@@ -132,11 +132,17 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 
 function makeSettings(
   enableAutoUpdate: boolean | undefined = undefined,
+  updateMode: string | undefined = undefined,
 ): LoadedSettings {
+  const general: Record<string, unknown> = {};
+  if (enableAutoUpdate !== undefined) {
+    general['enableAutoUpdate'] = enableAutoUpdate;
+  }
+  if (updateMode !== undefined) {
+    general['updateMode'] = updateMode;
+  }
   return {
-    merged: {
-      general: enableAutoUpdate === undefined ? {} : { enableAutoUpdate },
-    },
+    merged: { general },
   } as LoadedSettings;
 }
 
@@ -455,6 +461,57 @@ describe('startupPrefetch', () => {
 
     expect(mockCheckForUpdatesDetailed).not.toHaveBeenCalled();
     expect(mockConnectIdeForStartup).toHaveBeenCalledWith(config);
+  });
+
+  it('does not run update check in explicit off mode (#14274)', async () => {
+    startPostRenderPrefetches(makeConfig(), makeSettings(undefined, 'off'));
+
+    await settle();
+
+    expect(mockCheckForUpdatesDetailed).not.toHaveBeenCalled();
+    expect(mockRecordStartupEvent).not.toHaveBeenCalledWith(
+      'startup_prefetch_started',
+      { name: 'update_check' },
+    );
+  });
+
+  it('checks in notify mode and routes non-npm installs through the notify path (#14274)', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'pnpm add -g @qwen-code/qwen-code@latest',
+      packageManager: 'pnpm',
+      isGlobal: true,
+    });
+    mockCheckForUpdatesDetailed.mockResolvedValue({
+      status: 'update',
+      info: {
+        message: 'Update available',
+        update: { latest: '2.0.0' },
+      },
+    });
+    const settings = makeSettings(undefined, 'notify');
+
+    startPostRenderPrefetches(makeConfig(), settings);
+    await settle();
+
+    // The real install state is passed (the previous code hardcoded true)
+    // so notification wording matches the effective mode.
+    expect(mockGetInstallationInfo).toHaveBeenCalledWith('/repo', false);
+    // notify routes every package manager through handleAutoUpdate, which
+    // emits update-received before its install gate, instead of the
+    // update-info branch the auto mode uses for non-npm managers.
+    expect(mockHandleAutoUpdate).toHaveBeenCalledWith(
+      {
+        message: 'Update available',
+        update: { latest: '2.0.0' },
+      },
+      settings,
+      '/repo',
+    );
+    expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
+    expect(mockUpdateEventEmit).not.toHaveBeenCalledWith(
+      'update-info',
+      expect.anything(),
+    );
   });
 
   it('surfaces update check errors as a warning through the update event emitter', async () => {

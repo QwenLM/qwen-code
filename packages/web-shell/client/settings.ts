@@ -1,6 +1,6 @@
 /** Stable presentation aliases; schema paths are private implementation details. */
 const SETTING_KEYS = {
-  'setting:auto-update': 'general.enableAutoUpdate',
+  'setting:auto-update': 'general.updateMode',
   'setting:session-recap': 'general.showSessionRecap',
   'setting:session-recap-away-threshold':
     'general.sessionRecapAwayThresholdMinutes',

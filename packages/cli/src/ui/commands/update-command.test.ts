@@ -40,12 +40,13 @@ const { updateCommand } = await import('./update-command.js');
 function context(
   executionMode: 'interactive' | 'non_interactive' | 'acp',
   enableAutoUpdate?: boolean,
+  updateMode?: 'auto' | 'notify' | 'off',
 ) {
   return createMockCommandContext({
     executionMode,
     services: {
       settings: {
-        merged: { general: { enableAutoUpdate } },
+        merged: { general: { enableAutoUpdate, updateMode } },
       },
       config: {
         getProjectRoot: () => '/repo',
@@ -84,6 +85,31 @@ describe('updateCommand', () => {
       commandContext.services.settings.merged.general?.enableAutoUpdate,
     ).toBeUndefined();
     expect(getInstallationInfo).toHaveBeenCalledWith('/repo', true);
+  });
+
+  it('installs in interactive notify mode because /update is an explicit request (#14274)', async () => {
+    const commandContext = context('interactive', false, 'notify');
+
+    const result = await updateCommand.action!(commandContext, '');
+
+    expect(result).toBeUndefined();
+    expect(relaunchForUpdate).toHaveBeenCalledTimes(1);
+    expect(getInstallationInfo).toHaveBeenCalledWith('/repo', true);
+  });
+
+  it('returns manual instructions in interactive mode when updateMode is off even with the legacy flag on (#14274)', async () => {
+    const commandContext = context('interactive', true, 'off');
+
+    const result = await updateCommand.action!(commandContext, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
+    });
+    expect(relaunchForUpdate).not.toHaveBeenCalled();
+    expect(getInstallationInfo).toHaveBeenCalledWith('/repo', false);
   });
 
   it('returns the manual update command in non-interactive mode', async () => {

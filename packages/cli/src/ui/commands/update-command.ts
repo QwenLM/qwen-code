@@ -7,6 +7,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { resolveUpdateMode } from '../../utils/update-mode.js';
 
 export const updateCommand: SlashCommand = {
   name: 'update',
@@ -71,11 +72,13 @@ export const updateCommand: SlashCommand = {
     }
 
     const info = updateCheck.info;
-    const isAutoUpdateEnabled =
-      settings.merged.general?.enableAutoUpdate !== false;
+    // An explicit /update may install in both 'auto' and 'notify' modes —
+    // the user asked for the update; only 'off' falls back to manual
+    // instructions (#14274).
+    const updateMode = resolveUpdateMode(settings.merged.general);
     const installInfo = getInstallationInfo(
       projectRoot || process.cwd(),
-      isAutoUpdateEnabled,
+      updateMode !== 'off',
     );
     const manualInstructions = () => {
       const lines = [
@@ -104,7 +107,7 @@ export const updateCommand: SlashCommand = {
         };
       }
       const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
-      if (hostUpdateRelaunch === 'true' && isAutoUpdateEnabled) {
+      if (hostUpdateRelaunch === 'true' && updateMode !== 'off') {
         await relaunchForUpdate();
         return;
       }
@@ -120,7 +123,7 @@ export const updateCommand: SlashCommand = {
       const canAutoUpdate =
         installInfo.updateCommand ||
         (installInfo.isStandalone && installInfo.standaloneDir);
-      if (isAutoUpdateEnabled && canAutoUpdate) {
+      if (updateMode !== 'off' && canAutoUpdate) {
         await relaunchForUpdate();
         return;
       }
@@ -128,7 +131,7 @@ export const updateCommand: SlashCommand = {
     }
 
     if (
-      isAutoUpdateEnabled &&
+      updateMode !== 'off' &&
       installInfo.isStandalone &&
       installInfo.standaloneDir
     ) {

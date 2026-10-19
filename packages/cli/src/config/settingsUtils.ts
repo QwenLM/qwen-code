@@ -196,7 +196,7 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'context.fileFiltering.respectQwenIgnore',
 
   // System Settings - rarely changed
-  'general.disableAutoUpdate',
+  'general.updateMode',
 
   // Privacy
   'privacy.usageStatisticsEnabled',
