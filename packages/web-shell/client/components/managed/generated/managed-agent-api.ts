@@ -601,6 +601,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-skills/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read only names and descriptions from the Session's pinned static Skill catalog. Requires a trusted actor and Workspace read access. Never resolves the latest AgentDefinition or discovers host Skills. */
+        post: operations["queryWebShellSessionSkills"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/workspaces/files/query": {
         parameters: {
             query?: never;
@@ -1565,6 +1582,13 @@ export interface components {
             /** @enum {string} */
             mime_type: "image/png" | "image/jpeg" | "image/webp";
             data: string;
+        };
+        WebShellSkill: {
+            name: string;
+            description: string;
+        };
+        WebShellSessionSkills: {
+            skills: components["schemas"]["WebShellSkill"][];
         };
         WebShellWorkspaceFileQueryRequest: {
             workspaceId: string;
@@ -2876,6 +2900,36 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    queryWebShellSessionSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session static Skill metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionSkills"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellWorkspaceFilesQuery: {

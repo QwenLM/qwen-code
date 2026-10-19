@@ -153,6 +153,10 @@ export function createJavaManagedAgentProvider(
     },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    skills: {
+      list: (sessionId, request) =>
+        client.getSessionSkills(sessionId, request.signal),
+    },
     tasks: {
       list: (sessionId, request) =>
         client.listTasks(
