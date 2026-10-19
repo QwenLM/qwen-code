@@ -146,6 +146,10 @@ export function OpenTuiStatsDialog(props: {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   // Rows the body wants, reported by layout; 0 until the first layout pass.
   const [contentRows, setContentRows] = useState(0);
+  // A zero budget still paints one clamped row that has nowhere to scroll,
+  // so only advertise scrolling when the viewport can actually move.
+  const canScroll =
+    bodyRows !== undefined && bodyRows > 0 && contentRows > bodyRows;
   const [tab, setTabState] = useState<StatsTabName>('session');
   // A held Tab hands the whole burst to the handler from the last render, so
   // the cycle must read where the previous key of the burst landed.
@@ -474,9 +478,7 @@ export function OpenTuiStatsDialog(props: {
 
       <box marginTop={1}>
         <text fg={C.dim}>
-          {bodyRows !== undefined && contentRows > bodyRows
-            ? 'tab · ↑↓ scroll · esc'
-            : 'tab · esc'}
+          {canScroll ? 'tab · ↑↓ scroll · esc' : 'tab · esc'}
         </text>
       </box>
     </box>

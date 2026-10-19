@@ -190,6 +190,19 @@ describe('OpenTuiStatsDialog scrolling', () => {
     expect(getByText('tab · ↑↓ scroll · esc')).toBeTruthy();
   });
 
+  it('does not advertise scrolling when the region leaves the body no rows', () => {
+    mocks.state.contentRows = 30;
+    const { getByText, queryByText } = render(
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={6}
+      />,
+    );
+    expect(getByText('tab · esc')).toBeTruthy();
+    expect(queryByText('tab · ↑↓ scroll · esc')).toBeNull();
+  });
+
   it('scrolls the body with up/down/pageup/pagedown', () => {
     render(
       <OpenTuiStatsDialog
