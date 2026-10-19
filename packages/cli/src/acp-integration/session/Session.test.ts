@@ -7245,6 +7245,45 @@ describe('Session', () => {
       expect(sendOptions).toBeUndefined();
     });
 
+    it('does not re-lend an id that is still live after a retry strips only a continuation', async () => {
+      // A fresh turn cancelled between tool laps pushes a continuation
+      // stamped with the turn's own id. A retry then strips that trailing
+      // continuation only: the prompt entry carrying the same id survives,
+      // so lending the id again would duplicate the mark and make the
+      // unique-match resolver refuse the turn (R11-1).
+      const promptId = 'test-session-id########7';
+      const promptEntry: Content = {
+        role: 'user',
+        parts: [{ text: 'cancelled turn' }],
+      };
+      markApiHistoryPrompt(promptEntry, promptId);
+      const continuation: Content = {
+        role: 'user',
+        parts: [
+          { functionResponse: { id: 'call-1', name: 'read', response: {} } },
+        ],
+      };
+      markApiHistoryPrompt(continuation, promptId);
+      mockChat.getHistory = vi.fn().mockReturnValue([promptEntry]);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([promptEntry]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([continuation]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [{ type: 'text', text: 'cancelled turn' }],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.retry': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[0]?.[4];
+      expect(sendOptions).toBeUndefined();
+    });
+
     it('associates a recording-disabled fresh prompt with its admitted daemon identity', async () => {
       vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
       const snapshots: core.FileHistorySnapshot[] = [];
