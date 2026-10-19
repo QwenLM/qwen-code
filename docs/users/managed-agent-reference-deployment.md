@@ -74,6 +74,16 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 This base configuration supports text-only Hosted Sessions. Keep the listener on loopback unless a signed or authenticated ingress is configured. The complete authentication, API, and capability configuration is bundled as `docs/server-reference.md`.
 
+## Preflight check
+
+Run the bundled launcher with `--check` before the first start and after installing each new artifact. It binds the same configuration (`config/application.yml` plus the environment), starts no listener, and prints one row per input:
+
+```bash
+bin/qwen-managed-agent-server --check
+```
+
+It covers the JDK, the configuration file and its permissions, the credential key ring, the auth/bind combination, Harness reachability, the Workspace files and Shell cross-settings, broker credentials and directories, the Workspace `cwd`, free ports, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1. The port checks bind the configured addresses, so stop the service first. The command does not verify the Harness capability digest or Workspace mount registration.
+
 ## Enable the accepted local-process tool path
 
 Tool execution requires the existing fail-closed Runtime and Workspace setup. At minimum, configure:

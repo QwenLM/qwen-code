@@ -74,6 +74,16 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 基础配置支持纯文本 Hosted Session。除非配置签名或认证入口，否则服务只能监听 loopback。完整认证、API 与 capability 配置随包提供于 `docs/server-reference.md`。
 
+## 预检
+
+在首次启动前以及每次安装新产物后，用启动脚本运行 `--check`。它绑定与服务器相同的配置（`config/application.yml` 加环境变量），不启动监听，并按输入项逐行输出结果：
+
+```bash
+bin/qwen-managed-agent-server --check
+```
+
+检查范围包括 JDK、配置文件及其权限、凭据密钥环、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验 Workspace mount 注册。
+
 ## 开启已接受的 local-process 工具路径
 
 工具执行需要既有的 fail-closed Runtime 与 Workspace 配置。至少配置：
