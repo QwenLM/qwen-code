@@ -1774,13 +1774,14 @@ it('treats a null glob path as omitted and still dispatches the whole batch', as
 it('truncates an oversized glob result to a fitting prefix with a narrowing hint', async () => {
   turn = createSearchTurn();
   messageFitsInline.mockImplementation(
-    (type, messageParts) =>
+    (type, messageParts, model) =>
       Buffer.byteLength(
         JSON.stringify({
           uuid: randomUUID(),
           parentUuid: null,
           sessionId: session.authority.sessionHeader.sessionKey.sessionId,
           timestamp: new Date().toISOString(),
+          model,
           type,
           cwd: root,
           version: 'test',
