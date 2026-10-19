@@ -361,6 +361,7 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(source).toContain('publishedPrefixSequences');
     expect(source).toContain("approvalFault === 'after-result'");
+    expect(source).toContain('expectedModelsAfterResults');
     expect(source).toContain('? 2');
   });
 
