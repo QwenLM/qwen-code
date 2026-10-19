@@ -67,6 +67,8 @@ import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/m
 import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   assertManagedSessionDurableRef,
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -138,6 +140,7 @@ import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 import { teamMemberPreamble } from './hosted-member-chain.js';
+import { hostedWakeContinuationId } from './hosted-wake-continuation.js';
 
 const wakeDeps = vi.hoisted(() => ({
   last: undefined as unknown,
@@ -7206,6 +7209,7 @@ describe('Hosted Harness no-tool session', () => {
 
   async function prewriteAcceptedChildOfKind(
     kind: 'child_agent' | 'workflow',
+    interrupted = false,
   ): Promise<string> {
     const key = {
       tenantId: 'tenant',
@@ -7306,6 +7310,22 @@ describe('Hosted Harness no-tool session', () => {
       await children.accept('run-1', {
         notification: { description: 'audit the diff' },
       });
+      if (interrupted) {
+        await managed.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId: SESSION_ID,
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          cwd: state.root,
+          version: 'hosted-harness/1',
+          daemonPromptId: 'run-1:accept:notify',
+          message: {
+            role: 'user',
+            parts: [{ text: 'original child notification' }],
+          },
+        });
+      }
     } finally {
       await managed.close().catch(() => undefined);
     }
@@ -7496,6 +7516,7 @@ describe('Hosted Harness no-tool session', () => {
   async function prewriteChannelWriteInterruption(
     cleanupDebt = false,
     previousPromptId?: string,
+    interruption: 'runtime' | 'queued' | 'approval' = 'runtime',
   ): Promise<string> {
     const key = {
       tenantId: 'tenant',
@@ -7631,6 +7652,7 @@ describe('Hosted Harness no-tool session', () => {
         attachments: [],
         replyContext: { parent: '<a@example.com>', references: [] },
       });
+      if (interruption === 'queued') return channelTurn;
       // The wake turn began — its user record is minted — and died inside
       // write_file before the tool result arrived.
       await managed.sink.write({
@@ -7646,6 +7668,48 @@ describe('Hosted Harness no-tool session', () => {
       } as ChatRecord);
       const harness = createManagedHarnessHandle(managed);
       await harness.ensureRunnable();
+      if (interruption === 'approval') {
+        const requestId = 'channel-recovery-approval';
+        const invocationRef = await resources.publish(
+          'managed-tool-input',
+          Buffer.from('{}'),
+        );
+        const now = Date.now();
+        const optionsRef = await resources.publish(
+          'managed-action-options',
+          Buffer.from(
+            JSON.stringify({
+              v: 1,
+              requestId,
+              turnId: channelTurn,
+              functionCallId: 'approval-call',
+              toolName: 'write_file',
+              policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+              inputRevision: 1,
+              createdAt: now,
+              expiresAt: now + 600_000,
+              options: [
+                { id: 'allow', label: 'Allow' },
+                { id: 'deny', label: 'Deny' },
+              ],
+            }),
+          ),
+        );
+        await harness.commitDurableWait(
+          {
+            requestId,
+            kind: 'permission',
+            source: 'tool_call',
+            optionsRef,
+            inputRevision: '1',
+            invocationRef,
+            attemptId: 'approval-attempt',
+            routeRef: invocationRef,
+          },
+          { turnId: channelTurn, promptId: channelTurn },
+        );
+        return channelTurn;
+      }
       if (cleanupDebt) {
         const broker = new HostedWorkspaceBroker(
           { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -7740,6 +7804,221 @@ describe('Hosted Harness no-tool session', () => {
     }
     return channelTurn;
   }
+
+  async function loadChannelWakePark(
+    interruption: 'runtime' | 'queued' | 'approval' = 'runtime',
+  ) {
+    const turnId = await prewriteChannelWriteInterruption(
+      false,
+      undefined,
+      interruption,
+    );
+    mockBrokerBroker();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
+      () => {},
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      })
+      .expect(200);
+    return {
+      turnId,
+      server,
+      clientId: loaded.body.clientId,
+      resident: capturedWakeSession(),
+    };
+  }
+
+  it('recovers a blocked channel wake through its interruption funnel', async () => {
+    const { turnId, server, clientId, resident } = await loadChannelWakePark();
+    const scheduler = resident.monitorWake as unknown as {
+      deps: { failed(cause: unknown): void; recoverBlocked(): Promise<void> };
+    };
+    scheduler.deps.failed(new Error('wake pump failure'));
+    await scheduler.deps.recoverBlocked();
+    expect(resident.blocked).toBe(false);
+    const settlements = resident.managed.authority
+      .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+      .filter(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+      );
+    expect(settlements).toHaveLength(1);
+    expect(settlements[0]!.payload).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'harness_interruption',
+    });
+    expect(
+      (await hostedHistory.readHostedFileHistory(resident.managed))
+        ?.pendingTurn ?? null,
+    ).toBeNull();
+    const channels = (resident as unknown as { channels: HostedChannelSession })
+      .channels;
+    expect(await channels.planReply(turnId)).toBeUndefined();
+    await scheduler.deps.recoverBlocked();
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  it('never cancels a queued channel input while repairing a blocked wake pump', async () => {
+    const { turnId, server, clientId, resident } =
+      await loadChannelWakePark('queued');
+    const scheduler = resident.monitorWake as unknown as {
+      deps: { failed(cause: unknown): void; recoverBlocked(): Promise<void> };
+    };
+    scheduler.deps.failed(new Error('wake input read failure'));
+    await scheduler.deps.recoverBlocked();
+    expect(resident.blocked).toBe(true);
+    expect(
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        ),
+    ).toHaveLength(0);
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  it('keeps channel approval resolvable after a wake pump failure', async () => {
+    const { turnId, server, clientId, resident } =
+      await loadChannelWakePark('approval');
+    const scheduler = resident.monitorWake as unknown as {
+      deps: { failed(cause: unknown): void; recoverBlocked(): Promise<void> };
+    };
+    scheduler.deps.failed(
+      new Error('wake pump failed with an approval pending'),
+    );
+    await scheduler.deps.recoverBlocked();
+    expect(resident.blocked).toBe(false);
+    expect(
+      resident.managed.authority.action('channel-recovery-approval')?.state,
+    ).toBe('requested');
+    expect(
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        ),
+    ).toBe(false);
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(
+      supertest(server).post(
+        `/session/${SESSION_ID}/actions/channel-recovery-approval/resolve`,
+      ),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        optionId: 'allow',
+        inputRevision: 1,
+        policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+      })
+      .expect(200);
+    expect(
+      resident.managed.authority.action('channel-recovery-approval')?.state,
+    ).toBe('decided');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  it.each(['broker', 'checkpoint'] as const)(
+    'retries blocked channel recovery after a %s refusal',
+    async (fault) => {
+      const { turnId, server, clientId, resident } =
+        await loadChannelWakePark();
+      const checkpoint =
+        fault === 'checkpoint'
+          ? vi
+              .spyOn(resident.managed.authority, 'harnessRunAuthorization')
+              .mockResolvedValue({ status: 'blocked', reason: 'invalid_state' })
+          : undefined;
+      if (fault === 'broker')
+        vi.mocked(HostedWorkspaceBroker.prototype.status).mockRejectedValueOnce(
+          new Error('broker unavailable'),
+        );
+      const scheduler = resident.monitorWake as unknown as {
+        deps: { failed(cause: unknown): void; recoverBlocked(): Promise<void> };
+      };
+      scheduler.deps.failed(new Error('wake pump failure'));
+      await scheduler.deps.recoverBlocked();
+      expect(resident.blocked).toBe(true);
+      expect(
+        (await hostedHistory.readHostedFileHistory(resident.managed))
+          ?.pendingTurn,
+      ).toBe(turnId);
+      checkpoint?.mockRestore();
+      await scheduler.deps.recoverBlocked();
+      expect(resident.blocked).toBe(false);
+      const settlements = resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        );
+      expect(settlements).toHaveLength(1);
+      expect(settlements[0]!.payload).toMatchObject({
+        outcome: 'cancelled',
+        stopReason: 'harness_interruption',
+      });
+      expect(
+        (await hostedHistory.readHostedFileHistory(resident.managed))
+          ?.pendingTurn ?? null,
+      ).toBeNull();
+      expect(state.model).not.toHaveBeenCalled();
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+    },
+  );
+
+  it('refuses a fresh prompt while a channel wake holds a Runtime park', async () => {
+    const { server, clientId, resident } = await loadChannelWakePark();
+    const promptId = randomUUID();
+    const prompt = [{ type: 'text', text: 'Wait for channel recovery' }];
+    const response = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(409);
+    expect(response.body.code).toBe('hosted_turn_recovery_in_progress');
+    expect(
+      resident.managed.authority
+        .eventsInSequenceRange(1, resident.managed.authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['turnId'] === promptId,
+        ),
+    ).toBe(false);
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
 
   it('recovers a channel turn interrupted inside a Write at attachment instead of refusing the load', async () => {
     // The R4 P1 witness: the load gate refused every attachment shape (the
@@ -8381,6 +8660,96 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  it.each(['child_agent', 'workflow'] as const)(
+    'continues an interrupted %s wake with no recovered call answer',
+    async (kind) => {
+      domainEnablement.childRun = true;
+      const notificationTurnId = await prewriteAcceptedChildOfKind(kind, true);
+      const continuation = hostedWakeContinuationId(notificationTurnId);
+      mockBrokerBroker();
+      const server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store() })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          const session = capturedWakeSession();
+          expect(
+            session.managed.authority.eventsInSequenceRange(
+              1,
+              session.managed.authority.committedSequence,
+            ),
+          ).toContainEqual(
+            expect.objectContaining({
+              kind: 'turn.settled',
+              payload: expect.objectContaining({
+                turnId: continuation,
+                outcome: 'completed',
+              }),
+            }),
+          );
+          expect(
+            session.managed.authority
+              .extensionRecordsInDomain('child_run')
+              .at(-1)?.record,
+          ).toMatchObject({ run: { delivery: { state: 'consumed' } } });
+        },
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
+      expect(state.model).toHaveBeenCalledOnce();
+      expect(state.model.mock.calls[0]![0]).toMatchObject({
+        promptId: continuation,
+        prompt: expect.stringContaining('审阅通过'),
+      });
+      const session = capturedWakeSession();
+      const records = await session.managed.sink.project();
+      expect(records.filter((entry) => entry.type === 'user')).toHaveLength(1);
+      expect(
+        records.filter(
+          (entry) =>
+            entry.subtype === 'turn_attempt' &&
+            entry.daemonPromptId === continuation,
+        ),
+      ).toHaveLength(1);
+      const events = session.managed.authority.eventsInSequenceRange(
+        1,
+        session.managed.authority.committedSequence,
+      );
+      const accepted = events.find(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['turnId'] === continuation,
+      )!;
+      const settled = events.find(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === notificationTurnId,
+      )!;
+      expect(accepted.sequence).toBeLessThan(settled.sequence);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (
+              await headers(
+                supertest(server).post(`/session/${SESSION_ID}/detach`),
+              )
+                .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+                .send({})
+            ).status,
+          ).toBe(204);
+        },
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
+      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({ managedSessionStore: store() })
+        .expect(200);
+      expect(state.model).toHaveBeenCalledOnce();
+    },
+    60_000,
+  );
+
   // R1-5: a pending child-acceptance notification is wake-pump work, not
   // a parked Turn — counted as unsettled, it would refuse every load and
   // wedge exactly the pump that was supposed to deliver it.
@@ -8795,6 +9164,44 @@ describe('Hosted Harness no-tool session', () => {
     expect(storeDown.status).toBe(503);
     expect(storeDown.body.code).toBe('session_message_failed');
     faltered.mockRestore();
+    // An append whose outcome is unknown is the same retryable store fault:
+    // a 409 here would make the relay reject a message that may yet commit.
+    const unsettled = vi
+      .spyOn(HostedSessionMessageSession.prototype, 'receive')
+      .mockRejectedValueOnce(
+        new ManagedSessionAppendUnsettledError(new Error('ack lost')),
+      );
+    const unknownOutcome = await message({
+      messageId: 'msg_late3',
+      kind: 'receive',
+      route: 'to_parent',
+      childRunId: 'run-1',
+      senderSessionId: CHILD_SESSION_ID,
+      contentBase64: content2.toString('base64'),
+      contentDigest: createHash('sha256').update(content2).digest('hex'),
+    });
+    expect(unknownOutcome.status).toBe(503);
+    expect(unknownOutcome.body.code).toBe('session_message_failed');
+    unsettled.mockRestore();
+    // A proven journal fence is the same store-side retryable answer: a 4xx
+    // here would make the relay reject a message whose receipt is durable.
+    const fenced = vi
+      .spyOn(HostedSessionMessageSession.prototype, 'receive')
+      .mockRejectedValueOnce(
+        new ManagedSessionJournalFencedError('journal fenced'),
+      );
+    const fencedOutcome = await message({
+      messageId: 'msg_late4',
+      kind: 'receive',
+      route: 'to_parent',
+      childRunId: 'run-1',
+      senderSessionId: CHILD_SESSION_ID,
+      contentBase64: content2.toString('base64'),
+      contentDigest: createHash('sha256').update(content2).digest('hex'),
+    });
+    expect(fencedOutcome.status).toBe(503);
+    expect(fencedOutcome.body.code).toBe('session_message_failed');
+    fenced.mockRestore();
     const noReceipt = await message({ messageId: 'msg_down', kind: 'consume' });
     expect(noReceipt.status).toBe(409);
     expect(noReceipt.body.code).toBe('session_message_record');

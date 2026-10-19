@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
@@ -73,7 +74,18 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         }
     }
 
+    @Test
+    void hostedProducerRecoversOriginalReceiptsWithoutRepeatingFileEffects() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, true);
+        }
+    }
+
     static void acceptance(DataSource source, Path directory, boolean hostedProducer) throws Exception {
+        acceptance(source, directory, hostedProducer, false);
+    }
+
+    static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery) throws Exception {
         Path root = Path.of("../..").toRealPath();
         assertThat(Files.isRegularFile(root.resolve("packages/cli/dist/src/serve/managed-csi-file-worker.js")))
                 .as("Run npm run build before this explicitly invoked integration gate").isTrue();
@@ -169,11 +181,47 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                 yield Map.of("mapped", true);
                             }
                             case "/fixture:inspect" -> Map.of("executions", jdbc.queryForList(
-                                    "SELECT execution_state, native_authorization_json FROM ma_tool_execution"
+                                    "SELECT execution_call_id, execution_state, result_json, native_authorization_json FROM ma_tool_execution"
                                             + " ORDER BY execution_call_id"),
                                     "activationRevision", jdbc.queryForObject(
                                             "SELECT first_activation_journal_revision FROM ma_runtime_binding", Long.class),
                                     "nativeReads", nativeReads.get());
+                            case "/fixture:leases" -> jdbc.queryForObject("SELECT writer_lease_until, activation_expires_at, "
+                                    + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW
+                                    + " FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'", (row, number) ->
+                                            Map.of("writerLeaseUntil", row.getLong(1), "activationExpiresAt", row.getLong(2),
+                                                    "databaseNow", row.getLong(3)));
+                            case "/fixture:image" -> databaseImage(source, jdbc);
+                            case "/fixture:publication" -> transaction.execute(status -> {
+                                var writer = journal.lockPublicationWriter("tenant", "workspace", sessionId,
+                                        (String) body.get("writerId"), ((Number) body.get("writerGeneration")).longValue(),
+                                        (String) body.get("writerToken"));
+                                return Map.of("generation", writer.activationEpoch());
+                            });
+                            case "/fixture:cold-refusals" -> {
+                                var before = databaseImage(source, jdbc);
+                                String execution = jdbc.queryForObject("SELECT execution_call_id FROM ma_tool_execution"
+                                        + " ORDER BY execution_call_id LIMIT 1", String.class);
+                                for (String mutation : List.of("execution_state = 'UNKNOWN', result_json = NULL, execution_status = NULL, settled_at = NULL",
+                                        "cancel_requested = TRUE", "native_authorization_json = NULL",
+                                        "execution_status = 'error', result_json = '{\"executionStatus\":\"error\",\"responseParts\":[],\"error\":{\"message\":\"changed\"}}'")) {
+                                    transaction.executeWithoutResult(status -> {
+                                        jdbc.update("UPDATE ma_tool_execution SET " + mutation + " WHERE execution_call_id = ?", execution);
+                                        try {
+                                            journal.acquireWriter("tenant", sessionId, (String) body.get("writerToken"),
+                                                    new ManagedSessionStoreModels.AcquireWriterRequest("workspace",
+                                                            UUID.randomUUID().toString(), 1_000L));
+                                            throw new AssertionError("Incomplete original SQL evidence admitted a writer");
+                                        } catch (RuntimeBrokerException refusal) {
+                                            assertThat(refusal.getStatusCode()).isEqualTo(409);
+                                        } finally {
+                                            status.setRollbackOnly();
+                                        }
+                                    });
+                                    assertThat(databaseImage(source, jdbc)).isEqualTo(before);
+                                }
+                                yield Map.of("refusals", 4);
+                            }
                             default -> throw new IllegalArgumentException("Unknown owned fixture route");
                         };
                         respond(exchange, 200, response);
@@ -212,6 +260,13 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     } else {
                         respond(exchange, 200, response);
                     }
+                } catch (RuntimeBrokerException refusal) {
+                    try {
+                        respond(exchange, refusal.getStatusCode(), Map.of("error", Map.of("code", refusal.getCode(),
+                                "message", refusal.getMessage())));
+                    } catch (java.io.IOException ignored) {
+                        exchange.close();
+                    }
                 } catch (ApiException refusal) {
                     try {
                         respond(exchange, refusal.getStatus().value(), Map.of("error", Map.of("code", refusal.getCode(),
@@ -242,6 +297,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         "foreignOwnerOperationId", UUID.nameUUIDFromBytes(foreignOwner.getBytes(StandardCharsets.UTF_8)).toString(),
                         "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", sessionId),
                         "hostedProducer", hostedProducer,
+                        "coldRecovery", coldRecovery,
                         "runtime", Map.of("bindingId", binding.getBindingId(), "generation", Long.toString(binding.getGeneration()))));
                 Path producer = directory.resolve("producer.mjs");
                 try (var script = WorkspaceCsiSqlWorkerMySqlIT.class.getResourceAsStream("/csi-sql-worker-acceptance.mjs");
@@ -287,7 +343,13 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE native_authorization_json IS NOT NULL"
                         + " AND execution_state = 'SETTLED'", Integer.class)).isEqualTo(4);
-                assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class)).isEqualTo(1);
+                assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))
+                        .isEqualTo(coldRecovery ? 3 : 1);
+                if (coldRecovery) {
+                    assertThat(result.path("coldRecovery").asBoolean()).isTrue();
+                    assertThat(result.path("coldRefusalChecks").asInt()).isEqualTo(9);
+                    assertThat(jdbc.queryForObject("SELECT activation_epoch FROM ma_session_head", Long.class)).isEqualTo(2);
+                }
                 assertThat(jdbc.queryForObject("SELECT first_activation_journal_revision FROM ma_runtime_binding", Long.class)).isEqualTo(2);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ'"
                         + " AND state = 'RETURNED'", Integer.class)).isPositive();
@@ -330,6 +392,29 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 assertThat(clientTerminated).as("http client did not terminate").isTrue();
             }
         }
+    }
+
+    private static Map<String, List<String>> databaseImage(DataSource source, ManagedSchemaJdbcTemplate jdbc)
+            throws Exception {
+        String schema;
+        try (var connection = source.getConnection()) {
+            schema = connection.getSchema();
+            if (schema == null) {
+                schema = connection.getCatalog();
+            }
+        }
+        var image = new java.util.TreeMap<String, List<String>>();
+        for (String table : jdbc.queryForList("SELECT table_name FROM information_schema.tables"
+                + " WHERE table_schema = ? AND table_type = 'BASE TABLE' ORDER BY table_name", String.class, schema)) {
+            assertThat(table).matches("[a-z_]+");
+            var rows = new java.util.ArrayList<String>();
+            for (var row : jdbc.queryForList("SELECT * FROM " + table)) {
+                rows.add(JSON.writeValueAsString(row));
+            }
+            rows.sort(String::compareTo);
+            image.put(table, rows);
+        }
+        return image;
     }
 
     private static <T> T read(String body, Class<T> type) {

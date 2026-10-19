@@ -1548,42 +1548,50 @@ class ManagedAgentMySqlIT {
                         "session.closed",
                         "session.archived");
 
-        // A writer holds the journal until it is sealed or database time
-        // passes its lease; the lifecycle worker waits for that.
         ManagedSessionStore journals = new ManagedSessionStore(jdbc);
         String token = "mysql-lifecycle-writer-token-00000000";
+        assertThatThrownBy(() -> inTransaction(transactions,
+                () -> journals.acquireWriter(tenant, sessionId, token,
+                        new AcquireWriterRequest("workspace", "writer", 60_000L))))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("managed_session_not_writable"));
+        String leaseSessionId = store.insertSessionCommand(
+                tenant, "CREATE_SESSION", "lease-session", "digest-lease-session",
+                "qwen-code", null, null, List.of(), null).sessionId();
+        // A writer holds the journal until it is sealed or database time
+        // passes its lease; the lifecycle worker waits for that.
         long generation =
                 inTransaction(
                                 transactions,
                                 () ->
                                         journals.acquireWriter(
                                                 tenant,
-                                                sessionId,
+                                                leaseSessionId,
                                                 token,
                                                 new AcquireWriterRequest(
                                                         "workspace", "writer", 60_000L)))
                         .writerGeneration();
-        assertThat(journals.hasLiveWriter(tenant, sessionId)).isTrue();
+        assertThat(journals.hasLiveWriter(tenant, leaseSessionId)).isTrue();
         inTransaction(
                 transactions,
                 () ->
                         journals.sealWriter(
                                 tenant,
-                                sessionId,
+                                leaseSessionId,
                                 token,
                                 new SealWriterRequest("workspace", "writer", generation)));
-        assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
+        assertThat(journals.hasLiveWriter(tenant, leaseSessionId)).isFalse();
         inTransaction(
                 transactions,
                 () ->
                         journals.acquireWriter(
                                 tenant,
-                                sessionId,
+                                leaseSessionId,
                                 token,
                                 new AcquireWriterRequest("workspace", "writer", 1_000L)));
-        assertThat(journals.hasLiveWriter(tenant, sessionId)).isTrue();
+        assertThat(journals.hasLiveWriter(tenant, leaseSessionId)).isTrue();
         Thread.sleep(1_500);
-        assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
+        assertThat(journals.hasLiveWriter(tenant, leaseSessionId)).isFalse();
     }
 
     @Test
