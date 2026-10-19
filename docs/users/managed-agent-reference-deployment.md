@@ -84,6 +84,10 @@ bin/qwen-managed-agent-server --check
 
 It covers the JDK, the configuration file and its permissions, the credential key ring, the auth/bind combination, Harness reachability, the Workspace files and Shell cross-settings, broker credentials and directories, the Workspace `cwd`, free ports, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1. The port checks bind the configured addresses, so stop the service first. The command does not verify the Harness capability digest or Workspace mount registration.
 
+## systemd
+
+The distribution includes `systemd/` unit and environment templates for the accepted single-host topology. The control-plane unit uses `KillMode=process` so Runtime workers survive a Broker restart; the Harness unit uses `KillMode=mixed` so its tool processes terminate with it. Follow `systemd/README.md` to install them.
+
 ## Enable the accepted local-process tool path
 
 Tool execution requires the existing fail-closed Runtime and Workspace setup. At minimum, configure:
