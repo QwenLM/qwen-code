@@ -97,6 +97,13 @@ export function useManagedFileReferences(
     return {
       scopeKey: source,
       filesOnly: true,
+      onFileReferenceDiscarded() {
+        if (active.current && currentSource.current === source)
+          setFailure({
+            source,
+            message: 'Draft changed; select the file again.',
+          });
+      },
       async listDirectory(directory, options) {
         const page = await query(directory, '', options?.signal);
         return {
@@ -243,6 +250,7 @@ export function useManagedFileReferences(
     const attached = [...files];
     const mapping: string[] = [];
     for (const snapshot of selected) {
+      // Catch draft-storage corruption after the server validated the read.
       const digest = Array.from(
         new Uint8Array(
           await crypto.subtle.digest(

@@ -1475,10 +1475,11 @@ export function useAtMentionMenu({
           .then((prepared) => {
             if (
               viewRef.current === view &&
-              view.state.doc === document &&
               workspaceActionsRef.current === actions
-            )
-              insertPrepared(prepared);
+            ) {
+              if (view.state.doc === document) insertPrepared(prepared);
+              else actions.onFileReferenceDiscarded?.();
+            }
           })
           .catch(() => undefined);
       } else insertPrepared(tag);

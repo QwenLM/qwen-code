@@ -118,7 +118,9 @@ request cancellation/stale-response behavior. Only file actions are supplied;
 other menus retain their own capabilities. Unsupported and empty results are
 distinct, and read failures retain the draft.
 
-Selecting a file obtains the snapshot before inserting its chip. Keep the full
+Selecting a file obtains the snapshot before inserting its chip. If the draft
+changes during an inline selection read, retain the edited draft, discard the
+stale insertion and ask the user to select the file again. Keep the full
 contents, path and source scope in its metadata. Managed composers opt into a
 versioned draft envelope that atomically stores text and complete file tags,
 including inline positions. Restore the tags on remount; keep legacy plain-text

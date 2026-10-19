@@ -111,6 +111,7 @@ export interface AtMentionWorkspaceActions {
   prepareFileReference?: (
     tag: WebShellComposerTag,
   ) => Promise<WebShellComposerTag>;
+  onFileReferenceDiscarded?: () => void;
   scopeKey?: string;
   filesOnly?: boolean;
   loadExtensionsStatus?: LoadExtensionsStatusFn;

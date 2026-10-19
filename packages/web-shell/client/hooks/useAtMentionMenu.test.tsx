@@ -152,6 +152,7 @@ describe('useAtMentionMenu', () => {
       resolve = done;
     });
     const prepare = vi.fn(() => pending);
+    const discarded = vi.fn();
     const effect = vi.fn(() => StateEffect.define<unknown>().of('snapshot'));
     mount({
       view,
@@ -160,6 +161,7 @@ describe('useAtMentionMenu', () => {
       actions: {
         filesOnly: true,
         prepareFileReference: prepare,
+        onFileReferenceDiscarded: discarded,
         listDirectory: vi.fn().mockResolvedValue({
           kind: 'list',
           path: '.',
@@ -195,21 +197,24 @@ describe('useAtMentionMenu', () => {
       }),
     );
     expect(view.dispatch).toHaveBeenCalledTimes(1);
+    expect(discarded).not.toHaveBeenCalled();
   });
 
-  it('keeps a changed draft intact when a selected file finishes reading later', async () => {
+  it('keeps a changed draft intact and reports a discarded file selection', async () => {
     vi.useFakeTimers();
     const view = makeView('@');
     let resolve!: (tag: WebShellComposerTag) => void;
     const pending = new Promise<WebShellComposerTag>((done) => {
       resolve = done;
     });
+    const discarded = vi.fn();
     mount({
       view,
       builtinProviders: ['files'],
       actions: {
         filesOnly: true,
         prepareFileReference: () => pending,
+        onFileReferenceDiscarded: discarded,
         listDirectory: vi.fn().mockResolvedValue({
           kind: 'list',
           path: '.',
@@ -228,6 +233,7 @@ describe('useAtMentionMenu', () => {
     );
     expect(view.dispatch).not.toHaveBeenCalled();
     expect(view.state.doc.toString()).toBe('changed draft');
+    expect(discarded).toHaveBeenCalledTimes(1);
   });
 
   it('does not open while disabled', () => {

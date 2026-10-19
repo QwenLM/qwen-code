@@ -92,6 +92,18 @@ describe('Managed file reference snapshots', () => {
     } satisfies ComposerSubmitMetadata;
   }
 
+  it('reports discarded references only in their original Workspace and clears the error on selection', async () => {
+    await render();
+    const actions = current.actions!;
+    act(() => actions.onFileReferenceDiscarded!());
+    expect(current.error).toBe('Draft changed; select the file again.');
+    await select();
+    expect(current.error).toBeUndefined();
+    await render('other');
+    act(() => actions.onFileReferenceDiscarded!());
+    expect(current.error).toBeUndefined();
+  });
+
   it('stores exact contents in the chip, survives JSON draft persistence and submits without rereading', async () => {
     await render();
     const saved = JSON.parse(
