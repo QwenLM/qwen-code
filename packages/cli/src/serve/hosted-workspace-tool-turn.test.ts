@@ -75,6 +75,7 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import * as hostedPlan from './hosted-plan-mode.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -187,6 +188,7 @@ function createTurn(
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
   hooks?: HostedHookSession,
   skills?: HostedSkillCatalog,
+  planMode: 'none' | 'public' | 'member' = 'none',
 ) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -206,7 +208,13 @@ function createTurn(
       },
       waiters,
     },
-    { hooks, skills },
+    {
+      hooks,
+      skills,
+      publicPlanMode: planMode === 'public',
+      memberPlanMode: planMode === 'member',
+      ...(planMode === 'public' ? { profile: 'hosted-workspace-files/1' } : {}),
+    },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -326,44 +334,55 @@ const publishedSkills = () =>
     },
   ]);
 
-it('loads a published static Skill durably without Runtime execution or approval', async () => {
-  const skills = publishedSkills();
-  turn = createTurn(false, { mode: 'default' }, undefined, skills);
-  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
-  const original: Part[] = [
-    { functionCall: { id: call.callId, name: call.name, args: call.args } },
-  ];
-  expect(await turn.declarations(new AbortController().signal)).toContainEqual(
-    skills.declaration(),
-  );
-  const responses = await turn.execute(
-    [call],
-    original,
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['output']).toBe(
-    skills.response(call.args),
-  );
-  const history = await session.sink.project();
-  expect(history.map((entry) => entry.type)).toEqual([
-    'assistant',
-    'tool_result',
-  ]);
-  expect(history[1].message?.parts).toEqual(responses);
-  expect(broker.acquire).not.toHaveBeenCalled();
-  expect(broker.prepare).not.toHaveBeenCalled();
-  expect(broker.execute).not.toHaveBeenCalled();
-  expect(
-    session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
-      .some((event) => event.kind === 'action.changed'),
-  ).toBe(false);
-  await turn.finish();
-  const reloaded = createTurn(false, undefined, undefined, skills);
-  await reloaded.resumeCommittedResults(new AbortController().signal);
-  expect(broker.acquire).not.toHaveBeenCalled();
-});
+it.each(['none', 'public', 'member'] as const)(
+  'loads a published static Skill durably without Runtime execution or approval (Plan: %s)',
+  async (planMode) => {
+    if (planMode === 'public')
+      vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+    const skills = publishedSkills();
+    turn = createTurn(false, { mode: 'default' }, undefined, skills, planMode);
+    const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+    const original: Part[] = [
+      { functionCall: { id: call.callId, name: call.name, args: call.args } },
+    ];
+    expect(
+      await turn.declarations(new AbortController().signal),
+    ).toContainEqual(skills.declaration());
+    if (planMode === 'public')
+      expect(await turn.declarations(new AbortController().signal)).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'write_file' }),
+        ]),
+      );
+    const responses = await turn.execute(
+      [call],
+      original,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['output']).toBe(
+      skills.response(call.args),
+    );
+    const history = await session.sink.project();
+    expect(history.map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[1].message?.parts).toEqual(responses);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .some((event) => event.kind === 'action.changed'),
+    ).toBe(false);
+    await turn.finish();
+    const reloaded = createTurn(false, undefined, undefined, skills);
+    await reloaded.resumeCommittedResults(new AbortController().signal);
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
 
 it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
   const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
@@ -7911,10 +7930,14 @@ it('probes every inconclusive background binding within one timeout window', asy
       .finally(() => {
         completed = true;
       });
+    // A deadlock guard, not a latency assertion: the probes are mock calls
+    // that only need to be in flight together, and a shared runner under load
+    // can spend more than a second scheduling them (release run 39192115354
+    // failed this guard on all three attempts while every other test passed).
     const guardedStart = new Promise<never>((_resolve, reject) => {
       guard = realSetTimeout(
         () => reject(new Error('both probes did not start concurrently')),
-        1_000,
+        10_000,
       );
     });
 
@@ -8001,7 +8024,7 @@ it('settles grant-proven bindings before waiting for process probes', async () =
     const guardedStart = new Promise<never>((_resolve, reject) => {
       guard = realSetTimeout(
         () => reject(new Error('process probe did not start')),
-        1_000,
+        10_000,
       );
     });
 
