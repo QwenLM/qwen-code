@@ -75,6 +75,12 @@ around it.
   Session without one (`session_not_found`), while closing a workspace
   Session in this fixture answers `workspace_unavailable` — the same
   execution-authority gap FG11f records.
+- A task cancel needs the projection's task id, not the run record id:
+  passing `arun_…` answers `task_not_found`, and the id from
+  `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn parked
+  on the model, that cancel then left the run unsettled for 120 s while the
+  Harness connection closed with socket EOF; staging the cell needs a
+  different hold point.
 - Lease takeover during a cancel is out of scope, as in FG11c.
 - The stream-gap gate (`FG11e`) is untouched.
 
