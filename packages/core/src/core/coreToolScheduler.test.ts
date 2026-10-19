@@ -5951,6 +5951,10 @@ describe('CoreToolScheduler', () => {
       `printf '%s\\n' 'git reset --hard'`,
       'TOOL=printf; TEXT=hello; $TOOL $TEXT',
       'TOOL=printf; TEXT=hello; $TOOL "$TEXT"',
+      `TOOL=printf; $TOOL '%s\\n' *.txt`,
+      `TOOL=printf; $TOOL '%s\\n' '*.txt'`,
+      `printf '%s\\n' *.txt`,
+      'unknown-wrapper git reset --soft; bash other.sh',
     ])(
       'lets harmless %s reach the classifier and run when it allows',
       async (command) => {
@@ -5998,6 +6002,8 @@ describe('CoreToolScheduler', () => {
       'git rese{t..t} --hard',
       './g*t reset --hard',
       'gi{t..t} rese{t..t} --hard',
+      'TOOL=git; $TOOL rese{t..t} --hard',
+      'TOOL=$(which git); $TOOL rese{t..t} --hard',
       `printf 'git reset --hard\\n' > fix.sh && rg --pr{e..e} bash . fix.sh`,
     ];
 

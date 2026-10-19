@@ -258,6 +258,10 @@ interface Scan {
   /** A cd or repository variable may point a later git command elsewhere. */
   movesRepository: boolean;
   unverifiable: boolean;
+  /** An argument pattern of a run-time program may supply an operation. */
+  patternArguments: boolean;
+  /** A protected program named as an argument of an unverified wrapper. */
+  unverifiedProgram: boolean;
   /**
    * The command runs code the guard cannot read: a script file, a program a
    * shell reads from a pipe or file, interpreter code, a git setting, or a
@@ -295,6 +299,8 @@ export async function isDestructiveCommand(
     amendTargets: [],
     movesRepository: false,
     unverifiable: false,
+    patternArguments: false,
+    unverifiedProgram: false,
     hiddenCode: false,
   };
   for (let i = 0; i < scan.scripts.length && !scan.found; i++) {
@@ -308,7 +314,8 @@ export async function isDestructiveCommand(
       for (const [start, end] of checked) {
         rest = rest.slice(0, start) + ' '.repeat(end - start) + rest.slice(end);
       }
-      flagIfMayRunProtected(rest, scan);
+      if (mayRunProtected(rest, scan.patternArguments))
+        scan.unverifiable = true;
     }
   }
 
@@ -329,7 +336,7 @@ export async function isDestructiveCommand(
   ) {
     return { blocked: true, reason: AMEND_REASON };
   }
-  if (scan.unverifiable) {
+  if (scan.unverifiable || (scan.patternArguments && scan.unverifiedProgram)) {
     return { blocked: true, reason: UNVERIFIABLE_REASON };
   }
   return null;
@@ -545,11 +552,11 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   if (isDynamic(head)) {
     // e.g. `$GIT reset --hard`: the program is only known at run time.
     scan.hiddenCode = true;
+    scan.patternArguments ||= args.some((arg) => arg.includes(PATTERN));
     if (
       args.some(
         (arg) =>
           PROTECTED_OPERATIONS.has(arg) ||
-          arg.includes(PATTERN) ||
           (head.includes(PATTERN) && arg.includes(SPLIT)),
       )
     ) {
@@ -636,6 +643,9 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   // run code it is handed (`trap 'cmd' EXIT`, `lua -e …`).
   for (let i = 1; i < argv.length; i++) {
     if (isInterpreted(argv[i]!)) {
+      const argumentProgram = programName(argv[i]!);
+      scan.unverifiedProgram ||=
+        argumentProgram === 'git' || IAC_TOOLS.has(argumentProgram);
       runArgv(argv.slice(i), { ...ctx, cwd: undefined }, scan);
     }
   }
@@ -1195,7 +1205,7 @@ function runScript(
   });
 }
 
-function mayRunProtected(text: string): boolean {
+function mayRunProtected(text: string, patternArguments = false): boolean {
   const plain = joinLines(text).replace(/["']/g, '');
   // `g\it` is `git`; printf's `\ngit` starts a new word, and printf,
   // `echo -e` and `$'…'` read `\x67`, `g`, `\U00000067` and `\147` as
@@ -1216,7 +1226,8 @@ function mayRunProtected(text: string): boolean {
     decoded.replace(/\\./g, ' '),
   ].some(
     (variant) =>
-      PROTECTED_PROGRAM.test(variant) && MENTIONED_OPERATION.test(variant),
+      PROTECTED_PROGRAM.test(variant) &&
+      (patternArguments || MENTIONED_OPERATION.test(variant)),
   );
 }
 
