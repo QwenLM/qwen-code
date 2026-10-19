@@ -963,10 +963,10 @@ export async function parseArguments(): Promise<CliArgs> {
     // their own execution and exit. Returning here would let the main
     // interactive flow run, which would prompt for stdin input despite the
     // user having already invoked a subcommand. `batch` must be here for a
-    // second reason: the main
-    // flow below relaunches the process for a larger heap, and a second parse
-    // would run the subcommand handler again — submitting (and billing) a
-    // duplicate batch job whose id the user never sees.
+    // second reason: the main flow below relaunches the process for a larger
+    // heap, and a second parse would run the subcommand handler again —
+    // submitting (and billing) a duplicate batch job whose id the user never
+    // sees.
     process.exit(process.exitCode ?? 0);
   }
 
