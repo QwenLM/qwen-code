@@ -21,13 +21,16 @@ import {
   HookCommandIsolationUnavailableError,
 } from './hook-command-cgroup.js';
 
+let root: string;
 let directory: string;
 beforeEach(async () => {
-  directory = await mkdtemp(join(tmpdir(), 'hook-launcher-'));
+  root = await mkdtemp(join(tmpdir(), 'hook-launcher-'));
+  directory = join(root, 'unit');
+  await mkdir(directory);
 });
 afterEach(async () => {
   vi.restoreAllMocks();
-  await rm(directory, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true });
 });
 
 function alive(pid: number): boolean {
@@ -391,6 +394,98 @@ process.exit(0);`,
       });
     } finally {
       worker.kill('SIGKILL');
+    }
+  });
+
+  it('keeps the reaper for a foreground that exits before its descendants', async () => {
+    await writeFile(join(directory, 'cgroup.events'), 'populated 1\n');
+    const descendantPidFile = join(directory, 'descendant.pid');
+    const launcherPidFile = join(directory, 'launcher.pid');
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const descendant = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], {
+  stdio: ['ignore', 'ignore', 'ignore'],
+  detached: true,
+});
+descendant.unref();
+writeFileSync(process.env.DESCENDANT_PID, String(descendant.pid));
+process.exit(0);`,
+      ],
+      { DESCENDANT_PID: descendantPidFile },
+      { reapOnParentExit: true },
+    );
+    const worker = spawn(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const spec = JSON.parse(process.env.SPEC);
+const child = spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+writeFileSync(process.env.LAUNCHER_PID, String(child.pid));
+setInterval(() => {}, 1000);`,
+      ],
+      {
+        env: {
+          PATH: process.env['PATH'] ?? '',
+          SPEC: JSON.stringify(launch),
+          LAUNCHER_PID: launcherPidFile,
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    try {
+      await waitFor(async () => {
+        try {
+          return (await readFile(launcherPidFile, 'utf8')).length > 0;
+        } catch {
+          return false;
+        }
+      });
+      const launcherPid = Number(await readFile(launcherPidFile, 'utf8'));
+
+      // The foreground exits immediately; the launcher moves itself to a
+      // temporary sibling reaper unit and stays for the remaining members.
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(
+              join(root, `unit-reaper-${launcherPid}`, 'cgroup.procs'),
+              'utf8',
+            )) === String(launcherPid)
+          );
+        } catch {
+          return false;
+        }
+      });
+      worker.kill('SIGKILL');
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.kill'), 'utf8')) === '1'
+          );
+        } catch {
+          return false;
+        }
+      });
+    } finally {
+      worker.kill('SIGKILL');
+    }
+    try {
+      const descendantPid = Number(await readFile(descendantPidFile, 'utf8'));
+      process.kill(descendantPid, 'SIGKILL');
+    } catch {
+      // The descendant already exited.
     }
   });
 });

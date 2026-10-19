@@ -11,20 +11,22 @@ This slice adds a Hook-only parent-death reaper to the existing cgroup launcher.
 ## Decision
 
 - `HookCommandCgroup.launch(..., { reapOnParentExit: true })` sets a launcher-environment marker. The launcher checks `process.ppid` every 100 ms; if it starts already reparented to PID 1 it reaps immediately, and on a later change it writes `cgroup.kill` and exits. The kernel kills the launcher and the whole unit, so a foreground command that never writes and detached descendants both go.
+- When the foreground exits while the unit still has members, the launcher creates a temporary sibling reaper unit under the delegated root, moves itself there, keeps the reaper alive, and exits with the foreground's status once the original unit is empty. The move leaves `waitForEmpty()` measuring only the remaining members; a worker death during that drain still writes `cgroup.kill`.
 - The Hook runner opts in only for the `waitForProcessTree` command path. Background Shells do not: H3 deliberately keeps them across worker restarts and re-attaches their named units. The `survivesParentExit` Hooks (`MessageDisplay`, `StopFailure`, `SessionDelete`) use a separate supervisor and never create this unit.
 - Why this instead of the issue's two designs: the launcher is already inside the unit, so no owner-derivable unit name or product state is needed, and the Java control plane gains no cgroup code. The kill happens at the only process that survives the worker. The empty directory and the unknown outcome remain; a sweep and the abandonment route are follow-up.
 
 ## Behavior and acceptance
 
-- The launcher test spawns a worker that owns the launcher, kills the worker, and asserts the launcher wrote `cgroup.kill`; a second case starts the launcher after its worker has already exited (ppid 1) and asserts the immediate reap. The default launch carries no marker, so background Shells keep their current lifetime.
+- The launcher test spawns a worker that owns the launcher, kills the worker, and asserts the launcher wrote `cgroup.kill`; a second case starts the launcher after its worker has already exited (ppid 1) and asserts the immediate reap; a third lets the foreground exit first while a detached descendant remains and kills the worker during the drain. The default launch carries no marker, so background Shells keep their current lifetime.
 - The Hook runner suite and the existing process-tree cancellation cases stay green.
 - On the Linux Hosted lane with a real delegated cgroup root, the original `HookRunner` reproduction (worker SIGKILL, heap-OOM, native crash) should now show the unit emptied; `populated 0` is the observable.
 - `packages/core` typecheck and lint pass.
 
 ## Limits
 
-- The empty unit directory remains after `cgroup.kill`; a worker-start sweep of `populated 0` `qwen-hook-*` units is follow-up.
+- The empty Hook unit and the temporary reaper unit directories remain after `cgroup.kill`; a worker-start sweep of `populated 0` `qwen-hook-*` units is follow-up.
 - The record stays `recovery_blocked`/`outcome_unknown`: killing bounds the effect, it cannot settle an outcome no survivor observed.
 - Only the local-process Linux cgroup path is covered; non-Linux Hook commands are already refused by the cgroup guard.
 - A custom subreaper that adopts the launcher before it starts can hide the startup reparent; the normal worker/Harness topology reparents to PID 1, and the interval still covers a mid-command death.
+- The drain-time reaper unit requires the delegated root to allow child units. If it refuses, the launcher falls back to the immediate exit and that drain window is not covered; the empty reaper unit is removed by the worker-start sweep.
 - No Broker/Java change and no owner-derivable unit name in this slice.

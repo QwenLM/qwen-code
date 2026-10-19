@@ -42,7 +42,7 @@ export class HookCommandIsolationUnavailableError extends Error {
 }
 
 const LAUNCHER = String.raw`
-const { writeFileSync, writeSync } = require('node:fs');
+const { mkdirSync, readFileSync, writeFileSync, writeSync } = require('node:fs');
 const { spawn } = require('node:child_process');
 const [group, executable, args] = process.argv.slice(1);
 try {
@@ -98,13 +98,55 @@ child.on('error', () => process.exit(1));
 // signal 6 SIGABRT, never SIGIOT, and Linux has no SIGEMT.
 const KEPT = ['SIGABRT', 'SIGBUS', 'SIGFPE', 'SIGILL', 'SIGQUIT', 'SIGSEGV',
   'SIGSYS', 'SIGTRAP', 'SIGXCPU', 'SIGXFSZ', 'SIGUSR1', 'SIGPIPE'];
-child.on('exit', (code, signal) => {
-  if (signal !== null && !KEPT.includes(signal)) {
-    process.kill(process.pid, signal);
+let exitCode = 0;
+let exitSignal = null;
+function exitLikeChild() {
+  if (exitSignal !== null && !KEPT.includes(exitSignal)) {
+    process.kill(process.pid, exitSignal);
     setTimeout(() => process.exit(1), 1000);
     return;
   }
-  process.exit(code ?? 1);
+  process.exit(exitCode ?? 1);
+}
+child.on('exit', (code, signal) => {
+  exitCode = code;
+  exitSignal = signal;
+  if (process.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT === '1') {
+    // A foreground exit is not the end of the Hook tree. Move this launcher
+    // out of the unit so its population is only the remaining members, then
+    // keep the reaper alive until the unit is empty. A worker that dies in
+    // that drain window still reaches cgroup.kill through the interval.
+    let moved = false;
+    try {
+      // A temporary sibling unit keeps this launcher out of the original
+      // unit without moving into the root, which may forbid internal
+      // processes while it has children.
+      const reaperUnit = group + '-reaper-' + process.pid;
+      mkdirSync(reaperUnit, { mode: 0o700 });
+      writeFileSync(reaperUnit + '/cgroup.procs', String(process.pid));
+      moved = true;
+    } catch {
+      // The delegated root may refuse the unit; fall back to the old exit.
+    }
+    if (moved) {
+      const wait = setInterval(() => {
+        let empty = true;
+        try {
+          empty = /^populated 0$/m.test(
+            readFileSync(group + '/cgroup.events', 'utf8'),
+          );
+        } catch {
+          // A removed unit has no members left.
+        }
+        if (!empty) return;
+        clearInterval(wait);
+        exitLikeChild();
+      }, 100);
+      // The wait itself keeps this launcher alive; do not unref it.
+      return;
+    }
+  }
+  exitLikeChild();
 });
 `;
 
