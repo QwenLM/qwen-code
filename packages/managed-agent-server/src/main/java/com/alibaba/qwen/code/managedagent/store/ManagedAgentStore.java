@@ -3454,7 +3454,8 @@ public class ManagedAgentStore implements AgentStateStore {
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
         if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                    jdbc, tenantId, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         }
         if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
