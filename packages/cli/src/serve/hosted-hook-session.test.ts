@@ -1159,8 +1159,30 @@ it('cancels a Hook while the dispatch acquisition is held, before dispatch_start
       entered();
       await held;
       return {
-        runtime: { bindingId: 'fg13d-binding', generation: '1' },
+        runtime: {
+          bindingId: 'fg13d-binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        },
       } as never;
+    });
+  const dispatched: unknown[] = [];
+  const originalCommit = session.authority.commitExtensionRecord.bind(
+    session.authority,
+  );
+  const commit = vi
+    .spyOn(session.authority, 'commitExtensionRecord')
+    .mockImplementation(async (command, request, actor) => {
+      const record = request.record as {
+        hookId?: string;
+        run?: { execution?: string };
+      };
+      if (
+        record.hookId !== '__plan__' &&
+        record.run?.execution === 'dispatch_started'
+      )
+        dispatched.push(command);
+      return originalCommit(command, request, actor);
     });
   const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
   await enteredPromise;
@@ -1180,6 +1202,7 @@ it('cancels a Hook while the dispatch acquisition is held, before dispatch_start
   expect(childExecution().run.execution).toBe('intent');
   release();
   expect((await firing)?.decision).toBe('block');
+  expect(dispatched).toEqual([]);
   expect(childExecution().run).toMatchObject({
     state: 'cancelled',
     execution: 'not_started_proven',
@@ -1189,6 +1212,7 @@ it('cancels a Hook while the dispatch acquisition is held, before dispatch_start
   ).toHaveLength(0);
   expect(hooks.hasPendingOperations).toBe(false);
   executionBroker.mockRestore();
+  commit.mockRestore();
 });
 
 it('applies failClosed when a lost reply is settled through status after reconstruction', async () => {
