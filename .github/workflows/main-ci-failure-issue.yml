@@ -433,6 +433,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: 'write'
+      pull-requests: 'write'
     steps:
       - name: 'Post or update the failure summary'
         env:

@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBrokerSchema;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
 import org.assertj.core.api.SoftAssertions;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;

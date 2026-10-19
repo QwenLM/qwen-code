@@ -215,6 +215,7 @@ describe('no-AK integration CI wiring', () => {
         './cli/daemon-invocation-context.test.ts',
         './cli/headless-workflow-skill.test.ts',
         './cli/workflow-ancestor-discovery.test.ts',
+        './cli/daemon-workflow-ancestor-trust.test.ts',
         './cli/list_directory.test.ts',
         './cli/tool-hook-context.test.ts',
         './cli/qwen-serve-routes.test.ts',
