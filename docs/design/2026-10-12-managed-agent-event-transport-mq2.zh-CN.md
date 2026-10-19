@@ -2,6 +2,13 @@
 
 [English](2026-10-12-managed-agent-event-transport-mq2.md) | [简体中文](2026-10-12-managed-agent-event-transport-mq2.zh-CN.md)
 
+> **Wake 恢复更新（2026-10-19）：** 本文早期仅依赖来源账本的兜底描述已由
+> [Hosted SQL wake 扫描](2026-10-18-hosted-wake-recovery.zh-CN.md)取代。writer 丢失后，
+> 它发现已提交、未消费的 monitor/后台 Shell、channel、child/workflow、automation
+> 和 Session message 输入。公共前台 Turn 仍归 dispatcher；私有 CSI 和其他来源保留
+> 原有恢复路径。真实 MQ 开启、部署及跨平台扫描验收仍未验证。下方历史 MQ 门禁不证明
+> 这一新扫描；其故障验收见链接设计。
+
 > **状态:** 提案阶段计划。这是跨节点 EventTransport 设计
 > ([2026-10-04-managed-agent-event-transport](2026-10-04-managed-agent-event-transport.zh-CN.md)
 > §7)的 **MQ2** 阶段,由 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 跟踪。
@@ -39,7 +46,7 @@ MQ2 是把命名的 seam 变成接好线的传输的阶段:outbox 排出的 MQ �
 
 ### MQ2c——公开事件线 + 唤醒/物化消费者
 
-扩展已冻结的信封词表,加入 `public_event` 流(MQ1 seam 所在通道所需的、有跟踪的契约扩展),然后由第二个 `EventTransport` 实现把公开 `managed_agent_event` 流(MQ1 seam 所在通道)以 `public_event` 信封承载;两个消费者角色落地:唤醒消费者经 Session Authority 围栏尝试激活,物化消费者触发现有 `MessageMaterializer` 路径。消费者拓扑遵循 §11 路由决策:待激活唤醒走共享 bootstrap 组,加 owner 侧按 Session 动态订阅。每个消费者以 `(tenantId, sessionId, stream, sequence)` 对照 SQL 水位去重。交接窗口期旧订阅可能短暂共存(租约到期而未干净退订);旧订阅者被围栏拒绝的空操作 ACK 仍会推进组位点,新 owner 可能错过该次通知,必须靠 SQL 对账恢复该待办——绝不能假设 MQ 已送达。(落地后,这个对账并不是通用扫描;见 MQ2d 下的「丢失或被烧掉的唤醒靠什么恢复」。)
+扩展已冻结的信封词表,加入 `public_event` 流(MQ1 seam 所在通道所需的、有跟踪的契约扩展),然后由第二个 `EventTransport` 实现把公开 `managed_agent_event` 流(MQ1 seam 所在通道)以 `public_event` 信封承载;两个消费者角色落地:唤醒消费者经 Session Authority 围栏尝试激活,物化消费者触发现有 `MessageMaterializer` 路径。消费者拓扑遵循 §11 路由决策:待激活唤醒走共享 bootstrap 组,加 owner 侧按 Session 动态订阅。每个消费者以 `(tenantId, sessionId, stream, sequence)` 对照 SQL 水位去重。交接窗口期旧订阅可能短暂共存(租约到期而未干净退订);旧订阅者被围栏拒绝的空操作 ACK 仍会推进组位点,新 owner 可能错过该次通知,必须靠 SQL 对账恢复该待办——绝不能假设 MQ 已送达。(原 MQ2d 的账本兜底对符合条件的唤醒已由 Hosted SQL 扫描取代;见 MQ2d 下的「丢失或被烧掉的唤醒靠什么恢复」。)
 
 **落地情况。** 契约扩展记录在 [2026-10-06-managed-event-envelope](2026-10-06-managed-event-envelope.zh-CN.md)(v1 内增量扩展;`public_event` 的 kind 即公开事件类型,按形状校验;digest 绑定九字段的行;`workspaceId` 取 Session 的绑定,未绑定时取其 journal 的 workspace)。接线如下:
 
@@ -66,7 +73,7 @@ MQ2c 不包含:真实 broker 故障行(MQ2d)、接收侧对 journal 事实的 di
 - **配错即启动失败。** NORMAL(非 LITE)topic 能骗过单纯的订阅探针,现在由新增的发送探针拒绝——向探针自己的 lite topic 同步发一条消息——赶在任何信封被丢弃之前;没人预建的探针组会让订阅探针失败。探针组现在是可配置属性(`capability-probe-group`),代码里打印的每条 `mqadmin` 命令都写明了集群;既不写集群也不写 broker 的话,mqadmin 什么也不建。
 - **开关关闭。** 以结构方式而非经 broker 钉住:`EventTransportConfigurationTest` 证明开关关闭的上下文里不存在任何生产者、消费者、transport 或消费者 store,模块其余测试集也都在开关关闭下运行。
 
-**丢失或被烧掉的唤醒靠什么恢复。** 不存在加载「有已提交未消费唤醒的 Session」的通用扫描。通知丢失的唤醒——或者认领之后没有加载的唤醒(加载失败、线程池已满,或本节点已持有 attachment)——恢复方式与开关关闭时完全相同:由提交该输入的那个来源的账本负责(如果该来源有账本;公开 Turn 派发器,直到 Turn 终结;session message 中继的 consume 循环;child 结果中继;automation 扫描器),或者由之后任何一次对该 Session 的加载负责,加载后其唤醒泵会执行 journal 中的内容。transport 从不让情况变差:认领水位只拒绝它自己和更旧的序号,所以已认领的唤醒绝不会挡住之后的唤醒。但这些账本有早于它就存在的缺口:channel 入站输入以及 Monitor 或后台 shell 通知完全没有定时重驱;message 中继、child 结果中继与 automation 扫描器各自在失败 64 次后放弃;走过 `mark_accepted` 的 child 结果在父会话失去 writer 时不会被重新加载;已 fired 的 automation occurrence 只有在同一定义的后续 slot 触发或对账时才会被它自己的扫描器重新加载,而被禁用、已退役或被阻断的定义——或者下一个 cron slot 还很远的定义——短期内不会这样做。补上这些缺口属于各来源自身,而不是 transport。
+**丢失或被烧掉的唤醒靠什么恢复。** 原 MQ2d 实现依靠各输入来源的账本或之后的 Session 加载，因此 channel、Monitor/后台 Shell 和来源 relay 已结束的输入存在缺口。[Hosted SQL wake 扫描](2026-10-18-hosted-wake-recovery.zh-CN.md)在 writer 丢失后，为其准入的六个来源取代这一兜底，且独立于 MQ 认领水位。扫描不会重新准入从未提交的输入，不延长来源投递重试上限，也不恢复私有 CSI 和公共前台 Turn；后两者仍使用来源账本或 dispatcher。现有 MQ2d 交接门禁证明通知可能丢失；无需后续通知的自动扫描恢复，仍需按链接设计完成真实 MQ 故障验收。
 
 ## 关键决策
 
@@ -87,4 +94,4 @@ MQ2c 不包含:真实 broker 故障行(MQ2d)、接收侧对 journal 事实的 di
 - MQ2a:fixture 文件中某个信封键被重命名、或某个禁用字段反例被接受时,Java fixture 消费方必须变红。
 - MQ2b:flag 关闭的部署字节级一致;flag 开启时真实 broker 能收到信封(单 broker,预发或 CI)。
 - MQ2c:消费者去重使重投递的信封成为无操作;对已围栏 Session 的过期唤醒是无操作。
-- MQ2d:MQ2 退出检查点名的 §8 故障行在 CI 中全绿,含 owner 交接恢复行——旧 owner 的空操作 ACK 推进组位点,新 owner 在未收到该 MQ 通知的情况下仍由 SQL 对账发现并处理待办。落地后,该行证明新 owner 永远收不到这条通知,且该唤醒在 SQL 中保持未认领,后来的通知仍能激活它;对账本身是各输入来源的账本(见 MQ2d)。
+- MQ2d:MQ2 退出检查点名的 §8 故障行在 CI 中全绿,含 owner 交接恢复行——旧 owner 的空操作 ACK 推进组位点,新 owner 在未收到该 MQ 通知的情况下仍由 SQL 对账发现并处理待办。落地后,该行证明新 owner 永远收不到这条通知,且该唤醒在 SQL 中保持未认领,后来的通知仍能激活它。应扩展验收，证明符合条件的已提交唤醒在 writer 到期后无需另一条通知即可由独立 Hosted SQL 扫描恢复；真实 MQ 下该扩展仍未验证（见 MQ2d）。

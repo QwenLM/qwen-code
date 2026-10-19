@@ -11,6 +11,10 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { getCliVersion } from '../utils/version.js';
 import {
+  readWorkspaceFiles,
+  WorkspaceFileError,
+} from './managed-workspace-files.js';
+import {
   createManagedContextAttestationResponse,
   isManagedContextReady,
   parseManagedContextBoot,
@@ -687,6 +691,35 @@ export async function executeSshBootstrap(
       refuse('Directory is outside the configured roots.');
     if (within(root, stateDirectory) || within(stateDirectory, root))
       refuse('Runtime state and Workspace roots must not overlap.');
+    if (request['files'] !== undefined) {
+      const identity =
+        request['identity'] === undefined
+          ? undefined
+          : identityDocument(request['identity']);
+      const marker = identity
+        ? markerDocument(request['marker'], identity)
+        : undefined;
+      if (identity && identity.root !== root) refuse('Storage root conflicts.');
+      if (identity) await verifySshStorage(identity, marker);
+      const expected = identity ?? object(request['localRootIdentity']);
+      try {
+        const files = await readWorkspaceFiles(
+          root,
+          text(request['cwdRelative']),
+          request['files'],
+          {
+            device: text(expected.device),
+            inode: text(expected.inode),
+          },
+        );
+        if (identity) await verifySshStorage(identity, marker);
+        return { qwenVersion: await getCliVersion(), files };
+      } catch (error) {
+        if (error instanceof WorkspaceFileError)
+          throw new SshBootstrapError(error.code, error.message);
+        throw error;
+      }
+    }
     const identity = await inspectSshStorage(root);
     if (request['cwdRelative'] !== undefined) {
       const relative = text(request['cwdRelative']);
@@ -832,7 +865,13 @@ export async function executeSshBootstrap(
   );
 }
 
-export async function runManagedRuntimeBootstrap(): Promise<void> {
+export async function runManagedRuntimeBootstrap(help = false): Promise<void> {
+  if (help) {
+    process.stdout.write(
+      `${JSON.stringify({ protocolVersion: 1, capabilities: { workspaceFiles: 1 } })}\n`,
+    );
+    return;
+  }
   let response;
   try {
     const chunks: Buffer[] = [];

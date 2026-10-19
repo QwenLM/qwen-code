@@ -8,7 +8,7 @@ import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
-export const HOSTED_ATTACHMENT_INPUT_BYTES = 48 * 1024;
+export const HOSTED_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 const TEXT_EXTENSIONS = new Set([
   'txt',
   'md',
@@ -152,7 +152,7 @@ export function parseHostedInput(value: unknown): {
     attachments.length &&
     Buffer.byteLength(JSON.stringify(value)) > HOSTED_ATTACHMENT_INPUT_BYTES
   )
-    throw new Error('Hosted attachment input exceeds 48 KiB.');
+    throw new Error('Hosted attachment input exceeds 8 MiB.');
   const text = texts.join('\n');
   return {
     text,
@@ -186,7 +186,7 @@ export async function readHostedInput(
   if (
     ref.kind !== 'managed-input' ||
     ref.schemaVersion !== 1 ||
-    ref.byteLength > 64 * 1024
+    ref.byteLength > HOSTED_ATTACHMENT_INPUT_BYTES
   )
     throw new Error('Invalid Hosted input reference.');
   return parseHostedInput(
