@@ -12,6 +12,11 @@ import {
 } from './hosted-approval-selection.js';
 import { parseHostedInput, readHostedInput } from './hosted-input.js';
 import {
+  enqueueHostedWakeContinuation,
+  isHostedWakeContinuationId,
+  readHostedWakeContinuation,
+} from './hosted-wake-continuation.js';
+import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
   createHostedModelRequest,
@@ -1256,6 +1261,10 @@ export async function settleCrashedWakeTurnAftermath(params: {
       messages: session.messages,
       commands: session.commands,
     });
+    const continuationId = await enqueueHostedWakeContinuation(
+      session.managed,
+      turnId,
+    );
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
     // same crash (the journal-filter rule in the history builders then
@@ -1291,6 +1300,9 @@ export async function settleCrashedWakeTurnAftermath(params: {
     // The settle journaled durably, so retries re-derive the outcomes from
     // the journal and the carry has no more work.
     session.recoveryUnobserved?.delete(turnId);
+    writeStderrLineSafe(
+      `qwen serve: Hosted wake turn ${turnId} crash aftermath settled${continuationId === undefined ? '.' : `; continuation ${continuationId} is durable.`}`,
+    );
     return 'settled';
   } catch (cause) {
     writeStderrLineSafe(
@@ -3162,12 +3174,21 @@ async function executeHostedTurn(
         );
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (!resumeFromToolResults && !resumeApproval && !resumeModel) {
-          const user = record(session, sessionId, 'user', parentUuid, {
-            daemonPromptId: promptId,
-            message: { role: 'user', parts: promptInput.parts },
-          });
-          await session.managed.sink.write(user);
-          parentUuid = user.uuid;
+          const continuation = isHostedWakeContinuationId(promptId);
+          const inputRecord = record(
+            session,
+            sessionId,
+            continuation ? 'system' : 'user',
+            parentUuid,
+            {
+              daemonPromptId: promptId,
+              ...(continuation
+                ? { subtype: 'turn_attempt' }
+                : { message: { role: 'user', parts: promptInput.parts } }),
+            },
+          );
+          await session.managed.sink.write(inputRecord);
+          parentUuid = inputRecord.uuid;
         }
         const messageRecord = (
           type: 'assistant' | 'tool_result',
@@ -5004,6 +5025,16 @@ export function registerHostedHarnessSessionRoutes(
                 !stoppedMessage(input.source),
             );
             if (first === undefined) return undefined;
+            if (isHostedWakeContinuationId(first.turnId)) {
+              return {
+                turnId: first.turnId,
+                source: first.source,
+                ...(await readHostedWakeContinuation(
+                  session.managed,
+                  first.turnId,
+                )),
+              };
+            }
             if (first.source === CHANNEL_INPUT_SOURCE) {
               let text: string | undefined;
               try {
