@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.ServletException;
 import org.junit.jupiter.api.Test;
@@ -57,7 +59,7 @@ class TenantContextFilterTest {
         TenantContext context = (TenantContext) request.getAttribute(
                 TenantContextFilter.ATTRIBUTE);
         assertThatThrownBy(context::requireActorId)
-                .isInstanceOfSatisfying(ApiException.class, error ->
+                .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("actor_required"));
     }
 

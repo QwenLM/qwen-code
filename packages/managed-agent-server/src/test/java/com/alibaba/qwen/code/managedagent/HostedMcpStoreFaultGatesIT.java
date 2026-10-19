@@ -1,16 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.FaultingExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
-import com.alibaba.qwen.code.managedagent.store.StoreFaultGate;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.StoreFaultGate;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

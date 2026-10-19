@@ -385,7 +385,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain(`'${refusal}'`);
     expect(
       read(
-        'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/ManagedSessionStore.java',
+        'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java',
       ),
     ).toContain(`"${refusal}."`);
     const writerBefore = source.indexOf(
