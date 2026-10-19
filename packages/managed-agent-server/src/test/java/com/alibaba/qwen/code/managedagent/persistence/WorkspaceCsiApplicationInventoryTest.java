@@ -824,7 +824,11 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
 
         assertThatThrownBy(() -> jdbc.update("UPDATE ma_session SET plan_enabled = TRUE"))
-                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+                .isInstanceOfSatisfying(org.springframework.dao.DataAccessException.class, error ->
+                        assertThat(error.getMostSpecificCause()).isInstanceOfSatisfying(java.sql.SQLException.class, sql -> {
+                            assertThat(sql.getMessage()).containsIgnoringCase("ck_ma_session_plan");
+                            assertThat(sql.getSQLState() + ":" + sql.getErrorCode()).isIn("23513:23513", "HY000:3819");
+                        }));
         jdbc.update("UPDATE ma_session SET plan_enabled = TRUE, selected_approval_mode = 'default', approval_revision = 1");
         var enabled = inspect();
         assertThat(enabled.table("ma_session").rows().getFirst().bool("plan_enabled")).isTrue();
@@ -1111,6 +1115,29 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.update("UPDATE ma_storage SET registration_json = ?", saved.toString());
         assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("ma_storage")
                 && blocker.code().equals("invalid_original_association"));
+    }
+
+    @Test
+    void equivalentHandleJsonRetainsExactRawBytesButRefusesChangedOrAmbiguousObjects() throws Exception {
+        var before = inspect();
+        assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_runtime_binding"));
+        String raw = WorkspaceCsiApplicationImage.sole(before, "ma_runtime_binding").text("resource_handle_json");
+        String equivalent = " \n" + raw.replace(":", " : ") + "\n ";
+        jdbc.update("UPDATE ma_runtime_binding SET resource_handle_json = ? WHERE binding_id = ?", equivalent, binding.getBindingId());
+        var observed = inspect();
+        assertThat(observed.blockers()).noneMatch(blocker -> blocker.table().equals("ma_runtime_binding"));
+        assertThat(WorkspaceCsiApplicationImage.sole(observed, "ma_runtime_binding").text("resource_handle_json"))
+                .isEqualTo(equivalent);
+        assertThat(observed.bytes()).isNotEqualTo(before.bytes());
+        assertThatThrownBy(() -> WorkspaceCsiApplicationImage.verify(
+                WorkspaceCsiApplicationInventory.expectedImage(observed.tables()),
+                WorkspaceCsiApplicationInventory.expectedImage(before.tables()))).isInstanceOf(IllegalArgumentException.class);
+        for (String invalid : List.of(raw.replace("fixture-original", "changed"),
+                raw.substring(0, raw.length() - 1) + ",\"podUid\":\"fixture-original\"}", raw + "{}")) {
+            jdbc.update("UPDATE ma_runtime_binding SET resource_handle_json = ? WHERE binding_id = ?", invalid, binding.getBindingId());
+            assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("ma_runtime_binding")
+                    && blocker.code().equals("invalid_original_association"));
+        }
     }
 
     @Test

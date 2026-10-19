@@ -3072,7 +3072,7 @@ final class WorkspaceCsiApplicationInventory {
                         && "DRAINING".equals(row.text("binding_state")) && Boolean.TRUE.equals(row.bool("drain_requested"))
                         && intent.runtimeInstanceId().equals(row.text("runtime_instance_id"))
                         && intent.leaseId().equals(row.text("runtime_lease_id")) && Objects.equals(intent.epoch(), row.number("runtime_epoch"))
-                        && intent.resourceHandleJson().equals(row.text("resource_handle_json"))
+                        && matches(parse(row.text("resource_handle_json")), parse(intent.resourceHandleJson()))
                         && Objects.equals(intent.resourceHandleVersion().longValue(), row.number("resource_handle_version"))
                         && Objects.equals(intent.attestationGeneration(), row.number("attestation_generation")));
                 case "ma_runtime_session" -> expect(table, row, scope(row)
