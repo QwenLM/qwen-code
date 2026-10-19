@@ -39,6 +39,16 @@ class ManagedAutomationServiceTest {
                 .isEqualTo("hosted_automations_unavailable");
     }
 
+    // A recovery block can lift, but a cleanup block may never: the route
+    // does not promise a retry for this code.
+    @Test
+    void keepsHostedSessionBlockedAsConflict() {
+        ApiException conflict = ManagedAutomationService.translate(
+                refusal(409, "hosted_session_blocked"));
+        assertThat(conflict.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(conflict.getCode()).isEqualTo("hosted_session_blocked");
+    }
+
     // A 409 whose body names no code is not a self-healing conflict.
     @Test
     void keepsACodeLessHarnessConflictAsConflict() {

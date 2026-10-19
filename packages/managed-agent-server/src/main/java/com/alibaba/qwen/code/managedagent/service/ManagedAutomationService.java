@@ -347,6 +347,16 @@ public class ManagedAutomationService {
                             "The automation is being scanned; retry."));
             if (AutomationLedgerStore.OUTCOME_FIRING.equals(
                     occurrence.outcome())) {
+                if (occurrence.nextRetryAt() > now) {
+                    // The last attempt deferred the claim. A client retry
+                    // inside that window must not spend another attempt or
+                    // move the scanner's schedule; the scanner owns the
+                    // next fire once the delay lapses.
+                    throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                            "automation_operation_unknown",
+                            "The Hosted Harness answer is pending; retry"
+                                    + " the same key.");
+                }
                 try {
                     scanner.fire(held, occurrence, owner, fence, now);
                 } catch (RuntimeException error) {

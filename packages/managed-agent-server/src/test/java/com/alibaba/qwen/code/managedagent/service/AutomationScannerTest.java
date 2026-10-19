@@ -1069,8 +1069,20 @@ class AutomationScannerTest {
         assertThat(claim.attempts()).isEqualTo(1);
         assertThat(claim.lastError()).isEqualTo("connection lost");
         assertThat(claim.trigger()).isEqualTo(AutomationScanner.TRIGGER_MANUAL);
-        // The same key asked again re-drives the claim at once: the caller
-        // is answered what the Harness now says, under the same run id.
+        // A retry inside the defer window answers the retryable 503 without
+        // spending an attempt: the scanner owns the next fire.
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, id, "lost-1"))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_operation_unknown");
+                });
+        assertThat(fake.fires()).isEqualTo(1);
+        assertThat(ledger.findOccurrence(tenant, id, "manual:lost-1")
+                .orElseThrow().attempts()).isEqualTo(1);
+        clock.addAndGet(11_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
         var asked = service.run(tenant, ACTOR, id, "lost-1");
         assertThat(asked.replayed()).isTrue();
         assertThat(asked.body().outcome()).isEqualTo("fired");
@@ -1101,6 +1113,42 @@ class AutomationScannerTest {
                 .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
         assertThat(ledger.findSchedule(tenant, id).orElseThrow().leaseOwner())
                 .isNull();
+    }
+
+    @Test
+    void aRetryInsideTheDeferWindowDoesNotSpendTheScannerBudget() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none",
+                null, true);
+        String id = automation.id();
+        ScheduleRow held = ledger.findSchedule(tenant, id).orElseThrow();
+        long seedFence = ledger.claim(tenant, id, "seed",
+                clock.get() + 60_000, clock.get());
+        assertThat(seedFence).isPositive();
+        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+                .decision(held, "manual:seeded", null,
+                        AutomationScanner.TRIGGER_MANUAL,
+                        AutomationLedgerStore.OUTCOME_FIRING, null, seedFence,
+                        clock.get()), "seed")).isPresent();
+        assertThat(ledger.deferOccurrence(tenant, id, "manual:seeded", 63,
+                clock.get() + 30_000, "seeded", "seed", seedFence,
+                clock.get())).isTrue();
+        ledger.release(tenant, id, "seed", seedFence, clock.get());
+        // One more fire would take attempts to MAX_FIRE_ATTEMPTS and settle
+        // the claim unknown; the guard answers 503 without reaching it.
+        fake.failNextFire = new DaemonException("must not fire");
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, id, "seeded"))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_operation_unknown");
+                });
+        assertThat(fake.fires()).isZero();
+        AutomationLedgerStore.OccurrenceRow after = ledger.findOccurrence(
+                tenant, id, "manual:seeded").orElseThrow();
+        assertThat(after.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+        assertThat(after.attempts()).isEqualTo(63);
     }
 
     @Test
