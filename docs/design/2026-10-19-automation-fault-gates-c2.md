@@ -89,9 +89,9 @@ loser's write a second row.
 The class runs five tests — the fixture smoke, the fire path, and the three
 windows — in one fork with one Harness and up to two Spring children. The
 whole class measured 262.0 s locally on JDK 21 + MySQL 8.0.46, budgeted at
-524 s (2x): `main`'s healthy sum 6835 s to 7359 s, the Hosted fork 7435 s to
-7959 s with the method's 600 s ceiling, the Verify step 134 to 143 minutes,
-and the job ceiling 227 to 236 minutes.
+524 s (2x): `main`'s healthy sum 6985 s to 7509 s, the Hosted fork 7585 s to
+8109 s with the method's 600 s ceiling, the Verify step 137 to 146 minutes,
+and the job ceiling 230 to 239 minutes.
 
 `parked-tool-harness-kill` is deferred: slice 1's `turn-crash` already pins
 "the Harness dies mid-turn and the run settles exactly once as

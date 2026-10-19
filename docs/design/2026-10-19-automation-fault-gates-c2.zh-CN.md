@@ -74,9 +74,9 @@ prompt。
 
 该类跑五个测试——夹具烟测、fire 路径与三个窗口——同处一个 fork，共用一个
 Harness 与最多两个 Spring 子进程。整类在 JDK 21 + MySQL 8.0.46 上实测 262.0 秒，
-按 524 秒（2x）计入：`main` 的健康总和 6835 秒到 7359 秒，Hosted fork 由 7435 秒
-升到 7959 秒（方法本身 600 秒上限不变），Verify 步骤由 134 分钟升到 143 分钟，
-job 上限由 227 分钟升到 236 分钟。
+按 524 秒（2x）计入：`main` 的健康总和 6985 秒到 7509 秒，Hosted fork 由 7585 秒
+升到 8109 秒（方法本身 600 秒上限不变），Verify 步骤由 137 分钟升到 146 分钟，
+job 上限由 230 分钟升到 239 分钟。
 
 `parked-tool-harness-kill` 延期：第 1 片的 `turn-crash` 已钉住「Harness 在 turn
 中途死掉、run 恰好结算一次 `failed`/`outcome_unknown`」，已合入的 #14526 门禁

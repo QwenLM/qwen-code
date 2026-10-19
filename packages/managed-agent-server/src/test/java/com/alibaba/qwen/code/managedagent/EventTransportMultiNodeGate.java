@@ -501,9 +501,11 @@ class EventTransportMultiNodeGate {
     @Timeout(360)
     void aLongBrokerOutageLeavesTheFlagAsTheWayBack() throws Exception {
         Node a = node("a").start(true);
-        Node b = node("b").start(true);
         String session = createSession(a);
         turn(a, session, "MQ3_BEFORE_LONG_OUTAGE");
+        // The surviving node must own the journal whose failed sends we await.
+        Node b = node("b").start(true);
+        assertThat(writerId(session)).isEqualTo(a.bootId);
 
         try (Frozen proxy = freezeProxy()) {
             turn(a, session, "MQ3_DURING_LONG_OUTAGE");
