@@ -1,6 +1,9 @@
 # FG11d: retire, disable, close and the cancellation matrix
 
-Status: proposed. Two slices are scoped here; neither is implemented yet.
+[English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
+
+Status: slice 1 is partially delivered. `disable-span` is implemented and
+green; the other three cells and slice 2 are scoped but not implemented.
 
 Issue: #14446, the FG11 tracker. The `d` row records per-run task
 cancellation as implemented by #14526, and states that retire, disable,

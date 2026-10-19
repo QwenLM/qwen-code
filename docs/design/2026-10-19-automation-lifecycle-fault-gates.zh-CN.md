@@ -1,6 +1,8 @@
 # FG11d：retire、disable、close 与取消矩阵
 
-状态：提案。两片在此定界，均未实现。
+[English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
+
+状态：第 1 片部分交付。`disable-span` 已实现并实跑绿；其余三格与第 2 片已定界但未实现。
 
 Issue：#14446，FG11 tracker。`d` 行记载按 run 取消已由 #14526 实现，并声明
 retire、disable、close 与 round 级取消矩阵并未因该合并而结清。
