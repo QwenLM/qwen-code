@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -58,7 +58,7 @@ class HostedProcessCrashIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         source.setConnectionProperties(timeouts);
-        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         var database = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
         try (var connection = source.getConnection()) {
@@ -95,7 +95,7 @@ class HostedProcessCrashIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         source.setConnectionProperties(timeouts);
-        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         try (var fixture = new CoordinatorRestartFixture(jdbc)) {
             fixture.run();
@@ -360,13 +360,13 @@ class HostedProcessCrashIT {
 
         private void run() throws Exception {
             startSpring();
-            if ("Linux".equals(System.getProperty("os.name"))) {
+            if (List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
                 var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
                 storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
                 storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
                         new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                                 tenant, "storage", root.resolve("workspace").toString())));
-                new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+                new com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard(jdbc,
                         new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
                         .register(tenant, "storage", UUID.randomUUID().toString());
             }

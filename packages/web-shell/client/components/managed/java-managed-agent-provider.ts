@@ -145,6 +145,12 @@ export function createJavaManagedAgentProvider(
   return {
     kind: 'java',
     storageKey: storageKey(options),
+    workspaceFiles: {
+      query: (request, command) =>
+        client.queryWorkspaceFiles(request, command.signal),
+      read: (request, command) =>
+        client.readWorkspaceFile(request, command.signal),
+    },
     canCancel: true,
     acceptsWorkspaceCwd: false,
     skills: {
@@ -401,6 +407,10 @@ export function createJavaManagedAgentProvider(
           );
         }
       },
+    },
+    toolDetails: {
+      get: (sessionId, itemId, request) =>
+        client.getToolDetails(sessionId, itemId, request.signal),
     },
     toolResults: {
       canDownload: saveArtifact !== undefined,

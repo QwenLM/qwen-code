@@ -274,17 +274,18 @@ export function withChildAgentConsumption(
 ) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   return async (turn) => {
     const outcome = await runWakeTurn(turn);
+    const notificationTurnId = turn.notificationTurnId ?? turn.turnId;
     if (
       outcome === 'settled' &&
       !session.blocked &&
       // #13803: either child Session kind's acceptance notification.
       isChildNotificationSource(turn.source) &&
-      turn.turnId.endsWith(':accept:notify') &&
+      notificationTurnId.endsWith(':accept:notify') &&
       session.childAgents
     ) {
       try {
         await session.childAgents.markConsumed(
-          turn.turnId.slice(0, -':accept:notify'.length),
+          notificationTurnId.slice(0, -':accept:notify'.length),
         );
       } catch (cause) {
         // The wake settled the input durably already: a rejected consume

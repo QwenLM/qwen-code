@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.ManagedContextProtocol;
+
 /** Private Runtime proof returned before a restored endpoint is used. */
 public final class RuntimeAttestation {
     private final String runtimeInstanceId;

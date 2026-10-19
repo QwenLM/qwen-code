@@ -1,14 +1,14 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.TaskRow;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -175,7 +175,7 @@ class ManagedSessionStoreIntegrationTest {
         jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 "[]".getBytes(StandardCharsets.UTF_8), TENANT, session, published.resourceId());
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> sessionStore.readResource(TENANT,
-                WORKSPACE, session, published.resourceId(), TOKEN_A)).isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
+                WORKSPACE, session, published.resourceId(), TOKEN_A)).isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt"));
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> sessionStore.publishAgentSkills(TENANT,
                 WORKSPACE, session, skills)).isInstanceOf(RuntimeException.class);
@@ -485,16 +485,16 @@ class ManagedSessionStoreIntegrationTest {
         for (JsonNode resource : oversizedResources) {
             inlineBytes += resource.get("byteLength").asInt();
         }
-        for (int index = 0; inlineBytes < ManagedSessionStoreModels.MAX_TRANSACTION_BYTES; index++) {
+        for (int index = 0; inlineBytes < ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES; index++) {
             byte[] bytes = new byte[Math.min(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES,
-                    ManagedSessionStoreModels.MAX_TRANSACTION_BYTES - inlineBytes)];
+                    ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES - inlineBytes)];
             oversizedResources.addObject().put("resourceId", "budget-part-" + index)
                     .put("kind", "managed-message-part").put("schemaVersion", 1)
                     .put("byteLength", bytes.length).put("digest", sha256(bytes))
                     .put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
             inlineBytes += bytes.length;
         }
-        assertThat(inlineBytes).isEqualTo(8 * 1024 * 1024);
+        assertThat(inlineBytes).isEqualTo(40 * 1024 * 1024);
         mvc.perform(post(base + "/transactions:commit")
                 .header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
