@@ -475,8 +475,7 @@ export async function createReferenceDistribution({
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
     `${rootName}/bin/qwen-managed-agent-bootstrap`,
     `${rootName}/config/application.example.yml`,
-    `${rootName}/systemd/qwen-managed-agent-server.service`,
-    `${rootName}/systemd/README.md`,
+    ...systemdFiles.map((file) => `${rootName}/systemd/${file}`),
   ]) {
     if (!entries.split('\n').includes(required)) {
       throw new Error(`Archive is missing ${required}.`);
