@@ -98,9 +98,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
     );
-    expect(block).toContain('flock --wait 2400 9');
+    expect(block).toContain('flock --wait 3600 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 40 minutes',
+      '::error::sdk-java host lock not acquired within 60 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -703,30 +703,30 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       'Install Managed Agent dependencies',
       'Run Managed Agent tests, Checkstyle, and MySQL integration',
     ]);
-    for (const s of mavenSteps) {
+    const lockWaits = mavenSteps.map((s) => {
       expect(s.run, s.name).toContain(
         'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
       );
-      expect(s.run, s.name).toContain('flock --wait 2400 9');
-    }
+      const seconds = Number(s.run.match(/flock --wait (\d+) 9/)?.[1]);
+      expect(seconds, s.name).toBeGreaterThanOrEqual(50 * 60);
+      return seconds;
+    });
     // The ceiling must absorb one full lock wait per acquisition — this job
-    // takes the lock once per Maven step — plus the ~14 minutes of measured
-    // Maven work. The 1200 s budget was sized on pool run 37743332082's
-    // 1193 s of waits against 818 s of holds, and main run 38258395829
-    // exhausted it: the verify step starved a full 1200 s behind cross-run
-    // pool traffic and failed before Maven started (#13989), so the budget
-    // now covers two full sibling holds. Derived from the step count so a
-    // fourth locked step turns this red instead of silently over-drawing
-    // the budget.
+    // takes the lock once per Maven step — plus the ~50 minutes of measured
+    // Maven work. Run 39097018288 held it for 47m26s, longer than the old
+    // 40-minute acquisition budget. Derive the ceiling from the step count
+    // so another locked step cannot silently overdraw it.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
-    ).toBeGreaterThanOrEqual(mavenSteps.length * 2400 + 14 * 60);
+    ).toBeGreaterThanOrEqual(
+      lockWaits.reduce((total, seconds) => total + seconds, 0) + 50 * 60,
+    );
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus its own measured locked work (~5 minutes on
     // the Java 21 leg of run 37743332082) and setup headroom. This job's holds
     // now consume part of that wait budget.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      2400 + 10 * 60,
+      3600 + 10 * 60,
     );
   });
 

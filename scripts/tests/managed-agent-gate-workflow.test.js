@@ -37,8 +37,17 @@ function evaluate(text, context) {
     'needs',
     'inputs',
     'format',
+    'always',
+    'cancelled',
     `return (${body});`,
-  )(context.github ?? {}, context.needs ?? {}, context.inputs ?? {}, format);
+  )(
+    context.github ?? {},
+    context.needs ?? {},
+    context.inputs ?? {},
+    format,
+    () => true,
+    () => context.cancelled ?? false,
+  );
 }
 
 const interpolate = (text, context) =>
@@ -314,8 +323,30 @@ describe('Managed Agent gate required check', () => {
     },
   );
 
-  it('always reports after the tier selection and the suite', () => {
-    expect(gate.jobs.gate.if).toBe('${{ always() }}');
+  it.each([
+    ['pull_request', 'fast', false, true],
+    ['pull_request', 'fast', true, false],
+    ['pull_request', 'full', true, true],
+    ['pull_request_review', 'full', true, true],
+    ['push', 'fast', true, true],
+    ['merge_group', 'fast', true, true],
+    ['pull_request', '', false, true],
+    ['pull_request', '', true, false],
+    ['pull_request', 'none', true, false],
+  ])(
+    '%s %s tier with workflow cancelled=%s reports=%s',
+    (event, tier, cancelled, expected) => {
+      expect(
+        evaluate(gate.jobs.gate.if, {
+          github: github(event),
+          needs: { scope: { outputs: { tier } } },
+          cancelled,
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  it('reports after tier selection and the suite on the same runners', () => {
     expect(gate.jobs.gate.needs).toEqual(['scope', 'suite']);
     // Same trust routing as the scope job, which the runner-routing
     // inventory evaluates: a starved hosted queue must not hold the check.
