@@ -128,9 +128,9 @@ The three cases measured 48 s, 124 s and 110 s locally on JDK 21 +
 MySQL 8.0.46 when selected individually; the whole method measured
 144.8 s in its acceptance run. The method is budgeted at 550 s (2×),
 composed onto
-`main`'s healthy sum: 5985 s → 6535 s, and the Hosted fork from 6585 s to
-7135 s with the method's 600 s ceiling. The Verify step moves from 120 to
-129 minutes, and the job ceiling from 213 to 222 minutes.
+`main`'s healthy sum: 6285 s → 6835 s, and the Hosted fork from 6885 s to
+7435 s with the method's 600 s ceiling. The Verify step moves from 125 to
+134 minutes, and the job ceiling from 218 to 227 minutes.
 
 ## Acceptance
 
