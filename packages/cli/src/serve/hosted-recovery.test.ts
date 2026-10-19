@@ -739,6 +739,45 @@ const prepared: LlmPreparedRequest = {
   promptTokensForClamp: 12,
 };
 
+it('restores a screenshot-sized model request from a cold session owner', async () => {
+  const f = await fixture();
+  const data = Buffer.alloc(5 * 1024 * 1024, 0x61).toString('base64');
+  const content = {
+    role: 'user',
+    parts: [{ inlineData: { mimeType: 'image/png', data } }],
+  };
+  const request = createHostedModelRequest(
+    f.session,
+    f.promptId,
+    {
+      ...prepared,
+      history: [content],
+      request: { ...prepared.request, contents: [content] },
+    },
+    0,
+    false,
+    undefined,
+    { bootId: 'source-boot', eventEpoch: 'source-epoch' },
+  );
+  await new ManagedHookActivationController(f.session).runTurn(
+    f.promptId,
+    async (scope) => {
+      const ref = await publishHostedModelRequest(f.session, request);
+      expect(ref?.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+      await scope.beginMainAttempt('fixture', ref);
+    },
+  );
+  await f.session.close();
+  const replacement = await f.reopen();
+  try {
+    expect(await findHostedModelRequest(replacement, f.promptId)).toEqual(
+      request,
+    );
+  } finally {
+    await replacement.close();
+  }
+});
+
 it.each(
   [false, true].flatMap((finished) =>
     [0, 16].flatMap((round) =>
@@ -820,7 +859,7 @@ it('does not reuse an older snapshot after a newer unsupported attempt', async (
     expect(
       await publishHostedModelRequest(f.session, {
         ...request,
-        workspaceContext: 'x'.repeat(64 * 1024),
+        workspaceContext: 'x'.repeat(32 * 1024 * 1024),
       }),
     ).toBeUndefined();
   } finally {
