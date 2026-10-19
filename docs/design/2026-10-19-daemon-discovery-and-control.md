@@ -83,12 +83,15 @@ qwen daemon stop [--port <port>] [--all] [--force]
   including `401` from `--require-auth`.
 - `status --prune` removes records whose process is gone.
 - `logs` prints the trailing lines and, with `--follow`, polls the recorded
-  file until interrupted. It survives truncation by resetting its offset.
+  file until interrupted. It survives truncation by resetting its offset and
+  drains the old file before following a rotated replacement.
 - `stop` sends `SIGTERM` to the recorded PID only after the listener answers
   or the PID is still alive, and only when the process start time matches the
-  record (POSIX). A PID that started after the record is a reused id and is
-  never signalled. `--force` sends `SIGKILL` after the graceful timeout. A
-  stale record is removed without signalling anything.
+  record (POSIX, or Windows through PowerShell when available). A PID that
+  started after the record is a reused id and is never signalled; a PID whose
+  start time cannot be read is never signalled. `--force` sends `SIGKILL`
+  after the graceful timeout. A stale record is removed without signalling
+  anything.
 - When exactly one daemon is registered, `logs` and `stop` select it
   implicitly. Multiple registrations require `--port` or, for `stop`, `--all`.
 
@@ -106,8 +109,7 @@ qwen daemon stop [--port <port>] [--all] [--force]
 - No bearer token, prompt, transcript, or credential is written to the record.
 - `stop` refuses to signal the current process and never signals a PID whose
   record is already stale. It also refuses a PID whose process started after
-  the record was written, and, on POSIX, refuses when the start time cannot
-  be read.
+  the record was written, and refuses when the start time cannot be read.
 - `--force` is opt-in and only applies after the graceful timeout.
 
 ## Validation

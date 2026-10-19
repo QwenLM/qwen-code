@@ -64,8 +64,8 @@ qwen daemon stop [--port <port>] [--all] [--force]
 
 - `status` 列出所有记录及其健康状态：`running`、`unreachable`、`stale`。`/health` 返回任何 HTTP 响应都证明监听器存活，包括 `--require-auth` 下的 `401`。
 - `status --prune` 清理进程已消失的记录。
-- `logs` 打印末尾若干行；带 `--follow` 时轮询记录中的文件直到中断，遇到截断会重置偏移。
-- `stop` 仅在监听器有响应或 PID 仍存活时发送 `SIGTERM`，且在 POSIX 上进程启动时间必须匹配记录；启动时间晚于记录的 PID 视为复用，绝不发信号。`--force` 在优雅超时后发送 `SIGKILL`。`stale` 记录只删除，不发信号。
+- `logs` 打印末尾若干行；带 `--follow` 时轮询记录中的文件直到中断，遇到截断会重置偏移，轮转时先排空旧文件再跟随新文件。
+- `stop` 仅在监听器有响应或 PID 仍存活时发送 `SIGTERM`，且进程启动时间必须匹配记录（POSIX，或 Windows 上可通过 PowerShell 读取时）；启动时间晚于记录的 PID 视为复用，读不到启动时间的 PID 同样绝不发信号。`--force` 在优雅超时后发送 `SIGKILL`。`stale` 记录只删除，不发信号。
 - 只注册了一个 daemon 时，`logs` 与 `stop` 隐式选中它；多个注册必须用 `--port`，`stop` 也支持 `--all`。
 
 ## 生命周期
@@ -78,7 +78,7 @@ qwen daemon stop [--port <port>] [--all] [--force]
 
 - 文件仅属主可读写（目录 `0700`，记录 `0600`）。
 - 记录中不写入 bearer token、prompt、transcript 或任何凭证。
-- `stop` 拒绝向当前进程发信号；对已判定为 `stale` 的记录不发信号。对启动时间晚于记录的 PID 不发信号；POSIX 上无法读取启动时间时同样拒绝。
+- `stop` 拒绝向当前进程发信号；对已判定为 `stale` 的记录不发信号。对启动时间晚于记录的 PID 不发信号；无法读取启动时间时同样拒绝。
 - `--force` 需显式开启，且只在优雅超时后生效。
 
 ## 验证

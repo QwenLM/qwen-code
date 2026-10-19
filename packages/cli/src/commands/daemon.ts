@@ -60,12 +60,28 @@ function age(iso: string, now = Date.now()): number {
 }
 
 /**
- * The recorded daemon's process start time, from ps's lstart. POSIX only:
- * Windows has no portable equivalent, and callers there fall back to the
- * health probe alone.
+ * The recorded daemon's process start time: ps's lstart on POSIX, and
+ * Get-Process StartTime through PowerShell on Windows. undefined means the
+ * start time cannot be established, and callers refuse rather than signal.
  */
 export function processStartTime(pid: number): number | undefined {
-  if (process.platform === 'win32') return undefined;
+  if (process.platform === 'win32') {
+    const result = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+      ],
+      { encoding: 'utf8' },
+    );
+    if (result.status !== 0 || typeof result.stdout !== 'string') {
+      return undefined;
+    }
+    const parsed = Date.parse(result.stdout.trim());
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
   const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
     encoding: 'utf8',
     env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
@@ -277,43 +293,66 @@ async function printTail(file: string, count: number): Promise<number> {
 
 async function followFile(file: string, startOffset: number): Promise<void> {
   let offset = startOffset;
+  let handle: Awaited<ReturnType<typeof fsp.open>> | undefined;
+  let inode: number | undefined;
+  const openCurrent = async (): Promise<void> => {
+    try {
+      const next = await fsp.open(file, 'r');
+      const stat = await next.stat();
+      handle = next;
+      inode = stat.ino;
+    } catch {
+      handle = undefined;
+      inode = undefined;
+    }
+  };
+  const drain = async (from: number): Promise<number> => {
+    if (!handle) return from;
+    const stat = await handle.stat();
+    if (stat.size <= from) return stat.size;
+    const buffer = Buffer.alloc(stat.size - from);
+    await handle.read(buffer, 0, buffer.length, from);
+    for (const line of buffer.toString('utf8').split(/\r?\n/)) {
+      if (line.length > 0) writeStdoutLine(line);
+    }
+    return stat.size;
+  };
+  await openCurrent();
   writeStderrLine(`qwen daemon: following ${file} (Ctrl+C to stop)`);
-  const timer = setInterval(() => {
-    void (async () => {
+  let stopped = false;
+  const stop = () => {
+    stopped = true;
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  try {
+    while (!stopped) {
       try {
         const stat = await fsp.stat(file);
-        if (stat.size < offset) {
+        if (!handle) {
+          await openCurrent();
           offset = 0;
-        }
-        if (stat.size === offset) return;
-        const handle = await fsp.open(file, 'r');
-        try {
-          const length = stat.size - offset;
-          const buffer = Buffer.alloc(length);
-          await handle.read(buffer, 0, length, offset);
-          offset = stat.size;
-          const text = buffer.toString('utf8');
-          for (const line of text.split(/\r?\n/)) {
-            if (line.length > 0) writeStdoutLine(line);
-          }
-        } finally {
+        } else if (inode !== undefined && stat.ino !== inode) {
+          // Drain the abandoned file before switching to the replacement.
+          offset = await drain(offset);
           await handle.close();
+          handle = undefined;
+          await openCurrent();
+          offset = 0;
+        } else {
+          if (stat.size < offset) offset = 0;
+          offset = await drain(offset);
         }
       } catch {
         // A rotated or removed file is picked up on the next poll.
       }
-    })();
-  }, FOLLOW_POLL_MS);
-  await new Promise<void>((resolve) => {
-    const stop = () => {
-      clearInterval(timer);
-      process.off('SIGINT', stop);
-      process.off('SIGTERM', stop);
-      resolve();
-    };
-    process.on('SIGINT', stop);
-    process.on('SIGTERM', stop);
-  });
+      await new Promise((resolve) => setTimeout(resolve, FOLLOW_POLL_MS));
+    }
+  } finally {
+    if (handle) await handle.close();
+  }
 }
 
 async function handleLogs(argv: LogsArgs): Promise<void> {
@@ -381,32 +420,20 @@ async function handleStop(argv: StopArgs): Promise<void> {
       failed = true;
       continue;
     }
-    if (process.platform === 'win32') {
-      // Windows has no portable process-start identity. Only a listener that
-      // answers may be signalled; an unreachable record may be a reused pid.
-      if (health !== 'running') {
-        writeStderrLine(
-          `qwen daemon: refusing to signal pid ${record.pid}: Windows cannot verify the process identity and the listener is not answering.`,
-        );
-        failed = true;
-        continue;
-      }
-    } else {
-      const processStarted = processStartTime(record.pid);
-      if (processStarted === undefined) {
-        writeStderrLine(
-          `qwen daemon: refusing to signal pid ${record.pid}: its process start time could not be read.`,
-        );
-        failed = true;
-        continue;
-      }
-      if (!processStartMatchesRecord(record.startedAt, processStarted)) {
-        writeStderrLine(
-          `qwen daemon: refusing to signal pid ${record.pid}: it started after the daemon recorded at ${record.startedAt}, so the pid was reused.`,
-        );
-        failed = true;
-        continue;
-      }
+    const processStarted = processStartTime(record.pid);
+    if (processStarted === undefined) {
+      writeStderrLine(
+        `qwen daemon: refusing to signal pid ${record.pid}: its process start time could not be read.`,
+      );
+      failed = true;
+      continue;
+    }
+    if (!processStartMatchesRecord(record.startedAt, processStarted)) {
+      writeStderrLine(
+        `qwen daemon: refusing to signal pid ${record.pid}: it started after the daemon recorded at ${record.startedAt}, so the pid was reused.`,
+      );
+      failed = true;
+      continue;
     }
     try {
       process.kill(record.pid, 'SIGTERM');
