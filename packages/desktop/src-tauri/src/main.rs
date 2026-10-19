@@ -47,6 +47,7 @@ const DISABLE_UPDATES_ENV: &str = "QWEN_DESKTOP_DISABLE_UPDATES";
 // with the persisted value.
 const ZOOM_HOTKEY_SCRIPT: &str = r#"
 (() => {
+  if (window.self !== window.top) return;
   const send = (action) => {
     window.__TAURI__?.core?.invoke('change_zoom', { action })?.catch(() => {});
   };
@@ -798,7 +799,9 @@ fn require_bootstrap_origin(webview: &WebviewWindow) -> Result<(), String> {
 
 fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
     is_bootstrap_url(url)
-        // Web Shell srcdoc previews rely on sandboxing and CSP for isolation.
+        // Untrusted srcdoc previews in packages/web-shell rely on CSP and
+        // sandbox="allow-scripts" without allow-same-origin; keep their origin
+        // isolated from the daemon-served shell.
         || url.as_str() == "about:srcdoc"
         || lock(origin)
             .as_ref()
