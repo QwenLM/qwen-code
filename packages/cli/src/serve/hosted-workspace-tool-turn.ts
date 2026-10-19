@@ -188,7 +188,10 @@ import {
   createHookOutput,
   type HookOutput,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
-import { hostedHookOccurrenceId } from './hosted-hook-session.js';
+import {
+  hostedHookOccurrenceId,
+  semanticInputDigest,
+} from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { waitForTurn } from './hosted-turn-wait.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
@@ -1414,6 +1417,29 @@ function physicalToolStatus(
   return response?.['error'] ? 'error' : 'success';
 }
 
+/**
+ * The replacement a saved PreToolUse output made to its call's input, by the
+ * rules execution applied: an output that refuses the call replaces nothing,
+ * and only an object can replace the input.
+ */
+function preToolUseReplacement(
+  output: HookOutput | undefined,
+  skill: boolean,
+): Record<string, unknown> | undefined {
+  const parsed = output && new PreToolUseHookOutput(output);
+  const permission = parsed?.getPermissionDecision();
+  const input = output?.hookSpecificOutput?.['updatedInput'];
+  return parsed?.shouldStopExecution() ||
+    parsed?.isBlockingDecision() ||
+    permission === 'deny' ||
+    (skill && permission === 'ask') ||
+    !input ||
+    typeof input !== 'object' ||
+    Array.isArray(input)
+    ? undefined
+    : (input as Record<string, unknown>);
+}
+
 export { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 
 export class HostedToolRecoveryRequiredError extends Error {
@@ -2485,42 +2511,43 @@ export class HostedWorkspaceToolTurn {
           entry.payload['batchId'] === assistant?.uuid,
       );
     const preToolOutputs = new Map<string, PreToolUseHookOutput>();
+    // Each call with the input its PreToolUse decision left. `earlier` is
+    // how an earlier release read the same records, taking any saved
+    // replacement even when it was refused; it may only match an after
+    // event that release already saved.
     const effective = await Promise.all(
       calls.map(async (call) => {
-        const marker = this.session.authority.extensionRecord(
-          'hook_execution',
-          hostedHookOccurrenceId(
-            HookEventName.PreToolUse,
-            `${this.promptId}:${call.callId}`,
-          ),
-        );
-        if (!marker) return call;
-        const record = parseHookExecution(marker.record);
-        const original = JSON.parse(
-          (await this.session.resources.read(record.inputRef)).toString(),
-        ) as { tool_input?: Record<string, unknown> };
-        const saved = record.resultRef
-          ? (JSON.parse(
-              (await this.session.resources.read(record.resultRef)).toString(),
-            ) as { output?: HookOutput })
-          : undefined;
-        if (saved?.output)
-          preToolOutputs.set(
-            call.callId,
-            new PreToolUseHookOutput(saved.output),
-          );
+        const pre = await this.recordedHook(HookEventName.PreToolUse, call);
+        if (!pre) return { call, earlier: call };
+        if (pre.output)
+          preToolOutputs.set(call.callId, new PreToolUseHookOutput(pre.output));
+        const input = pre.refusedInputDigest
+          ? await this.preToolUseInput(call, pre.refusedInputDigest)
+          : (pre.input['tool_input'] as Record<string, unknown>);
         return {
-          ...call,
-          args:
-            (saved?.output?.hookSpecificOutput?.['updatedInput'] as
-              | Record<string, unknown>
-              | undefined) ??
-            original.tool_input ??
-            call.args,
+          call: {
+            ...call,
+            args:
+              preToolUseReplacement(
+                pre.output,
+                call.name === 'skill' && this.skills !== undefined,
+              ) ?? input,
+          },
+          earlier: {
+            ...call,
+            args:
+              (pre.output?.hookSpecificOutput?.['updatedInput'] as
+                | Record<string, unknown>
+                | undefined) ??
+              (pre.input['tool_input'] as
+                | Record<string, unknown>
+                | undefined) ??
+              call.args,
+          },
         };
       }),
     );
-    for (const [ordinal, call] of effective.entries()) {
+    for (const [ordinal, { call, earlier }] of effective.entries()) {
       const response = responses.find(
         (part) => part.functionResponse?.id === call.callId,
       )?.functionResponse?.response;
@@ -2574,28 +2601,30 @@ export class HostedWorkspaceToolTurn {
       if (!dispatched) continue;
       if (response?.['executionStatus'] === 'not_started') continue;
       const failed = physicalToolStatus(response) !== 'success';
+      const fields = (args: Record<string, unknown>) => ({
+        tool_name: call.name,
+        tool_input: args,
+        tool_use_id: call.callId,
+        ...(failed
+          ? {
+              error: String(
+                response?.['error'] ??
+                  response?.['executionStatus'] ??
+                  'Tool failed',
+              ),
+              is_interrupt: response?.['executionStatus'] === 'cancelled',
+            }
+          : { tool_response: response }),
+        permission_mode: this.approval?.settings.mode ?? 'yolo',
+        prompt_id: this.promptId,
+      });
       const result = await this.hooks.fire(
         failed ? HookEventName.PostToolUseFailure : HookEventName.PostToolUse,
         `${this.promptId}:${call.callId}`,
-        {
-          tool_name: call.name,
-          tool_input: call.args,
-          tool_use_id: call.callId,
-          ...(failed
-            ? {
-                error: String(
-                  response?.['error'] ??
-                    response?.['executionStatus'] ??
-                    'Tool failed',
-                ),
-                is_interrupt: response?.['executionStatus'] === 'cancelled',
-              }
-            : { tool_response: response }),
-          permission_mode: this.approval?.settings.mode ?? 'yolo',
-          prompt_id: this.promptId,
-        },
+        fields(call.args),
         signal,
         this.promptHookRunner,
+        fields(earlier.args),
       );
       const output =
         result &&
@@ -2609,27 +2638,29 @@ export class HostedWorkspaceToolTurn {
       const context = output?.getAdditionalContext();
       if (context) contextParts.push({ text: context });
     }
+    const batchFields = (inputs: readonly ToolCallRequestInfo[]) => ({
+      tool_calls: inputs.map((call) => {
+        const response = responses.find(
+          (part) => part.functionResponse?.id === call.callId,
+        )?.functionResponse?.response;
+        return {
+          tool_name: call.name,
+          tool_input: call.args,
+          tool_use_id: call.callId,
+          status: physicalToolStatus(response),
+          tool_response: response,
+        };
+      }),
+      permission_mode: this.approval?.settings.mode ?? 'yolo',
+      prompt_id: this.promptId,
+    });
     const batch = await this.hooks.fire(
       HookEventName.PostToolBatch,
       `${this.promptId}:${calls.map((call) => call.callId).join(':')}`,
-      {
-        tool_calls: effective.map((call) => {
-          const response = responses.find(
-            (part) => part.functionResponse?.id === call.callId,
-          )?.functionResponse?.response;
-          return {
-            tool_name: call.name,
-            tool_input: call.args,
-            tool_use_id: call.callId,
-            status: physicalToolStatus(response),
-            tool_response: response,
-          };
-        }),
-        permission_mode: this.approval?.settings.mode ?? 'yolo',
-        prompt_id: this.promptId,
-      },
+      batchFields(effective.map(({ call }) => call)),
       signal,
       this.promptHookRunner,
+      batchFields(effective.map(({ earlier }) => earlier)),
     );
     const output =
       batch && createHookOutput(HookEventName.PostToolBatch, batch);
@@ -2652,6 +2683,79 @@ export class HostedWorkspaceToolTurn {
         });
     }
     return [...responses, ...contextParts];
+  }
+
+  private preToolUseFields(call: ToolCallRequestInfo): Record<string, unknown> {
+    return {
+      tool_name: call.name,
+      tool_input: call.args,
+      tool_use_id: call.callId,
+      permission_mode: this.approval?.settings.mode ?? 'yolo',
+      prompt_id: this.promptId,
+    };
+  }
+
+  /**
+   * A call's saved occurrence of a tool Hook event: the input it was planned
+   * for (an oversized plan keeps only the digest of the input it refused)
+   * and, once it has a result, its output. Reading runs and settles nothing.
+   */
+  private async recordedHook(
+    event: HookEventName,
+    call: ToolCallRequestInfo,
+  ): Promise<
+    | {
+        input: Record<string, unknown>;
+        refusedInputDigest?: string;
+        output?: HookOutput;
+      }
+    | undefined
+  > {
+    const marker = this.session.authority.extensionRecord(
+      'hook_execution',
+      hostedHookOccurrenceId(event, `${this.promptId}:${call.callId}`),
+    );
+    if (!marker) return undefined;
+    const record = parseHookExecution(marker.record);
+    const plan = JSON.parse(
+      (await this.session.resources.read(record.planRef)).toString(),
+    ) as { input: Record<string, unknown>; refusedInputDigest?: string };
+    const saved = record.resultRef
+      ? (JSON.parse(
+          (await this.session.resources.read(record.resultRef)).toString(),
+        ) as { output?: HookOutput })
+      : undefined;
+    return {
+      input: plan.input,
+      refusedInputDigest: plan.refusedInputDigest,
+      output: saved?.output,
+    };
+  }
+
+  /**
+   * The input an oversized PreToolUse plan kept only as a digest. PreToolUse
+   * ran on the input the PermissionRequest Hook left, so that record (or the
+   * model's input where none ran) must reproduce the digest.
+   */
+  private async preToolUseInput(
+    call: ToolCallRequestInfo,
+    digest: string,
+  ): Promise<Record<string, unknown>> {
+    const permission = await this.recordedHook(
+      HookEventName.PermissionRequest,
+      call,
+    );
+    const decision = permission?.output?.hookSpecificOutput?.['decision'] as
+      | { updatedInput?: Record<string, unknown> }
+      | undefined;
+    const args = decision?.updatedInput || call.args;
+    if (
+      semanticInputDigest(this.preToolUseFields({ ...call, args })) !== digest
+    )
+      throw new HostedToolRecoveryRequiredError(
+        'PreToolUse record does not match its tool call.',
+      );
+    return args;
   }
 
   async resumeHookResults(
@@ -3890,13 +3994,7 @@ export class HostedWorkspaceToolTurn {
           const output = await this.hooks.fire(
             HookEventName.PreToolUse,
             `${this.promptId}:${request.call.callId}`,
-            {
-              tool_name: request.call.name,
-              tool_input: request.call.args,
-              tool_use_id: request.call.callId,
-              permission_mode: this.approval?.settings.mode ?? 'yolo',
-              prompt_id: this.promptId,
-            },
+            this.preToolUseFields(request.call),
             signal,
             this.promptHookRunner,
           );
