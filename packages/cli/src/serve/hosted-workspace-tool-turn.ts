@@ -71,6 +71,8 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionWritesStoppedError,
   type ManagedSessionDomain,
   type ManagedSessionDurableRef,
@@ -311,17 +313,19 @@ function shellHistoryId(executionCallId: string): string {
 }
 
 // H4d-b: a refusal the store makes at commit (a closing Session, a rule the
-// authority holds) is a send_message call's answer, never a failed turn. A
-// conflict and the store's own transient faults fail the call like any
-// other store fault: a refusal answer would tell the model a message that
-// may yet commit was never sent.
+// authority holds) is a send_message or member-command call's answer, never
+// a failed turn. A conflict and the store's own transient faults fail the
+// call like any other store fault: a refusal answer would tell the model a
+// command that may yet commit was never sent.
 function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
   return (
     cause instanceof ManagedSessionRecordError &&
     !(cause instanceof ManagedSessionConflictError) &&
     !(cause instanceof ManagedSessionStoreHttpError) &&
     !(cause instanceof ManagedSessionStoreTransportError) &&
-    !(cause instanceof ManagedSessionWritesStoppedError)
+    !(cause instanceof ManagedSessionWritesStoppedError) &&
+    !(cause instanceof ManagedSessionAppendUnsettledError) &&
+    !(cause instanceof ManagedSessionJournalFencedError)
   );
 }
 
@@ -6312,7 +6316,7 @@ export class HostedWorkspaceToolTurn {
     } catch (cause) {
       // byte_limit and budget_exhausted are the funnel's member-facing
       // refusals; a store fault is recovery's, never the call's answer.
-      if (cause instanceof ManagedSessionRecordError) {
+      if (isMessageRefusal(cause)) {
         const parts = await answer(cause.message, true);
         // A normal local refusal still owes the parked wait its fold —
         // a durable wait it leaves behind turns the Turn's next call
