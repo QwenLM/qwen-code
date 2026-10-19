@@ -187,25 +187,9 @@ class HostedMcpStoreFaultGatesIT {
         baseline(session);
         String configuration = uuid();
         storeFault().arm(StoreFaultGate.Phase.INTENT, configuration);
-        // Under CI load the first configure can answer a retryable refusal
-        // before the intent commit; re-drive the same idempotent revision
-        // until the armed phase fires, as the sibling released gate does.
-        long deadline = System.nanoTime() + Duration.ofSeconds(90).toNanos();
-        List<Integer> answers = new ArrayList<>();
-        HttpResponse<String> refused = null;
-        while (storeFault().attempts() == 0
-                && System.nanoTime() < deadline) {
-            refused = configure(session, configuration, 2);
-            answers.add(refused.statusCode());
-            if (storeFault().attempts() == 0) {
-                Thread.sleep(1_000);
-            }
-        }
-        assertThat(refused).isNotNull();
+        HttpResponse<String> refused = configure(session, configuration, 2);
         assertThat(refused.statusCode()).isIn(202, 409, 503);
-        assertThat(storeFault().attempts())
-                .as("the store wrapper fired; configure answers: %s", answers)
-                .isPositive();
+        waitForRejection();
         // A rejected intent never reaches the owner or the wire; the retry
         // chain the store client runs dies at the same phase.
         Thread.sleep(1_000);
@@ -1279,13 +1263,33 @@ class HostedMcpStoreFaultGatesIT {
             assertThat(harness.isAlive())
                     .as("Harness log: %s", temporary.resolve("harness.log"))
                     .isTrue();
-            JsonNode capabilities = json.readTree(http.send(
-                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
-                            + harnessPort + "/capabilities"))
-                            .timeout(Duration.ofSeconds(2))
-                            .header("Authorization", "Bearer " + TOKEN)
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString()).body());
+            HttpResponse<String> answer;
+            try {
+                answer = http.send(
+                        HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                                + harnessPort + "/capabilities"))
+                                .timeout(Duration.ofSeconds(2))
+                                .header("Authorization", "Bearer " + TOKEN)
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+            } catch (IOException notReady) {
+                // AssertionError is what the boot wait retries.
+                throw new AssertionError("capabilities: " + notReady,
+                        notReady);
+            }
+            assertThat(answer.statusCode())
+                    .as("capabilities: %s", answer.body())
+                    .isEqualTo(200);
+            JsonNode capabilities;
+            try {
+                capabilities = json.readTree(answer.body());
+            } catch (IOException notJsonYet) {
+                throw new AssertionError("capabilities: " + answer.body(),
+                        notJsonYet);
+            }
+            assertThat(capabilities)
+                    .as("capabilities: %s", answer.body())
+                    .isNotNull();
             bootId = capabilities.at("/hostedHarness/bootId").asText();
             assertThat(bootId).isNotBlank();
         });
