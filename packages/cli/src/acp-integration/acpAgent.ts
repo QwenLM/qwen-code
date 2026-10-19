@@ -250,6 +250,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
 import {
+  getOperatorTrustSettings,
   loadSettings,
   reloadEnvironment,
   SettingScope,
@@ -387,6 +388,7 @@ import {
   SUPPORTED_LANGUAGES,
 } from '../i18n/index.js';
 import {
+  createLocalWorkflowAncestorTrustProvider,
   isWorkspaceTrusted,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
@@ -4467,7 +4469,14 @@ class QwenAgent implements Agent {
           undefined,
           undefined,
           undefined,
-          undefined,
+          this.expectedPrivateParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
+              }
+            : undefined,
           buildEnabledSkillNamesProvider(settings),
         ),
       );
@@ -7513,6 +7522,7 @@ class QwenAgent implements Agent {
     after: PermissionRuleSet,
     settingScope: SettingScope,
     settingsCwd: string,
+    strict = false,
   ): void {
     for (const ruleType of PERMISSION_RULE_TYPES) {
       const oldRules = new Set(before[ruleType]);
@@ -7557,6 +7567,7 @@ class QwenAgent implements Agent {
               error instanceof Error ? error.message : String(error)
             }`,
           );
+          if (strict) throw error;
         }
       }
     }
@@ -9131,7 +9142,15 @@ class QwenAgent implements Agent {
       await session.buildAvailableCommandsSnapshot();
     const workflowsEnabled = this.canUseWorkflowControls(config);
     const savedWorkflows = workflowsEnabled
-      ? (await listSavedWorkflows(config)).map(({ name, source }) => ({
+      ? (
+          await listSavedWorkflows(config).catch((error: unknown) => {
+            debugLogger.warn(
+              'Saved workflow discovery failed while listing session commands:',
+              error,
+            );
+            return [];
+          })
+        ).map(({ name, source }) => ({
           name,
           source,
         }))
@@ -9226,16 +9245,14 @@ class QwenAgent implements Agent {
       workflow,
     });
     if (!this.canUseWorkflowControls(config)) return envelope(null);
-    const entry = (await listSavedWorkflows(config)).find(
-      (candidate) => candidate.name === name,
-    );
-    if (!entry) return envelope(null);
-    let script: string;
+    let resolved: Awaited<ReturnType<typeof resolveSavedWorkflowScript>>;
     try {
-      script = (await resolveSavedWorkflowScript(name, config)).script;
+      resolved = await resolveSavedWorkflowScript(name, config);
     } catch {
       return envelope(null);
     }
+    if (!resolved.source) return envelope(null);
+    const { script } = resolved;
     let meta: ServeSessionSavedWorkflowDetail['meta'] = null;
     let metaError: string | undefined;
     try {
@@ -9246,9 +9263,9 @@ class QwenAgent implements Agent {
     return envelope({
       v: STATUS_SCHEMA_VERSION,
       sessionId,
-      name: entry.name,
-      source: entry.source,
-      scriptPath: entry.scriptPath,
+      name: resolved.name,
+      source: resolved.source,
+      scriptPath: resolved.scriptPath,
       script,
       meta,
       ...(metaError !== undefined ? { metaError } : {}),
@@ -10668,9 +10685,10 @@ class QwenAgent implements Agent {
           }
           switch (kind) {
             case 'permissions': {
-              // A settings reload alone does not touch the live permission
-              // managers, so diff the rule sets the control engine persisted
-              // and sync them the way the permission-rule route does.
+              // The live manager holds the scopes' rules merged, without
+              // provenance, so diff the effective set: a rule another scope
+              // still provides must never be removed. The workspace filter
+              // stays on the apply.
               const before = readPermissionRuleSet(this.settings.merged);
               if (
                 !this.settings.reloadScopesFromDiskAtomically([
@@ -10682,18 +10700,16 @@ class QwenAgent implements Agent {
                   'The permission rules could not be reloaded for a workspace change.',
                 );
               }
-              const after = readPermissionRuleSet(this.settings.merged);
+              const scope =
+                params['scope'] === 'user'
+                  ? SettingScope.User
+                  : SettingScope.Workspace;
               this.syncLivePermissionManagers(
                 before,
-                after,
-                SettingScope.User,
+                readPermissionRuleSet(this.settings.merged),
+                scope,
                 changeCwd,
-              );
-              this.syncLivePermissionManagers(
-                before,
-                after,
-                SettingScope.Workspace,
-                changeCwd,
+                true,
               );
               break;
             }
@@ -13524,9 +13540,15 @@ class QwenAgent implements Agent {
           const attempt = await tryWithWorkflowTaskMutation(
             mutationClaim,
             async () => {
-              const savedWorkflow = (await listSavedWorkflows(config)).find(
-                (entry) => entry.name === taskId,
-              );
+              const savedWorkflow = (
+                await listSavedWorkflows(config).catch((error: unknown) => {
+                  debugLogger.warn(
+                    'Saved workflow discovery failed while starting a saved workflow:',
+                    error,
+                  );
+                  return [];
+                })
+              ).find((entry) => entry.name === taskId);
               if (!savedWorkflow) return { changed: false };
               const workflowTool = config
                 .getToolRegistry()
@@ -15623,6 +15645,12 @@ class QwenAgent implements Agent {
       ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
+    const workflowAncestorTrustProvider =
+      this.expectedPrivateParentCapability === undefined
+        ? createLocalWorkflowAncestorTrustProvider(
+            getOperatorTrustSettings(settings),
+          )
+        : undefined;
     const config = await loadCliConfig(
       mergedSettings,
       argvForSession,
@@ -15656,8 +15684,12 @@ class QwenAgent implements Agent {
         restoreOptions ||
         provisionalWorkspace ||
         agentHostReadOnly ||
-        executionEngine
+        executionEngine ||
+        workflowAncestorTrustProvider
         ? {
+            ...(workflowAncestorTrustProvider
+              ? { workflowAncestorTrustProvider }
+              : {}),
             ...(provisionalWorkspace
               ? { provisionalWorkspace: true as const }
               : {}),

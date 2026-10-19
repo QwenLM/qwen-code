@@ -23,6 +23,7 @@ public final class ManagedSchema {
     public static final String MODEL_SELECTION = "/db/managed-schema/V5__session_model_selection.sql";
     public static final String APPROVAL_SELECTION = "/db/managed-schema/V6__session_approval_selection.sql";
     public static final String RUNTIME_SESSION_HARNESS = "/db/managed-schema/V9__runtime_session_harness.sql";
+    public static final String PLAN_MODE = "/db/managed-schema/V10__session_plan_mode.sql";
     // Additive migrations over the published V1 baseline, in version order.
     public static final String SSH_WORKSPACE =
             "/db/managed-schema/V7__ssh_workspace_registration.sql";
@@ -32,7 +33,7 @@ public final class ManagedSchema {
             new Migration(3, SESSION_LIST), new Migration(4, WORKSPACE_CREATION),
             new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
             new Migration(7, SSH_WORKSPACE), new Migration(8, TURN_COMMAND_OPERATIONS),
-            new Migration(9, RUNTIME_SESSION_HARNESS));
+            new Migration(9, RUNTIME_SESSION_HARNESS), new Migration(10, PLAN_MODE));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {
