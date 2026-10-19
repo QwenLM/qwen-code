@@ -348,6 +348,80 @@ try {
         wakeReason: 'input',
       },
     );
+    if (input.hostedProducer) {
+      const { runHostedFileTurn } = await import('./csi-hosted-file-turns.mjs');
+      const actual = await runHostedFileTurn({
+        root,
+        output,
+        session,
+        promptId,
+        prompt,
+        index,
+        mutation,
+        files: {
+          broker: { baseUrl: input.broker, token: input.operatorToken },
+          runtime: input.runtime,
+        },
+      });
+      invocations.push(...actual);
+      observation = await control('snapshot');
+      assert.deepEqual(session.activation, initialActivation);
+      if (index === 0) firstPins = structuredClone(observation.retainedBackups);
+      else
+        for (const pin of firstPins)
+          assert.deepEqual(
+            observation.retainedBackups.find(
+              (current) => current.name === pin.name,
+            ),
+            pin,
+          );
+      const issued = await fixture('/fixture:inspect');
+      const grant = issued.executions
+        .filter((row) => row.native_authorization_json)
+        .map((row) => JSON.parse(row.native_authorization_json))
+        .at(-1);
+      assert.ok(grant, 'Hosted execution must mint a native SQL grant');
+      const request = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        action: 'execute',
+        subject: grant.executionCallId,
+        identity: grant.identity,
+        context: grant.context,
+        installedContext: grant.installedContext,
+      };
+      const workerHeaders = {
+        ...headers,
+        authorization: `Bearer ${boot.context.token}`,
+        'x-qwen-managed-lease-id': boot.context.leaseId,
+        'x-qwen-managed-lease-epoch': String(boot.context.epoch),
+      };
+      const workingBefore = await fs.readFile(
+        path.join(workspace, 'marker.txt'),
+      );
+      for (const [name, override, code] of [
+        ['Hosted wrong token', { authorization: 'Bearer foreign' }, 401],
+        ['Hosted wrong lease', { 'x-qwen-managed-lease-epoch': '99' }, 409],
+      ]) {
+        await post(
+          worker.ready.context.url,
+          '/internal/managed-runtime/csi/v2/execute',
+          request,
+          { ...workerHeaders, ...override },
+          code,
+          name,
+        );
+        assert.deepEqual(
+          await fs.readFile(path.join(workspace, 'marker.txt')),
+          workingBefore,
+          name,
+        );
+        assert.deepEqual(await fixture('/fixture:inspect'), issued, name);
+        checks.push(name);
+      }
+      completedTurns++;
+      continue;
+    }
     const harness = createManagedHarnessHandle(session);
     await new ManagedHookActivationController(session).runTurn(
       promptId,
@@ -864,6 +938,7 @@ try {
     JSON.stringify(
       {
         completedTurns,
+        hostedProducer: input.hostedProducer === true,
         nativeSqlGrant: true,
         workerClosed: true,
         finalBytes,

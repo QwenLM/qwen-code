@@ -261,6 +261,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '一个 PR 要达到多少轮评审之后，评审才可以追加一段提示性文字，说明看起来成问题的是改动的方向而不是当前补丁本身。它只在 diff 自评审首次测量以来也膨胀了数倍时出现，且从不出现在 Approve 上。它仅是披露：不新增发现、不改变结论、不阻塞任何事——它存在的原因是每条发现都锚定在当前 diff 的某一行上，所以评审能报告某个方向在哪里漏，却永远说不出换个方向能一次性消除所有这些漏洞。保持 0 表示用内置的 5 轮阈值；调大让这段文字更晚出现；设得非常大则彻底关闭。非正整数的值会被忽略。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略，仓库无法为其评审者设定评审策略。',
   'settings.label.ui.theme': '主题',
   'settings.description.ui.theme': '界面的颜色主题。',
+  'settings.label.ui.allowedApprovalModes': 'Web Shell 审批模式',
+  'settings.description.ui.allowedApprovalModes':
+    'Web Shell 提供的执行审批模式。未配置时显示 default、auto-edit、auto 和 yolo；空列表不提供任何选项。宿主 allowedApprovalModes 优先于此设置。仅控制展示，不改变当前模式或强制约束后端权限。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略并产生警告。请直接编辑 settings.json。',
   'settings.label.ui.hideTips': '隐藏提示',
   'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
   'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',
