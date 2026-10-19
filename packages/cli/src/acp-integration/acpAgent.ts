@@ -15792,7 +15792,9 @@ class QwenAgent implements Agent {
     );
     workflowAncestorTrustSession.config = config;
     // /clear rotates the recording ID while the ACP transport keeps its ID.
-    workflowAncestorTrustSession.sessionId = config.getSessionId();
+    workflowAncestorTrustSession.sessionId = normalizeSessionIdForLookup(
+      config.getSessionId(),
+    );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }

@@ -29360,11 +29360,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       privateParentCapability ? { privateParentCapability } : undefined,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
+    const connection = {
+      extMethod: vi.fn(),
       get closed() {
         return mockConnectionState.promise;
       },
-    });
+    };
+    const agent = capturedAgentFactory!(connection);
     if (privateParentCapability) {
       await agent.initialize({
         clientCapabilities: {},
@@ -29373,7 +29375,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         },
       });
     }
-    return { agent, agentPromise };
+    return { agent, agentPromise, extMethod: connection.extMethod };
   }
 
   it.each([
@@ -30265,7 +30267,15 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         persistedSpelling: storageSessionId,
       });
       innerConfig.getSessionId.mockReturnValue(storageSessionId);
-      const { agent, agentPromise } = await spawnAgent();
+      const { agent, agentPromise, extMethod } = await spawnAgent(
+        'expected-capability',
+      );
+      extMethod.mockImplementation(
+        async (_method: string, params: Record<string, unknown>) => ({
+          v: 1,
+          trusted: [params['sessionId'] === sessionId],
+        }),
+      );
 
       try {
         const params = { cwd: '/tmp', sessionId, mcpServers: [] };
@@ -30279,6 +30289,28 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           | CliArgs
           | undefined;
         expect(argv?.resume).toBe(storageSessionId);
+
+        expect(vi.mocked(Session).mock.calls.at(-1)?.[0]).toBe(sessionId);
+        const target = await fs.realpath('/tmp');
+        const provider = vi
+          .mocked(loadCliConfig)
+          .mock.calls.at(-1)?.[9]?.workflowAncestorTrustProvider;
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        innerConfig.getSessionId.mockReturnValue('new-recording-session');
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        expect(extMethod).toHaveBeenLastCalledWith(
+          'qwen/control/workflow/ancestor-trust',
+          {
+            v: 1,
+            sessionId,
+            canonicalTargetDir: target,
+            ancestorDirs: [path.dirname(target)],
+          },
+        );
 
         // The in-memory session map key is normalized, so caller-case
         // follow-up operations still reach the adopted session.
