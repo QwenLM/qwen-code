@@ -464,12 +464,19 @@
                                  three cold boots) measures 121.1 s
                                  locally on the merged base (~242 s
                                  budgeted): the healthy sum becomes
-                                 5985 s; the FG11c Harness-crash method
-                                 (three cases, 144.8 s measured, 550 s
-                                 budgeted) moves it to 6535 s, so the fork
-                                 moves to 7135 s and the Verify step to 129
-                                 minutes. -->
-                            <forkedProcessTimeoutInSeconds>7135</forkedProcessTimeoutInSeconds>
+                                 5985 s, so the fork moves to 6585 s
+                                 and the Verify step to 120 minutes.
+                                 The FG13a execute lost-reply cell
+                                 (issue #14449) adds 150 s: the healthy
+                                 sum becomes 6135 s, so the fork moves
+                                 to 6735 s. The FG13a status lost-reply
+                                 cell (issue #14449) adds 150 s: the
+                                 healthy sum becomes 6285 s; the FG11c
+                                 Harness-crash method (three cases, 144.8 s
+                                 measured, 550 s budgeted) moves it to
+                                 6835 s, so the fork moves to 7435 s and
+                                 the Verify step to 134 minutes. -->
+                            <forkedProcessTimeoutInSeconds>7435</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
