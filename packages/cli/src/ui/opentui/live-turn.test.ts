@@ -18,7 +18,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import type { LivePromptOptions } from './live-session.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   foldBatch,
@@ -123,7 +122,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     live.script.clear();
   });
 
-  it('reads compaction and scheduler activity live and clears it after reset and completion', async () => {
+  it('reads compaction live while session commands wait for idle turns', () => {
     let compacting = false;
     const config = {
       getLlmClient: () => ({
@@ -137,34 +136,6 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     compacting = true;
     expect(readReason()).toContain('context compaction');
     compacting = false;
-    act(() => result.current.submit('hello'));
-    expect(readReason()).toContain('no response content arriving');
-    const options = live.turns[0].options as LivePromptOptions;
-    for (const status of [
-      'awaiting_approval',
-      'scheduled',
-      'validating',
-      'executing',
-    ] as const) {
-      options.onToolCallsUpdate?.([{ request: { name: 'shell' }, status }]);
-      expect(readReason()).toContain(
-        `tool "shell" is ${status === 'awaiting_approval' ? 'awaiting approval' : status}`,
-      );
-    }
-    options.onToolCallsUpdate?.([
-      { request: { name: 'shell' }, status: 'success' },
-    ]);
-    expect(readReason()).toContain('has not been submitted');
-    options.onToolCallsUpdate?.([]);
-    expect(readReason()).toContain('no response content arriving');
-    await act(async () => {
-      for (const wake of live.waiters.splice(0)) wake();
-    });
-    expect(readReason()).toBeNull();
-    act(() => result.current.resetTranscript([]));
-    options.onToolCallsUpdate?.([
-      { request: { name: 'stale' }, status: 'executing' },
-    ]);
     expect(readReason()).toBeNull();
   });
 

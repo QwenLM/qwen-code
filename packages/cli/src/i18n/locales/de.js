@@ -10,31 +10,31 @@
 export default {
   'Cannot branch: {{reason}}': 'Verzweigung nicht möglich: {{reason}}',
   'Cannot fork: {{reason}}':
-    'Hintergrundagent kann nicht gestartet werden: {{reason}}',
+    'Hintergrund-Fork kann nicht erstellt werden: {{reason}}',
   'Cannot change directory: {{reason}}':
     'Verzeichniswechsel nicht möglich: {{reason}}',
   'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
-    'das Werkzeug „{{tool}}“ wartet auf Genehmigung. Bearbeite die ausstehende Genehmigung.',
+    'Das Werkzeug „{{tool}}“ wartet auf Genehmigung. Bearbeiten Sie die ausstehende Genehmigung.',
   'a subagent is awaiting approval. Resolve the pending approval.':
-    'ein Unteragent wartet auf Genehmigung. Bearbeite die ausstehende Genehmigung.',
+    'Ein Unteragent wartet auf Genehmigung. Bearbeiten Sie die ausstehende Genehmigung.',
   'tool "{{tool}}" is executing. Wait for it to finish.':
-    'das Werkzeug „{{tool}}“ wird ausgeführt. Warte, bis es fertig ist.',
+    'Das Werkzeug „{{tool}}“ wird ausgeführt. Warten Sie, bis es fertig ist.',
   'tool "{{tool}}" is scheduled. Wait for it to finish.':
-    'das Werkzeug „{{tool}}“ ist eingeplant. Warte, bis es fertig ist.',
+    'Das Werkzeug „{{tool}}“ ist eingeplant. Warten Sie, bis es fertig ist.',
   'tool "{{tool}}" is validating. Wait for it to finish.':
-    'das Werkzeug „{{tool}}“ wird validiert. Warte, bis es fertig ist.',
+    'Das Werkzeug „{{tool}}“ wird validiert. Warten Sie, bis es fertig ist.',
   'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
-    'das Ergebnis des Werkzeugs „{{tool}}“ wurde noch nicht an das Modell gesendet. Warte auf die Übermittlung oder drücke Esc, um den Durchgang abzubrechen.',
+    'Das Ergebnis des Werkzeugs „{{tool}}“ wurde noch nicht an das Modell gesendet. Warten Sie auf die Übermittlung oder drücken Sie Esc, um den Turn abzubrechen.',
   'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
-    'das Modell überträgt eine Antwort. Warte auf den Abschluss oder drücke Esc zum Abbrechen.',
+    'Das Modell überträgt eine Antwort. Warten Sie auf den Abschluss oder drücken Sie Esc zum Abbrechen.',
   'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
-    'eine Modellanfrage läuft, aber es treffen noch keine Antwortinhalte ein. Warte auf den Abschluss oder drücke Esc zum Abbrechen.',
+    'Eine Modellanfrage läuft, aber es treffen noch keine Antwortinhalte ein. Warten Sie auf den Abschluss oder drücken Sie Esc zum Abbrechen.',
   'context compaction is in progress. Wait for it to finish.':
-    'der Kontext wird komprimiert. Warte auf den Abschluss.',
+    'Der Kontext wird komprimiert. Warten Sie auf den Abschluss.',
   'a slash command is still running. Wait for it to finish.':
-    'ein Slash-Befehl wird noch ausgeführt. Warte auf den Abschluss.',
+    'Ein Slash-Befehl wird noch ausgeführt. Warten Sie auf den Abschluss.',
   'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'eine Antwort oder ein Werkzeugaufruf läuft. Warte auf den Abschluss oder bearbeite den ausstehenden Werkzeugaufruf.',
+    'Eine Antwort oder ein Werkzeugaufruf läuft. Warten Sie auf den Abschluss oder bearbeiten Sie den ausstehenden Werkzeugaufruf.',
   // ============================================================================
   // Help / UI Components
   // ============================================================================

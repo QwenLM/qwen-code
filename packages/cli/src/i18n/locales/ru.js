@@ -9,7 +9,7 @@
 
 export default {
   'Cannot branch: {{reason}}': 'Невозможно создать ветку: {{reason}}',
-  'Cannot fork: {{reason}}': 'Невозможно запустить фонового агента: {{reason}}',
+  'Cannot fork: {{reason}}': 'Невозможно создать fork: {{reason}}',
   'Cannot change directory: {{reason}}':
     'Невозможно сменить каталог: {{reason}}',
   'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':

@@ -117,6 +117,14 @@ describe('must-translate locale coverage', () => {
       const untranslated = MUST_TRANSLATE_KEYS.filter((key) => t(key) === key);
 
       expect(untranslated).toEqual([]);
+      const placeholders = (text: string) =>
+        [...text.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]).sort();
+      const mismatched = MUST_TRANSLATE_KEYS.filter(
+        (key) =>
+          JSON.stringify(placeholders(t(key))) !==
+          JSON.stringify(placeholders(key)),
+      );
+      expect(mismatched).toEqual([]);
     },
     SLOW_LOCALE_TEST_TIMEOUT_MS,
   );

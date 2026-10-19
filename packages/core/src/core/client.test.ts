@@ -47,6 +47,7 @@ import { BaseLlmClient } from './baseLlmClient.js';
 import { MemoryManager } from '../memory/manager.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
+import { ChatCompressionService } from '../services/chatCompressionService.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -5194,6 +5195,30 @@ describe('Gemini Client (client.ts)', () => {
       // The top-level beforeEach stubs tryCompressChat to NOOP for unrelated
       // tests; restore the real implementation here so we can observe it.
       vi.mocked(client.tryCompressChat).mockRestore();
+    });
+
+    it('exposes compression activity on the current chat until replacement', async () => {
+      const originalChat = client.getChat();
+      let finish!: (
+        value: Awaited<ReturnType<ChatCompressionService['compress']>>,
+      ) => void;
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      expect(originalChat.isCompressing()).toBe(false);
+      const pending = client.tryCompressChat('busy-diagnostics', true);
+      expect(client.getChat()).toBe(originalChat);
+      expect(client.getChat().isCompressing()).toBe(true);
+      finish({
+        newHistory: [userText('summary'), modelText('ok')],
+        info: compressionInfo(CompressionStatus.COMPRESSED, 1000, 200),
+      });
+      await pending;
+      expect(originalChat.isCompressing()).toBe(false);
+      expect(client.getChat()).not.toBe(originalChat);
+      expect(client.getChat().isCompressing()).toBe(false);
     });
     /** A chat whose tryCompress NOOPs; returns the tryCompress spy. */
     const noopCompressChat = () => {

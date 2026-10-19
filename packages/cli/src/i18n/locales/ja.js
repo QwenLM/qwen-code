@@ -7,9 +7,8 @@
 // Japanese translations for Qwen Code CLI
 
 export default {
-  'Cannot branch: {{reason}}': 'ブランチを作成できません：{{reason}}',
-  'Cannot fork: {{reason}}':
-    'バックグラウンドエージェントを起動できません：{{reason}}',
+  'Cannot branch: {{reason}}': '分岐できません：{{reason}}',
+  'Cannot fork: {{reason}}': 'フォークできません：{{reason}}',
   'Cannot change directory: {{reason}}':
     'ディレクトリを変更できません：{{reason}}',
   'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':

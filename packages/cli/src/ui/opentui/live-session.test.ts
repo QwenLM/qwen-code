@@ -206,7 +206,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             this.opts.outputUpdateHandler?.(c.callId, chunk);
           }
         }
-        await this.opts.onToolCallsUpdate?.([]);
         await this.opts.onAllToolCallsComplete(
           calls.map((c) => {
             const a = (c.args ?? {}) as {
@@ -240,7 +239,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             };
           }),
         );
-        await this.opts.onToolCallsUpdate?.([]);
       }
     },
   };
@@ -1907,36 +1905,8 @@ describe('livePromptEvents', () => {
     });
     const config = createFakeConfig(sendMessageStream);
     const onWaitingCall = vi.fn();
-    let latestCalls: ReadonlyArray<{ status: string }> = [];
-    const onToolCallsUpdate = vi.fn(
-      (calls: ReadonlyArray<{ status: string }>) => {
-        latestCalls = calls;
-      },
-    );
-    let resultEvents = 0;
-    for await (const event of livePromptEvents(config, 'q', undefined, {
-      onWaitingCall,
-      onToolCallsUpdate,
-    })) {
-      if (event.type === 'tool-end') {
-        resultEvents++;
-        expect(latestCalls).toEqual([
-          expect.objectContaining({ status: 'success' }),
-        ]);
-      }
-    }
-    expect(resultEvents).toBe(1);
-    expect(onToolCallsUpdate).toHaveBeenCalledWith([
-      expect.objectContaining({
-        status: 'awaiting_approval',
-        request: expect.objectContaining({ name: 'ask_user_question' }),
-      }),
-    ]);
-    expect(onToolCallsUpdate).toHaveBeenCalledWith([
-      expect.objectContaining({ status: 'success' }),
-    ]);
-    expect(onToolCallsUpdate).toHaveBeenLastCalledWith([]);
-    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+
+    await drain(livePromptEvents(config, 'q', undefined, { onWaitingCall }));
 
     // The fake scheduler reports the waiting call twice; dedupe must surface it once.
     expect(onWaitingCall).toHaveBeenCalledTimes(1);
@@ -2030,7 +2000,6 @@ describe('livePromptEvents', () => {
         tool: 'run_shell_command',
         title: 'Hook requested confirmation to run',
       },
-      { type: 'confirm-resolved', id: 'b2', outcome: 'approved' },
     ]);
   });
 

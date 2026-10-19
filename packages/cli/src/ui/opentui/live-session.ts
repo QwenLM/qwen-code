@@ -61,7 +61,6 @@ import {
   toolResultEvent,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
-import type { SessionBusyToolCall } from '../utils/session-busy.js';
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
@@ -78,7 +77,6 @@ interface LooseCompletedCall {
 
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
-  onToolCallsUpdate?: (calls: readonly SessionBusyToolCall[]) => void;
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
   /**
@@ -878,8 +876,6 @@ export async function* livePromptEvents(
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
-        // Display-list clears do not mean the results reached the model.
-        if (calls.length > 0) options?.onToolCallsUpdate?.(calls);
         // Real invocation descriptions (ink mapToDisplay): the card title is
         // the tool's own getDescription() off the tracked call's invocation,
         // not a hand-rolled args guess. Pushed once per callId, as soon as
@@ -969,7 +965,6 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
-        options?.onToolCallsUpdate?.(calls);
         completed = calls as unknown as LooseCompletedCall[];
         live.close();
       },
@@ -1071,7 +1066,6 @@ export async function* livePromptEvents(
       }
     }
     if (responseParts.length === 0) return;
-    options?.onToolCallsUpdate?.([]);
     nextPrompt = responseParts;
   }
 }

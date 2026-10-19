@@ -9,7 +9,7 @@ import type { TrackedToolCall } from '../hooks/useReactToolScheduler.js';
 import { StreamingState } from '../types.js';
 import { t } from '../../i18n/index.js';
 
-export type SessionBusyToolCall = {
+type SessionBusyToolCall = {
   request: { name: string };
   status: TrackedToolCall['status'];
   responseSubmittedToLlm?: boolean;

@@ -16,12 +16,12 @@ export default {
   'tool "{{tool}}" is validating. Wait for it to finish.':
     '工具「{{tool}}」正在驗證。請等待完成。',
   'Cannot branch: {{reason}}': '無法建立分支：{{reason}}',
-  'Cannot fork: {{reason}}': '無法啟動分叉代理：{{reason}}',
+  'Cannot fork: {{reason}}': '無法分支：{{reason}}',
   'Cannot change directory: {{reason}}': '無法切換目錄：{{reason}}',
   'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
     '工具「{{tool}}」正在等待批准。請處理待審批請求。',
   'a subagent is awaiting approval. Resolve the pending approval.':
-    '子代理正在等待批准。請處理待審批請求。',
+    '子智能體正在等待批准。請處理待審批請求。',
   'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
     '工具「{{tool}}」的結果尚未提交給模型。請等待提交，或按 Esc 取消本輪。',
   'the model is streaming a response. Wait for it to finish or press Esc to cancel.':

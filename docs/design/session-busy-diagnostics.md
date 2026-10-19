@@ -34,13 +34,18 @@ generic busy fallback. Every rejection names the requested operation and gives
 a matching wait, approval, or cancellation action. Messages expose tool names,
 never tool arguments.
 
-The OpenTUI live-turn driver supplies the same reader through its stable host
-and command context. It reads current scheduler calls and clears them before
-a model continuation, on completion, and on transcript reset; stale turn
-callbacks cannot overwrite the next turn. Both renderers use the same
-compaction-first classifier and complete sentence translation keys. All built-in
-locales translate the operation prefixes and reasons, enforced by the
-must-translate list.
+The OpenTUI live-turn driver supplies a compaction-only reader through its
+stable host and command context. OpenTUI queues these three commands during a
+live turn, so their tool and response diagnostics have no reachable consumer
+there. Its existing queue admission stays unchanged; commands that actually
+dispatch read current compaction and pending slash-command activity. Ink also
+defers these typed commands during a live turn. Its full action-time classifier
+provides defensive diagnostics at the command boundary, including subagent
+approval; the composer hides input while approval is pending. These classifier
+cases do not establish typed-command reachability in those states. Both
+renderers use complete sentence translation keys. All built-in locales translate the
+operation prefixes and reasons, enforced by the must-translate list and
+placeholder-parity checks.
 
 Affected areas are the chat compression service boundary, the interactive apps,
 the slash-command action/context bridge, the three command guards, the shared

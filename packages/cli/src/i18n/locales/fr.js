@@ -8,8 +8,7 @@
 
 export default {
   'Cannot branch: {{reason}}': 'Impossible de créer une branche : {{reason}}',
-  'Cannot fork: {{reason}}':
-    'Impossible de lancer un agent en arrière-plan : {{reason}}',
+  'Cannot fork: {{reason}}': 'Impossible de créer un fork : {{reason}}',
   'Cannot change directory: {{reason}}':
     'Impossible de changer de répertoire : {{reason}}',
   'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':

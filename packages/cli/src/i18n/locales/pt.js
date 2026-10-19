@@ -9,8 +9,7 @@
 export default {
   'Cannot branch: {{reason}}':
     'Não é possível criar uma ramificação: {{reason}}',
-  'Cannot fork: {{reason}}':
-    'Não é possível iniciar um agente em segundo plano: {{reason}}',
+  'Cannot fork: {{reason}}': 'Não é possível criar um fork: {{reason}}',
   'Cannot change directory: {{reason}}':
     'Não é possível alterar o diretório: {{reason}}',
   'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
