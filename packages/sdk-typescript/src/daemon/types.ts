@@ -3933,6 +3933,14 @@ export interface DaemonSkillToggleResult {
   sessionsFailed: number;
 }
 
+export interface DaemonSkillRefreshResult {
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  configsRefreshed: number;
+  configsFailed: number;
+  reason: 'all';
+}
+
 /** Per-target error codes returned by older daemon versions. */
 export type DaemonSkillBatchToggleErrorCode =
   | 'skill_not_found'

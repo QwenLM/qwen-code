@@ -543,16 +543,14 @@ describe('build artifact — transcript entry (#11031)', () => {
     // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
     // increase is shared i18n copy; substituting main's table restores the
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
-    // Merging 87dcc4a7 and updating deletion error copy measures 1,344,854.
-    // The merge base is itself only bracketed, 1,333,969 to 1,334,735, so
-    // grouped deletion contributes 10,119 to 10,885 units of shared action
-    // rendering and bilingual copy. The two sides add rather than overlap:
-    // their i18n keys are disjoint (messageDelete.* and message.moreActions
-    // versus managed.*, sideTask.* and shell.result.*) and the merged table
-    // is their exact union. Main's own 1,338,000 ceiling then bounds the
-    // merged entry under 1,348,900, and 1,351,000 keeps over 2,100 units of
-    // margin against that bound. Both figures come from recorded
-    // measurements, not from building this merge.
+    // Attachment recovery copy measures 1,338,049 at 9c3555b334. Building
+    // with the base (6d9df42d99) i18n table measures 1,337,798; the 251-unit
+    // increase is shared copy, while Managed interactive code stays excluded.
+    // A 1,339,500 ceiling retains 1,451 units of margin on main.
+    // Grouped deletion additionally shares action rendering and bilingual
+    // copy with this entry; its mutation hook stays interactive-only.
+    // Merging 020e4114ed measures 1,347,150; the existing 1,351,000 ceiling
+    // retains 3,850 units of margin without relaxing the deletion budget.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,

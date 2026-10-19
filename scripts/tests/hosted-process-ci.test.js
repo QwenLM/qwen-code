@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (125 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (146 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 205, 218],
+    ['hosted-harness-mysql', 226, 239],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -612,12 +612,16 @@ describe('Hosted real-process gates', () => {
       // (121.1 s measured on the merged base), so the fork moves to 6585;
       // the FG13a execute lost-reply cell adds 150 s, so the fork moves to
       // 6735; the FG13a status lost-reply cell adds 150 s, so the fork moves
-      // to 6885 and the Verify step to 125 minutes):
+      // to 6885 and the Verify step to 125 minutes; the FG11c Harness-crash
+      // method (144.8 s measured, 550 s budgeted) moves the fork to 7435;
+      // the FG13d DELETE-drain cell adds 150 s, so the fork moves to 7585;
+      // the FG11c Spring-crash class (262.0 s measured, ~524 s budgeted at
+      // 2x) moves the fork to 8109 and the Verify step to 146 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(6885);
+        expect(forkSeconds).toBe(8109);
       }
     },
   );
@@ -673,11 +677,15 @@ describe('Hosted real-process gates', () => {
   // cases, three cold boots) measures 121.1s locally on the merged base
   // (~242s budgeted), so it becomes 5985s; the FG13a execute lost-reply
   // cell adds 150s, so it becomes 6135s; the FG13a status lost-reply cell
-  // adds 150s, so it becomes 6285s. The largest ceiling (600s) plus
+  // adds 150s, so it becomes 6285s; the FG11c Harness-crash method (144.8s
+  // measured, ~550s budgeted at 2x) becomes 6835s; the FG13d DELETE-drain
+  // cell adds 150s, so it becomes 6985s; the FG11c Spring-crash class
+  // (262.0s measured, ~524s budgeted at 2x) becomes 7509s. The largest
+  // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 6285;
+  const hostedForkHealthySeconds = 7509;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -737,6 +745,7 @@ describe('Hosted real-process gates', () => {
     // on main (#14148).
     expect(hostedTestClasses().map(({ name }) => name)).toEqual([
       'HostedAutomationFaultGatesIT',
+      'HostedAutomationSpringCrashIT',
       'HostedChannelFaultGatesIT',
       'HostedChannelProcessCrashIT',
       'HostedCommittedEventLineReplayIT',
