@@ -261,6 +261,7 @@ export class UiRuntime {
     try {
       execute();
       const jobs = this.runtime.executePendingJobs(256);
+      // QuickJS job execution errors are distinct from guest promise rejections.
       if (jobs.error) {
         jobs.error.dispose();
         throw new Error('Generated JavaScript microtask failed.');

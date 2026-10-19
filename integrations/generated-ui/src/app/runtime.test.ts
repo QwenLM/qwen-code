@@ -278,15 +278,78 @@ describe('UiRuntime', () => {
     ).toThrow('Generated JavaScript failed or exceeded a runtime limit.');
   });
 
-  it('reports rejected asynchronous event callbacks', () => {
+  it.each([
+    `async () => { throw new Error('failure'); }`,
+    `() => Promise.resolve().then(() => { throw new Error('failure'); })`,
+    `() => Promise.reject({ get message() { while (true) {} } })`,
+  ])(
+    'stops when an event callback returns a rejected promise: %s',
+    (handler) => {
+      const runtime = createRuntime();
+      runtime.initialize(`ui.on('run', 'click', ${handler});`, {});
+      expect(() => runtime.dispatch(event(), {})).toThrow(
+        'Generated JavaScript failed or exceeded a runtime limit.',
+      );
+      expect(() => runtime.dispatch(event(), {})).toThrow(/stopped/);
+    },
+  );
+
+  it('lets promise handlers recover from ordinary errors', () => {
     const runtime = createRuntime();
-    runtime.initialize(
-      `ui.on('run', 'click', async () => { throw new Error('failure'); });`,
-      {},
-    );
-    expect(() => runtime.dispatch(event(), {})).toThrow(/limit/);
+    expect(
+      runtime.initialize(
+        `Promise.resolve().then(() => { throw new Error('failure'); })
+           .catch(() => ui.text('out', 'recovered'));
+         ui.on('run', 'click', () => Promise.reject(new Error('failure'))
+           .catch(() => ui.text('out', 'handled')));`,
+        {},
+      ),
+    ).toEqual([{ kind: 'text', id: 'out', value: 'recovered' }]);
+    expect(runtime.dispatch(event(), {})).toEqual([
+      { kind: 'text', id: 'out', value: 'handled' },
+    ]);
+  });
+
+  it('cannot hide a UI limit violation with a promise rejection handler', () => {
+    const runtime = createRuntime();
+    expect(() =>
+      runtime.initialize(
+        `Promise.resolve().then(() => ui.text('out', 'x'.repeat(17000)))
+           .catch(() => {});`,
+        {},
+      ),
+    ).toThrow('Generated JavaScript failed or exceeded a runtime limit.');
     expect(() => runtime.dispatch(event(), {})).toThrow(/stopped/);
   });
+
+  it.each([
+    `Promise.resolve().then(() => { throw new Error('failure'); });`,
+    `Promise.resolve().then(() => {}).then(() => null.x);`,
+    `Promise.reject(new Error('failure'));`,
+    `new Promise((_, reject) => reject(new Error('failure')));`,
+    `(async () => { await 0; throw new Error('failure'); })();`,
+  ])(
+    'does not globally monitor independent promise rejections: %s',
+    (source) => {
+      const runtime = createRuntime();
+      expect(
+        runtime.initialize(
+          `${source}
+         ui.text('out', 'initial');
+         ui.on('run', 'click', () => {
+           ${source}
+           ui.text('out', 'interactive');
+         });`,
+          {},
+        ),
+      ).toEqual([{ kind: 'text', id: 'out', value: 'initial' }]);
+      for (let i = 0; i < 2; i++) {
+        expect(runtime.dispatch(event(), {})).toEqual([
+          { kind: 'text', id: 'out', value: 'interactive' },
+        ]);
+      }
+    },
+  );
 
   it('validates input limits before copying data into the guest', () => {
     for (const inputs of [

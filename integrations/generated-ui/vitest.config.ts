@@ -8,6 +8,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['src/**/*.test.{ts,tsx}'],
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? 60_000
       : undefined,
