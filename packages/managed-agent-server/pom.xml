@@ -475,7 +475,11 @@
                                  Harness-crash method (three cases, 144.8 s
                                  measured, 550 s budgeted) moves it to
                                  6835 s, so the fork moves to 7435 s and
-                                 the Verify step to 134 minutes. -->
+                                 the Verify step to 134 minutes. The FG11c
+                                 Spring-crash class (five cases, 262.0 s
+                                 measured) is budgeted at 524 s: the healthy
+                                 sum becomes 7359 s, so the fork moves to
+                                 7959 s and the Verify step to 143 minutes. -->
                             <forkedProcessTimeoutInSeconds>7959</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>

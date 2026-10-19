@@ -23,12 +23,16 @@ write, drive `reconcile_run` through an overlap-`skip` slot, the run stays
 
 ## What the gate pins
 
-At most one run and one model Turn per occurrence. A Spring process that
-dies mid-fire must not produce a second run on restart, and a scanner that
-lost its lease must move neither the watermark nor the ledger. A run whose
+At most one run and one model Turn per occurrence, and one committed
+`automation_run` plus one accepted input for the slot. A Spring process
+that dies mid-fire must not produce a second run on restart. A run whose
 wake turn settled must settle from the journal's `turn.settled`, never as
 `failed`/`outcome_unknown`, even when the settling process died before
 writing revision 3.
+
+These cases gate deduplication, not lease takeover: fencing is the store's
+own `lease_owner`/`fence` predicates on `claim`, `settleOccurrence` and
+`advanceWatermark`, and a stale-writer takeover is not staged here.
 
 ## Fixture
 
@@ -112,6 +116,7 @@ the increment.
 
 - Whether a crashed scanner should reconcile on boot rather than on the next
   due slot is #14116's scope, not this slice.
-- Whether the losing scanner should observe the winner's claim immediately
-  or only on its next tick is left to today's behaviour; the gate pins that
-  it moves nothing, not the timing of its observation.
+- A controlled lease takeover — one scanner losing the lease and then
+  attempting a stale write — is not staged by these cases; it would need a
+  pause point inside the scanner's claim, which the product does not expose.
+  Fencing itself is the store's `lease_owner`/`fence` predicates.

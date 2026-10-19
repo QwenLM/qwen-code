@@ -6,6 +6,7 @@
 
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDatabase;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -75,6 +76,7 @@ class HostedAutomationSpringCrashIT {
     private int fixtureInternalPort;
     private int fixturePublicPort;
     private String fixtureDatabaseUrl;
+    private IsolatedManagedSchemaMySqlTestDatabase isolated;
 
     @AfterEach
     void tearDown() throws Exception {
@@ -91,6 +93,12 @@ class HostedAutomationSpringCrashIT {
         if (model != null) {
             model.stop(0);
             model = null;
+        }
+        // Drop the owned database only after the children are gone: an open
+        // pooled connection would hold the metadata lock DROP DATABASE needs.
+        if (isolated != null) {
+            isolated.close();
+            isolated = null;
         }
     }
 
@@ -515,8 +523,12 @@ class HostedAutomationSpringCrashIT {
             return watermarkSlot(definition) != null && chains != null
                     && chains == 1 ? true : null;
         });
-        assertThat(committedRuns(runIdOf(definition)))
+        String runId = runIdOf(definition);
+        assertThat(committedRuns(session))
                 .as("one committed automation_run across the crash")
+                .isEqualTo(1);
+        assertThat(acceptedInputs(session, runId))
+                .as("one accepted input across the crash")
                 .isEqualTo(1);
         // The kill also drops the Harness's Session connection, so the
         // wake turn may be aborted before its model call; the turn count is
@@ -525,10 +537,10 @@ class HostedAutomationSpringCrashIT {
     }
 
     private String freshDatabaseUrl() {
-        String base = required("mysql.url");
-        String name = "fg11c2_" + UUID.randomUUID().toString().replace("-", "");
-        fixtureDatabaseUrl = base.replaceFirst("^(jdbc:mysql://[^/]+/)[^?]+",
-                "$1" + name);
+        // The owned database is created through an admin connection and
+        // dropped on close; the Hosted lane creates only its own catalog.
+        isolated = new IsolatedManagedSchemaMySqlTestDatabase();
+        fixtureDatabaseUrl = isolated.url();
         return fixtureDatabaseUrl;
     }
 
@@ -587,8 +599,12 @@ class HostedAutomationSpringCrashIT {
         });
         // `fired` lands with the fire answer, before the wake turn's model
         // call starts, so wait for the turn and then pin it to exactly one.
-        assertThat(committedRuns(runIdOf(definition)))
+        String runId = runIdOf(definition);
+        assertThat(committedRuns(session))
                 .as("one committed automation_run for the re-driven slot")
+                .isEqualTo(1);
+        assertThat(acceptedInputs(session, runId))
+                .as("one accepted input for the re-driven slot")
                 .isEqualTo(1);
         await("the re-driven run's model Turn", 120,
                 () -> modelPrompts.stream()
@@ -623,18 +639,43 @@ class HostedAutomationSpringCrashIT {
                 schedule);
     }
 
-    private int committedRuns(String runId) {
+    private int committedRuns(String sessionId) {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM ma_session_record WHERE tenant_id = ?"
-                        + " AND domain = 'automation_run' AND record_id = ?",
-                Integer.class, tenant, runId);
+                        + " AND session_id = ? AND domain = 'automation_run'",
+                Integer.class, tenant, sessionId);
         return count == null ? 0 : count;
+    }
+
+    private int acceptedInputs(String sessionId, String runId)
+            throws Exception {
+        int count = 0;
+        for (byte[] record : jdbc.queryForList(
+                "SELECT record_bytes FROM ma_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " ORDER BY journal_revision",
+                byte[].class, tenant, sessionId)) {
+            for (String line : new String(record, StandardCharsets.UTF_8)
+                    .lines().toList()) {
+                JsonNode entry = json.readTree(line);
+                if ("managed_session_event_v1".equals(
+                        entry.path("subtype").asText())
+                        && "input.accepted".equals(entry.path(
+                                "managedSession").path("kind").asText())
+                        && entry.path("managedSession").path("eventId")
+                                .asText().startsWith(runId + ":")) {
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     private String occurrenceOutcome(String schedule) {
         return jdbc.queryForObject(
                 "SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
-                        + " AND schedule_id = ? ORDER BY slot", String.class,
+                        + " AND schedule_id = ? ORDER BY slot DESC LIMIT 1",
+                String.class,
                 tenant, schedule);
     }
 
@@ -666,28 +707,15 @@ class HostedAutomationSpringCrashIT {
             String definition = apiRequest("POST", "/v1/agent-automations",
                     definition(session, "FG11C2_RACE"), "fg11c2-race-def",
                     202).path("id").asText();
-            // Two scanners, one due slot: the lease fence must let exactly
-            // one of them claim it.
-            Thread left = Thread.ofPlatform().start(() -> {
-                try {
-                    control("scan", "");
-                } catch (Exception lost) {
-                    // The race's loser may answer late; the ledger decides.
-                }
-            });
-            Thread right = Thread.ofPlatform().start(() -> {
-                try {
-                    controlAt(second.controlUrl(), "scan", "");
-                } catch (Exception lost) {
-                    // Same for the second child.
-                }
-            });
-            left.join();
-            right.join();
+            // Two scanners, one due slot: the first claims it, and the
+            // second's tick must leave the ledger alone.
+            control("scan", "");
+            controlAt(second.controlUrl(), "scan", "");
             await("one occurrence and one run chain", 180, () -> {
                 Integer occurrences = jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_schedule_occurrence"
-                                + " WHERE tenant_id = ? AND schedule_id = ?",
+                                + " WHERE tenant_id = ? AND schedule_id = ?"
+                                + " AND run_id IS NOT NULL",
                         Integer.class, tenant, definition);
                 Integer chains = jdbc.queryForObject(
                         "SELECT COUNT(DISTINCT run_id) FROM"
@@ -699,8 +727,12 @@ class HostedAutomationSpringCrashIT {
                         && "fired".equals(occurrenceOutcome(definition))
                         ? true : null;
             });
-            assertThat(committedRuns(runIdOf(definition)))
+            String runId = runIdOf(definition);
+            assertThat(committedRuns(session))
                     .as("one committed automation_run for the raced slot")
+                    .isEqualTo(1);
+            assertThat(acceptedInputs(session, runId))
+                    .as("one accepted input for the raced slot")
                     .isEqualTo(1);
             await("one model Turn for the raced slot", 120,
                     () -> modelPrompts.stream().anyMatch(prompt -> prompt

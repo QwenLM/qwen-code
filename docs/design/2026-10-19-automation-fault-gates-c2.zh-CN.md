@@ -21,10 +21,14 @@ live-run reconcile 格（存活 turn 经 overlap-`skip` slot 驱动 `reconcile_r
 
 ## 门控的性质
 
-每个 occurrence 至多一条 run、一次模型 Turn。fire 中途死掉的 Spring 在重启后
-不得产生第二条 run；丢了租约的 scanner 不得推进 watermark 或账本。wake turn 已
-结算的 run 必须按 journal 的 `turn.settled` 结算，绝不写成
-`failed`/`outcome_unknown`，即使结算进程在写 revision 3 之前就死了。
+每个 occurrence 至多一条 run、一次模型 Turn，且该 slot 恰好一条已提交的
+`automation_run` 与一个被接受的 input。fire 中途死掉的 Spring 在重启后不得
+产生第二条 run。wake turn 已结算的 run 必须按 journal 的 `turn.settled` 结算，
+绝不写成 `failed`/`outcome_unknown`，即使结算进程在写 revision 3 之前就死了。
+
+这些用例门控的是去重，不是租约接管：fencing 由 store 在 `claim`、
+`settleOccurrence`、`advanceWatermark` 上的 `lease_owner`/`fence` 谓词保证，
+本片不构造 stale writer 的接管。
 
 ## 夹具
 
@@ -60,11 +64,11 @@ prompt。
 
 每个见证单独对各自的用例运行，并逐字节恢复。
 
-| 见证 | 变异                                                            | 预期变红处                                                         |
-| ---- | --------------------------------------------------------------- | ------------------------------------------------------------------ |
-| s1   | `automationRunId` 每次调用加 nonce，重新驱动会派生出新的 run id | `spring-kill-before-answer`：重新驱动的那条链旁边出现第二条 run 链 |
-| s2   | 租约认领去掉 owner 与 fence 谓词                                | `two-scanner-race`：出现两条 run 链，或第二次模型 Turn             |
-| s3   | 随延期格移除（结算顺序仍由第 1 片钉住）                         | -                                                                  |
+| 见证 | 变异                                                                       | 预期变红处                                                         |
+| ---- | -------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| s1   | `automationRunId` 每次调用加 nonce，重新驱动会派生出新的 run id            | `spring-kill-before-answer`：重新驱动的那条链旁边出现第二条 run 链 |
+| s2   | `CronSlots.occurrenceKey` 每次调用加 nonce，使两个 scanner 派生出不同 slot | `two-scanner-race`：出现两行 occurrence 与两条 run 链              |
+| s3   | 随延期格移除（结算顺序仍由第 1 片钉住）                                    | -                                                                  |
 
 ## 预算
 
@@ -95,5 +99,6 @@ job 上限由 227 分钟升到 236 分钟。
 
 - 崩溃的 scanner 是否应在启动时 reconcile 而不是等下一个到期 slot，是 #14116 的
   范围，不在本片。
-- 输掉的 scanner 应当立即观察到赢家的认领，还是只在下一次 tick 观察到，维持今天
-  的行为；门禁只钉「它什么都没推进」，不钉它观察到的时点。
+- 受控的租约接管——一个 scanner 丢掉租约后再尝试写过期数据——不在这些用例的
+  构造范围内；它需要在 scanner 认领内部设暂停点，产品未暴露该点。fencing 本身
+  由 store 的 `lease_owner`/`fence` 谓词保证。

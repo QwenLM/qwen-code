@@ -614,7 +614,9 @@ describe('Hosted real-process gates', () => {
       // 6735; the FG13a status lost-reply cell adds 150 s, so the fork moves
       // to 6885 and the Verify step to 125 minutes; the FG11c Harness-crash
       // method (144.8 s measured, 550 s budgeted) moves the fork to 7435 and
-      // the Verify step to 134 minutes):
+      // the Verify step to 134 minutes; the FG11c Spring-crash class
+      // (262.0 s measured, ~524 s budgeted at 2x) moves the fork to 7959 and
+      // the Verify step to 143 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
@@ -676,7 +678,9 @@ describe('Hosted real-process gates', () => {
   // (~242s budgeted), so it becomes 5985s; the FG13a execute lost-reply
   // cell adds 150s, so it becomes 6135s; the FG13a status lost-reply cell
   // adds 150s, so it becomes 6285s; the FG11c Harness-crash method (144.8s
-  // measured, ~550s budgeted at 2x) becomes 6835s. The largest ceiling
+  // measured, ~550s budgeted at 2x) becomes 6835s; the FG11c Spring-crash
+  // class (262.0s measured, ~524s budgeted at 2x) becomes 7359s. The largest
+  // ceiling
   // (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing

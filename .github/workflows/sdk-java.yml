@@ -692,11 +692,13 @@ jobs:
     # execute lost-reply cell adds 150 s and the FG13a status lost-reply
     # cell another 150 s, moving the fork to 6885 s and Verify to 125
     # minutes; the FG11c Harness-crash method (144.8 s measured) is budgeted
-    # at 550 s, so the fork moves to 7435 s and Verify to 134 minutes, which
-    # wraps its fork + 600 s plus margin; the Broker fault gates
+    # at 550 s, so the fork moves to 7435 s and Verify to 134 minutes; the
+    # FG11c Spring-crash class (262.0 s measured) is budgeted at 524 s, so the
+    # fork moves to 7959 s and Verify to 143 minutes, which wraps its fork +
+    # 600 s plus margin; the Broker fault gates
     # keep 10, and admission plus O4 keep per-fork ceilings) plus ~13
     # minutes for the uncapped setup steps (Checkout.. cgroup delegation,
-    # the report checks): 214 + 13. The failover arms run in
+    # the report checks): 223 + 13. The failover arms run in
     # hosted-failover-e2e.
     timeout-minutes: 236
     services:
@@ -787,7 +789,7 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 7435 s, so the step wraps to fork + 600 s plus margin.
+        # 7959 s, so the step wraps to fork + 600 s plus margin.
         timeout-minutes: 143
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
