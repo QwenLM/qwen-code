@@ -41,7 +41,15 @@ import type {
   ManagedAgentWorkspace,
   ManagedApprovalMode,
   ManagedSessionOptions,
+  ManagedInputBlock,
 } from './managed-agent-provider';
+import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
+import {
+  encodeManagedInput,
+  isManagedInput,
+  managedInputText,
+  restoreManagedAttachments,
+} from './managed-input';
 import { isManagedApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
 import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
@@ -50,11 +58,12 @@ interface PendingCreation {
   agentId: string;
   workspaceId: string;
   cwdRelative: string;
-  input: [] | [{ type: 'input_text'; text: string }];
+  input: ManagedInputBlock[];
   clientId: string;
   idempotencyKey: string;
   sessionId?: string;
   approvalMode?: ManagedApprovalMode;
+  planMode?: boolean;
 }
 
 interface PendingWorkspace {
@@ -107,7 +116,6 @@ function readPending(key: string): PendingCreation | undefined {
     if (typeof value !== 'object' || !value) return undefined;
     const item = value as Record<string, unknown>;
     const input = item['input'];
-    const first: unknown = Array.isArray(input) ? input[0] : undefined;
     if (
       typeof item['agentId'] !== 'string' ||
       typeof item['workspaceId'] !== 'string' ||
@@ -116,13 +124,9 @@ function readPending(key: string): PendingCreation | undefined {
       typeof item['idempotencyKey'] !== 'string' ||
       (item['approvalMode'] !== undefined &&
         !isManagedApprovalMode(item['approvalMode'])) ||
-      !Array.isArray(input) ||
-      input.length > 1 ||
-      (input.length === 1 &&
-        (typeof first !== 'object' ||
-          first === null ||
-          (first as Record<string, unknown>)['type'] !== 'input_text' ||
-          typeof (first as Record<string, unknown>)['text'] !== 'string')) ||
+      (item['planMode'] !== undefined &&
+        typeof item['planMode'] !== 'boolean') ||
+      !isManagedInput(input) ||
       (item['sessionId'] !== undefined && typeof item['sessionId'] !== 'string')
     )
       return undefined;
@@ -193,6 +197,8 @@ export function WorkspaceBindingCreator({
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [optionsError, setOptionsError] = useState<string>();
   const [optionsRevision, setOptionsRevision] = useState(0);
+  const [planMode, setPlanMode] = useState(false);
+  const encoding = useRef(false);
   const [items, setItems] = useState<ManagedAgentWorkspace[]>([]);
   const selectionKey = `qwen-managed-workspace-selection:${provider.storageKey}`;
   const [selected, setSelected] = useState(() => {
@@ -445,9 +451,20 @@ export function WorkspaceBindingCreator({
     }
   }
 
-  async function createOrRead(text?: string, commit?: ComposerSubmitCommit) {
+  async function createOrRead(
+    text?: string,
+    commit?: ComposerSubmitCommit,
+    images?: PromptImage[],
+    files?: PromptFile[],
+  ) {
     const abort = commandLifetime.current;
-    if (!abort || abort.signal.aborted || busy || workspaceCreatingRef.current)
+    if (
+      !abort ||
+      abort.signal.aborted ||
+      busy ||
+      encoding.current ||
+      workspaceCreatingRef.current
+    )
       return;
     let attempt = pendingRef.current;
     if (
@@ -458,7 +475,13 @@ export function WorkspaceBindingCreator({
       return;
     const firstSubmission = !attempt;
     if (!attempt) {
-      if (text !== undefined && !text.trim()) return;
+      if (
+        text !== undefined &&
+        !text.trim() &&
+        !images?.length &&
+        !files?.length
+      )
+        return;
       if (!approvalReady) return;
       if (
         !supported ||
@@ -470,15 +493,32 @@ export function WorkspaceBindingCreator({
         if (text !== undefined) setError(t('managed.workspaceChoose'));
         return;
       }
+      let input: ManagedInputBlock[] = [];
+      encoding.current = true;
+      setBusy(true);
+      try {
+        if (text !== undefined)
+          input = await encodeManagedInput(text, images, files);
+      } catch (failure) {
+        setError(message(failure));
+        return;
+      } finally {
+        encoding.current = false;
+        setBusy(false);
+      }
+      if (abort.signal.aborted) return;
       attempt = {
         agentId,
         workspaceId: selected,
         cwdRelative,
-        input: text === undefined ? [] : [{ type: 'input_text', text }],
+        input,
         clientId,
         idempotencyKey: managedRequestId(),
         ...(supportsApprovalModeSelection && currentOptions
           ? { approvalMode: currentOptions.approvalMode }
+          : {}),
+        ...(planMode && currentOptions?.planModeSupported
+          ? { planMode: true }
           : {}),
       };
       if (!savePending(pendingKey, attempt)) {
@@ -501,20 +541,32 @@ export function WorkspaceBindingCreator({
           ...(attempt.approvalMode === undefined
             ? {}
             : { approvalMode: attempt.approvalMode }),
+          ...(attempt.planMode === undefined
+            ? {}
+            : { planMode: attempt.planMode }),
         };
         const command = {
           clientId: attempt.clientId,
           idempotencyKey: attempt.idempotencyKey,
           signal: abort.signal,
         };
-        const initial = attempt.input[0];
+        const initial = attempt.input.length > 0;
         if (initial && !binding.createSession)
           throw new Error(
             'The provider no longer supports initial Workspace input',
           );
         const admitted = initial
           ? await binding.createSession!(
-              { ...request, text: initial.text },
+              {
+                ...request,
+                text: managedInputText(attempt.input),
+                ...(attempt.input.some(
+                  (block) =>
+                    block.type === 'input_file' || block.type === 'input_image',
+                )
+                  ? { input: attempt.input }
+                  : {}),
+              },
               command,
             )
           : await binding.createEmpty(request, command);
@@ -821,10 +873,13 @@ export function WorkspaceBindingCreator({
               variant="outline"
               disabled={busy}
               onClick={() => {
-                const initial = pending.input[0];
+                const initial = pending.input;
                 updatePending(undefined);
                 acceptedCommit.current = undefined;
-                if (initial) editor.current?.setText(initial.text);
+                if (initial.length) {
+                  editor.current?.setText(managedInputText(initial));
+                  restoreManagedAttachments(editor.current, initial);
+                }
                 onAbandoned?.();
               }}
             >
@@ -1040,12 +1095,20 @@ export function WorkspaceBindingCreator({
                 registrationAvailable && Boolean(binding.registration)
               }
               onOpenExistingWorkspace={() => {
-                if (!busy && !pendingRef.current) setRegistrationOpen(true);
+                if (!busy && !encoding.current && !pendingRef.current)
+                  setRegistrationOpen(true);
               }}
-              attachmentsEnabled={false}
+              attachmentsEnabled={currentOptions?.inputAttachments === true}
               visibleToolbarActions={
                 interactive
                   ? [
+                      ...(currentOptions?.inputAttachments ||
+                      currentOptions?.planModeSupported
+                        ? ['addMenu' as const]
+                        : []),
+                      ...(currentOptions?.planModeSupported
+                        ? ['plan' as const]
+                        : []),
                       ...(displayedApprovalMode
                         ? ['approvalMode' as const]
                         : []),
@@ -1061,6 +1124,24 @@ export function WorkspaceBindingCreator({
                 busy || workspaceCreating || Boolean(pending)
               }
               currentMode={displayedApprovalMode ?? ''}
+              planMode={
+                pending?.planMode ??
+                (currentOptions?.planModeSupported === true && planMode)
+              }
+              onTogglePlan={
+                currentOptions?.planModeSupported
+                  ? () => {
+                      if (
+                        !busy &&
+                        !encoding.current &&
+                        !pendingRef.current &&
+                        !workspaceCreating &&
+                        !optionsLoading
+                      )
+                        setPlanMode((value) => !value);
+                    }
+                  : undefined
+              }
               availableModes={
                 pending?.approvalMode
                   ? [pending.approvalMode]
@@ -1072,11 +1153,13 @@ export function WorkspaceBindingCreator({
                 Boolean(pending) ||
                 optionsLoading ||
                 !currentOptions ||
-                currentOptions.availableApprovalModes.length <= 1
+                (currentOptions.availableApprovalModes.length <= 1 &&
+                  !currentOptions.planModeSupported)
               }
               onSelectMode={(value) => {
                 if (
                   !busy &&
+                  !encoding.current &&
                   !workspaceCreating &&
                   !pendingRef.current &&
                   !optionsLoading &&
@@ -1091,7 +1174,8 @@ export function WorkspaceBindingCreator({
                 label: item.label,
               }))}
               onSelectModel={(id) => {
-                if (!busy && !pendingRef.current) setAgentId(id);
+                if (!busy && !encoding.current && !pendingRef.current)
+                  setAgentId(id);
               }}
               workspaces={items.map((item) => ({
                 id: item.workspaceId,
@@ -1105,7 +1189,9 @@ export function WorkspaceBindingCreator({
               scratchWorkspaceSupported={
                 interactive && workspaceCreationSupported
               }
-              onCreateScratchWorkspace={() => setWorkspaceDialogOpen(true)}
+              onCreateScratchWorkspace={() => {
+                if (!encoding.current) setWorkspaceDialogOpen(true);
+              }}
               workspaceMutationBusy={
                 busy || workspaceCreating || Boolean(pending)
               }
@@ -1118,10 +1204,13 @@ export function WorkspaceBindingCreator({
                 Boolean(pending)
               }
               onSelectWorkspace={(id) => {
-                if (id && !busy && !pendingRef.current) choose(id);
+                if (id && !busy && !encoding.current && !pendingRef.current)
+                  choose(id);
               }}
               composerInput={
-                pending?.input[0] ? { text: pending.input[0].text } : undefined
+                pending?.input.length
+                  ? { text: managedInputText(pending.input) }
+                  : undefined
               }
               composerInputVersion={0}
               disabled={
@@ -1139,8 +1228,8 @@ export function WorkspaceBindingCreator({
               }
               isPreparing={busy || loading || optionsLoading}
               placeholderText={t('managed.prompt')}
-              onSubmit={(text, _images, _files, commit) => {
-                void createOrRead(text, commit);
+              onSubmit={(text, images, files, commit) => {
+                void createOrRead(text, commit, images, files);
                 return false;
               }}
             />

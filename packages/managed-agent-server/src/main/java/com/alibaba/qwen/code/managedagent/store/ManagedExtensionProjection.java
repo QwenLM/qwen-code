@@ -127,12 +127,13 @@ public final class ManagedExtensionProjection {
      * the process through the Broker, and the worker's stop-marked end
      * settles the record {@code stop_requested} (A8). A channel delivery
      * (#13746 F3) cancels only while no adapter has claimed it: its
-     * cancelRequested flag is its stop request. An automation run has no
-     * stop path yet.
+     * cancelRequested flag is its stop request. An automation run stops
+     * its own wake Turn and proves cancellation through its cancelled
+     * terminal record.
      */
     public static final Set<String> CANCELLABLE_TASK_KINDS = Set.of(
             "child_agent", "workflow", "background_shell", "monitor",
-            "channel_delivery");
+            "channel_delivery", "automation_run");
     /** Task states a cancel may still act on: the run has not ended and
      * is not waiting on recovery reconciliation. */
     private static final Set<String> CANCELLABLE_TASK_STATES = Set.of(

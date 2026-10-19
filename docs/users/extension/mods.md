@@ -309,24 +309,24 @@ fails explicitly; it is not sent to the model.
 
 `next` exposes `event`, `is(pattern)`, frozen `origin`, `signal`, and a fresh frozen
 `budget` snapshot with `ms` and `remainingMs`. Catch additionally receives `called`
-and `error.kind` (`throw`, `timeout` or `re-entry`). Engine events use origin
+and `error.kind` (`throw` or `timeout`). Engine events use origin
 `{ plugin: 'engine', tier: 'core' }`; Mod API events identify the calling plugin
 with tier `user`. Managed-tier `next.to`, tracing and custom namespace `lent`
 recovery are not available.
 
 API events begin at the chain head. Their input is the command specification or
 `{text, to}` log payload. Return `next(e)`, `{value}` to answer, or `{deny: reason}`
-to reject the API call. Immediate self-reentry skips that registration; active
-ancestor registrations can use their catch. Re-entry catch cannot call `$` APIs,
-and its `next` reuses the original event once. `ui.log` remains a void notification:
+to reject the API call. Registrations already in the event's call chain are
+skipped, including their catches. Other registrations in the same plugin remain
+eligible. This re-entry behavior follows Claude Code 2.1.301.
+`ui.log` remains a void notification:
 `await $.ui.log(...)` does not wait for interceptors. The headless boundary drains
 queued notifications before returning output.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
 cross-plugin `next` or API calls. Pending void `ui.log` notifications do not pause
-the caller's budget. Catch and re-entry recovery use a one-second budget.
-Re-entry dispatch shares this shorter budget with other registrations in
-that plugin. Qwen additionally caps each root dispatch at 60 seconds and each
+the caller's budget. Catch recovery uses a one-second budget.
+Qwen additionally caps each root dispatch at 60 seconds and each
 uninterrupted guest execution slice at 10 seconds. All `session.end` work shares
 1.5 seconds. An outer handler that finishes early abandons pending downstream
 work; cancellation never starts a fallback operation. Retained next/API functions
