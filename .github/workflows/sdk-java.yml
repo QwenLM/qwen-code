@@ -692,12 +692,15 @@ jobs:
     # Spring-crash class (262.0 s measured) is budgeted at 524 s, so the fork
     # moves to 8109 s and Verify to 146 minutes, and the FG13a catalog
     # lost-reply cell adds 150 s, so the fork moves to 8259 s and Verify to
-    # 148 minutes, which wraps its fork + 600 s plus margin; the Broker fault
+    # 148 minutes, and the FG13a HTTP lost-reply cell adds 150 s, so the fork
+    # moves to 8409 s and Verify to 151 minutes, and the FG13f deny
+    # lost-reply cell adds 150 s, so the fork moves to 8559 s and Verify to
+    # 153 minutes, which wraps its fork + 600 s plus margin; the Broker fault
     # gates keep 10,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 228 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 241
+    # checks): 233 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 246
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -786,8 +789,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 8259 s, so the step wraps to fork + 600 s plus margin.
-        timeout-minutes: 148
+        # 8559 s, so the step wraps to fork + 600 s plus margin.
+        timeout-minutes: 153
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -890,9 +893,9 @@ jobs:
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
     # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 15 arms × 10 = 150 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 163 + 2.
-    timeout-minutes: 165
+    # one failed. Ceilings: 19 arms × 10 = 190 plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. Install MySQL binaries): 203 + 2.
+    timeout-minutes: 205
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1002,6 +1005,29 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-expiry
+      # #14481 step 2: the approval path's fault points. Each arm crashes or
+      # loses one reply after a durable barrier the five mode arms above only
+      # cross without a fault, and the next generation must resume that stage.
+      - name: 'Run approval post-decision crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-after-decision
+      - name: 'Run approval partial-prepare crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-after-prepare
+      - name: 'Run approval decision reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
+      - name: 'Run Turn admission reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
       - name: 'Run Harness-restart continuation closeout E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10

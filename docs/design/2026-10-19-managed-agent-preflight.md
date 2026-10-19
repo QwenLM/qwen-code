@@ -41,7 +41,7 @@ The command binds the same inputs Spring would load:
 | `validation` | The startup property validations accept the bound configuration.                                                                                                 |
 | `auth`       | A non-loopback bind does not use `auto`; signed mode has a signing key; insecure bind is reported.                                                               |
 | `harness`    | Enabled Harness has a token, a well-formed digest, and answers `GET /capabilities` with 200.                                                                     |
-| `tool-path`  | Workspace files and Shell enablement match the startup cross-setting rules.                                                                                      |
+| `tool-path`  | Workspace files and Shell enablement, the isolation class, and the mount, creation-root or SSH-node requirement match the startup rules.                         |
 | `broker`     | Token, active and previous credential keys decode to 32 bytes, the state directory is writable, and the provisioner's Node/worker or static endpoint is present. |
 | `workspace`  | The configured Workspace `cwd` exists and is writable.                                                                                                           |
 | `*-port`     | The server port and the enabled broker port can be bound.                                                                                                        |
