@@ -916,11 +916,12 @@ class ManagedActionsTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
-        properties.getDispatch().setLeaseDuration(Duration.ofMillis(300));
-        // 400ms > leaseDuration/3, so the coordinator's clamp (min → 100ms)
-        // is what picks the period. Inverting the clamp (max → 400ms) starves
-        // the 300ms lease and the competing replica must win it.
-        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(400));
+        properties.getDispatch().setLeaseDuration(Duration.ofSeconds(3));
+        // 4s > leaseDuration/3, so the coordinator's clamp (min → 1s) is
+        // what picks the period. Inverting the clamp (max → 4s) lets the 3s
+        // lease expire before the competing claim. The longer lease leaves
+        // room for a loaded runner to delay a renewal without expiring it.
+        properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;
@@ -958,7 +959,7 @@ class ManagedActionsTest {
             long started = System.currentTimeMillis();
             first.dispatch(tenant, session, operation);
             assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
-            await().atMost(Duration.ofSeconds(5)).until(() -> System.currentTimeMillis() - started >= 1000);
+            await().atMost(Duration.ofSeconds(10)).until(() -> System.currentTimeMillis() - started >= 3500);
             var claimed = sessions.findOperation(tenant, session, operation).orElseThrow();
             assertThat(claimed.claimGeneration()).isEqualTo(1);
             assertThat(sessions.claimOperation(tenant, session, operation, "competing-replica", Duration.ofSeconds(1)))
