@@ -96,6 +96,27 @@ differ:
 
 Slice 2 repeats 1, 2 and 4 across the kill.
 
+## Fixture constraints
+
+Running the first case against the packaged stack established three
+requirements the fixture has to meet. They cost a run each to find, so they
+are recorded here instead of being rediscovered:
+
+- `harness.workspace-shell-enabled=true` refuses the server default
+  `approval-mode: yolo` (`ManagedAgentProperties.validateWorkspaceFiles`), so
+  the case boots with `default`.
+- A definition whose tools name `hosted-workspace-shell/1` refuses `yolo` at
+  admission ("Shell definitions must start with an asking policy", #13271).
+  The case stores the definition with `default` and selects `yolo` on the
+  Session afterwards through
+  `/api/agent/web-shell/v1/session-approval/change`.
+- A public Shell wake turn needs workspace-execution authority. The
+  non-durable broker answers the Harness with `409 workspace_unavailable`,
+  and the durable broker on an owner-private state directory still leaves the
+  turn in `WorkspaceExecutionStore.unavailable()`. The automation fixture has
+  no execution-grant or approval flow, so slice 1 has to add the one
+  `HostedPublicWorkspaceIT` drives before any fault arm can run.
+
 ## Limits
 
 - The arms fault the object store, not the network between Spring and OSS.

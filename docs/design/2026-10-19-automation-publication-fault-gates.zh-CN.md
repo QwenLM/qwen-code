@@ -84,6 +84,24 @@ bean。故障打在 `OSS` 客户端上，真实的 `AliyunToolPublicationObjectS
 
 第 2 片在跨越 kill 后重复第 1、2、4 条。
 
+## 夹具约束
+
+第一条用例在打包栈上实跑后，暴露出夹具必须满足的三项要求。每项都花了一轮实跑才定位，记在这里避免重复试错：
+
+- 开启 `harness.workspace-shell-enabled=true` 时，服务端默认的
+  `approval-mode: yolo` 会被拒（`ManagedAgentProperties.validateWorkspaceFiles`），
+  用例因此以 `default` 启动。
+- 定义的工具指名 `hosted-workspace-shell/1` 时，准入拒绝 `yolo`
+  （「Shell 定义必须以询问策略起步」，#13271）。用例以 `default` 存定义，
+  之后通过 `/api/agent/web-shell/v1/session-approval/change` 在会话上选择
+  `yolo`。
+- 公开 Shell 的 wake turn 需要 workspace 执行授权。非 durable broker 让
+  Harness 得到 `409 workspace_unavailable`；换成 durable broker 加
+  owner-private 状态目录后，turn 仍停在
+  `WorkspaceExecutionStore.unavailable()`。automation 夹具没有
+  execution-grant/approval 流程，第 1 片必须先补上
+  `HostedPublicWorkspaceIT` 驱动的那套，故障臂才有机会运行。
+
 ## 边界
 
 - 故障臂打在对象存储，不打 Spring 与 OSS 之间的网络。`O4OssGate` 仍是唯一的
