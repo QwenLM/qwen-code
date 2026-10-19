@@ -33832,6 +33832,9 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       ).toHaveBeenCalledWith(discoveryConfig),
     );
     expect(discoveryConfigSessionContext).toBe('workspace-mcp-discovery');
+    // A discovery-only Config must never start language servers, whatever the
+    // user's setting says: it runs no tools and is never shut down.
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.lspDisabled).toBe(true);
     const ancestorTrustProvider =
       vi.mocked(loadCliConfig).mock.calls[0]?.[9]
         ?.workflowAncestorTrustProvider;

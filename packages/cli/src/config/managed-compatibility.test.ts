@@ -150,13 +150,6 @@ describe('evaluateManagedCompatibility', () => {
       'the workspace is not trusted',
     ],
     [
-      'forwarded LSP',
-      () => {
-        runtime.forwardedArgs = ['--experimental-lsp'];
-      },
-      'the daemon enables LSP for its sessions',
-    ],
-    [
       'LSP enabled from the user-scoped setting',
       () => {
         runtime.lspEnabledForSessions = true;
@@ -309,6 +302,16 @@ describe('evaluateManagedCompatibility', () => {
     await arrange();
 
     await expect(evaluate()).resolves.toEqual({ status: 'deferred', reason });
+  });
+
+  it('certifies a forwarded LSP flag that the runtime resolves off', async () => {
+    // Only the kill switch produces this combination: the daemon still
+    // forwards `--experimental-lsp`, but every child inherits
+    // QWEN_CODE_DISABLE_LSP and resolves LSP off, so deferring would strand
+    // the session for a capability that will not start.
+    runtime.forwardedArgs = ['--experimental-lsp'];
+
+    await expect(evaluate()).resolves.toEqual({ status: 'compatible' });
   });
 
   it('defers plan mode requested by the session', async () => {

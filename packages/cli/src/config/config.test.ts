@@ -3821,7 +3821,9 @@ describe('loadCliConfig', () => {
         false,
         { shellExecutionSandbox: policy },
       ),
-    ).rejects.toThrow(/does not yet support/);
+    ).rejects.toThrow(
+      /does not yet support LSP enabled through tools\.lspEnabled/,
+    );
   });
 
   it('should keep LSP off when the embedding host refuses it outright', async () => {
@@ -3847,6 +3849,59 @@ describe('loadCliConfig', () => {
 
     expect(config.isLspEnabled()).toBe(false);
     expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off in safe mode even when the setting opts in', async () => {
+    // Safe mode distrusts ambient file-sourced state, so a standing setting
+    // must not start workspace-declared language servers there.
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off when QWEN_CODE_SAFE_MODE opts in', async () => {
+    vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it('should let a host refusal outrank the LSP env entrance', async () => {
+    // The refusal contract says "whatever the user's setting or the
+    // environment says"; resolving the env pair first would let a daemon-wide
+    // QWEN_CODE_ENABLE_LSP start servers in a Config that must never run them.
+    vi.stubEnv('QWEN_CODE_ENABLE_LSP', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { lspDisabled: true },
+    );
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
   });
 
   it('should collect LSP status snapshots during debug-mode startup', async () => {

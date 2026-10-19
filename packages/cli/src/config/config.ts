@@ -1792,15 +1792,20 @@ export async function loadCliConfig(
   // below has to see the same answer the session gets: the flag, the
   // user/system-scope setting and the env pair all start the same subsystem,
   // and a sandboxed tool runner must refuse every entrance, not just the one
-  // it happens to read. The host-mode terms are the entrances a mode still
-  // refuses, so the guard asks the question the session will actually answer
-  // rather than one it would decline anyway.
+  // it happens to read. The host-mode terms below are the modes that refuse
+  // LSP wholesale — read-only agent host, SSH workspace, provisional
+  // workspace, bare and safe mode — so the guard asks the question the session
+  // will actually answer rather than one it would decline anyway.
+  const safeMode =
+    agentHostReadOnly ||
+    (argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv());
   const lspEnabled =
     !hostPolicy?.lspDisabled &&
     !agentHostReadOnly &&
     !sshWorkspace &&
     !provisionalWorkspace &&
     !bareMode &&
+    !safeMode &&
     isLspOptedIn(argv.experimentalLsp, settings);
   if (
     sandboxEnabled &&
@@ -1817,14 +1822,14 @@ export async function loadCliConfig(
       Object.keys(sessionMcpServers ?? {}).length ||
       provisionalWorkspace)
   ) {
+    const lspEntrance =
+      lspEnabled && argv.experimentalLsp !== true
+        ? 'LSP enabled through tools.lspEnabled or QWEN_CODE_ENABLE_LSP'
+        : 'LSP';
     throw new Error(
-      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP, extensions or provisional workspaces.',
+      `tools.executionSandbox does not yet support ${lspEntrance}, ACP, worktree management, MCP, extensions or provisional workspaces.`,
     );
   }
-  const safeMode =
-    agentHostReadOnly ||
-    (argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv());
-
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
   // every content generator and the preconnect path. Resolution there ORs this

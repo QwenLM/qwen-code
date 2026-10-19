@@ -9643,6 +9643,8 @@ describe('runQwenServe runtime startup failures', () => {
             tools: {
               workflowsEnabled:
                 workspace === dynamic ? !dynamicReloaded : !runtimeMounted,
+              lspEnabled:
+                workspace === dynamic ? !dynamicReloaded : !runtimeMounted,
             },
             advanced: {
               runtimeOutputDir: isSecondary
@@ -9741,6 +9743,13 @@ describe('runQwenServe runtime startup failures', () => {
         .find((runtime) => runtime.workspaceCwd === secondary);
       expect(secondaryRuntime).toBeDefined();
       const env = secondaryRuntime!.env;
+      // Site 1 of the three runtime constructors: the primary workspace reads
+      // the same setting through its own boot snapshot.
+      const primaryRuntime = workspaceRegistry
+        ?.list()
+        .find((runtime) => runtime.workspaceCwd === primary);
+      expect(primaryRuntime).toBeDefined();
+      expect(primaryRuntime!.env.lspEnabledForSessions).toBe(true);
       const overlayKeys = env.overlayKeys;
       const envFilePaths = env.envFilePaths;
       const envFileReadFailures = env.envFileReadFailures;
@@ -9754,6 +9763,7 @@ describe('runQwenServe runtime startup failures', () => {
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(env.workflowsEnabledBySettings).toBe(true);
+      expect(env.lspEnabledForSessions).toBe(true);
 
       await expect(
         secondaryRuntime!.workspaceService.reload({
@@ -9772,17 +9782,20 @@ describe('runQwenServe runtime startup failures', () => {
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(env.workflowsEnabledBySettings).toBe(false);
+      expect(env.lspEnabledForSessions).toBe(false);
 
       const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
         provenance: 'existing',
       });
       expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(true);
+      expect(dynamicRuntime.env.lspEnabledForSessions).toBe(true);
       dynamicReloaded = true;
       await dynamicRuntime.workspaceService.reload({
         route: 'POST /workspace/reload',
         workspaceCwd: dynamic,
       });
       expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(false);
+      expect(dynamicRuntime.env.lspEnabledForSessions).toBe(false);
 
       providerRuntimeMutation = true;
       await expect(

@@ -46,11 +46,16 @@ export interface ManagedCompatibilityRuntime {
   readonly forwardedArgs: readonly string[];
   /**
    * Whether this runtime's sessions resolve LSP on, from the flag, the
-   * user/system-scope setting or the env pair — the same resolution the session
-   * itself makes. `forwardedArgs` cannot carry it: a host that builds its own
-   * argv (the Desktop client) never passes the flag, and a child inherits the
-   * daemon's environment, so the language servers spawn under the user's
-   * permissions either way.
+   * user/system-scope setting or the env pair. This is a conservative
+   * runtime-level over-approximation: the daemon does not know each host's
+   * own host-mode terms (read-only agent host, SSH workspace, provisional
+   * workspace, bare and safe mode), so a runtime that would refuse LSP there
+   * still reports on. Over-reporting is the fail-safe direction — it defers a
+   * session that could have run rather than certifying one that starts
+   * language servers. `forwardedArgs` cannot carry the answer either: a host
+   * that builds its own argv (the Desktop client) never passes the flag, and a
+   * child inherits the daemon's environment, so the language servers spawn
+   * under the user's permissions either way.
    */
   readonly lspEnabledForSessions: boolean;
   /**
@@ -95,16 +100,19 @@ export async function evaluateManagedCompatibility(
   if (!sameWorkspace) {
     return deferredResult('the session directory is not the runtime workspace');
   }
-  if (
-    runtime.lspEnabledForSessions ||
-    runtime.forwardedArgs.includes('--experimental-lsp')
-  ) {
+  if (runtime.lspEnabledForSessions) {
     return deferredResult('the daemon enables LSP for its sessions');
   }
   if (runtime.forwardedArgs.includes('--restore-ask-user-question')) {
     return deferredResult('the daemon restores unanswered user questions');
   }
-  if (runtime.forwardedArgs.length > 0) {
+  // A forwarded `--experimental-lsp` is already accounted for above: it feeds
+  // `lspEnabledForSessions`, which also applies the kill switch, so the flag
+  // is a known argument rather than an unclassifiable one.
+  if (
+    runtime.forwardedArgs.filter((arg) => arg !== '--experimental-lsp').length >
+    0
+  ) {
     return unknownResult(
       'the daemon forwards an argument the evaluation does not know',
     );

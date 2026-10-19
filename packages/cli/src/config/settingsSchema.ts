@@ -3381,7 +3381,7 @@ const SETTINGS_SCHEMA = {
       lspEnabled: {
         type: 'boolean',
         label: 'LSP Code Intelligence',
-        category: 'Tools',
+        category: 'Experimental',
         // The native LSP service and its language-server subprocesses are built
         // while the Config is constructed, and /lsp is gated when commands
         // load, so a mid-session change cannot attach a client to a session
@@ -3389,7 +3389,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable the LSP (Language Server Protocol) code-intelligence service without the `--experimental-lsp` flag: go-to-definition, find-references, hover, symbols, diagnostics and code actions. Off by default. Servers still start only for a language declared by a trusted workspace `.lsp.json` or by an enabled extension, and they run with your user permissions. The QWEN_CODE_ENABLE_LSP=1 and QWEN_CODE_DISABLE_LSP=1 environment variables override this setting (disable wins).',
+          "Experimental. Enable the LSP (Language Server Protocol) code-intelligence service without the `--experimental-lsp` flag: go-to-definition, find-references, hover, symbols, diagnostics and code actions. Off by default. Servers run with your user permissions and only a workspace `.lsp.json` or an enabled extension declares them. Those servers start in any folder you open unless `security.folderTrust.enabled` is on; with it on, an untrusted folder's servers are skipped. The QWEN_CODE_ENABLE_LSP=1 and QWEN_CODE_DISABLE_LSP=1 environment variables override this setting (disable wins).",
         showInDialog: true,
       },
       workflowSizeGuideline: {

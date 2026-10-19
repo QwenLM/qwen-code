@@ -389,9 +389,9 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 //
 // Known adjacent surface: LSP `.lsp.json` env overrides carry their own
 // narrower denylist (`SECURITY_SENSITIVE_ENV_KEYS` in
-// core/lsp/LspServerManager.ts — missing BASH_ENV/ENV/npm_config_node_options).
-// Unifying the two lists is deferred: the LSP surface is experimental
-// (behind --experimental-lsp) and its keys were chosen independently.
+// core/lsp/lsp-server-manager.ts — missing BASH_ENV/ENV/npm_config_node_options).
+// Unifying the two lists is deferred: the LSP surface stays opt-in and
+// experimental, and its keys were chosen independently.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
   // npm maps its `node-options` config onto npm_config_node_options in the
