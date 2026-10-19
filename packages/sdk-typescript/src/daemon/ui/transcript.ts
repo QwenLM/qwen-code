@@ -1700,13 +1700,15 @@ function appendUnrecognizedDiagnostic(
 }
 
 /**
- * An inter-teammate message is a discrete event, not latest-state progress:
- * two messages between the same pair carry different text and these frames are
- * never persisted, so merging them loses the earlier one for good. Tool frames
+ * An inter-teammate message or a failed tool result is a discrete event, not
+ * latest-state progress: two messages between the same pair carry different
+ * text, and a failure is an outcome rather than a phase, while these frames are
+ * never persisted, so merging either loses it for good. Ordinary tool frames
  * stay coalesced, which is what protects the `maxBlocks` budget below.
  */
-function isTeammateMessageFrame(data: unknown): boolean {
-  return (data as { status?: unknown } | undefined)?.status === 'message';
+function isDiscreteTeammateFrame(data: unknown): boolean {
+  const status = (data as { status?: unknown } | undefined)?.status;
+  return status === 'message' || status === 'failed';
 }
 
 /**
@@ -1724,7 +1726,7 @@ function coalesceTeammateActivity(
   }
   const agentName = event.agent?.agentName;
   if (!agentName) return false;
-  if (isTeammateMessageFrame(event.data)) return false;
+  if (isDiscreteTeammateFrame(event.data)) return false;
   for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
     const candidate = state.blocks[i]!;
     // Stop at a segment boundary: a row above it keeps the text the reader saw
@@ -1735,7 +1737,7 @@ function coalesceTeammateActivity(
     if (
       candidate.source !== 'teammate_activity' ||
       candidate.agent?.agentName !== agentName ||
-      isTeammateMessageFrame(candidate.data)
+      isDiscreteTeammateFrame(candidate.data)
     ) {
       continue;
     }

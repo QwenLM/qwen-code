@@ -549,6 +549,39 @@ describe('teammate_activity status events', () => {
     ]);
   });
 
+  it('keeps a failed tool row instead of letting the next call overwrite it', () => {
+    // A failure is an outcome, not a phase, and the system row renders it as
+    // one; the teammate's next call frame carries the same identity and these
+    // frames are never persisted, so merging it would lose the failure.
+    const frame = (text: string, status: string): DaemonUiEvent => ({
+      type: 'status',
+      source: 'teammate_activity',
+      text,
+      data: { status },
+      agent: { agentName: '/root/qa', depth: 1, kind: 'teammate' as const },
+      clearActiveText: false,
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        frame('qa failed read_file', 'failed'),
+        frame('qa started write_file', 'call'),
+      ],
+      { now: 1 },
+    );
+
+    const rows = state.blocks.filter(
+      (block) =>
+        block.kind === 'status' && block.source === 'teammate_activity',
+    );
+    expect(rows.map((block) => ('text' in block ? block.text : ''))).toEqual([
+      'qa failed read_file',
+      'qa started write_file',
+    ]);
+    expect(rows[0]).toMatchObject({ data: { status: 'failed' } });
+  });
+
   it('appends a separate row when the activity carries no identity', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
