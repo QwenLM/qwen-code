@@ -12,6 +12,7 @@ import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.text;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.utf8;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.uuid;
 
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -253,7 +254,9 @@ final class CsiNativeToolReservation {
         require(original != null && prefix.input() != null && prefix.pendingBatch() != null);
         var batch = prefix.batches().get(prefix.pendingBatch().messageId());
         require(batch != null && batch.promptId().equals(prefix.input().inputId())
-                && batch.batch().equals(prefix.pendingBatch()));
+                && batch.batch().messageId().equals(prefix.pendingBatch().messageId())
+                && batch.batch().contentRef().equals(prefix.pendingBatch().contentRef())
+                && batch.batch().calls().equals(prefix.pendingBatch().calls()));
         qualify(original, batch, execution, inputBytes, definitionBytes);
     }
 
@@ -310,6 +313,21 @@ final class CsiNativeToolReservation {
     record Content(ObjectNode normalized, String digest) {
     }
 
+    static String refusalReason(RuntimeProvisionRequest original, CsiNativeActivationProof.FunctionCall call) {
+        ObjectNode input;
+        try {
+            input = normalizedInput(call.name(), call.args());
+        } catch (RuntimeBrokerException | WorkspaceException | IllegalArgumentException invalid) {
+            return "CSI file input is invalid.";
+        }
+        ObjectNode payload = JSON.createObjectNode().put("toolName", call.name());
+        payload.set("input", input);
+        ObjectNode wrapper = JSON.createObjectNode().put("harnessSessionId", original.getIsolationKey())
+                .put("runtimeSessionId", original.getIsolationKey()).put("payloadJson", canonical(payload));
+        return utf8(canonical(wrapper)).length > 64 * 1024
+                ? "CSI file input exceeds the durable Session limit." : null;
+    }
+
     static Content content(RuntimeProvisionRequest original, CsiNativeActivationProof.FunctionCall call,
             byte[] inputBytes, byte[] definitionBytes) {
         require(inputBytes != null && inputBytes.length <= 64 * 1024
@@ -359,6 +377,7 @@ final class CsiNativeToolReservation {
         require(!args.has("replace_all") || args.path("replace_all").isBoolean());
         ObjectNode result = args.deepCopy();
         result.put("file_path", WorkspaceRelativePath.normalize(trim(args.path("file_path").textValue())));
+        require(!".".equals(result.path("file_path").textValue()));
         return result;
     }
 

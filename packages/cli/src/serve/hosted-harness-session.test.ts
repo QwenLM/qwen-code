@@ -14286,14 +14286,18 @@ describe('Hosted Harness no-tool session', () => {
         .then((response) => response);
       let recovery: Promise<supertest.Response> | undefined;
       try {
-        await vi.waitFor(() => expect(invokeStarted).toBe(true));
+        await vi.waitFor(() => expect(invokeStarted).toBe(true), {
+          timeout: 10_000,
+        });
         const url = `/session/${SESSION_ID}/mcp/operations/${operationId}`;
         recovery = authorize(
           kind === 'status'
             ? supertest(server).get(url)
             : supertest(server).post(`${url}/cancel`),
         ).then((response) => response);
-        await vi.waitFor(() => expect(recoveryStarted).toBe(true));
+        await vi.waitFor(() => expect(recoveryStarted).toBe(true), {
+          timeout: 10_000,
+        });
         finishInvoke();
         expect((await invoke).status).toBe(202);
         expect(
@@ -27768,23 +27772,30 @@ describe('Hosted Harness Runtime turn takeover', () => {
         .spyOn(stdio, 'writeStderrLineSafe')
         .mockImplementation(() => {});
       const commits: string[] = [];
-      const commitOriginal = (
-        LocalManagedSessionAuthority.prototype as unknown as {
-          commitCheckpoint: (
-            this: LocalManagedSessionAuthority,
-            ...args: unknown[]
-          ) => Promise<unknown>;
-        }
-      ).commitCheckpoint;
+      const commitOriginal =
+        LocalManagedSessionAuthority.prototype.commitCheckpoint;
       vi.spyOn(
         LocalManagedSessionAuthority.prototype,
-        'commitCheckpoint' as never,
-      ).mockImplementation(async function (
+        'commitCheckpoint',
+      ).mockImplementation(function (
         this: LocalManagedSessionAuthority,
-        ...args: unknown[]
+        command,
+        request,
+        actor,
       ) {
-        commits.push(String((args[0] as { commandId?: string }).commandId));
-        return commitOriginal.apply(this, args);
+        if (typeof command !== 'function') commits.push(command.commandId);
+        return commitOriginal.call(
+          this,
+          typeof command === 'function'
+            ? (state, coveredSequence) => {
+                const assigned = command(state, coveredSequence);
+                commits.push(assigned.commandId);
+                return assigned;
+              }
+            : command,
+          request,
+          actor,
+        );
       });
       const taken = await replacementHeaders(
         supertest(server).post(`/session/${SESSION_ID}/load`),

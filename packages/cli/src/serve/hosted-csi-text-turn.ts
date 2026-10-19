@@ -5,21 +5,33 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { Part } from '@google/genai';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   runHostedHarnessTextTurn,
   type HostedHarnessModelResult,
 } from './hosted-harness-model.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
+import {
+  HostedCsiToolTurn,
+  type HostedCsiTurnCommit,
+} from './hosted-csi-tool-turn.js';
+import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
+import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 
 export interface HostedCsiTextSession {
   managed: ManagedSession;
   cwd: string;
+  files?: {
+    broker: HostedWorkspaceBrokerOptions;
+    runtime: { bindingId: string; generation: string };
+  };
 }
 
 export async function runHostedCsiTextTurn(
@@ -28,7 +40,7 @@ export async function runHostedCsiTextTurn(
   text: string,
   abort: AbortController,
 ): Promise<ChatRecord> {
-  const { managed, cwd } = session;
+  const { managed, cwd, files } = session;
   const authority = managed.authority;
   const sessionId = authority.sessionHeader.sessionKey.sessionId;
   const harness = createManagedHarnessHandle(managed);
@@ -75,9 +87,51 @@ export async function runHostedCsiTextTurn(
         });
         await managed.sink.write(user);
         const deltas = new HostedTextDeltaStream(managed, promptId);
+        let parentUuid = user.uuid;
+        const messageRecord = (
+          type: 'assistant' | 'tool_result',
+          parts: Part[],
+          model: string,
+          identity?: Pick<ChatRecord, 'uuid' | 'timestamp'>,
+        ) =>
+          record(type, parentUuid, {
+            daemonPromptId: promptId,
+            model,
+            message: { role: type === 'assistant' ? 'model' : 'user', parts },
+            ...identity,
+          });
+        const fitsInline = (message: ChatRecord) =>
+          Buffer.byteLength(JSON.stringify(message)) <=
+          HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+        const commit: HostedCsiTurnCommit = async (
+          type,
+          parts,
+          model,
+          identity,
+        ) => {
+          const message = messageRecord(type, parts, model, identity);
+          if (type === 'assistant')
+            message.uuid = deltas.takeMessageId() ?? message.uuid;
+          await managed.sink.write(message);
+          parentUuid = message.uuid;
+          return message.uuid;
+        };
+        const toolTurn = files
+          ? new HostedCsiToolTurn(
+              managed,
+              files.broker,
+              files.runtime,
+              promptId,
+              commit,
+              harness,
+              (type, parts, model) =>
+                fitsInline(messageRecord(type, parts, model)),
+            )
+          : undefined;
         let state: 'completed' | 'error' = 'completed';
         let stopReason = 'end_turn';
         let result: HostedHarnessModelResult | undefined;
+        let finalOutputCommitted = false;
         try {
           result = await runHostedHarnessTextTurn({
             sessionId,
@@ -88,9 +142,25 @@ export async function runHostedCsiTextTurn(
             signal: abort.signal,
             modelScope,
             textDeltas: deltas,
+            ...(toolTurn
+              ? {
+                  toolTurn,
+                  completeFinalOutput: async (attempt, usage, parts, model) => {
+                    const message = messageRecord('assistant', parts, model);
+                    message.uuid = deltas.takeMessageId() ?? message.uuid;
+                    await attempt(true, usage, message);
+                    parentUuid = message.uuid;
+                    finalOutputCommitted = true;
+                  },
+                }
+              : {}),
           });
         } catch (cause) {
-          if (cause instanceof ManagedSessionRecordError) throw cause;
+          if (
+            cause instanceof ManagedSessionRecordError ||
+            cause instanceof HostedToolRecoveryRequiredError
+          )
+            throw cause;
           state = 'error';
           stopReason = state;
           if (!abort.signal.aborted)
@@ -98,18 +168,13 @@ export async function runHostedCsiTextTurn(
               `qwen serve: Private CSI text turn ${promptId} failed: ${String(cause)}`,
             );
         }
-        if (result) {
-          const assistant = record('assistant', user.uuid, {
-            daemonPromptId: promptId,
-            model: result.model,
-            message: {
-              role: 'model',
-              parts: result.parts ?? [{ text: result.text }],
-            },
-          });
-          assistant.uuid = deltas.takeMessageId() ?? assistant.uuid;
-          await managed.sink.write(assistant);
-        }
+        if (result && !finalOutputCommitted)
+          await commit(
+            'assistant',
+            result.parts ?? [{ text: result.text }],
+            result.model,
+          );
+        await toolTurn?.finish();
         turnResult = record('system', null, {
           subtype: 'turn_result',
           systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
