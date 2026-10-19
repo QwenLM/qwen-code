@@ -42,9 +42,9 @@ jobs:
     # job, whose verify step held it for 1h36m in run 39238346243. A sibling
     # hold can therefore outlast the old 60-minute wait; main run
     # 39235911469's Java 21 leg starved the full wait without running a test
-    # (#14794). The wait is two hours; the ceiling adds this leg's ~41
-    # minutes of locked Maven work, ~11 minutes of uncapped setup and
-    # margin: 200.
+    # (#14794). The wait is two hours; the ceiling adds this leg's ~15
+    # minutes of locked Maven work (925 s in job 117729316936), ~11 minutes
+    # of uncapped setup and margin: 200.
     # Hosted lanes never take the lock and inherit this ceiling as a bound.
     timeout-minutes: 200
     strategy:

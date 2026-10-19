@@ -723,10 +723,10 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     );
     // The sibling test job shares the same per-host lock, and a full-tier
     // MySQL verify step held it for 1h36m in run 39238346243. Its ceiling
-    // covers one full 2-hour wait plus its own 41-minute hold and ~11
+    // covers one full 2-hour wait plus its own 925 s Maven hold and ~11
     // minutes of uncapped setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      7200 + 41 * 60 + 11 * 60,
+      7200 + 925 + 11 * 60,
     );
   });
 
