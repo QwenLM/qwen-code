@@ -6627,6 +6627,7 @@ export class Session implements SessionContext {
             }
 
             let parts: Part[] | null;
+            let suppressedHookContext: string | undefined;
             let fullTurnModelOverride: string | undefined;
             const onFullTurnModel = (model: string) => {
               if (fullTurnModelOverride === model) {
@@ -6824,17 +6825,25 @@ export class Session implements SessionContext {
               // to no parts, where the append is the only thing keeping the
               // request non-empty (`toParts` rejects an empty array).
               const additionalContext = hookOutput?.getAdditionalContext();
-              if (
-                additionalContext &&
-                (parts.length === 0 ||
-                  !this.#getCurrentChat().findLastHistoryEntry((entry) =>
+              if (additionalContext) {
+                const alreadyDelivered =
+                  parts.length > 0 &&
+                  this.#getCurrentChat().findLastHistoryEntry((entry) =>
                     hasUserPromptSubmitContext(entry, additionalContext),
-                  ))
-              ) {
-                parts = [
-                  ...parts,
-                  createUserPromptSubmitContextPart(additionalContext),
-                ];
+                  ) !== undefined;
+                if (alreadyDelivered) {
+                  // A compaction inside this send replaces the history entry
+                  // holding the block's only copy; the send re-appends it then.
+                  suppressedHookContext = additionalContext;
+                  debugLogger.debug(
+                    'UserPromptSubmit context already delivered; not appending it again',
+                  );
+                } else {
+                  parts = [
+                    ...parts,
+                    createUserPromptSubmitContextPart(additionalContext),
+                  ];
+                }
               }
             }
 
@@ -7219,6 +7228,7 @@ export class Session implements SessionContext {
                       responseInterrupt.signal,
                       {
                         modelOverride: fullTurnModelOverride,
+                        suppressedHookContext,
                         historyPromptId:
                           turnCount === 1 &&
                           goalTurn?.origin !== 'runtime' &&
@@ -9185,6 +9195,7 @@ export class Session implements SessionContext {
       historyPromptId?: string;
       modelOverride?: string;
       getModelOverride?: () => string | undefined;
+      suppressedHookContext?: string;
       prepareBeforeCompression?: () => Promise<BeforeModelSendDecision>;
       beforeSend?: (
         context: BeforeModelSendContext,
@@ -9230,6 +9241,14 @@ export class Session implements SessionContext {
           // task block (a short reminder refers back to a message that is no
           // longer in context).
           this.loopTickResolver?.resetCache();
+          if (options.suppressedHookContext) {
+            // The compaction replaced the history entry holding the block's
+            // only copy, so the request must carry it on this send.
+            message = [
+              ...message,
+              createUserPromptSubmitContextPart(options.suppressedHookContext),
+            ];
+          }
           const reasonClause =
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`

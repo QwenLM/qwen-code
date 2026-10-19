@@ -4505,6 +4505,25 @@ export class LlmChat {
                         );
                       }
                     }
+
+                    // Same one-copy problem for a suppressed hook block: the
+                    // compaction replaced the history entry that held it.
+                    if (options?.suppressedHookContext) {
+                      const lastContent = self.history.at(-1);
+                      const hookContextPart = createUserPromptSubmitContextPart(
+                        options.suppressedHookContext,
+                      );
+                      if (lastContent?.role === 'user') {
+                        lastContent.parts = [
+                          ...(lastContent.parts ?? []),
+                          hookContextPart,
+                        ];
+                      } else {
+                        self.history.push(
+                          createUserContent([hookContextPart]),
+                        );
+                      }
+                    }
                     requestContents = self.getRequestHistoryForRoute(
                       currentUserContent,
                       requestModalities,

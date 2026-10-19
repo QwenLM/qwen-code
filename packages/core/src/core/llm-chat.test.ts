@@ -69,6 +69,7 @@ import {
 import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
+import { wrapUserPromptSubmitContext } from '../hooks/user-prompt-submit-context.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
   getToolCallPreparations,
@@ -3599,6 +3600,30 @@ describe('LlmChat', async () => {
             entry.parts?.some((part) => part.text?.includes('CTX')),
           ),
       ).toBe(true);
+    });
+
+    it('re-appends a suppressed hook block when a reactive compaction replaces history', async () => {
+      reactiveCompaction(135_000);
+      mockRequests(tooLong(), textStream('answer after compaction'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'prompt-id-hook-reactive-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      const sentParts = (
+        requestAt(1) as { contents: Content[] }
+      ).contents.flatMap((entry) => entry.parts ?? []);
+      expect(
+        sentParts.filter(
+          (part) => part.text === wrapUserPromptSubmitContext('CTX'),
+        ),
+      ).toHaveLength(1);
     });
 
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
