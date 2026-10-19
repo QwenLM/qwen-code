@@ -379,8 +379,12 @@ cat "\${RUNNER_TEMP}/pulls.json"
     // `then` block, since outside it a successful fetch raises an annotation
     // claiming the opposite. `--paginate` rides the same span because this one
     // fetch feeds both projections, so dropping it caps a wide run at page 1.
+    // The slurp merge rides it too: `--paginate` prints one document per page
+    // while the comment helper reads the file with a single JSON.parse, so a
+    // run wider than one page would silently render a comment naming no job
+    // without it.
     expect(download).toContain(
-      'if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate > "${jobs_json}"; then echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}" fi',
+      'if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate | jq -s \'{jobs: [ .[].jobs[]? ]}\' > "${jobs_json}"; then echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}" fi',
     );
     // Counted over the whole workflow: both projections read the file this one
     // fetch wrote, so the payload must be fetched exactly once.

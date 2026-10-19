@@ -126,14 +126,17 @@ jobs:
           log_dir="${RUNNER_TEMP}/failed-logs"
           mkdir -p "${log_dir}"
 
-          # One fetch feeds both projections below. `gh api` writes a non-2xx
-          # body to stdout before exiting non-zero, so an errored call parks its
-          # error JSON here instead of in a projection: both jq passes reject a
-          # body with no `.jobs` and emit nothing, which is the degradation the
+          # One fetch feeds both projections below. `--paginate` prints one
+          # JSON document per page, and the comment helper reads this file
+          # with a single JSON.parse, so the pages merge into one document
+          # here — a run wider than 100 jobs would otherwise render a comment
+          # naming no job. `gh api` writes a non-2xx body to stdout before
+          # exiting non-zero, and that body carries no `.jobs`, so a parked
+          # error normalizes to an empty list: the same degradation the
           # per-commit body already handles.
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
           if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
-            --paginate > "${jobs_json}"; then
+            --paginate | jq -s '{jobs: [ .[].jobs[]? ]}' > "${jobs_json}"; then
             echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}"
           fi
 
