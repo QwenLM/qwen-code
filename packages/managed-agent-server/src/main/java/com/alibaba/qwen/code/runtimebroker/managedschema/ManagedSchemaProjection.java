@@ -120,7 +120,7 @@ public enum ManagedSchemaProjection {
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, recovery_protected, "
                     + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision, "
-                    + "selected_approval_mode, approval_revision"),
+                    + "selected_approval_mode, approval_revision, plan_enabled"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
@@ -130,7 +130,8 @@ public enum ManagedSchemaProjection {
                     + "o3_backfill_through, o3_backfill_error, o3_backfill_pending, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
-                    + "phase, operation_id, claim_generation, claim_lease_until"),
+                    + "phase, operation_id, claim_generation, claim_lease_until, wake_pending, "
+                    + "wake_head_revision, wake_retry_at, wake_scan_pending"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_key_hash, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "
@@ -176,7 +177,7 @@ public enum ManagedSchemaProjection {
                     + "dispatch_lease_until, error_code, error_message, gmt_create, gmt_modified, "
                     + "completed_at, version, retry_count, consecutive_failures, "
                     + "budget_exempt_failures, retry_after, model_id, model_revision, "
-                    + "approval_mode, approval_revision");
+                    + "approval_mode, approval_revision, plan_enabled");
 
     private final String columns;
 

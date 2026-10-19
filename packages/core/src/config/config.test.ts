@@ -6651,6 +6651,26 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it.each([
+      ['deepseek-v4.1-flash-1017', 'qwen3.8-max', true],
+      ['qwen3.8-max', 'deepseek-v4.1-flash-1017', false],
+    ] as const)(
+      'reports reasoning overrides for final %s -> %s',
+      (model, finalModel, tiered) => {
+        const config = maxEffortConfig({
+          model,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          extra_body: { model: finalModel, thinking_budget: 4096 },
+        });
+        expect(config.getReasoningEffortOverride()).toEqual(
+          tiered
+            ? { source: 'extra_body', field: 'thinking_budget' }
+            : undefined,
+        );
+      },
+    );
+
     it('does not report an identical static effort or a non-tiered model', () => {
       const config = maxEffortConfig({
         extra_body: { reasoning_effort: 'max' },
@@ -6914,6 +6934,174 @@ describe('Server Config (config.ts)', () => {
         expect(config.getContentGeneratorConfig().reasoning).toEqual({
           effort: 'high',
         });
+      },
+    );
+
+    it.each([
+      ['https://api.deepseek.com/v1', 'settings'],
+      ['https://api.deepseek.com/v1', 'programmatic'],
+      ['https://api.deepseek.com/v1', 'modelProviders'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'settings'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'programmatic'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'modelProviders'],
+    ] as const)(
+      'preserves only explicit DeepSeek off on %s from %s across refresh and reload',
+      async (baseUrl, kind) => {
+        const actual = await vi.importActual<
+          typeof import('../core/contentGenerator.js')
+        >('../core/contentGenerator.js');
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          actual.resolveContentGeneratorConfigWithSources,
+        );
+        const model = 'deepseek-flash';
+        const source =
+          kind === 'settings'
+            ? { kind, settingsPath: 'model.reasoningEffort' }
+            : kind === 'programmatic'
+              ? { kind, detail: 'reasoning selection' }
+              : {
+                  kind,
+                  authType: AuthType.USE_OPENAI,
+                  modelId: model,
+                  detail: 'generationConfig.reasoning',
+                };
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          generationConfig: { apiKey: 'test-key', baseUrl, reasoning: false },
+          generationConfigSources: { reasoning: source },
+          modelProvidersConfig: {
+            openai: [
+              { id: model, baseUrl, generationConfig: { reasoning: false } },
+            ],
+          },
+        });
+        for (const stage of ['initial', 'refresh', 'reload']) {
+          if (stage === 'reload') {
+            config.reloadModelProvidersConfig({
+              openai: [
+                {
+                  id: model,
+                  baseUrl,
+                  generationConfig: { reasoning: { effort: 'high' } },
+                },
+              ],
+            });
+          }
+          await config.refreshAuth(AuthType.USE_OPENAI, stage === 'initial');
+          const expected =
+            kind === 'modelProviders' && stage === 'reload'
+              ? { effort: 'high' }
+              : false;
+          expect(config.getContentGeneratorConfig().reasoning).toEqual(
+            expected,
+          );
+          expect(
+            config.getModelsConfig().getGenerationConfig().reasoning,
+          ).toEqual(expected);
+          expect(
+            config.getContentGeneratorConfigSources()['reasoning'],
+          ).toMatchObject(source);
+          expect(
+            config.getModelsConfig().getGenerationConfigSources()['reasoning'],
+          ).toMatchObject(source);
+        }
+      },
+    );
+
+    it.each([
+      ['deepseek-v4.1-flash-1017', false],
+      ['gpt-5.4', false],
+      ['deepseek-v4.1-flash-1017', true],
+    ] as const)(
+      'restores explicit reasoning off from %s using final DeepSeek mandatory=%s',
+      async (model, finalMandatory) => {
+        const actual = await vi.importActual<
+          typeof import('../core/contentGenerator.js')
+        >('../core/contentGenerator.js');
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          actual.resolveContentGeneratorConfigWithSources,
+        );
+        const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+        const generationConfig = {
+          apiKey: 'test-key',
+          baseUrl,
+          thinkingMandatory: true,
+          extra_body: { model: 'deepseek-v4-pro' },
+        };
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          generationConfig: { ...generationConfig, reasoning: false },
+          generationConfigSources: {
+            reasoning: { kind: 'programmatic', detail: 'reasoning selection' },
+          },
+          modelProvidersConfig: {
+            openai: [
+              { id: model, baseUrl, generationConfig },
+              {
+                id: 'deepseek-v4-pro',
+                baseUrl,
+                ...(finalMandatory
+                  ? {
+                      capabilities: {
+                        reasoning: {
+                          thinking: true,
+                          efforts: ['high', 'max'],
+                          defaultEffort: 'high',
+                          disableField: 'enable_thinking',
+                          canDisable: false,
+                        },
+                      },
+                    }
+                  : {}),
+              },
+            ],
+          },
+        });
+        for (const initial of [true, false]) {
+          await config.refreshAuth(AuthType.USE_OPENAI, initial);
+          expect(config.getContentGeneratorConfig().reasoning).toBe(
+            finalMandatory ? undefined : false,
+          );
+          expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+            finalMandatory ? undefined : false,
+          );
+        }
+      },
+    );
+
+    it.each([
+      { model: 'deepseek-v4-pro' },
+      { authType: AuthType.USE_ANTHROPIC },
+      { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+      { thinkingMandatory: true },
+    ])(
+      'does not restore explicit DeepSeek off onto a changed route or mandatory profile %j',
+      async (changed) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'deepseek-flash',
+          generationConfig: {
+            baseUrl: 'https://api.deepseek.com/v1',
+            reasoning: false,
+          },
+          generationConfigSources: {
+            reasoning: {
+              kind: 'settings',
+              settingsPath: 'model.reasoningEffort',
+            },
+          },
+        });
+        resolveGeneratorTo({
+          model: 'deepseek-flash',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'test-key',
+          baseUrl: 'https://api.deepseek.com/v1',
+          ...changed,
+        });
+        await config.refreshAuth(changed.authType ?? AuthType.USE_OPENAI, true);
+        expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
       },
     );
 

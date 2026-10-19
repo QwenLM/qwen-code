@@ -22,6 +22,7 @@ import {
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import {
   createHttpManagedSessionStores,
   ManagedSessionStoreHttpError,
@@ -35,7 +36,11 @@ import {
   type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
-import { HostedHookSession } from './hosted-hook-session.js';
+import {
+  HostedHookSession,
+  hostedHookOccurrenceId,
+} from './hosted-hook-session.js';
+import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import {
   HOSTED_TEAM_TOOLS,
   HOSTED_TEAM_PLAN_TOOL,
@@ -75,6 +80,7 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import * as hostedPlan from './hosted-plan-mode.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -187,6 +193,7 @@ function createTurn(
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
   hooks?: HostedHookSession,
   skills?: HostedSkillCatalog,
+  planMode: 'none' | 'public' | 'member' = 'none',
 ) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -206,7 +213,13 @@ function createTurn(
       },
       waiters,
     },
-    { hooks, skills },
+    {
+      hooks,
+      skills,
+      publicPlanMode: planMode === 'public',
+      memberPlanMode: planMode === 'member',
+      ...(planMode === 'public' ? { profile: 'hosted-workspace-files/1' } : {}),
+    },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -326,44 +339,55 @@ const publishedSkills = () =>
     },
   ]);
 
-it('loads a published static Skill durably without Runtime execution or approval', async () => {
-  const skills = publishedSkills();
-  turn = createTurn(false, { mode: 'default' }, undefined, skills);
-  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
-  const original: Part[] = [
-    { functionCall: { id: call.callId, name: call.name, args: call.args } },
-  ];
-  expect(await turn.declarations(new AbortController().signal)).toContainEqual(
-    skills.declaration(),
-  );
-  const responses = await turn.execute(
-    [call],
-    original,
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['output']).toBe(
-    skills.response(call.args),
-  );
-  const history = await session.sink.project();
-  expect(history.map((entry) => entry.type)).toEqual([
-    'assistant',
-    'tool_result',
-  ]);
-  expect(history[1].message?.parts).toEqual(responses);
-  expect(broker.acquire).not.toHaveBeenCalled();
-  expect(broker.prepare).not.toHaveBeenCalled();
-  expect(broker.execute).not.toHaveBeenCalled();
-  expect(
-    session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
-      .some((event) => event.kind === 'action.changed'),
-  ).toBe(false);
-  await turn.finish();
-  const reloaded = createTurn(false, undefined, undefined, skills);
-  await reloaded.resumeCommittedResults(new AbortController().signal);
-  expect(broker.acquire).not.toHaveBeenCalled();
-});
+it.each(['none', 'public', 'member'] as const)(
+  'loads a published static Skill durably without Runtime execution or approval (Plan: %s)',
+  async (planMode) => {
+    if (planMode === 'public')
+      vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+    const skills = publishedSkills();
+    turn = createTurn(false, { mode: 'default' }, undefined, skills, planMode);
+    const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+    const original: Part[] = [
+      { functionCall: { id: call.callId, name: call.name, args: call.args } },
+    ];
+    expect(
+      await turn.declarations(new AbortController().signal),
+    ).toContainEqual(skills.declaration());
+    if (planMode === 'public')
+      expect(await turn.declarations(new AbortController().signal)).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'write_file' }),
+        ]),
+      );
+    const responses = await turn.execute(
+      [call],
+      original,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['output']).toBe(
+      skills.response(call.args),
+    );
+    const history = await session.sink.project();
+    expect(history.map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[1].message?.parts).toEqual(responses);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .some((event) => event.kind === 'action.changed'),
+    ).toBe(false);
+    await turn.finish();
+    const reloaded = createTurn(false, undefined, undefined, skills);
+    await reloaded.resumeCommittedResults(new AbortController().signal);
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
 
 it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
   const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
@@ -5268,6 +5292,572 @@ it.each([
     ]);
   },
 );
+
+// A real HostedHookSession over this Session's durable records; only the
+// Hook Runtime's control channel is scripted, one command Hook per event.
+// The `oversized` event's Hook takes the message history, which is too large
+// to send, so its plan keeps only the digest of its input.
+function durableHooks(
+  outputs: Partial<
+    Record<HookEventName, (input: Record<string, unknown>) => unknown>
+  >,
+  oversized?: HookEventName,
+) {
+  const pin = {
+    catalogId: 'recorded-input',
+    catalogRevision: 1,
+    definitionDigest: 'a'.repeat(64),
+  };
+  const seen: Array<{ event: string; input: Record<string, unknown> }> = [];
+  const hookControl = vi.fn<HostedWorkspaceBroker['hookControl']>(
+    async (operation) => {
+      if (operation.kind === 'hook-catalog')
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          catalog: {
+            ...pin,
+            hooks: Object.keys(outputs).map((eventName) => ({
+              hookId: eventName,
+              eventName: eventName as HookEventName,
+              sequential: false,
+              async: false,
+              failClosed: true,
+              onceKey: null,
+              config: {
+                type:
+                  eventName === oversized
+                    ? ('function' as const)
+                    : ('command' as const),
+              },
+            })),
+          },
+        };
+      if (operation.kind !== 'hook-execute')
+        throw new Error(`Unexpected ${operation.kind}`);
+      const input = operation.input as unknown as Record<string, unknown>;
+      seen.push({ event: operation.hookId, input });
+      const output = outputs[operation.hookId as HookEventName]?.(input);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        result: {
+          success: true,
+          outcome: 'success',
+          duration: 0,
+          ...(output === undefined
+            ? {}
+            : { output: output as Record<string, unknown> }),
+        },
+      };
+    },
+  );
+  const hookBroker = {
+    ...broker,
+    runtimeSessionId: 'prompt',
+    runtime: {
+      bindingId: 'binding',
+      generation: '1',
+      workspaceGeneration: '1',
+    },
+    hookControl,
+  } as unknown as HostedWorkspaceBroker;
+  const create = () => {
+    const hooks = new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      pin,
+      hookBroker,
+    );
+    hooks.setMessagesProvider(() => [
+      { text: 'x'.repeat(8 * 1024 * 1024 + 1) },
+    ]);
+    return hooks;
+  };
+  return { create, seen };
+}
+
+// A saved occurrence as the Session holds it: its marker, plan and result.
+async function savedHook(event: HookEventName, occurrenceId: string) {
+  const marker = session.authority.extensionRecord(
+    'hook_execution',
+    hostedHookOccurrenceId(event, occurrenceId),
+  )!;
+  const record = parseHookExecution(marker.record);
+  const read = async (ref: ManagedSessionDurableRef) =>
+    JSON.parse((await session.resources.read(ref)).toString()) as Record<
+      string,
+      unknown
+    >;
+  return {
+    marker,
+    plan: await read(record.planRef),
+    result: record.resultRef ? await read(record.resultRef) : undefined,
+  };
+}
+
+const editA = calls[1].args;
+const editB = { ...editA, file_path: 'b.txt' };
+const editC = { ...editA, file_path: 'c.txt' };
+const permitB = () => ({
+  hookSpecificOutput: {
+    hookEventName: HookEventName.PermissionRequest,
+    decision: { behavior: 'allow', updatedInput: editB },
+  },
+});
+const reportedInputs = (hit: { input: Record<string, unknown> } | undefined) =>
+  (hit?.input['tool_calls'] as Array<Record<string, unknown>>).map(
+    (call) => call['tool_input'],
+  );
+
+it.each([
+  {
+    name: 'deny',
+    output: {
+      hookSpecificOutput: { permissionDecision: 'deny', updatedInput: editC },
+    },
+  },
+  {
+    name: 'block',
+    output: {
+      decision: 'block',
+      hookSpecificOutput: { permissionDecision: 'ask', updatedInput: editC },
+    },
+  },
+  {
+    name: 'stop',
+    output: { continue: false, hookSpecificOutput: { updatedInput: editC } },
+  },
+])(
+  'reports the input PreToolUse ran on when its $name carries a replacement',
+  async ({ output }) => {
+    const { create, seen } = durableHooks({
+      [HookEventName.PermissionRequest]: permitB,
+      [HookEventName.PreToolUse]: () => output,
+      [HookEventName.PostToolBatch]: () => undefined,
+    });
+    turn = createTurn(false, { mode: 'default' }, create());
+    const signal = new AbortController().signal;
+    const responses = await turn.execute(
+      [calls[1]],
+      [parts[1]],
+      'model',
+      signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBeTruthy();
+    expect(seen.map(({ event }) => event)).toEqual([
+      HookEventName.PermissionRequest,
+      HookEventName.PreToolUse,
+      HookEventName.PostToolBatch,
+    ]);
+    expect(seen[1].input['tool_input']).toEqual(editB);
+    expect(reportedInputs(seen[2])).toEqual([editB]);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const pre = await savedHook(
+      HookEventName.PreToolUse,
+      `prompt:${calls[1].callId}`,
+    );
+    expect(pre.result).toMatchObject({
+      output: { hookSpecificOutput: { updatedInput: editC } },
+    });
+    const history = await session.sink.project();
+    await expect(
+      createTurn(false, { mode: 'default' }, create()).resumeHookResults(
+        responses,
+        'model',
+        signal,
+      ),
+    ).resolves.toEqual(responses);
+    expect(seen).toHaveLength(3);
+    expect(await session.sink.project()).toEqual(history);
+    expect(
+      await savedHook(HookEventName.PreToolUse, `prompt:${calls[1].callId}`),
+    ).toEqual(pre);
+  },
+);
+
+it.each([null, 'text', ['x'], 0, false])(
+  'reports the input that ran when a PreToolUse replacement is not an object (%j)',
+  async (updatedInput) => {
+    const { create, seen } = durableHooks({
+      [HookEventName.PermissionRequest]: permitB,
+      [HookEventName.PreToolUse]: () => ({
+        hookSpecificOutput: { updatedInput },
+      }),
+      [HookEventName.PostToolUse]: () => undefined,
+      [HookEventName.PostToolBatch]: () => undefined,
+    });
+    turn = createTurn(false, { mode: 'default' }, create());
+    await turn.execute(
+      [calls[1]],
+      [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toMatchObject(
+      editB,
+    );
+    expect(seen.map(({ event }) => event)).toEqual([
+      HookEventName.PermissionRequest,
+      HookEventName.PreToolUse,
+      HookEventName.PostToolUse,
+      HookEventName.PostToolBatch,
+    ]);
+    expect(seen[2].input['tool_input']).toEqual(editB);
+    expect(reportedInputs(seen[3])).toEqual([editB]);
+  },
+);
+
+it('reports each call of a batch with the input its PreToolUse decision left', async () => {
+  const replaced = { ...editA, new_string: 'replaced' };
+  const { create, seen } = durableHooks({
+    [HookEventName.PreToolUse]: (input) => ({
+      hookSpecificOutput:
+        input['tool_use_id'] === calls[0].callId
+          ? {
+              permissionDecision: 'deny',
+              updatedInput: { file_path: 'denied.txt' },
+            }
+          : { updatedInput: replaced },
+    }),
+    [HookEventName.PostToolUse]: () => undefined,
+    [HookEventName.PostToolBatch]: () => undefined,
+  });
+  turn = createTurn(false, { mode: 'yolo' }, create());
+  const responses = await turn.execute(
+    calls,
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBeTruthy();
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toMatchObject(
+    replaced,
+  );
+  expect(
+    seen
+      .filter(({ event }) => event === HookEventName.PostToolUse)
+      .map(({ input }) => input['tool_input']),
+  ).toEqual([replaced]);
+  expect(
+    reportedInputs(
+      seen.find(({ event }) => event === HookEventName.PostToolBatch),
+    ),
+  ).toEqual([calls[0].args, replaced]);
+});
+
+it('reports the Skill a PreToolUse ask left in place, never the replacement it asked about', async () => {
+  const { create, seen } = durableHooks({
+    [HookEventName.PreToolUse]: () => ({
+      hookSpecificOutput: {
+        permissionDecision: 'ask',
+        updatedInput: { skill: 'testing' },
+      },
+    }),
+    [HookEventName.PostToolBatch]: () => undefined,
+  });
+  turn = createTurn(false, { mode: 'default' }, create(), publishedSkills());
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBe(
+    HOSTED_SKILL_APPROVAL_REFUSAL,
+  );
+  expect(seen.map(({ event }) => event)).toEqual([
+    HookEventName.PreToolUse,
+    HookEventName.PostToolBatch,
+  ]);
+  expect(reportedInputs(seen[1])).toEqual([call.args]);
+});
+
+it('reads an oversized PreToolUse input back through its PermissionRequest record', async () => {
+  const { create, seen } = durableHooks(
+    {
+      [HookEventName.PermissionRequest]: permitB,
+      [HookEventName.PreToolUse]: () => undefined,
+      [HookEventName.PostToolBatch]: () => undefined,
+    },
+    HookEventName.PreToolUse,
+  );
+  turn = createTurn(false, { mode: 'default' }, create());
+  const responses = await turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toContain(
+    '60 KiB',
+  );
+  expect(seen.map(({ event }) => event)).toEqual([
+    HookEventName.PermissionRequest,
+    HookEventName.PostToolBatch,
+  ]);
+  expect(reportedInputs(seen[1])).toEqual([editB]);
+  expect(broker.execute).not.toHaveBeenCalled();
+  const { plan } = await savedHook(
+    HookEventName.PreToolUse,
+    `prompt:${calls[1].callId}`,
+  );
+  expect(plan['refusedInputDigest']).toEqual(expect.any(String));
+  expect(plan['input']).not.toHaveProperty('tool_input');
+});
+
+it('refuses to guess an oversized PreToolUse input no saved record reproduces', async () => {
+  const { create, seen } = durableHooks(
+    {
+      [HookEventName.PreToolUse]: () => undefined,
+      [HookEventName.PostToolBatch]: () => undefined,
+    },
+    HookEventName.PreToolUse,
+  );
+  const signal = new AbortController().signal;
+  await commit('assistant', [parts[1]], 'model');
+  // PreToolUse ran on a replacement whose PermissionRequest record is gone.
+  await create().fire(
+    HookEventName.PreToolUse,
+    `prompt:${calls[1].callId}`,
+    {
+      tool_name: calls[1].name,
+      tool_input: editB,
+      tool_use_id: calls[1].callId,
+      permission_mode: 'default',
+      prompt_id: 'prompt',
+    },
+    signal,
+  );
+  const refused = convertToFunctionErrorResponse(
+    calls[1].name,
+    calls[1].callId,
+    [],
+    'Hook data exceeds the 60 KiB resource or 8 MiB control/transaction limit.',
+  );
+  await commit('tool_result', refused, 'model');
+  const history = await session.sink.project();
+  await expect(
+    createTurn(false, { mode: 'default' }, create()).resumeHookResults(
+      refused,
+      'model',
+      signal,
+    ),
+  ).rejects.toMatchObject({
+    cause: 'PreToolUse record does not match its tool call.',
+  });
+  expect(seen).toEqual([]);
+  expect(await session.sink.project()).toEqual(history);
+});
+
+// Saves what an earlier release left of a refused call: PermissionRequest
+// replaced A with B, PreToolUse denied B with a replacement C, and the
+// refusal was committed. That release then reported C in the Batch.
+async function saveRefusedCall(oversized: boolean) {
+  const { create, seen } = durableHooks(
+    {
+      [HookEventName.PermissionRequest]: permitB,
+      [HookEventName.PreToolUse]: () => ({
+        hookSpecificOutput: { permissionDecision: 'deny', updatedInput: editC },
+      }),
+      [HookEventName.PostToolBatch]: () => ({
+        hookSpecificOutput: { additionalContext: 'batch reviewed' },
+      }),
+    },
+    oversized ? HookEventName.PostToolBatch : undefined,
+  );
+  const hooks = create();
+  const signal = new AbortController().signal;
+  const occurrence = `prompt:${calls[1].callId}`;
+  await commit('assistant', [parts[1]], 'model');
+  await hooks.fire(
+    HookEventName.PermissionRequest,
+    occurrence,
+    {
+      tool_name: calls[1].name,
+      tool_input: editA,
+      tool_use_id: calls[1].callId,
+      prompt_id: 'prompt',
+    },
+    signal,
+  );
+  await hooks.fire(
+    HookEventName.PreToolUse,
+    occurrence,
+    {
+      tool_name: calls[1].name,
+      tool_input: editB,
+      tool_use_id: calls[1].callId,
+      permission_mode: 'default',
+      prompt_id: 'prompt',
+    },
+    signal,
+  );
+  const refused = convertToFunctionErrorResponse(
+    calls[1].name,
+    calls[1].callId,
+    [],
+    'No reason provided',
+  );
+  await commit('tool_result', refused, 'model');
+  const batch = (call: Record<string, unknown>) => ({
+    tool_calls: [
+      {
+        tool_name: calls[1].name,
+        tool_input: editC,
+        tool_use_id: calls[1].callId,
+        status: 'error',
+        tool_response: refused[0].functionResponse!.response,
+        ...call,
+      },
+    ],
+    permission_mode: 'default',
+    prompt_id: 'prompt',
+  });
+  return { create, seen, hooks, signal, occurrence, refused, batch };
+}
+
+async function toolResultParts(): Promise<Part[]> {
+  return (await session.sink.project())
+    .filter((entry) => entry.type === 'tool_result')
+    .flatMap((entry) => entry.message?.parts ?? []);
+}
+
+it.each([false, true])(
+  'replays a Batch an earlier release saved on a refused replacement (oversized: %s)',
+  async (oversized) => {
+    const { create, seen, hooks, signal, occurrence, refused, batch } =
+      await saveRefusedCall(oversized);
+    await hooks.fire(
+      HookEventName.PostToolBatch,
+      occurrence,
+      batch({}),
+      signal,
+    );
+    const saved = await savedHook(HookEventName.PostToolBatch, occurrence);
+    if (oversized) {
+      expect(saved.plan['refusedInputDigest']).toEqual(expect.any(String));
+      expect(saved.plan['input']).not.toHaveProperty('tool_calls');
+    } else expect(saved.plan['input']).toMatchObject(batch({}));
+    const dispatched = seen.length;
+    const before = await session.sink.project();
+    for (const attempt of [1, 2]) {
+      const restored = createTurn(false, { mode: 'default' }, create());
+      expect(
+        await restored.resumeHookResults(
+          await toolResultParts(),
+          'model',
+          signal,
+        ),
+        `attempt ${attempt}`,
+      ).toEqual(oversized ? refused : [...refused, { text: 'batch reviewed' }]);
+      if (oversized) expect(restored.hookStopReason).toContain('60 KiB');
+      expect(seen).toHaveLength(dispatched);
+    }
+    expect(await savedHook(HookEventName.PostToolBatch, occurrence)).toEqual(
+      saved,
+    );
+    expect(
+      (await session.sink.project())
+        .filter((entry) => !before.some((record) => record.uuid === entry.uuid))
+        .map((entry) => entry.message?.parts),
+    ).toEqual(oversized ? [] : [[{ text: 'batch reviewed' }]]);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  { name: 'the model input', call: { tool_input: editA } },
+  { name: 'another call id', call: { tool_use_id: 'other-call' } },
+  { name: 'another status', call: { status: 'success' } },
+  { name: 'another response', call: { tool_response: { output: 'ran' } } },
+])(
+  'keeps an oversized saved Batch planned for $name in recovery',
+  async ({ call }) => {
+    const { create, seen, hooks, signal, occurrence, refused, batch } =
+      await saveRefusedCall(true);
+    await hooks.fire(
+      HookEventName.PostToolBatch,
+      occurrence,
+      batch(call),
+      signal,
+    );
+    const saved = await savedHook(HookEventName.PostToolBatch, occurrence);
+    expect(saved.plan['refusedInputDigest']).toEqual(expect.any(String));
+    const dispatched = seen.length;
+    const history = await session.sink.project();
+    await expect(
+      createTurn(false, { mode: 'default' }, create()).resumeHookResults(
+        refused,
+        'model',
+        signal,
+      ),
+    ).rejects.toThrow('Hook occurrence input conflict');
+    expect(seen).toHaveLength(dispatched);
+    expect(await session.sink.project()).toEqual(history);
+    expect(await savedHook(HookEventName.PostToolBatch, occurrence)).toEqual(
+      saved,
+    );
+  },
+);
+
+it('replays a PostToolUse an earlier release saved on an unusable replacement and plans the Batch on the input that ran', async () => {
+  const { create, seen } = durableHooks({
+    [HookEventName.PreToolUse]: () => ({
+      hookSpecificOutput: { updatedInput: 'text' },
+    }),
+    [HookEventName.PostToolUse]: () => ({
+      hookSpecificOutput: { additionalContext: 'after tool' },
+    }),
+    [HookEventName.PostToolBatch]: () => undefined,
+  });
+  const hooks = create();
+  const fire = hooks.fire.bind(hooks);
+  vi.spyOn(hooks, 'fire').mockImplementation((event, ...rest) =>
+    event === HookEventName.PostToolUse
+      ? Promise.reject(new Error('Harness lost'))
+      : fire(event, ...rest),
+  );
+  turn = createTurn(false, { mode: 'yolo' }, hooks);
+  const signal = new AbortController().signal;
+  await expect(
+    turn.execute([calls[0]], [parts[0]], 'model', signal),
+  ).rejects.toThrow('Harness lost');
+  const saved = await toolResultParts();
+  // The earlier release reported the raw replacement as the call's input.
+  await create().fire(
+    HookEventName.PostToolUse,
+    `prompt:${calls[0].callId}`,
+    {
+      tool_name: calls[0].name,
+      tool_input: 'text',
+      tool_use_id: calls[0].callId,
+      tool_response: saved[0].functionResponse!.response,
+      permission_mode: 'yolo',
+      prompt_id: 'prompt',
+    },
+    signal,
+  );
+  expect(
+    await createTurn(false, { mode: 'yolo' }, create()).resumeHookResults(
+      saved,
+      'model',
+      signal,
+    ),
+  ).toEqual([...saved, { text: 'after tool' }]);
+  expect(seen.map(({ event }) => event)).toEqual([
+    HookEventName.PreToolUse,
+    HookEventName.PostToolUse,
+    HookEventName.PostToolBatch,
+  ]);
+  expect(reportedInputs(seen[2])).toEqual([calls[0].args]);
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
 it('persists the prepared history before effects and settled history before continuation', async () => {
   broker.execute.mockImplementation(async () => {
     expect((await readHostedFileHistory(session))?.pendingTurn).toBe('prompt');
@@ -7076,6 +7666,9 @@ function retentionExhausted() {
 
 const CAPACITY_ANSWER =
   'This call was not started: Tool publication reservation refused at the active_captures limit. Retry after the running tools finish.';
+// #14518: a call that reserves nothing is told it can go without the rest.
+const BYSTANDER_ANSWER =
+  'This call was not started: another call in its batch was refused before any call ran (Tool publication reservation refused at the active_captures limit). This call needs no tool output capacity, so it can be retried in a batch without the refused calls.';
 
 function brokerStatusThroughCancel(
   override?: (id: string, cancelled: boolean) => unknown,
@@ -7457,7 +8050,7 @@ it('waits for each cancelled execution to settle before answering', async () => 
     'model',
     new AbortController().signal,
   );
-  expect(answerText(responses)).toEqual([CAPACITY_ANSWER, CAPACITY_ANSWER]);
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER, BYSTANDER_ANSWER]);
   // Two reads before the cancels, then two after each.
   expect(broker.status).toHaveBeenCalledTimes(6);
 });
@@ -7672,10 +8265,14 @@ it('answers every call of a mixed batch and closes every reservation', async () 
   expect(answers[1]).toContain(
     'Runtime refused this execution reservation before dispatch',
   );
+  // Both Shells reserve, so fewer of them may fit; the Edit reserves
+  // nothing and can go without them.
+  const shellAnswer =
+    'This call was not started: Tool publication reservation refused at the active_captures limit. Retry after the running tools finish, or send fewer run_shell_command calls in one batch.';
   expect([answers[0], answers[2], answers[3]]).toEqual([
-    CAPACITY_ANSWER,
-    CAPACITY_ANSWER,
-    CAPACITY_ANSWER,
+    shellAnswer,
+    BYSTANDER_ANSWER,
+    shellAnswer,
   ]);
   expect(rig.closed).toEqual([
     rig.publications.get('shell-a'),
@@ -7688,6 +8285,163 @@ it('answers every call of a mixed batch and closes every reservation', async () 
   });
   expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
   expect(await runtimeItemStates()).toEqual(['settled', 'settled', 'settled']);
+});
+
+// #14518: the store says how many reservations of this size the Session
+// could ever hold at once, so a batch needing more is told to send fewer
+// calls instead of to wait.
+function limitRefusal(
+  limit: string,
+  admits: number | string,
+  status: 429 | 409 = 429,
+) {
+  return new ManagedSessionStoreHttpError(
+    status,
+    status === 429
+      ? 'managed_tool_publication_capacity_exhausted'
+      : 'managed_tool_publication_retention_exhausted',
+    `Tool publication reservation refused at the ${limit} limit`,
+    undefined,
+    { request_id: 'request-1', limit, admits },
+  );
+}
+
+function shellBatch(count: number) {
+  const shells = Array.from({ length: count }, (_, index) => ({
+    ...foregroundShell,
+    callId: `shell-${index}-call`,
+  }));
+  return {
+    shells,
+    parts: shells.map(
+      (call): Part => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      }),
+    ),
+    ids: shells.map((_, index) => `shell-${index}`),
+  };
+}
+
+it.each(['active_captures', 'tenant_bytes', 'session_bytes'])(
+  'tells a batch of more Shells than its Session could ever hold at the %s limit to send fewer, without retrying',
+  async (limit) => {
+    const batch = shellBatch(3);
+    const cause = limitRefusal(limit, 2);
+    // The last of the three reservations is the one the limit refuses.
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: (id) => (id === 'shell-2' ? cause : undefined),
+      executionCallIds: batch.ids,
+    });
+    turn = rig.turn;
+    brokerStatusThroughCancel();
+    const responses = await turn.execute(
+      batch.shells,
+      batch.parts,
+      'model',
+      new AbortController().signal,
+    );
+
+    expect(answerText(responses)).toEqual(
+      Array(3).fill(
+        `This call was not started: Tool publication reservation refused at the ${limit} limit. This batch has 3 run_shell_command calls, but this Session can run at most 2 of them at a time, so retrying the same batch will not succeed. Send at most 2 of them in one batch.`,
+      ),
+    );
+    // Waiting cannot make the batch fit, so its refusal is not retried.
+    expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(3);
+    expect(rig.closed).toEqual(batch.ids.map((id) => rig.publications.get(id)));
+    expect(await runtimeItemStates()).toEqual([
+      'settled',
+      'settled',
+      'settled',
+    ]);
+  },
+);
+
+it('does not retry the first reservation of a batch its Session could never hold', async () => {
+  const batch = shellBatch(3);
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) =>
+      id === 'shell-0' ? limitRefusal('session_bytes', 2) : undefined,
+    executionCallIds: batch.ids,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    batch.shells,
+    batch.parts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual(
+    Array(3).fill(
+      'This call was not started: Tool publication reservation refused at the session_bytes limit. This batch has 3 run_shell_command calls, but this Session can run at most 2 of them at a time, so retrying the same batch will not succeed. Send at most 2 of them in one batch.',
+    ),
+  );
+  expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(1);
+});
+
+it.each([
+  ['admits the whole batch at once', limitRefusal('active_captures', 2)],
+  ['does not say', capacityExhausted()],
+  ['says it as text', limitRefusal('active_captures', '1')],
+  ['says a fraction', limitRefusal('tenant_bytes', 1.5)],
+  // A 429 always admits one; a smaller count is not acted on.
+  ['admits none', limitRefusal('session_bytes', 0)],
+])(
+  'retries a batch whose refusal %s and says fewer calls may fit sooner',
+  async (_label, cause) => {
+    const batch = shellBatch(2);
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: (id) => (id === 'shell-1' ? cause : undefined),
+      executionCallIds: batch.ids,
+    });
+    turn = rig.turn;
+    brokerStatusThroughCancel();
+    const responses = await turn.execute(
+      batch.shells,
+      batch.parts,
+      'model',
+      new AbortController().signal,
+    );
+
+    expect(answerText(responses)).toEqual(
+      Array(2).fill(
+        `This call was not started: ${cause.message}. Retry after the running tools finish, or send fewer run_shell_command calls in one batch.`,
+      ),
+    );
+    // One grant, then the refused reservation's three attempts.
+    expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(4);
+  },
+);
+
+it('keeps the retention answer for a batch its Session could never hold, and frees the call that reserves nothing', async () => {
+  const batch = shellBatch(3);
+  const all = [...batch.shells, calls[0]];
+  // Another Session's used bytes fill the tenant: the Session could hold
+  // two later, but none fits now, so the retention answer wins.
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: () => limitRefusal('tenant_bytes', 2, 409),
+    executionCallIds: batch.ids,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    all,
+    all.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([
+    ...Array(3).fill(
+      'This call was not started: Tool publication reservation refused at the tenant_bytes limit. Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.',
+    ),
+    'This call was not started: another call in its batch was refused before any call ran (Tool publication reservation refused at the tenant_bytes limit). This call needs no tool output capacity, so it can be retried in a batch without the refused calls.',
+  ]);
+  expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(1);
 });
 
 it('probes every inconclusive background binding within one timeout window', async () => {
@@ -7747,10 +8501,14 @@ it('probes every inconclusive background binding within one timeout window', asy
       .finally(() => {
         completed = true;
       });
+    // A deadlock guard, not a latency assertion: the probes are mock calls
+    // that only need to be in flight together, and a shared runner under load
+    // can spend more than a second scheduling them (release run 39192115354
+    // failed this guard on all three attempts while every other test passed).
     const guardedStart = new Promise<never>((_resolve, reject) => {
       guard = realSetTimeout(
         () => reject(new Error('both probes did not start concurrently')),
-        1_000,
+        10_000,
       );
     });
 
@@ -7837,7 +8595,7 @@ it('settles grant-proven bindings before waiting for process probes', async () =
     const guardedStart = new Promise<never>((_resolve, reject) => {
       guard = realSetTimeout(
         () => reject(new Error('process probe did not start')),
-        1_000,
+        10_000,
       );
     });
 
