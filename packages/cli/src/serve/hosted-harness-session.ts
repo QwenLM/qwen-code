@@ -10,7 +10,16 @@ import {
   hostedTurnApproval,
   type HostedApprovalSelection,
 } from './hosted-approval-selection.js';
-import { parseHostedInput, readHostedInput } from './hosted-input.js';
+import {
+  HOSTED_ATTACHMENT_INPUT_BYTES,
+  parseHostedInput,
+  readHostedInput,
+} from './hosted-input.js';
+import {
+  enqueueHostedWakeContinuation,
+  isHostedWakeContinuationId,
+  readHostedWakeContinuation,
+} from './hosted-wake-continuation.js';
 import {
   findHostedModelRequest,
   findHostedCommittedModelOutput,
@@ -115,6 +124,8 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   CHILD_NOTIFICATION_SOURCES,
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionModeGateError,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
@@ -383,6 +394,8 @@ function settledTurnOutcome(abort: AbortController): {
  */
 function namedStoreFailure(cause: unknown): string | undefined {
   if (
+    cause instanceof ManagedSessionAppendUnsettledError ||
+    cause instanceof ManagedSessionJournalFencedError ||
     cause instanceof ManagedSessionStoreTransportError ||
     (cause instanceof ManagedSessionStoreHttpError &&
       cause.status >= 500 &&
@@ -391,6 +404,38 @@ function namedStoreFailure(cause: unknown): string | undefined {
     return 'managed_session_store_unavailable';
   }
   return undefined;
+}
+
+/**
+ * Renders a store refusal with its stable status, remote code, refusing
+ * route and any writer-vs-store-head pairing captured at the refusal
+ * (review #14522): the store's public refusal text is shared across
+ * server predicates, so the printable error has to name which operation
+ * with which grant was refused (a grant never re-acquired vs one the
+ * store already judged superseded).
+ */
+function describeManagedError(cause: unknown): string {
+  let store: ManagedSessionStoreHttpError | undefined;
+  for (
+    let current: unknown = cause;
+    current instanceof Error;
+    current = (current as Error & { cause?: unknown }).cause
+  ) {
+    if (current instanceof ManagedSessionStoreHttpError) {
+      store = current;
+      break;
+    }
+  }
+  if (store === undefined) return String(cause);
+  const details = [
+    `status=${store.status}`,
+    `code=${store.remoteCode}`,
+    ...(store.route === undefined ? [] : [`route=${store.route}`]),
+    ...(store.writerRefusalContext === undefined
+      ? []
+      : [`[writer-context: ${store.writerRefusalContext}]`]),
+  ];
+  return `${String(cause)} (${details.join(' ')})`;
 }
 
 /**
@@ -1256,6 +1301,10 @@ export async function settleCrashedWakeTurnAftermath(params: {
       messages: session.messages,
       commands: session.commands,
     });
+    const continuationId = await enqueueHostedWakeContinuation(
+      session.managed,
+      turnId,
+    );
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
     // same crash (the journal-filter rule in the history builders then
@@ -1291,6 +1340,9 @@ export async function settleCrashedWakeTurnAftermath(params: {
     // The settle journaled durably, so retries re-derive the outcomes from
     // the journal and the carry has no more work.
     session.recoveryUnobserved?.delete(turnId);
+    writeStderrLineSafe(
+      `qwen serve: Hosted wake turn ${turnId} crash aftermath settled${continuationId === undefined ? '.' : `; continuation ${continuationId} is durable.`}`,
+    );
     return 'settled';
   } catch (cause) {
     writeStderrLineSafe(
@@ -2208,6 +2260,7 @@ async function verifyWorkspaceRestore(
           : parseHostedRecoveryResource(
               bytes,
               authority.sessionHeader.sessionKey,
+              ref.kind,
             );
       for (const nested of hostedRecoveryReferences(body))
         await readRef(nested);
@@ -2936,7 +2989,7 @@ async function startHostedRecoveredTurn(
         session.recoveryReason = 'managed_session_store_unavailable';
       writeStderrLineSafe(
         'qwen serve: Hosted Harness recovery remained blocked: ' +
-          String(cause),
+          describeManagedError(cause),
       );
     })
     .finally(() => {
@@ -3162,12 +3215,21 @@ async function executeHostedTurn(
         );
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (!resumeFromToolResults && !resumeApproval && !resumeModel) {
-          const user = record(session, sessionId, 'user', parentUuid, {
-            daemonPromptId: promptId,
-            message: { role: 'user', parts: promptInput.parts },
-          });
-          await session.managed.sink.write(user);
-          parentUuid = user.uuid;
+          const continuation = isHostedWakeContinuationId(promptId);
+          const inputRecord = record(
+            session,
+            sessionId,
+            continuation ? 'system' : 'user',
+            parentUuid,
+            {
+              daemonPromptId: promptId,
+              ...(continuation
+                ? { subtype: 'turn_attempt' }
+                : { message: { role: 'user', parts: promptInput.parts } }),
+            },
+          );
+          await session.managed.sink.write(inputRecord);
+          parentUuid = inputRecord.uuid;
         }
         const messageRecord = (
           type: 'assistant' | 'tool_result',
@@ -5004,6 +5066,16 @@ export function registerHostedHarnessSessionRoutes(
                 !stoppedMessage(input.source),
             );
             if (first === undefined) return undefined;
+            if (isHostedWakeContinuationId(first.turnId)) {
+              return {
+                turnId: first.turnId,
+                source: first.source,
+                ...(await readHostedWakeContinuation(
+                  session.managed,
+                  first.turnId,
+                )),
+              };
+            }
             if (first.source === CHANNEL_INPUT_SOURCE) {
               let text: string | undefined;
               try {
@@ -6442,7 +6514,11 @@ export function registerHostedHarnessSessionRoutes(
     const text = workflowLaunch
       ? workflowLaunchSummaryText(workflowLaunch)
       : promptInput!.text;
-    const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    const attachments = (promptInput?.attachments.length ?? 0) > 0;
+    const maxBytes = attachments
+      ? HOSTED_ATTACHMENT_INPUT_BYTES
+      : HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    const maxUserRecordBytes = attachments ? maxBytes + 1024 * 1024 : maxBytes;
     // A parent UUID is the largest possible parentUuid in the durable record.
     const userRecord = record(session, req.params['id'], 'user', promptId, {
       daemonPromptId: promptId,
@@ -6450,7 +6526,7 @@ export function registerHostedHarnessSessionRoutes(
     });
     if (
       Buffer.byteLength(JSON.stringify(prompt)) > maxBytes ||
-      Buffer.byteLength(JSON.stringify(userRecord)) > maxBytes
+      Buffer.byteLength(JSON.stringify(userRecord)) > maxUserRecordBytes
     )
       return error(res, 413, 'hosted_prompt_too_large');
     const existing = session.admissions.get(promptId);
@@ -7707,6 +7783,15 @@ export function registerHostedHarnessSessionRoutes(
         if (cause instanceof ChildMessagesPendingError) {
           return error(res, 409, 'child_messages_pending', undefined, message);
         }
+        if (
+          cause instanceof ManagedSessionAppendUnsettledError ||
+          cause instanceof ManagedSessionJournalFencedError
+        ) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted child operation ${kind} of session ${req.params['id']} has an unknown store outcome: ${message}`,
+          );
+          return error(res, 503, 'child_operation_failed', undefined, message);
+        }
         if (cause instanceof ManagedSessionConflictError) {
           return error(
             res,
@@ -7928,7 +8013,9 @@ export function registerHostedHarnessSessionRoutes(
       if (
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
-        cause instanceof ManagedSessionWritesStoppedError
+        cause instanceof ManagedSessionWritesStoppedError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
@@ -7997,7 +8084,17 @@ export function registerHostedHarnessSessionRoutes(
               parseSessionCommandReply(body?.['reply']),
             );
           } catch (cause) {
-            if (cause instanceof ManagedSessionRecordError) {
+            // A store-side append outcome is not the request's shape: let it
+            // reach the outer catch, which answers the retryable 503.
+            if (
+              cause instanceof ManagedSessionRecordError &&
+              !(cause instanceof ManagedSessionConflictError) &&
+              !(cause instanceof ManagedSessionStoreHttpError) &&
+              !(cause instanceof ManagedSessionStoreTransportError) &&
+              !(cause instanceof ManagedSessionWritesStoppedError) &&
+              !(cause instanceof ManagedSessionAppendUnsettledError) &&
+              !(cause instanceof ManagedSessionJournalFencedError)
+            ) {
               return error(res, 400, 'invalid_command_operation');
             }
             throw cause;
@@ -8100,7 +8197,9 @@ export function registerHostedHarnessSessionRoutes(
       if (
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
-        cause instanceof ManagedSessionWritesStoppedError
+        cause instanceof ManagedSessionWritesStoppedError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted command operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
@@ -8322,7 +8421,11 @@ export function registerHostedHarnessSessionRoutes(
         cause instanceof ManagedSessionRecordError &&
         !(cause instanceof ManagedSessionConflictError) &&
         !(cause instanceof ManagedSessionStoreHttpError) &&
-        !(cause instanceof ManagedSessionStoreTransportError)
+        !(cause instanceof ManagedSessionStoreTransportError) &&
+        !(
+          cause instanceof ManagedSessionAppendUnsettledError ||
+          cause instanceof ManagedSessionJournalFencedError
+        )
       )
         return error(res, 400, 'invalid_channel_operation', undefined, message);
       if (
@@ -8888,7 +8991,7 @@ export function registerHostedHarnessSessionRoutes(
             const storeFailure = namedStoreFailure(cause);
             if (storeFailure !== undefined) failureReason = storeFailure;
             writeStderrLineSafe(
-              `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
+              `qwen serve: Hosted Harness turn ${promptId} failed: ${describeManagedError(cause)}`,
             );
           }
         }
@@ -10564,7 +10667,9 @@ export function registerHostedHarnessSessionRoutes(
       // would skip the occurrence while the fault is quite recoverable.
       if (
         cause instanceof ManagedSessionStoreHttpError ||
-        cause instanceof ManagedSessionStoreTransportError
+        cause instanceof ManagedSessionStoreTransportError ||
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} lost its store: ${message}`,

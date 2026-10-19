@@ -1385,6 +1385,94 @@ class OperationRetryTerminalStateTest {
         }
     }
 
+    // The daemon's recovery refusal names a wait, not a hook refusal: the
+    // operation must not be recorded BLOCKED (the lifecycle store refuses a
+    // blocked row on every later attempt, turning a recoverable daemon
+    // state into a permanent one) and its attempts must not spend the
+    // budget. Past the budget the wait is published with the daemon's own
+    // code so it stays visible, still re-driven by the recovery scan.
+    @ParameterizedTest(name = "attemptCount = {0}, wrapped = {1}")
+    @CsvSource({"0, false", "10, false", "0, true", "10, true"})
+    void aDaemonRecoveryRefusalWaitsWithoutSpendingTheBudget(
+            int attemptCount, boolean wrapped) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(attemptCount, 0, 1);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(harness.isAvailable()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
+                lifecycle = mock(
+                        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
+        when(lifecycle.recoverEffects(any())).thenReturn(
+                new ObjectMapper().createObjectNode()
+                        .put("storeSynthesized", true));
+        DaemonHttpException recovery = mock(DaemonHttpException.class);
+        when(recovery.getErrorCode())
+                .thenReturn("hosted_lifecycle_recovery_required");
+        // The SDK wraps the daemon's refusal in MutationOutcomeUnknownException
+        // once the non-idempotent detach may have been delivered, so the wire
+        // code lives on the cause chain — the reason daemonRefusalCode walks it.
+        if (wrapped) {
+            com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException outcome =
+                    mock(com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException.class);
+            when(outcome.getCause()).thenReturn(recovery);
+            doThrow(outcome).when(harness).detachLifecycle(any());
+        } else {
+            doThrow(recovery).when(harness).detachLifecycle(any());
+        }
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ManagedAgentService.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
+        coordinator.setWorkspaceLifecycleStore(lifecycle);
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+            if (attemptCount >= 10) {
+                verify(store).blockLifecycleOperation(eq("tenant"),
+                        eq("session"), eq("op-close"), anyString(), eq(1L),
+                        eq("hosted_lifecycle_recovery_required"), anyLong(),
+                        eq(true));
+            } else {
+                verify(store).retryOperation(eq("tenant"), eq("session"),
+                        eq("op-close"), anyString(), eq(1L), anyLong(),
+                        eq(true));
+                verify(store, never()).blockLifecycleOperation(anyString(),
+                        anyString(), anyString(), anyString(), anyLong(),
+                        anyString(), anyLong(), anyBoolean());
+            }
+            verify(store, never()).completeOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
     // A writer check that itself fails is treated as live, so a permanent
     // refusal thrown before the Harness was asked to stop is published the
     // same way — budget-exempt, with the refusal's code — rather than

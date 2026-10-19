@@ -3484,9 +3484,8 @@ describe('AppContainer State Management', () => {
       );
       // The startup effect arms pendingWorktreeNoticeRef from the consumed
       // one-shot Config notice; wait for it before submitting.
-      await vi.waitFor(() => {
-        expect(startupNoticeSpy).toHaveBeenCalled();
-      });
+      await flushConfigInitialization();
+      expect(startupNoticeSpy).toHaveBeenCalled();
 
       act(() => {
         capturedUIActions.setShellModeActive(true);
