@@ -133,6 +133,7 @@ import {
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
 import { SessionGroupSection } from './SessionGroupSection';
+import { SessionRenameEditor } from './SessionRenameEditor';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import {
@@ -1539,7 +1540,6 @@ export function WebShellSidebar({
   >(null);
   const [editingSession, setEditingSession] =
     useState<DaemonSessionSummary | null>(null);
-  const [editingName, setEditingName] = useState('');
   // Mirrors editingSessionIdentity for promise callbacks that outlive the
   // render where the rename started.
   const editingSessionIdentityRef = useRef<string | null>(null);
@@ -3145,7 +3145,6 @@ export function WebShellSidebar({
       setEditingSession(session);
       setEditingSessionIdentity(identity);
       editingSessionIdentityRef.current = identity;
-      setEditingName(getSessionLabel(session));
     },
     [canRenameSession, getIdentityForSession],
   );
@@ -3154,7 +3153,6 @@ export function WebShellSidebar({
     setEditingSession(null);
     setEditingSessionIdentity(null);
     editingSessionIdentityRef.current = null;
-    setEditingName('');
   }, []);
   useEffect(() => {
     if (editingSession && !canRenameSession(editingSession)) {
@@ -3217,93 +3215,92 @@ export function WebShellSidebar({
     setGroupMenu(null);
   }, [cancelRename, projectFeaturesEnabled]);
 
-  const saveRename = useCallback(() => {
-    const nextName = editingName.trim();
-    if (
-      !nextName ||
-      !editingSession ||
-      editingSessionIdentity !== getIdentityForSession(editingSession) ||
-      !canRenameSession(editingSession)
-    ) {
-      cancelRename();
-      return;
-    }
-    const sessionId = editingSession.sessionId;
-    const workspaceCwd = getSessionWorkspaceCwd(editingSession);
-    const sessionIdentity = getIdentityForSession(editingSession);
-    if (busySessionIdsRef.current.has(sessionIdentity)) {
-      return;
-    }
-    setSessionBusy(sessionId, true, workspaceCwd);
-    let renamed = false;
-    const rename = isCurrentSession(editingSession)
-      ? actions.renameSession(nextName)
-      : workspaceCwd
-        ? workspace.client
-            .workspaceByCwd(workspaceCwd)
-            .updateSessionMetadata(sessionId, { displayName: nextName })
-        : workspace.client.updateSessionMetadata(sessionId, {
-            displayName: nextName,
-          });
-    rename
-      .then((result: SessionMetadataResult | void) => {
-        renamed = true;
-        // The daemon clamps displayName to 256 chars and reports the stored
-        // value; propagate that instead of the locally typed string so the
-        // catalog cache never disagrees with the daemon.
-        const effectiveName =
-          typeof result?.displayName === 'string' && result.displayName
-            ? result.displayName
-            : nextName;
-        if (workspaceCwd) {
-          if (onSessionRenameConfirmed) {
-            onSessionRenameConfirmed(workspaceCwd, sessionId, effectiveName);
-          } else {
-            sessionCatalogController.renamed(
-              workspaceCwd,
-              sessionId,
-              effectiveName,
-            );
+  const saveRename = useCallback(
+    (displayName: string) => {
+      const nextName = displayName.trim();
+      if (
+        !nextName ||
+        !editingSession ||
+        editingSessionIdentity !== getIdentityForSession(editingSession) ||
+        !canRenameSession(editingSession)
+      ) {
+        cancelRename();
+        return;
+      }
+      const sessionId = editingSession.sessionId;
+      const workspaceCwd = getSessionWorkspaceCwd(editingSession);
+      const sessionIdentity = getIdentityForSession(editingSession);
+      if (busySessionIdsRef.current.has(sessionIdentity)) {
+        return;
+      }
+      setSessionBusy(sessionId, true, workspaceCwd);
+      // Close the editor before the round trip: the draft is committed, and
+      // holding the form open until the daemon answers reads as a stall.
+      if (editingSessionIdentityRef.current === sessionIdentity) {
+        cancelRename();
+      }
+      let renamed = false;
+      const rename = isCurrentSession(editingSession)
+        ? actions.renameSession(nextName)
+        : workspaceCwd
+          ? workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .updateSessionMetadata(sessionId, { displayName: nextName })
+          : workspace.client.updateSessionMetadata(sessionId, {
+              displayName: nextName,
+            });
+      rename
+        .then((result: SessionMetadataResult | void) => {
+          renamed = true;
+          // The daemon clamps displayName to 256 chars and reports the stored
+          // value; propagate that instead of the locally typed string so the
+          // catalog cache never disagrees with the daemon.
+          const effectiveName =
+            typeof result?.displayName === 'string' && result.displayName
+              ? result.displayName
+              : nextName;
+          if (workspaceCwd) {
+            if (onSessionRenameConfirmed) {
+              onSessionRenameConfirmed(workspaceCwd, sessionId, effectiveName);
+            } else {
+              sessionCatalogController.renamed(
+                workspaceCwd,
+                sessionId,
+                effectiveName,
+              );
+            }
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
-          sessionCatalogController.refreshWorkspace(workspaceCwd);
-        }
-        // A late settle must not close an editor the user moved to another
-        // session with while this request was in flight.
-        if (editingSessionIdentityRef.current === sessionIdentity) {
-          cancelRename();
-        }
-        bumpWorkspaceReload();
-      })
-      .catch((err: unknown) => {
-        onError(err, t('sidebar.renameFailed'));
-        if (editingSessionIdentityRef.current === sessionIdentity) {
-          cancelRename();
-        }
-      })
-      .finally(() => {
-        if (!renamed && workspaceCwd) {
-          sessionCatalogController.refreshWorkspace(workspaceCwd);
-        }
-        setSessionBusy(sessionId, false, workspaceCwd);
-      });
-  }, [
-    actions,
-    bumpWorkspaceReload,
-    canRenameSession,
-    cancelRename,
-    editingName,
-    editingSession,
-    editingSessionIdentity,
-    getIdentityForSession,
-    getSessionWorkspaceCwd,
-    isCurrentSession,
-    onSessionRenameConfirmed,
-    onError,
-    sessionCatalogController,
-    setSessionBusy,
-    t,
-    workspace.client,
-  ]);
+          bumpWorkspaceReload();
+        })
+        .catch((err: unknown) => {
+          onError(err, t('sidebar.renameFailed'));
+        })
+        .finally(() => {
+          if (!renamed && workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          setSessionBusy(sessionId, false, workspaceCwd);
+        });
+    },
+    [
+      actions,
+      bumpWorkspaceReload,
+      canRenameSession,
+      cancelRename,
+      editingSession,
+      editingSessionIdentity,
+      getIdentityForSession,
+      getSessionWorkspaceCwd,
+      isCurrentSession,
+      onSessionRenameConfirmed,
+      onError,
+      sessionCatalogController,
+      setSessionBusy,
+      t,
+      workspace.client,
+    ],
+  );
 
   const handleDeleteSession = useCallback(
     (session: DaemonSessionSummary) => {
@@ -4689,28 +4686,11 @@ export function WebShellSidebar({
             }
           >
             {isEditing ? (
-              <form
-                className={styles.renameForm}
-                onKeyDown={(event) => event.stopPropagation()}
-                onDoubleClick={(event) => event.stopPropagation()}
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  saveRename();
-                }}
-              >
-                <input
-                  autoFocus
-                  aria-label={`${t('sidebar.rename')}: ${label}`}
-                  className={styles.renameInput}
-                  maxLength={256}
-                  value={editingName}
-                  onChange={(event) => setEditingName(event.target.value)}
-                  onBlur={cancelRename}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') cancelRename();
-                  }}
-                />
-              </form>
+              <SessionRenameEditor
+                label={label}
+                onCommit={saveRename}
+                onCancel={cancelRename}
+              />
             ) : (
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
@@ -4960,32 +4940,11 @@ export function WebShellSidebar({
             ) : null}
           </span>
           {isEditing && showRename ? (
-            <form
-              className={styles.renameForm}
-              onClick={(event) => event.stopPropagation()}
-              onKeyDown={(event) => event.stopPropagation()}
-              onDoubleClick={(event) => event.stopPropagation()}
-              onSubmit={(event) => {
-                event.preventDefault();
-                saveRename();
-              }}
-            >
-              <input
-                autoFocus
-                aria-label={`${t('sidebar.rename')}: ${label}`}
-                className={styles.renameInput}
-                maxLength={256}
-                value={editingName}
-                onChange={(event) => setEditingName(event.target.value)}
-                onBlur={cancelRename}
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') {
-                    event.preventDefault();
-                    cancelRename();
-                  }
-                }}
-              />
-            </form>
+            <SessionRenameEditor
+              label={label}
+              onCommit={saveRename}
+              onCancel={cancelRename}
+            />
           ) : (
             <>
               <span className={styles.sessionText} data-web-shell-session-title>
@@ -5261,7 +5220,6 @@ export function WebShellSidebar({
       cancelRename,
       completedUnreadIds,
       contentSearchHits,
-      editingName,
       editingSessionIdentity,
       exportingSessionIds,
       getArchivedExportWorkspaceCwd,
@@ -5291,11 +5249,31 @@ export function WebShellSidebar({
   );
 
   const body = useMemo(() => {
+    // Rename only has to reveal the edited row. Expanding the whole catalog —
+    // or even the whole section — mounted hundreds of rows exactly when the
+    // rename editor opened, which is what made typing lag.
+    // When the Pinned section hosts the editor, the row is already mounted
+    // there and this catalog's copy is `renameFormDisabled`; expanding here
+    // would only add rows nobody is editing.
+    const pinnedSectionHostsEditing =
+      editingSessionIdentity !== null &&
+      pinnedExpanded &&
+      pinnedSessions.some(
+        (session) => getIdentityForSession(session) === editingSessionIdentity,
+      );
+    const editingSessionBeyondPreview = (
+      items: readonly DaemonSessionSummary[],
+    ): boolean =>
+      !pinnedSectionHostsEditing &&
+      editingSessionIdentity !== null &&
+      items.findIndex(
+        (session) => getIdentityForSession(session) === editingSessionIdentity,
+      ) >= SIDEBAR_SESSION_PREVIEW_LIMIT;
     const renderFlatSessions = () => {
       const showAll =
-        editingSessionIdentity !== null ||
         showAllProjectSessions ||
-        Boolean(searchQuery.trim());
+        Boolean(searchQuery.trim()) ||
+        editingSessionBeyondPreview(filteredSessions);
       const displayedSessions = showAll
         ? filteredSessions
         : filteredSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
@@ -5348,7 +5326,10 @@ export function WebShellSidebar({
           id={section.id}
           label={section.label}
           count={section.sessions.length}
-          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
+          limitSessions={
+            !editingSessionBeyondPreview(section.sessions) &&
+            !searchQuery.trim()
+          }
           expanded={!collapsedSessionSectionIds.has(section.id)}
           onToggle={() => toggleSessionSection(section.id)}
         >
@@ -5378,7 +5359,10 @@ export function WebShellSidebar({
               <CalendarClockIcon data-web-shell-scheduled-task-group />
             ) : undefined
           }
-          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
+          limitSessions={
+            !editingSessionBeyondPreview(section.sessions) &&
+            !searchQuery.trim()
+          }
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}
           onRename={
@@ -6720,7 +6704,6 @@ export function WebShellSidebar({
                       !liveView && selectedSessionSource !== 'channel'
                     }
                     mapSession={applyOptimisticPin}
-                    limitSessions={editingSessionIdentity === null}
                     isPinnedSectionMember={isPinnedSectionMember}
                     autoExpandKey={
                       livePresence &&
@@ -6978,7 +6961,6 @@ export function WebShellSidebar({
                             groupActionsDisabled={groupBusy}
                             excludePinned={selectedSessionSource !== 'channel'}
                             mapSession={applyOptimisticPin}
-                            limitSessions={editingSessionIdentity === null}
                             isPinnedSectionMember={isPinnedSectionMember}
                             onOpenGitDiff={
                               projectFeaturesEnabled ? onOpenGitDiff : undefined

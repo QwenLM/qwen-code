@@ -2642,6 +2642,43 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onLoadSession).not.toHaveBeenCalled();
   });
 
+  it('does not expand the session preview while renaming a visible row', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push(
+      ...Array.from({ length: 7 }, (_, index) => ({
+        sessionId: `preview-session-${index + 1}`,
+        workspaceCwd: '/tmp/project',
+        displayName: `Preview session ${index + 1}`,
+      })),
+    );
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await expandWorkspace('project');
+
+    const sessionRows = () =>
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]');
+    expect(sessionRows()).toHaveLength(5);
+
+    await act(async () => {
+      click(inlineSessionAction('Preview session 1', 'Rename')!);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('input')).not.toBeNull();
+    // The edited row stays mounted inside the five-row preview; renaming it
+    // must not pull the other two sessions into the DOM.
+    expect(sessionRows()).toHaveLength(5);
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent === 'Show all',
+      ),
+    ).toBe(true);
+    expect(container.textContent).not.toContain('Preview session 6');
+  });
+
   it('keeps the next rename editor when an earlier rename settles late', async () => {
     connection.sessionId = 'current-session';
     active.sessions.push(
