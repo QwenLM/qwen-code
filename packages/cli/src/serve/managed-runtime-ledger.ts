@@ -352,9 +352,12 @@ function groupMatchesRecord(
   );
 }
 
-/** A zombie has exited and only awaits its parent's reap; it runs nothing. */
+/** A zombie has exited and only awaits its parent's reap; it runs nothing.
+ * A multithreaded leader in EXIT_ZOMBIE can still have live sibling threads;
+ * procps marks that row with `l` (e.g. `Zl`, `Zsl`), so only a zombie without
+ * that marker has nothing left to run. */
 function isZombieRow(row: ProcessTableRow): boolean {
-  return row.state?.startsWith('Z') ?? false;
+  return row.state?.startsWith('Z') === true && !row.state.includes('l');
 }
 
 /** What the live table can prove about the group a record holds. */
@@ -383,11 +386,13 @@ function judgeGroupIdentity(
   platform: NodeJS.Platform = process.platform,
 ): GroupIdentity | undefined {
   if (table === undefined) return undefined;
-  const members = [...table.values()].filter(
-    (row) => row.pgid === record.pgid && !isZombieRow(row),
-  );
+  const rows = [...table.values()].filter((row) => row.pgid === record.pgid);
+  const members = rows.filter((row) => !isZombieRow(row));
   if (members.length === 0) return 'gone';
-  if (groupMatchesRecord(members, record, now, platform)) return 'ours';
+  // The age/ownership check reads every row, including a zombie leader: its
+  // start time is still evidence that this is the recorded group, and a live
+  // child created later than the record must not erase that evidence.
+  if (groupMatchesRecord(rows, record, now, platform)) return 'ours';
   const leader = members.find((member) => member.pid === record.pgid);
   if (
     leader !== undefined &&
