@@ -4562,7 +4562,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it.each([undefined, '', 'private-parent'])(
-    'H01/H04 selects local or parent ancestor trust for provenance %s',
+    'H01/H04 preserves provenance and transport binding for %s',
     async (capability) => {
       const innerConfig = await setupSessionMocks('ancestor-session');
       const target = await fs.realpath(process.cwd());
@@ -4572,7 +4572,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const alias = path.join(linkRoot, 'alias');
       await fs.symlink(target, alias, 'junction');
       innerConfig.getTargetDir = vi.fn().mockReturnValue(alias);
-      const extMethod = vi.fn().mockResolvedValue({ v: 1, trusted: [true] });
+      const extMethod = vi.fn(
+        async (_method: string, params: Record<string, unknown>) => ({
+          v: 1,
+          trusted: [params['sessionId'] === 'ancestor-session'],
+        }),
+      );
       const { agent, agentPromise } = await bootAcpAgent(
         {
           privateParentCapability: capability,
@@ -4632,6 +4637,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           await expect(
             provider?.([path.dirname(target)], target),
           ).resolves.toEqual([true]);
+        }
+        innerConfig.getSessionId.mockReturnValue('new-recording-session');
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        if (capability !== undefined) {
+          expect(extMethod).toHaveBeenLastCalledWith(
+            'qwen/control/workflow/ancestor-trust',
+            expect.objectContaining({ sessionId: 'ancestor-session' }),
+          );
         }
       } finally {
         mockConnectionState.resolve();

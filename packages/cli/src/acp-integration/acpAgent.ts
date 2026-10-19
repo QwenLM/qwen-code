@@ -15680,8 +15680,12 @@ class QwenAgent implements Agent {
       ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
-    const workflowAncestorTrustSession: { config: Config | undefined } = {
+    const workflowAncestorTrustSession: {
+      config: Config | undefined;
+      sessionId: string | undefined;
+    } = {
       config: undefined,
+      sessionId: undefined,
     };
     const workflowAncestorTrustProvider =
       this.expectedPrivateParentCapability === undefined
@@ -15694,8 +15698,7 @@ class QwenAgent implements Agent {
                 this.isTrustedManagedParent() &&
                 this.workflowAncestorTrustConnected &&
                 !this.managedShuttingDown,
-              getSessionId: () =>
-                workflowAncestorTrustSession.config?.getSessionId(),
+              getSessionId: () => workflowAncestorTrustSession.sessionId,
               getCwdState: () => {
                 const config = workflowAncestorTrustSession.config;
                 if (!config) return undefined;
@@ -15788,6 +15791,8 @@ class QwenAgent implements Agent {
       agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
     );
     workflowAncestorTrustSession.config = config;
+    // /clear rotates the recording ID while the ACP transport keeps its ID.
+    workflowAncestorTrustSession.sessionId = config.getSessionId();
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
     }

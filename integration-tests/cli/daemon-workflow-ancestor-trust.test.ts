@@ -9,7 +9,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { DaemonSession } from '@qwen-code/sdk';
+import type { DaemonEvent, DaemonSession } from '@qwen-code/sdk';
 import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
@@ -243,6 +243,89 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
         true,
       );
     }, 120_000);
+
+    it('preserves ancestor sources after clear rotates the recording id', async () => {
+      const workspace = workspaces[1]!;
+      const { sessionId, clientId } =
+        await daemon!.client.createOrAttachSession({
+          workspaceCwd: workspace.target,
+          approvalMode: 'yolo',
+          sessionScope: 'thread',
+        });
+      const before = await daemon!.client.sessionSupportedCommands(
+        sessionId,
+        clientId,
+      );
+      expect(before.savedWorkflows?.map((entry) => entry.name)).toContain(
+        'ancestor-only',
+      );
+      const trustBefore = await daemon!.client.workspaceTrust({
+        statusVersion: 2,
+      });
+      const signal = AbortSignal.timeout(30_000);
+      const accepted = await daemon!.client.promptNonBlocking(
+        sessionId,
+        { prompt: [{ type: 'text', text: '/clear' }] },
+        signal,
+        clientId,
+      );
+      if (
+        typeof accepted.promptId !== 'string' ||
+        typeof accepted.lastEventId !== 'number'
+      ) {
+        throw new Error('Expected a nonblocking /clear turn receipt');
+      }
+      const events: DaemonEvent[] = [];
+      for await (const event of daemon!.client.subscribeEvents(sessionId, {
+        lastEventId: accepted.lastEventId,
+        epoch:
+          typeof accepted.eventEpoch === 'string'
+            ? accepted.eventEpoch
+            : undefined,
+        signal,
+        clientId,
+      })) {
+        events.push(event);
+        if (
+          event.type === 'turn_complete' &&
+          (event.data as { promptId?: string }).promptId === accepted.promptId
+        ) {
+          break;
+        }
+      }
+      expect(events.at(-1)).toMatchObject({
+        type: 'turn_complete',
+        data: { promptId: accepted.promptId, stopReason: 'end_turn' },
+      });
+      expect(JSON.stringify(events)).toContain(
+        'Context cleared. Previous messages are no longer in context.',
+      );
+      const commands = await daemon!.client.sessionSupportedCommands(
+        sessionId,
+        clientId,
+      );
+      expect(commands.savedWorkflows?.map((entry) => entry.name)).toEqual(
+        expect.arrayContaining(['ancestor-only', 'audit', 'own', 'user-only']),
+      );
+      for (const [name, expectedPath] of [
+        ['ancestor-only', path.join(workspace.repo, '.qwen', 'workflows')],
+        ['audit', path.join(workspace.repo, '.qwen', 'workflows')],
+        ['own', path.join(workspace.target, '.qwen', 'workflows')],
+        ['user-only', path.join(home, 'workflows')],
+      ] as const) {
+        const detail = await daemon!.client.sessionSavedWorkflow(
+          sessionId,
+          name,
+          clientId,
+        );
+        expect(detail.workflow?.scriptPath).toBe(
+          path.join(expectedPath, name + '.js'),
+        );
+      }
+      expect(await daemon!.client.workspaceTrust({ statusVersion: 2 })).toEqual(
+        trustBefore,
+      );
+    }, 60_000);
 
     it('revokes an ancestor without rebuilding its still-trusted target, then regrants', async () => {
       const primary = workspaces[0]!;
