@@ -137,7 +137,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 
 ### 11. 未观察到执行的 cancel 停车
 
-一个已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，挂起的 `CANCEL` 不能记为 `turn_already_settled`：取消可能已经到达那个结果未知的执行，也可能没有。`settleTurnCommands` 只把 Turn 结束前已经存在的 cancel 记为 `recovery_blocked`，失败码 `cancel_unconfirmed`，保持 `java_durable`/`blocked`，且不再投递。若 Turn 在准入前就已结束，或 cancel 在 Turn 结束后才提交，仍以 `turn_already_settled` 失败，因为没有任何执行可能见过它们。该停车行目前不在 acceptance-unknown kind 集合中，因此会一直停车（诚实、不再投递），直到后续新增从 Turn journal 读取的 `CancelEvidence`。
+一个已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，挂起的 `CANCEL` 不能记为 `turn_already_settled`：取消可能已经到达那个结果未知的执行，也可能没有。`settleTurnCommands` 在 Turn 失败时、Session 行锁之下，把所有仍为 pending 的 cancel 记为 `recovery_blocked`，失败码 `cancel_unconfirmed`，保持 `java_durable`/`blocked`，且不再投递。Turn 结束后才提交的 cancel 在 `insertCancelCommand` 读到终态行，直接结算为 `turn_already_settled`，因此副本时钟偏移不会改变分类；从未尝试提交的 Turn 走同一路径。该停车行目前不在 acceptance-unknown kind 集合中，因此会一直停车（诚实、不再投递），直到后续新增从 Turn journal 读取的 `CancelEvidence`。
 
 ## 验证
 

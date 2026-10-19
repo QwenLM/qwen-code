@@ -414,12 +414,26 @@ class ManagedTurnCommandOperationTest {
         store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
                 "managed_runtime_recovery_blocked",
                 "prior tool execution unknown");
-        now.addAndGet(1);
         Admission late = cancel("cancel-1", "cancel-digest-1", admitted);
         assertThat(late.commandEffect()).isFalse();
         OperationRecord operation = operation(late.operationId());
         assertThat(operation.state()).isEqualTo("FAILED");
         assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
+    }
+
+    @Test
+    void aCancelOfAnAttemptedTurnWithoutAnEpochParks() {
+        Admission attempted = submit("submit-1", "digest-1");
+        claim(attempted);
+        store.markSubmissionAttempted(TENANT, sessionId,
+                attempted.turnId(), OWNER);
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", attempted);
+        store.failTurn(TENANT, sessionId, attempted.turnId(), OWNER,
+                "managed_runtime_recovery_blocked",
+                "prior tool execution unknown");
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("cancel_unconfirmed");
     }
 
     @Test

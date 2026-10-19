@@ -134,7 +134,7 @@ The unknown gate used to call `transientFailure` with the budget-exempt flag, so
 
 ### 11. A cancel over an unobserved execution parks
 
-A pending `CANCEL` on a Turn that failed with `managed_runtime_recovery_blocked` after admission is not `turn_already_settled`: the cancel may have reached the execution whose outcome is unknown, or it may not. `settleTurnCommands` records a cancel that already existed when the Turn ended as `recovery_blocked` with `cancel_unconfirmed`, keeps it `java_durable`/`blocked`, and never delivers it again. A Turn that ended before admission, and a cancel submitted after the Turn ended, still fail `turn_already_settled`, because no execution could have seen them. The parked row is not yet in the acceptance-unknown kind set, so it stays parked (honest, never re-delivered) until a follow-up adds a `CancelEvidence` reader from the Turn journal.
+A pending `CANCEL` on a Turn that failed with `managed_runtime_recovery_blocked` after a submission attempt is not `turn_already_settled`: the cancel may have reached the execution whose outcome is unknown, or it may not. `settleTurnCommands` records every cancel still pending under the Session row lock when the Turn failed as `recovery_blocked` with `cancel_unconfirmed`, keeps it `java_durable`/`blocked`, and never delivers it again. A cancel admitted after the Turn ended reads the terminal row in `insertCancelCommand` and settles itself `turn_already_settled`, so replica clock skew cannot reclassify it; a Turn with no submission attempt takes the same path. The parked row is not yet in the acceptance-unknown kind set, so it stays parked (honest, never re-delivered) until a follow-up adds a `CancelEvidence` reader from the Turn journal.
 
 ## Validation
 
