@@ -160,4 +160,4 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - Turn 层接管读取原命令的 Broker 记录（决定 9）：两个加载都会对账，已结算的答案被观测，仍无法证明的结果报为未知，而不是当作瞬时故障失败或再次派发。
 - 结果仍未知的 Turn 会挂起，并按对账器周期复查，而不是继续 budget-exempt 重试或再次派发（决定 10）。
 - `CANCELLING` Turn 上因未知 Runtime 结果而待处理的取消不会被写成 `FAILED`；取消车道重试，取消路由仍可能结算为 `CANCELLED`（决定 10）。`managed_runtime_recovery_incomplete` 仍走终止路径。
-- 已准入的 Turn 因未观察到的执行失败时，cancel 报 `recovery_blocked`/`cancel_unconfirmed`，而不是假的 `turn_already_settled`（决定 11）。
+- 已准入、或已尝试提交的 Turn 因未观察到的执行失败时，cancel 报 `recovery_blocked`/`cancel_unconfirmed`，而不是假的 `turn_already_settled`（决定 11）。

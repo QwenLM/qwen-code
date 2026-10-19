@@ -157,4 +157,4 @@ A pending `CANCEL` on a Turn that failed with `managed_runtime_recovery_blocked`
 - The Turn-level takeover reads the original command's Broker record (decision 9): both loads reconcile once, a settled answer is observed, and a still-unproven outcome is reported unknown instead of failing as a transient fault or dispatching again.
 - A Turn whose outcome stays unknown parks and is re-checked on the reconciler's cadence instead of being retried budget-exempt or dispatched again (decision 10).
 - A pending cancel on a `CANCELLING` Turn blocked on an unknown Runtime outcome is never written `FAILED` over; the cancel lane retries and the cancel route may still settle it `CANCELLED` (decision 10). `managed_runtime_recovery_incomplete` still takes the terminal path.
-- A cancel whose admitted Turn failed on an unobserved execution reports `recovery_blocked`/`cancel_unconfirmed` instead of a false `turn_already_settled` (decision 11).
+- A cancel whose Turn failed on an unobserved execution after a Harness admitted it or a submission was attempted reports `recovery_blocked`/`cancel_unconfirmed` instead of a false `turn_already_settled` (decision 11).

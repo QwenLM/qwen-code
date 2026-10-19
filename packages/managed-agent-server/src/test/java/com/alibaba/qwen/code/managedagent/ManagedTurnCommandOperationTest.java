@@ -437,6 +437,25 @@ class ManagedTurnCommandOperationTest {
     }
 
     @Test
+    void aCancelParksWhenItsHarnessReportsAnUnknownExecutionFailure() {
+        Admission admitted = admit("submit-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(cancel.commandEffect()).isTrue();
+        assertThat(store.findTurn(TENANT, sessionId, admitted.turnId())
+                .orElseThrow().status()).isEqualTo("CANCELLING");
+
+        finish(admitted, "turn.failed", "FAILED",
+                "managed_runtime_recovery_blocked");
+
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(operation.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(operation.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("cancel_unconfirmed");
+        assertThat(operation.receiptId()).isNull();
+    }
+
+    @Test
     void aCancelOfAnAdmittedTurnFailedOtherwiseFailsAlreadySettled() {
         Admission admitted = admit("submit-1");
         Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
@@ -569,13 +588,18 @@ class ManagedTurnCommandOperationTest {
     }
 
     private void finish(Admission turn, String type, String status) {
+        finish(turn, type, status, null);
+    }
+
+    private void finish(Admission turn, String type, String status,
+            String errorCode) {
         claim(turn);
         String epoch = store.findTurn(TENANT, sessionId, turn.turnId())
                 .orElseThrow().harnessEventEpoch();
         store.recordHarnessEvents(TENANT, sessionId, turn.turnId(), OWNER,
                 epoch, List.of(new HarnessEvent(1, "boot:" + epoch + ":1",
                         new ProjectedEvent(type, Map.of(), true, status,
-                                null, null))));
+                                errorCode, null))));
     }
 
     OperationRecord operation(String operationId) {
