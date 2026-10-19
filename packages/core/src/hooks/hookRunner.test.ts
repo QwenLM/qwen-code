@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { HookRunner } from './hookRunner.js';
+import { HookCommandCgroup } from './hook-command-cgroup.js';
 import {
   HookEventName,
   HookType,
@@ -224,6 +225,41 @@ describe('HookRunner', () => {
   };
 
   describe('executeHook', () => {
+    it('opts the waitForProcessTree launcher into parent-death reaping', async () => {
+      const launch = vi.fn().mockReturnValue({
+        executable: process.execPath,
+        args: ['--eval', 'process.exit(0)'],
+        env: {},
+      });
+      const unit = {
+        launch,
+        waitForEmpty: vi.fn().mockResolvedValue(true),
+        terminate: vi.fn().mockResolvedValue(undefined),
+        remove: vi.fn(),
+      } as unknown as HookCommandCgroup;
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      const mockProcess = scriptSpawn(0);
+      // The cgroup path reads the launcher's joined marker from fd 3.
+      (mockProcess as unknown as { stdio: unknown[] }).stdio = [
+        null,
+        null,
+        null,
+        { on: vi.fn() },
+      ];
+
+      const result = await hookRunner.executeHook(
+        cmd('echo hi'),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        { waitForProcessTree: true, cgroupRoot: '/fake-root' },
+      );
+
+      expect(result.success).toBe(true);
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][3]).toEqual({ reapOnParentExit: true });
+    });
+
     it('should return error when hook command is missing', async () => {
       const result = await execute('');
 
