@@ -73,6 +73,10 @@ export class ManagedBackgroundShellRegistry {
     return this.entries.size;
   }
 
+  get hasActivity(): boolean {
+    return this.entries.size > 0 || this.finished.size > 0;
+  }
+
   /** Read-only: an attached or running process holds its Session's Runtime. */
   hasHolds(sessionId: string): boolean {
     return this.countBySession(sessionId) > 0;

@@ -88,10 +88,12 @@ public interface ToolExecutionRepository {
      * the release-state filter — a row stops mattering only when that
      * Session's release is durably recorded. Ownership is found by harness
      * session instead of by one Runtime Session, because the held obligation
-     * outlives the process that named the turn. At most 100 rows per page,
-     * and a short page means the scan is exhausted; the exclusive cursor is
-     * an execution ID, including one already settled. */
-    List<ToolExecutionRecord> findHoldRowsByHarnessSession(String harnessSessionId,
+     * outlives the process that named the turn. The answer is narrowed to
+     * the identity and Runtime Session the caller reads, so a store need not
+     * materialize non-hold rows it scans past (#13986 review R1-7). At most
+     * 100 rows per page, and a short page means the scan is exhausted; the
+     * exclusive cursor is an execution ID, including one already settled. */
+    List<ToolHoldRow> findHoldRowsByHarnessSession(String harnessSessionId,
             String afterExecutionCallId, int limit);
 
     /**

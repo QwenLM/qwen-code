@@ -1,17 +1,17 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.RenewWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -138,7 +138,7 @@ class WorkspaceSessionCloseMySqlIT {
         assertThat(journal.hasLiveWriter(tenant, another)).isTrue();
         assertThatThrownBy(() -> transaction(() -> journal.acquireWriter(tenant, another, "b".repeat(32),
                 new AcquireWriterRequest("workspace", "replacement", 60_000L))))
-                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_not_writable"));
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_not_writable"));
         transaction(() -> journal.sealWriter(tenant, another, TOKEN,
                 new SealWriterRequest("workspace", "original", generation)));
         assertThat(journal.hasLiveWriter(tenant, another)).isFalse();
@@ -299,13 +299,13 @@ class WorkspaceSessionCloseMySqlIT {
     private static Object outcome(Supplier<Object> operation) {
         try {
             return operation.get();
-        } catch (ApiException rejected) {
+        } catch (ManagedAgentException rejected) {
             return rejected;
         }
     }
 
     private static void assertCode(Object result, String code) {
-        assertThat(result).isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo(code));
+        assertThat(result).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo(code));
     }
 
     private <T> T transaction(Supplier<T> work) {
