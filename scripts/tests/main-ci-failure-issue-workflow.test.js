@@ -377,6 +377,13 @@ printf '%s\\n' '${liveAttempt}'
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).toContain('Could not read run 39237270547');
     });
+    it('fails open when the event carries no run attempt', () => {
+      // -gt coerces an empty operand to 0, so a field-less event would read
+      // as superseded and suppress every report.
+      expect(detect('2', { RUN_ATTEMPT: '' }).output).toBe(
+        'superseded=false\n',
+      );
+    });
     it('gates every failure reader on the supersession check', () => {
       // Without this wiring the check would run and still file the issue; the
       // order matters too, because a gate reading an empty output is a no-op.

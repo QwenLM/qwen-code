@@ -94,7 +94,8 @@ jobs:
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
               --jq '.run_attempt'
           )"; then
-            if [[ "${live_attempt}" -gt "${RUN_ATTEMPT}" ]]; then
+            # A missing run_attempt must fail open, not read as attempt 0.
+            if [[ -n "${RUN_ATTEMPT}" && "${live_attempt}" -gt "${RUN_ATTEMPT}" ]]; then
               superseded=true
               echo "::warning::Run ${WORKFLOW_RUN_ID} is on attempt ${live_attempt}; this attempt-${RUN_ATTEMPT} event is stale and its own completion event reports the result."
             fi
