@@ -916,18 +916,18 @@ class ManagedActionsTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
-        Duration lease = Duration.ofSeconds(2);
+        Duration lease = Duration.ofSeconds(3);
         properties.getDispatch().setLeaseDuration(lease);
-        // 4s > leaseDuration/3, so the coordinator's clamp (min → 666ms) is
+        // 4s > leaseDuration/3, so the coordinator's clamp (min → 1s) is
         // what picks the period. renewInterval > leaseDuration is deliberate
         // (asserted below): only then does inverting the clamp (max → 4s)
         // starve the lease — the first renewal comes after the lease has
         // lapsed and can no longer be extended, so the competing replica must
         // win it. HarnessCoordinator rejects this range (renew must be
         // <= lease/2); ActionResponseCoordinator clamps instead, and this
-        // test pins the clamp. The wide margins — over a second of renewal
-        // slack per period — keep scheduler jitter on a loaded CI runner
-        // from lapsing the lease mid-hold (#14476).
+        // test pins the clamp. Two seconds of renewal slack per period —
+        // matching current `main` — keep scheduler jitter on a loaded CI
+        // runner from lapsing the lease mid-hold (#14476).
         properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
         // Deriving the hold as lease + 6 clamped renewal periods keeps "hold
         // outlasts the lease" structural under rescale and leaves six renewal
