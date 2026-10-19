@@ -3424,13 +3424,20 @@ export const AppContainer = (props: AppContainerProps) => {
             // Falling back to a normal submit hides the reason the accept failed.
             // The overlay carries the underlying cause (EACCES from ENOSPC from
             // ENOTDIR), so record it rather than dropping it on the floor.
-            const appliedFiles =
-              err &&
-              typeof err === 'object' &&
-              'applied' in err &&
-              Array.isArray((err as { applied?: unknown }).applied)
-                ? (err as { applied: string[] }).applied
+            const errorStringArray = (key: string): string[] => {
+              if (!err || typeof err !== 'object') {
+                return [];
+              }
+              const value = (err as Record<string, unknown>)[key];
+              return Array.isArray(value)
+                ? value.filter(
+                    (entry): entry is string => typeof entry === 'string',
+                  )
                 : [];
+            };
+            const appliedFiles = errorStringArray('applied');
+            const failedFiles = errorStringArray('failed');
+            const damagedFiles = errorStringArray('damaged');
             logSpeculation(
               config,
               new SpeculationEvent({
@@ -3450,24 +3457,38 @@ export const AppContainer = (props: AppContainerProps) => {
               'Cause:',
               err instanceof Error ? err.cause : undefined,
             );
-            if (appliedFiles.length > 0) {
-              // Some edits are already on disk. Resubmitting the same turn would
-              // run the same tool calls again over files that already carry their
-              // result, so the second run compounds the first -- and the tool
-              // results the model reads back would describe an edit applied
-              // twice. Report what landed and stop; a normal submit is only safe
-              // when nothing was written.
+            if (appliedFiles.length > 0 || damagedFiles.length > 0) {
+              // Resubmitting would either run the same tool calls over edits
+              // that already landed (the second run compounds the first), or
+              // run them over a file that a failed copy left truncated or
+              // missing. Report the paths the user has to reconcile and stop.
+              const parts: string[] = [];
+              if (appliedFiles.length > 0) {
+                parts.push(
+                  `applied ${appliedFiles.length} file(s) before failing: ${appliedFiles.join(', ')}`,
+                );
+              }
+              if (failedFiles.length > 0) {
+                parts.push(`did not land: ${failedFiles.join(', ')}`);
+              }
+              if (damagedFiles.length > 0) {
+                parts.push(
+                  `may be truncated or missing after a failed copy: ${damagedFiles.join(', ')}`,
+                );
+              }
               historyManager.addItem(
                 {
                   type: MessageType.ERROR,
-                  text: `Speculative execution applied ${appliedFiles.length} file(s) before failing, so the request was not resubmitted: ${appliedFiles.join(', ')}. Re-running it would apply those edits a second time -- check the files above first, then re-run if the result is what you want.`,
+                  text: `Speculative execution ${parts.join('; ')}. The request was not resubmitted.`,
                 },
                 Date.now(),
               );
+              setPromptSuggestion(null);
               return;
             }
-            // Fallback: submit normally. Nothing reached disk, so a resubmit
-            // cannot duplicate an edit.
+            // Fallback: the rejection carried no applied and no damaged files
+            // (the apply contract sets both before a resubmit is safe), so a
+            // normal submit cannot duplicate an edit.
             addMessage(submittedValue, false, submittedPrompt, shellModeActive);
           });
         speculationRef.current = IDLE_SPECULATION;

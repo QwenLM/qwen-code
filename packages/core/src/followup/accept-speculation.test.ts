@@ -147,6 +147,36 @@ describe('acceptSpeculation', () => {
     expect(state.status).toBe('completed');
   });
 
+  it('records the turn when some files landed before an apply failure', async () => {
+    const cwd = await makeCwd();
+    const overlay = new OverlayFs(cwd);
+    dirs.push(overlay.getOverlayDir());
+
+    await writeFile(join(cwd, 'blocker'), 'not a directory');
+    const blocked = join(cwd, 'blocker', 'file.ts');
+    const writable = join(cwd, 'writable.ts');
+    await writeFile(await overlay.redirectWrite(blocked), 'blocked edit');
+    await writeFile(await overlay.redirectWrite(writable), 'applied edit');
+
+    const { client, addHistory } = makeLlmClient();
+    const state = makeState(cwd, overlay, [
+      { role: 'user', parts: [{ text: 'hi' }] },
+    ]);
+
+    const error = await acceptSpeculation(state, client).catch(
+      (err: unknown) => err,
+    );
+
+    expect((error as { applied?: string[] }).applied).toEqual([writable]);
+    expect((error as { failed?: string[] }).failed).toEqual([blocked]);
+    // The writable edit is on the user's disk. Its turn must enter the
+    // conversation even though the accept is rejected; otherwise the model's
+    // next turn reasons from a history that omits an edit it can see.
+    expect(addHistory).toHaveBeenCalledTimes(1);
+    expect(await readFile(writable, 'utf-8')).toBe('applied edit');
+    expect(state.status).not.toBe('completed');
+  });
+
   it('cleans up the overlay even when applyToReal throws', async () => {
     const cwd = await makeCwd();
     const overlay = new OverlayFs(cwd);

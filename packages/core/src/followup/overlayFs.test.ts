@@ -4,13 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { OverlayFs } from './overlayFs.js';
-import { writeFile, readFile, mkdir, rm } from 'node:fs/promises';
+import {
+  writeFile,
+  readFile,
+  mkdir,
+  rm,
+  stat,
+  copyFile,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+
+// The copy-stage failure test needs to truncate the destination and then fail,
+// which is what `copyFile` does on ENOSPC. Delegate every other call to the real
+// implementation so the rest of the suite is unchanged.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, copyFile: vi.fn(actual.copyFile) };
+});
 
 describe('OverlayFs', () => {
   let testDir: string;
@@ -183,6 +198,24 @@ describe('OverlayFs', () => {
       expect(existsSync(neverWritten)).toBe(false);
     });
 
+    it('ignores an existing file that was redirected but never written', async () => {
+      // For a path that already exists, `redirectWrite` preloads the original
+      // bytes into the overlay. A tool that then fails without writing leaves an
+      // overlay file holding the original content, which the old existence check
+      // counted as applied. That would report an unchanged file as landed and
+      // suppress a resubmit that was safe.
+      const realFile = join(testDir, 'existing.ts');
+      await writeFile(realFile, 'original content');
+      const before = (await stat(realFile)).mtimeMs;
+      await overlay.redirectWrite(realFile);
+
+      const applied = await overlay.applyToReal();
+
+      expect(applied).toEqual([]);
+      expect(await readFile(realFile, 'utf-8')).toBe('original content');
+      expect((await stat(realFile)).mtimeMs).toBe(before);
+    });
+
     it('skips a registered parent path that becomes a directory', async () => {
       const parent = join(testDir, 'src');
       const parentOverlayPath = await overlay.redirectWrite(parent);
@@ -232,6 +265,34 @@ describe('OverlayFs', () => {
 
       // The file that could be copied is on disk with the edit in it.
       expect(await readFile(writable, 'utf-8')).toBe('applied edit');
+    });
+
+    it('reports a failed copy as damaged so the caller does not resubmit over it', async () => {
+      const realFile = join(testDir, 'app.ts');
+      await writeFile(realFile, 'original content');
+      await writeFile(await overlay.redirectWrite(realFile), 'edited content');
+
+      const mockedCopyFile = vi.mocked(copyFile);
+      mockedCopyFile.mockImplementationOnce(async (_src, dest) => {
+        // copyFile opens the destination with O_TRUNC and libuv unlinks it when
+        // the write fails; leave the destination truncated to model that.
+        await writeFile(dest as string, '');
+        throw Object.assign(new Error('no space left on device'), {
+          code: 'ENOSPC',
+        });
+      });
+
+      const error = await overlay.applyToReal().catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as { applied?: string[] }).applied).toEqual([]);
+      expect((error as { failed?: string[] }).failed).toEqual([realFile]);
+      expect((error as { damaged?: string[] }).damaged).toEqual([realFile]);
+      expect((error as Error).message).toContain(
+        'Could not apply 1 of 1 file(s) to disk',
+      );
+      // The fixture truncated the file; the point is that the caller is told it
+      // is damaged instead of silently resubmitting over it.
+      expect(await readFile(realFile, 'utf-8')).toBe('');
     });
 
     it('carries the underlying failure as the cause', async () => {
