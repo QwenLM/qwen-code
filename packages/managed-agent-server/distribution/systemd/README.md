@@ -84,6 +84,12 @@ Broker restarts; the default `control-group` would terminate them with the
 server. `KillMode=mixed` on the Harness terminates its tool processes with it.
 Keep both settings unless an equivalent supervisor replaces them.
 
+The same `KillMode=process` means `systemctl stop qwen-managed-agent-server`
+signals only the main process: the unit reports inactive while Runtime workers
+keep the state directory and Workspace, and a following start races them. Reap
+them before restarting with
+`systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`.
+
 ## Paths
 
 - `/opt/qwen-managed-agent` — extracted distribution (read-only).

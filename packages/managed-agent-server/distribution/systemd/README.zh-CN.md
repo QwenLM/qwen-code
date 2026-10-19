@@ -62,6 +62,8 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 控制面使用 `KillMode=process`，使 Broker 重启时 Runtime worker 继续存活；默认的 `control-group` 会把它们随服务一起终止。Harness 使用 `KillMode=mixed`，其工具进程随它终止。除非改用等价监管方式，否则保留这两项设置。
 
+同一项 `KillMode=process` 也意味着 `systemctl stop qwen-managed-agent-server` 只向主进程发送信号：unit 报告 inactive 时 Runtime worker 仍在运行并持有状态目录与 Workspace，随后启动会与它们竞争。重启前先回收：`systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`。
+
 ## 路径
 
 - `/opt/qwen-managed-agent` — 解压后的分发产物（只读）。
