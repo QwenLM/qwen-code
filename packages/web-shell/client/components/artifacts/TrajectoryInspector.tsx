@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { CopyIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement } from '../../utils/dom';
@@ -74,6 +81,10 @@ export function TrajectoryInspector({
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'copied' | 'failed'>();
   const sectionRef = useRef<HTMLElement>(null);
+  const onFocusedUnmountRef = useRef(onFocusedUnmount);
+  useLayoutEffect(() => {
+    onFocusedUnmountRef.current = onFocusedUnmount;
+  }, [onFocusedUnmount]);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const alive = useRef(true);
   const copyVersion = useRef(0);
@@ -86,18 +97,21 @@ export function TrajectoryInspector({
     };
   }, []);
 
-  useLayoutEffect(
-    () => () => {
-      if (
-        sectionRef.current?.contains(
-          getShadowAwareActiveElement(sectionRef.current),
-        )
-      ) {
-        onFocusedUnmount?.();
-      }
-    },
-    [onFocusedUnmount],
-  );
+  const setSectionElement = useCallback((node: HTMLElement | null) => {
+    const previous = sectionRef.current;
+    if (!node && previous?.contains(getShadowAwareActiveElement(previous))) {
+      // Wait for the commit; simulated cleanup leaves the node connected.
+      queueMicrotask(() => {
+        if (
+          !previous.isConnected &&
+          previous.ownerDocument.activeElement === previous.ownerDocument.body
+        ) {
+          onFocusedUnmountRef.current?.();
+        }
+      });
+    }
+    sectionRef.current = node;
+  }, []);
 
   const rowKind = row?.kind;
   const executionKey = execution?.key;
@@ -392,7 +406,7 @@ export function TrajectoryInspector({
 
   return (
     <section
-      ref={sectionRef}
+      ref={setSectionElement}
       className={styles.inspector}
       aria-label={t('trajectory.inspector.title')}
       data-testid="trajectory-inspector"

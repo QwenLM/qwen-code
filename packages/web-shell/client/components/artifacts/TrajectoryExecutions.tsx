@@ -33,13 +33,20 @@ export function TrajectoryExecutions({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const setScrollElement = useCallback((node: HTMLDivElement | null) => {
-    if (
-      !node &&
-      scrollRef.current?.contains(
-        getShadowAwareActiveElement(scrollRef.current),
-      )
-    ) {
-      toggleRef.current?.focus({ preventScroll: true });
+    const previous = scrollRef.current;
+    if (!node && previous?.contains(getShadowAwareActiveElement(previous))) {
+      // Resolve the fallback after siblings have finished updating.
+      queueMicrotask(() => {
+        const target = scrollRef.current ?? toggleRef.current;
+        if (
+          !previous.isConnected &&
+          previous.ownerDocument.activeElement ===
+            previous.ownerDocument.body &&
+          target?.isConnected
+        ) {
+          target.focus({ preventScroll: true });
+        }
+      });
     }
     scrollRef.current = node;
   }, []);

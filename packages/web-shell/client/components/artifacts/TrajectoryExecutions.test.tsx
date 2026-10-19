@@ -232,7 +232,7 @@ describe.each([false, true])('focus recovery (shadow=%s)', (shadow) => {
         container.append(other);
         (outside ? other : grid).focus();
         if (removal === 'compact') {
-          act(() =>
+          await act(async () =>
             resize(
               [{ contentRect: { height: 400 } } as ResizeObserverEntry],
               {} as ResizeObserver,
