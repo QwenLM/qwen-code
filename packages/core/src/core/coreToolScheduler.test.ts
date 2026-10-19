@@ -7493,24 +7493,34 @@ describe('convertToFunctionResponse', () => {
     expect(getToolOutputProvenance(restored)?.rawSize).toBeUndefined();
   });
 
-  it('leaves raw size unknown when the producer does not declare one', () => {
-    const content = [{ inlineData: { mimeType: 'image/png', data: 'BASE64' } }];
+  it('measures an undeclared body but keeps a declared null unknown', () => {
     const cfg = {
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
     } as Config;
-    const [part] = convertToFunctionResponse(
-      'native_image',
-      'image',
-      content,
+    const [measured] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'complete body',
       {},
       cfg,
     );
-    // An undeclared raw size is unknown: the processed body must not be
-    // shipped as the pre-reduction raw size, or a pre-bounding producer
-    // (grep, ripGrep) would report raw == injected with truncated: false.
-    expect(getToolOutputProvenance(part)?.rawSize).toBeUndefined();
-    expect(measureToolOutput([part], cfg).estimatedTokens).toBe(816);
-    expect(getToolOutputProvenance(part)?.truncated).toBeUndefined();
+    // Undeclared means an ordinary producer whose body is complete, so the
+    // ACP and speculation paths report the same raw size as the scheduler.
+    expect(getToolOutputProvenance(measured)?.rawSize?.chars).toBe(
+      'complete body'.length,
+    );
+    expect(getToolOutputProvenance(measured)?.truncated).toBe(false);
+
+    const [declared] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null },
+      cfg,
+    );
+    // A producer that bounds its own render still declares raw size unknown.
+    expect(getToolOutputProvenance(declared)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(declared)?.truncated).toBeUndefined();
   });
 
   const toolName = 'testTool';

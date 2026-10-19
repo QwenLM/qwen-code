@@ -630,12 +630,22 @@ export class QwenLogger {
   }
 
   logToolResultSizeEvent(event: ToolResultSizeEvent): void {
-    const {
-      'event.name': name,
-      'event.timestamp': _timestamp,
-      ...properties
-    } = event;
-    this.enqueueLogEvent(this.createActionEvent('tool', name, { properties }));
+    // Field-by-field like logToolCallEvent: call_id/prompt_id stay log-only.
+    const rumEvent = this.createActionEvent('tool', event['event.name'], {
+      properties: {
+        function_name: event.function_name,
+        tool_type: event.tool_type,
+        layer: event.layer,
+        raw_content_length: event.raw_content_length,
+        injected_content_length: event.injected_content_length,
+        raw_estimated_tokens: event.raw_estimated_tokens,
+        injected_estimated_tokens: event.injected_estimated_tokens,
+        truncated: event.truncated,
+        applied_budget: event.applied_budget,
+        budget_source: event.budget_source,
+      },
+    });
+    this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
   }
 

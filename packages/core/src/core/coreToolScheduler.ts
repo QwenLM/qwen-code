@@ -1009,10 +1009,13 @@ export function convertToFunctionResponse(
   let rawSize: ReturnType<typeof measureToolOutput> | undefined;
   try {
     if (producerResult) {
-      // An undeclared raw size is unknown, not equal to the processed body:
-      // a producer that pre-bounds its own output (grep, ripGrep) would
-      // otherwise be reported as raw == injected with truncated: false.
-      rawSize = producerResult.rawOutputSize ?? undefined;
+      // A producer that bounds its own render declares null, so its raw size
+      // is unknown. Anything undeclared is an ordinary producer whose body is
+      // complete, and `processed` already measured it.
+      rawSize =
+        producerResult.rawOutputSize === null
+          ? undefined
+          : (producerResult.rawOutputSize ?? processed);
     }
   } catch {
     // Optional observation metadata must not change a tool's outcome.
@@ -6795,6 +6798,7 @@ export class CoreToolScheduler {
             content,
             { threshold: perToolMax, lines: perToolLines, keep: perToolKeep },
             promptIdForTruncation,
+            scheduledCall.request.callId,
           );
           recordBudgetReduction(
             contentBeforeTruncation,
@@ -6870,6 +6874,7 @@ export class CoreToolScheduler {
                   keep: perToolKeep,
                 },
                 promptIdForTruncation,
+                scheduledCall.request.callId,
               );
               recordBudgetReduction(
                 contentBeforeRecombination,
@@ -7153,6 +7158,7 @@ export class CoreToolScheduler {
                   keep: scheduledCall.tool.truncateKeep,
                 },
                 scheduledCall.request.prompt_id,
+                scheduledCall.request.callId,
               );
               recordBudgetReduction(
                 toolResult.llmContent,
