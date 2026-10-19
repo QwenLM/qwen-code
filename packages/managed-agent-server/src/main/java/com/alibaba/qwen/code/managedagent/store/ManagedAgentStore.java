@@ -3455,7 +3455,8 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         requireLegacyMutation(tenantId, sessionId);
         if (target.lifecycleProtocolVersion() == 1) {
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                    jdbc, tenantId, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         }
         if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);

@@ -1613,7 +1613,7 @@ class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
-            case SESSION_APPROVAL, SESSION_MODELS -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS -> "{\"sessionId\":\"" + session + "\"}";
             case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
             case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session

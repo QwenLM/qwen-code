@@ -253,6 +253,23 @@ public class ManagedSessionStore {
                         + " within the hot-path bound; retry.");
     }
 
+    /**
+     * Runs one sweep candidate in its own transaction. A guard refusal skips that candidate
+     * instead of aborting the sweep; any other failure propagates unchanged.
+     */
+    static <T> T skipContended(
+            org.springframework.transaction.support.TransactionTemplate transactions,
+            org.springframework.transaction.support.TransactionCallback<T> body) {
+        try {
+            return transactions.execute(body);
+        } catch (ApiException refusal) {
+            if (!"tenant_guard_contended".equals(refusal.getCode())) {
+                throw refusal;
+            }
+            return null;
+        }
+    }
+
     static void lockBounded(Runnable lock) {
         lockBoundedResult(() -> {
             lock.run();

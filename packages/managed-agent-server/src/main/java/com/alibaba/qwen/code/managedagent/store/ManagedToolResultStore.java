@@ -238,7 +238,8 @@ public class ManagedToolResultStore {
                     .thenComparing(row -> (String) row.get("operation_key")));
             for (var candidate : rows) {
                 String tenant = (String) candidate.get("tenant_id");
-                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
+                ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                        jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
                 if (isPrivateResult(candidate)) {
                     status.setRollbackOnly();
                     return null;
@@ -306,7 +307,9 @@ public class ManagedToolResultStore {
             if (candidate == null) {
                 return false;
             }
-            ToolPublicationRetentionStore.lockTenant(jdbc, (String) candidate.get("tenant_id"));
+            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                    jdbc, (String) candidate.get("tenant_id"),
+                    ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
             if (isPrivateResult(candidate)) {
                 status.setRollbackOnly();
                 return false;
