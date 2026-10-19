@@ -44,13 +44,13 @@ systemctl enable --now qwen-hosted-harness qwen-managed-agent-server
 
 ## 验证
 
-加载 unit 使用的同一份环境，并在服务停止时运行预检：
+加载 unit 使用的同一份环境文件，并在服务停止时运行预检：
 
 ```bash
-sudo -u qwen-managed-agent sh -c '
-  set -a; . /etc/qwen-managed-agent/server.env; set +a
+sudo systemd-run --wait --pipe --collect \
+  --property=User=qwen-managed-agent \
+  --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
-'
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
