@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
+import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
