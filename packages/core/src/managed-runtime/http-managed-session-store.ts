@@ -30,6 +30,7 @@ import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
+  HOSTED_MODEL_REQUEST_BYTES,
   hostedRecoveryReferences,
   parseHostedRecoveryResource,
 } from './hosted-recovery-records.js';
@@ -59,12 +60,20 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
   tenantHeader: 'X-Qwen-Tenant-Id',
   writerTokenHeader: 'X-Qwen-Managed-Writer-Token',
   maxInlineResourceBytes: 64 * 1024,
+  maxAttachmentInputBytes: 8 * 1024 * 1024,
   maxResourcesPerTransaction: 1024,
   minimumWriterTokenLength: 32,
   maximumWriterTokenLength: 512,
   minimumLeaseDurationMs: 1_000,
   maximumLeaseDurationMs: 300_000,
 } as const;
+
+export function managedSessionInlineResourceBytes(kind: string): number {
+  if (kind === 'managed-input')
+    return HTTP_MANAGED_SESSION_STORE_CONTRACT.maxAttachmentInputBytes;
+  if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
+  return HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+}
 
 const WRITER_TOKEN = new RegExp(
   `^[A-Za-z0-9_-]{${HTTP_MANAGED_SESSION_STORE_CONTRACT.minimumWriterTokenLength},${HTTP_MANAGED_SESSION_STORE_CONTRACT.maximumWriterTokenLength}}$`,
@@ -214,7 +223,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     totalBytes += bytes.length;
     if (
       bytes.length > MANAGED_SESSION_LIMITS.maxTransactionBytes ||
-      totalBytes > 32 * 1024 * 1024 ||
+      totalBytes > 128 * 1024 * 1024 ||
       bytes.length !== transaction.byteLength ||
       sha256(bytes) !== transaction.recordDigest
     ) {
@@ -296,7 +305,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     );
     totalBytes += bytes.length;
     if (
-      totalBytes > 32 * 1024 * 1024 ||
+      totalBytes > 128 * 1024 * 1024 ||
       bytes.length !== ref.byteLength ||
       sha256(bytes) !== ref.digest
     ) {
@@ -475,12 +484,10 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     source: Buffer,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
-    if (
-      source.byteLength >
-      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
-    ) {
+    const maxBytes = managedSessionInlineResourceBytes(safeKind);
+    if (source.byteLength > maxBytes) {
       throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline limit; OSS storage is not enabled.`,
+        `resource bytes exceed the ${maxBytes}-byte inline limit; OSS storage is not enabled.`,
       );
     }
     const bytes = Buffer.from(source);
@@ -2049,7 +2056,9 @@ export function collectNestedResourceRefs(
       : [];
   }
   if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
-    return hostedRecoveryReferences(parseHostedRecoveryResource(bytes));
+    return hostedRecoveryReferences(
+      parseHostedRecoveryResource(bytes, undefined, ref.kind),
+    );
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||

@@ -13,6 +13,7 @@ import type {
   ManagedSessionOptions,
 } from './managed-agent-provider';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
+import * as pendingStorage from './managed-pending-storage';
 
 const editorMocks = vi.hoisted(() => ({
   props: undefined as
@@ -705,6 +706,69 @@ describe('WorkspaceBindingCreator', () => {
       expect.any(Object),
     );
     expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
+    '{',
+  ])(
+    'requires explicit discard before creating after a pending record cannot be restored (%s)',
+    async (stored) => {
+      const { createSession } = approvalSelection();
+      const key = `qwen-managed-workspace-create:${provider.storageKey}`;
+      sessionStorage.setItem(key, stored);
+      await render();
+      expect(container.textContent).toContain(
+        'may already have been submitted',
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(sessionStorage.getItem(key)).toBeNull();
+      expect(container.textContent).not.toContain(
+        'may already have been submitted',
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      await sendInitial('new explicit request');
+      expect(createSession).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps initial submissions serialized while the frozen request is being persisted', async () => {
+    const { createSession } = approvalSelection();
+    await render();
+    let acknowledge!: (saved: boolean) => void;
+    const save = vi
+      .spyOn(pendingStorage, 'saveManagedPending')
+      .mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            acknowledge = resolve;
+          }),
+      );
+    const send = editorMocks.props!.onSubmit;
+    await act(async () => {
+      send('first draft', undefined, undefined, vi.fn());
+      await flush();
+      send('second draft', undefined, undefined, vi.fn());
+      await flush();
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(createSession).not.toHaveBeenCalled();
+    await act(async () => {
+      acknowledge(true);
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledOnce();
+    expect(createSession.mock.calls[0]?.[0]).toMatchObject({
+      text: 'first draft',
+    });
+    save.mockRestore();
   });
 
   it('freezes attachment-only input and Plan before asynchronous file reading', async () => {

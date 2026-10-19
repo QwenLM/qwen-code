@@ -2,7 +2,7 @@ import type { PromptFile, PromptImage } from '../../adapters/promptTypes';
 import type { ManagedInputBlock } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 
-const MAX_INPUT_BYTES = 48 * 1024;
+const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const TEXT_EXTENSIONS = new Set([
   'txt',
   'md',
@@ -143,7 +143,7 @@ export async function encodeManagedInput(
   for (const file of files) {
     if (file.data && file.data.size > MAX_INPUT_BYTES)
       throw new Error(
-        'Attachments and text together must fit within 48 KiB of encoded input.',
+        'Attachments and text together must fit within 8 MiB of encoded input.',
       );
     let contents = file.text;
     if (contents === undefined && file.data) {
@@ -178,7 +178,7 @@ export async function encodeManagedInput(
   }
   if (!isManagedInput(blocks))
     throw new Error(
-      'Use a nonempty UTF-8 text file or a valid PNG, JPEG or WebP image. Attachments and text together must fit within 48 KiB of encoded input.',
+      'Use a nonempty UTF-8 text file or a valid PNG, JPEG or WebP image. Attachments and text together must fit within 8 MiB of encoded input.',
     );
   return blocks;
 }
