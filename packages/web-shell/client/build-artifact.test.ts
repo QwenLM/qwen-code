@@ -523,12 +523,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
     // increase is shared i18n copy; substituting main's table restores the
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
+    // Attachment recovery copy measures 1,338,049 at 9c3555b334. Building
+    // with the base (6d9df42d99) i18n table measures 1,337,798; the 251-unit
+    // increase is shared copy, while Managed interactive code stays excluded.
+    // A 1,339,500 ceiling retains 1,451 units of margin.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_338_000);
+    expect(js.length).toBeLessThan(1_339_500);
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
