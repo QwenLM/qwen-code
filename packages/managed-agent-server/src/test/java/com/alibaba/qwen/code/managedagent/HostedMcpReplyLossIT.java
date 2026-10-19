@@ -37,8 +37,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -239,8 +239,6 @@ class HostedMcpReplyLossIT {
         // FG12a: a lost mcp-release reply. The close resolves the release
         // through a status lookup; a same-id release is re-sent only when
         // that lookup cannot settle it, and the server still exits once.
-        String releaseId = configuration(session.id())
-                .path("configurationId").asText() + ":release";
         int invokesBeforeClose = controls("mcp-invoke").size();
         int configuresBeforeClose = controls("mcp-configure").size();
         dropControls = true;
@@ -640,17 +638,21 @@ class HostedMcpReplyLossIT {
             boolean toolResult = false;
             boolean toolPrompt = false;
             for (JsonNode message : request.path("messages")) {
-                if ("tool".equals(message.path("role").asText()))
+                if ("tool".equals(message.path("role").asText())) {
                     toolResult = true;
+                }
                 if ("user".equals(message.path("role").asText())
                         && message.path("content").toString()
-                                .contains("FG12_TOOL"))
+                                .contains("FG12_TOOL")) {
                     toolPrompt = true;
+                }
             }
             String mcpName = null;
             for (JsonNode tool : request.path("tools")) {
                 String name = tool.at("/function/name").asText();
-                if (name.startsWith("mcp_")) mcpName = name;
+                if (name.startsWith("mcp_")) {
+                    mcpName = name;
+                }
             }
             boolean call = toolPrompt && !toolResult && mcpName != null;
             var chunk = json.createObjectNode().put("id", "fg12a")
