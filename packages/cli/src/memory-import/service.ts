@@ -6,6 +6,7 @@
 import * as fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
@@ -86,6 +87,7 @@ interface LedgerRecord {
   outcome: ImportItemResult;
 }
 type Ledger = Record<string, LedgerRecord>;
+const heldLocks = new AsyncLocalStorage<AbortSignal>();
 export interface ImportServiceOptions {
   projectRoot: string;
   assertActive: () => void;
@@ -141,9 +143,11 @@ async function readJson<T>(file: string): Promise<T> {
   }
 }
 async function writeJson(file: string, value: unknown): Promise<void> {
+  heldLocks.getStore()?.throwIfAborted();
   const tmp = `${file}.${randomUUID()}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
   try {
+    heldLocks.getStore()?.throwIfAborted();
     await fs.rename(tmp, file);
   } finally {
     await fs.rm(tmp, { force: true });
@@ -293,14 +297,20 @@ export class MemoryImportService {
   }
   private async locked<T>(
     directory: string,
-    run: () => Promise<T>,
+    run: (signal: AbortSignal) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
     await privateDirectory(directory, this.base);
-    let compromised = false;
+    const ownership = new AbortController();
+    const parent = heldLocks.getStore();
+    const held = parent
+      ? AbortSignal.any([parent, ownership.signal])
+      : ownership.signal;
+    // Cancellation may persist a terminal status; losing ownership may not.
+    const work = signal ? AbortSignal.any([signal, held]) : held;
     let release: (() => Promise<void>) | undefined;
     while (!release) {
-      signal?.throwIfAborted();
+      work.throwIfAborted();
       this.options.assertActive();
       try {
         release = await lockfile.lock(directory, {
@@ -309,9 +319,7 @@ export class MemoryImportService {
           update: 10_000,
           retries: 0,
           onCompromised: () => {
-            compromised = true;
-            for (const controller of this.controllers.values())
-              controller.abort();
+            ownership.abort(new Error('Import lock lost.'));
           },
         });
       } catch (error) {
@@ -320,10 +328,16 @@ export class MemoryImportService {
       }
     }
     try {
-      if (compromised) throw new Error('Import lock lost.');
-      return await run();
+      work.throwIfAborted();
+      const result = await heldLocks.run(held, () => run(work));
+      held.throwIfAborted();
+      return result;
     } finally {
-      await release();
+      try {
+        if (!ownership.signal.aborted) await release();
+      } finally {
+        ownership.abort(new Error('Import lock released.'));
+      }
     }
   }
   async submit(
@@ -418,7 +432,9 @@ export class MemoryImportService {
   }
   private kick(id: string): void {
     if (this.workers.has(id)) return;
-    const worker = this.run(id)
+    // A worker owns its task lock independently of submit's admission lock.
+    const worker = heldLocks
+      .exit(() => this.run(id))
       .catch(() => {
         /* Durable state is retained for retry/recovery. */
       })
@@ -499,6 +515,7 @@ export class MemoryImportService {
   }
 
   async retry(id: string): Promise<ImportTask> {
+    await this.get(id);
     await this.prepare();
     // A worker registered by submit() or a previous retry is still running:
     // wait for it instead of returning early, otherwise explicit retry loses
@@ -534,7 +551,7 @@ export class MemoryImportService {
     this.controllers.set(id, controller);
     await this.locked(
       dir,
-      async () => {
+      async (signal) => {
         const task = await this.readState<StoredTask>(
           path.join(dir, 'task.json'),
         );
@@ -563,15 +580,15 @@ export class MemoryImportService {
               await this.importSection(
                 section,
                 id,
-                controller.signal,
-                (before, ledger) =>
+                signal,
+                (before, ledger, proposalSignal) =>
                   this.prepareProposal(
                     section,
                     source,
                     task,
                     before,
                     ledger,
-                    controller.signal,
+                    proposalSignal,
                   ),
                 async () => {
                   if (await exists(path.join(dir, 'cancel.json')))
@@ -749,6 +766,7 @@ export class MemoryImportService {
     propose: (
       before: { existing: MemoryImportModelInput['existing'] },
       ledger: Ledger,
+      signal: AbortSignal,
     ) => Promise<MemoryImportProposal>,
     assertCommit: () => Promise<void>,
   ): Promise<ImportItemResult> {
@@ -759,7 +777,7 @@ export class MemoryImportService {
     const scopeState = path.join(this.state, 'scopes', digest(root));
     return this.locked(
       scopeState,
-      async () => {
+      async (signal) => {
         signal.throwIfAborted();
         this.options.assertActive();
         const ledgerPath = path.join(scopeState, 'ledger.json');
@@ -804,6 +822,7 @@ export class MemoryImportService {
             signal.throwIfAborted();
             this.options.assertActive();
             await assertCommit();
+            heldLocks.getStore()?.throwIfAborted();
             await fs.rename(stage, destination);
           }
           for (const output of previous.outputs) {
@@ -838,7 +857,7 @@ export class MemoryImportService {
           );
         }
         const before = await this.snapshot(section.scope);
-        const proposal = await propose(before, ledger);
+        const proposal = await propose(before, ledger, signal);
         signal.throwIfAborted();
         this.options.assertActive();
         if ((await this.snapshot(section.scope)).version !== before.version)
@@ -982,6 +1001,7 @@ export class MemoryImportService {
             'Existing memory changed before publication.',
           );
         await assertCommit();
+        heldLocks.getStore()?.throwIfAborted();
         await fs.rename(stage, path.join(root, 'imported', key));
         ledger[key].phase = 'committed';
         await writeJson(ledgerPath, ledger);

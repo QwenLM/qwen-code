@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import lockfile from 'proper-lockfile';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { scanAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import { getImportedProjectMemoryRoot } from '@qwen-code/qwen-code-core/memory/import-paths.js';
@@ -45,6 +46,7 @@ beforeEach(async () => {
   vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '0');
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   await fs.rm(root, { recursive: true, force: true });
 });
@@ -73,6 +75,135 @@ const selection = () => [
   { id: previewSource(source).sections[0].id, scope: 'project' },
 ];
 describe('durable memory import', () => {
+  it('does not allocate state for unknown retry IDs', () =>
+    context(async () => {
+      const svc = service();
+      for (const char of ['d', 'e', 'f'])
+        await expect(svc.retry(char.repeat(64))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      const owner = path.join(
+        runtime,
+        'memory-import',
+        'batches',
+        digest(project),
+      );
+      expect(await fs.readdir(owner).catch(() => [])).toEqual([]);
+    }));
+
+  it.each(['model', 'state write'])(
+    'fences a lost task lock during %s without cancelling another task',
+    (phase) =>
+      context(async () => {
+        const locks = new Map<
+          string,
+          {
+            release: () => Promise<void>;
+            compromise: () => void;
+          }
+        >();
+        const realLock = lockfile.lock.bind(lockfile);
+        vi.spyOn(lockfile, 'lock').mockImplementation(async (file, options) => {
+          const release = await realLock(file, options);
+          locks.set(file, {
+            release,
+            compromise: () =>
+              options?.onCompromised?.(
+                Object.assign(new Error('Synthetic lock loss'), {
+                  code: 'ECOMPROMISED',
+                }),
+              ),
+          });
+          return release;
+        });
+        let entered!: () => void;
+        const modelEntered = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        let enteredUser!: () => void;
+        const userEntered = new Promise<void>((resolve) => {
+          enteredUser = resolve;
+        });
+        let proceed!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          proceed = resolve;
+        });
+        const svc = new MemoryImportService({
+          projectRoot: project,
+          assertActive: () => {},
+          propose: async (input) => {
+            if (input.scope === 'project') entered();
+            else enteredUser();
+            await gate;
+            return {
+              items: input.sources.map(({ id }) => ({
+                id,
+                decision: 'new' as const,
+                reason: 'Synthetic knowledge.',
+                documents: [
+                  input.scope === 'user'
+                    ? doc.replace('type: project', 'type: user')
+                    : doc,
+                ],
+              })),
+            };
+          },
+        });
+        const a = await svc.submit(source, selection(), 'lost-lock');
+        await modelEntered;
+        const dir = path.join(
+          runtime,
+          'memory-import',
+          'batches',
+          digest(project),
+          a.id,
+        );
+        const file = path.join(dir, 'task.json');
+        const held = locks.get(dir)!;
+        const replacement = JSON.parse(await fs.readFile(file, 'utf8'));
+        replacement.updatedAt = '2030-01-01T00:00:00.000Z';
+        replacement.usage = { modelCalls: 17, reservedTokens: 123456 };
+        const bytes = JSON.stringify(replacement);
+        const realWrite = fs.writeFile;
+        let replacementRelease: (() => Promise<void>) | undefined;
+        const loseLock = async () => {
+          await held.release();
+          replacementRelease = await realLock(dir, { realpath: false });
+          await realWrite(file, bytes);
+          held.compromise();
+        };
+        if (phase === 'state write')
+          vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+            await realWrite(...args);
+            if (
+              String(args[0]).startsWith(`${file}.`) &&
+              String(args[1]).includes('"status":"added"') &&
+              !replacementRelease
+            )
+              await loseLock();
+          });
+        try {
+          const b = await svc.submit(
+            source,
+            [{ ...selection()[0], scope: 'user' }],
+            'unrelated',
+          );
+          await userEntered;
+          if (phase === 'model') await loseLock();
+          proceed();
+          await svc.idle(a.id);
+          const doneB = await svc.idle(b.id);
+          expect(replacementRelease).toBeDefined();
+          expect(await fs.readFile(file, 'utf8')).toBe(bytes);
+          expect(doneB.status).toBe('completed');
+          expect(doneB.items[0].status).toBe('added');
+        } finally {
+          proceed();
+          await svc.idle(a.id);
+          await replacementRelease?.();
+        }
+      }),
+  );
   it('previews without creating a runtime directory', async () => {
     previewSource(source);
     await expect(fs.stat(runtime)).rejects.toMatchObject({ code: 'ENOENT' });

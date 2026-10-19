@@ -18,6 +18,8 @@ export const IMPORT_LIMITS = {
   totalBytes: 8 * 1024 * 1024,
   sectionBytes: 64 * 1024,
   headings: 4096,
+  markdownLines: 16_384,
+  inlineMarkers: 4096,
 } as const;
 export interface ImportSourceFile {
   path: string;
@@ -169,6 +171,9 @@ export function previewSource(input: unknown): ImportPreview {
   const sections: ImportSection[] = [];
   const warnings: string[] = [];
   let headingCount = 0;
+  let lineCount = 0;
+  let markerCount = 0;
+  let expandedBytes = 0;
   const paths = new Set(source.files.map((file) => file.path));
   const referenced = new Set<string>();
   for (const file of source.files.filter(
@@ -196,6 +201,21 @@ export function previewSource(input: unknown): ImportPreview {
       file.content.match(/^ {0,3}#{1,6}(?:[\t ]|$)/gm)?.length ?? 0;
     if (headingCount + atxCandidates > 4 * IMPORT_LIMITS.headings)
       throw new Error('Source exceeds the supported heading limit.');
+    // Bound parser work independently of heading syntax, including setext and
+    // pathological inline delimiters. These conservative limits include code.
+    for (let i = 0; i < file.content.length; i++) {
+      const char = file.content[i];
+      if (char === '\n' || (char === '\r' && file.content[i + 1] !== '\n'))
+        lineCount++;
+      if ('*_~[]<>!`&\\'.includes(char)) markerCount++;
+      if (
+        lineCount > IMPORT_LIMITS.markdownLines ||
+        markerCount > IMPORT_LIMITS.inlineMarkers
+      )
+        throw new Error(
+          'Source exceeds the Markdown complexity limit; split it into smaller source sets before importing.',
+        );
+    }
     const tree = parser.parse(file.content);
     const headings = tree.children
       .filter((node) => node.type === 'heading')
@@ -260,10 +280,15 @@ export function previewSource(input: unknown): ImportPreview {
       }
       while (ancestors.length && ancestors.at(-1)!.depth >= boundary.depth)
         ancestors.pop();
-      const content = [
-        ...ancestors.map((heading) => heading.preface),
-        own,
-      ].join('\n\n');
+      const parts = [...ancestors.map((heading) => heading.preface), own];
+      expandedBytes +=
+        parts.reduce((bytes, part) => bytes + Buffer.byteLength(part), 0) +
+        2 * (parts.length - 1);
+      if (expandedBytes > IMPORT_LIMITS.totalBytes)
+        throw new Error(
+          'Source expanded context exceeds 8 MiB; split shared context and project groups before importing.',
+        );
+      const content = parts.join('\n\n');
       let scope = scopeFor(
         content,
         boundary.title,

@@ -111,6 +111,32 @@ describe('Codex source preview', () => {
     expect(() => previewSource(dense)).toThrow('heading limit');
     expect(performance.now() - started).toBeLessThan(1500);
   });
+  it.each([
+    { kind: 'setext', content: 'a\n=\n'.repeat(8193) },
+    { kind: 'emphasis', content: '*a'.repeat(4097) },
+  ])('rejects excessive $kind Markdown work before parsing', ({ content }) => {
+    expect(() => previewSource(source(content))).toThrow('Markdown complexity');
+  });
+  it('bounds repeated ancestor context across the complete preview', () => {
+    const content =
+      '# Shared\n' +
+      'x'.repeat(60_000) +
+      '\n' +
+      Array.from(
+        { length: 512 },
+        (_, i) => `## Project ${i}\ncwd: /synthetic/p${i}\nKeep this fact.`,
+      ).join('\n');
+    expect(() => previewSource(source(content))).toThrow('expanded context');
+    const small = previewSource(
+      source(content.slice(0, content.indexOf('## Project 2\n'))),
+    );
+    expect(small.sections.length).toBeGreaterThan(1);
+    expect(
+      small.sections.every((section) =>
+        section.content.includes('x'.repeat(100)),
+      ),
+    ).toBe(true);
+  });
   it('keeps stable identities after reordering', () => {
     const a = '# Alpha\ncwd: /synthetic/alpha\nA.';
     const b = '# Beta\ncwd: /synthetic/beta\nB.';

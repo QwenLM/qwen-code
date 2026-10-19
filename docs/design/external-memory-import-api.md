@@ -20,7 +20,7 @@ Paths are relative to the selected Codex memories folder. Accepted resources are
 These are distilled Markdown resources, not raw session JSONL. Symlinks,
 traversal, credentials, configuration and skills are excluded. Limits are 256
 files, 512 KiB per file, 8 MiB total decoded source and 64 KiB per selectable
-section and 4,096 headings in total; HTTP's existing 10 MiB JSON-body limit also applies. Selected contextual snapshots are limited to 16 MiB serialized JSON, and each consolidation request to eight sections / 64 KiB of source plus 32 KiB of same-scope context. Oversized input is rejected, never silently truncated.
+section and 4,096 headings in total; HTTP's existing 10 MiB JSON-body limit also applies. Selected contextual snapshots are limited to 16 MiB serialized JSON, and each consolidation request to eight sections / 64 KiB of source plus 32 KiB of same-scope context. Oversized input is rejected, never silently truncated. Before Markdown parsing, source sets are limited to 16,384 line breaks and 4,096 inline syntax markers (`* _ ~ [ ] < > !` plus backticks, ampersands and backslashes), conservatively including code blocks. Expanded preview context, including repeated ancestor text, is limited to 8 MiB. Split oversized source sets into smaller groups.
 
 `POST /preview` accepts the source envelope. It does not retain files, start a
 model or create memory/task records. Sending it to a server does transmit its
@@ -64,7 +64,7 @@ already in flight may finish, but its result is discarded.
 
 Registered runtimes recover queued/running batches when the daemon activates the
 service; later registered runtimes recover on first import access. Model failures
-require explicit retry. Restart recovery waits for a crashed worker’s 120-second lock lease to expire; it does not require manual lock deletion. Source snapshots and task journals are private runtime
+require explicit retry. Restart recovery waits for a crashed worker’s 120-second lock lease to expire; it does not require manual lock deletion. A lost task or scope lock aborts only its dependent work and prevents further journal/publication replacements by that holder once loss is detected; it does not cancel unrelated tasks. Unknown retry IDs are rejected before allocating task directories. Source snapshots and task journals are private runtime
 state outside Git repositories and outside native memory scanning. Native search,
 fetch, recall and forget can operate on published documents. Source inspection is
 restricted to the owning workspace and retained selection.

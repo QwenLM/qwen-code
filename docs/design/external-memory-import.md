@@ -17,7 +17,9 @@ offline parser returns source sections, stable content identities, project scope
 hints, references and warnings. Sections retain their surrounding headings and
 metadata. Uncertain scope remains pending assignment. Source paths are provenance,
 never server destinations. Raw sessions, credentials, configuration and skills
-are not accepted. Only selected sections become immutable retained resources.
+are not accepted. Only selected sections become immutable retained resources. Before parsing, conservative
+line and inline-marker limits bound admitted Markdown complexity. Repeated ancestor
+context counts toward an 8 MiB preview expansion limit; oversize sources must be split.
 
 A trusted workspace owns each submitted batch. The caller explicitly maps selected
 sections to project or user scope in that workspace; other project groups can be
@@ -40,7 +42,10 @@ Commits are serialized and recheck the scanned memory version after model work.
 Validated output is journaled before publication; recovery distinguishes an
 unpublished intent from completed output. Cancellation stops further commits.
 Recovery resumes durable tasks on runtime service activation; failed model calls
-require explicit retry, avoiding an unbounded paid retry loop.
+require explicit retry, avoiding an unbounded paid retry loop. Unknown retry IDs do
+not allocate task directories. Each lock signals loss only to dependent work; once
+detected, that holder cannot replace journals or publish staged documents. Other
+tasks continue, while explicit user cancellation can still persist cancelled state.
 
 Imported project documents use a separate private root keyed by the real Git
 common directory. Main checkouts and linked worktrees share it; clones/forks do
