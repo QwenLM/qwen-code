@@ -115,9 +115,10 @@ async function probeHealth(
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       redirect: 'manual',
     });
-    // Any HTTP answer — including 401 from --require-auth — proves the
-    // listener is alive. A connection failure is what makes it stale.
-    return 'running';
+    // Any HTTP answer — including 401 from --require-auth — proves a
+    // listener, but the recorded process must still exist for it to be this
+    // daemon's; another application may have taken the old port.
+    return isProcessAlive(record.pid) ? 'running' : 'stale';
   } catch {
     return isProcessAlive(record.pid) ? 'unreachable' : 'stale';
   }
@@ -380,7 +381,17 @@ async function handleStop(argv: StopArgs): Promise<void> {
       failed = true;
       continue;
     }
-    if (process.platform !== 'win32') {
+    if (process.platform === 'win32') {
+      // Windows has no portable process-start identity. Only a listener that
+      // answers may be signalled; an unreachable record may be a reused pid.
+      if (health !== 'running') {
+        writeStderrLine(
+          `qwen daemon: refusing to signal pid ${record.pid}: Windows cannot verify the process identity and the listener is not answering.`,
+        );
+        failed = true;
+        continue;
+      }
+    } else {
       const processStarted = processStartTime(record.pid);
       if (processStarted === undefined) {
         writeStderrLine(

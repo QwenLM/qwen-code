@@ -10735,7 +10735,7 @@ async function runQwenServeImpl(
           port: actualPort,
           hostname: opts.hostname,
           url: daemonDiscoveryUrl(url),
-          workspaces: rawWorkspaces,
+          workspaces: workspaceInputs.map((workspace) => workspace.cwd),
           primaryWorkspace: boundWorkspace,
           startedAt: new Date().toISOString(),
           auth: token ? 'bearer' : 'none',
