@@ -157,6 +157,11 @@ class HostedAutomationSpringCrashIT {
 
     private Child startChild(Path root, String tenant, int internalPort,
             int publicPort, int broker) throws Exception {
+        if (fixtureDatabaseUrl == null) {
+            // Cases that do not need a private database share the one the
+            // pass provided.
+            fixtureDatabaseUrl = required("mysql.url");
+        }
         Path log = root.resolve("fixture.log");
         Files.deleteIfExists(root.resolve("ready.json"));
         ProcessBuilder builder = new ProcessBuilder(
