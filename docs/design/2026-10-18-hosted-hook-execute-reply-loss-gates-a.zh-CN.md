@@ -14,9 +14,10 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
 ## 决策
 
 1. **复用 FG13d 的装置与 broker 代理。** 新类沿用只含 Hook 的定义、打包 Harness、
-   durable worker 与转发代理；只丢弃 `hook-execute` 控制调用的回复，其余请求直通。
-2. **重试走状态轮询，而不是第二次 execute。** 派发回复丢失时，Harness 会按记录
-   自身的 `runtimeSessionId` 回落到 `hook-status`，这正是物理调用保持一次的原因。
+   durable worker 与转发代理；每格只丢弃一条具名控制回复，其余请求直通。
+2. **两个命令格的重试走状态轮询，而不是第二次 execute。** 派发回复丢失时，Harness
+   会按记录自身的 `runtimeSessionId` 回落到 `hook-status`，这正是物理调用保持一次
+   的原因。
 3. **三格、各自一套夹具。** 前两格都让 solo 命令保持 1 秒后放行；派发回复丢失
    必须通过 status 解析，status 回复丢失必须先保持未知，直到同一 owner 的后续
    轮询把它结算。两者都不得增加第二次物理调用。第三格在注册提交前丢弃 catalog
@@ -56,5 +57,5 @@ FG13e、FG13f、本地非托管 Hook、Windows/macOS，以及 #13133 的设计�
 ## 验证
 
 在 Linux、MySQL 8.4 与委派 cgroup v2 根上跑完整的 `hosted-harness-mysql`
-车道即证据。Checkstyle、CI fork 预算守卫与 pin 名单随新类一起移动。被跳过的用例
-不算通过。
+车道即证据。Checkstyle 与 CI fork 预算守卫随新用例一起移动；pin 名单不变。
+被跳过的用例不算通过。

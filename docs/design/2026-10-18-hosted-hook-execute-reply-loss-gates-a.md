@@ -19,11 +19,12 @@ second command.
 
 1. **Reuse the FG13d rig and broker proxy.** The class borrows the Hook-only
    definition, the packaged Harness, the durable worker and the forwarding
-   proxy from the FG13d stack base; only the `hook-execute` control reply is
-   dropped, and every other call passes through.
-2. **The retry is a status poll, not a second execute.** The Harness falls
-   back to `hook-status` on the record's own `runtimeSessionId` when the
-   dispatch reply is lost, which is what keeps the physical call at one.
+   proxy from the FG13d stack base; each cell drops one named control reply,
+   and every other call passes through.
+2. **For the two command cells, the retry is a status poll, not a second
+   execute.** The Harness falls back to `hook-status` on the record's own
+   `runtimeSessionId` when the dispatch reply is lost, which is what keeps the
+   physical call at one.
 3. **Three cells, one fixture each.** The first two hold a solo command for one
    second and allow; a dropped dispatch reply must resolve through status, and a
    dropped status reply must stay unknown until a later poll of the same owner
@@ -71,6 +72,6 @@ Hooks, Windows/macOS and #13133's design items.
 ## Validation
 
 The full `hosted-harness-mysql` lane on Linux with MySQL 8.4 and a delegated
-cgroup v2 root is the evidence. Checkstyle, the CI fork-budget guard and the
-pinned class list move with the new class. A skipped cell is not a passing
-gate.
+cgroup v2 root is the evidence. Checkstyle and the CI fork-budget guard move
+with the new cell; the pinned class list is unchanged. A skipped cell is not a
+passing gate.

@@ -313,7 +313,7 @@ class HostedHookReplyLossFaultGatesIT {
                 "hook-catalog-reply"));
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
-        submit(session, "FG13_CATALOG_LOSS");
+        String turn = submit(session, "FG13_CATALOG_LOSS");
         waitFor(() -> assertThat(events("hook.call")).hasSize(1));
         waitFor(() -> {
             JsonNode execution = hookExecution(session);
@@ -333,6 +333,14 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(registration.path("catalogId").asText()).isEqualTo("fg13-hooks");
         assertThat(registration.path("catalogRevision").asInt()).isEqualTo(1);
         assertThat(registration.at("/run/state").asText()).isEqualTo("settled");
+        // The lost reply failed the first admission: the Turn carries the
+        // retry the coordinator scheduled, so a silently tolerated loss
+        // would leave this at zero.
+        assertThat(jdbc.queryForObject("SELECT retry_count FROM ma_turn"
+                + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                Integer.class, tenant, session, turn))
+                .as("retries after the lost catalog reply")
+                .isGreaterThanOrEqualTo(1);
         assertThat(Files.readString(temporary.resolve("proxy.log")))
                 .contains("PROXY dropped hook-catalog-reply");
         waitFor(() -> assertThat(modelRequests.toString()).contains(PROOF));
