@@ -161,6 +161,11 @@ function launcher(jar) {
   return `#!/usr/bin/env sh
 set -eu
 base="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+config="$base/config/application.yml"
+if [ -f "$config" ] && [ -z "\${SPRING_CONFIG_ADDITIONAL_LOCATION:-}" ]; then
+  SPRING_CONFIG_ADDITIONAL_LOCATION="file:\${config}"
+  export SPRING_CONFIG_ADDITIONAL_LOCATION
+fi
 exec java -jar "$base/lib/${jar}" "$@"
 `;
 }
@@ -315,6 +320,12 @@ export async function createReferenceDistribution({
   for (const component of componentSources) {
     await copy(root, stage, component.source, component.destination);
   }
+  await copy(
+    root,
+    stage,
+    'packages/managed-agent-server/distribution/config/application.example.yml',
+    'config/application.example.yml',
+  );
   const documentation = [
     ['docs/users/managed-agent-reference-deployment.md', 'docs/deployment.md'],
     [
@@ -435,6 +446,7 @@ export async function createReferenceDistribution({
     `${rootName}/SHA256SUMS`,
     `${rootName}/bin/qwen-managed-agent-server`,
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
+    `${rootName}/config/application.example.yml`,
   ]) {
     if (!entries.split('\n').includes(required)) {
       throw new Error(`Archive is missing ${required}.`);
