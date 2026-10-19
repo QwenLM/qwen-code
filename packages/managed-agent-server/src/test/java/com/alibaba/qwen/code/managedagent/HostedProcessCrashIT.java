@@ -360,7 +360,7 @@ class HostedProcessCrashIT {
 
         private void run() throws Exception {
             startSpring();
-            if ("Linux".equals(System.getProperty("os.name"))) {
+            if (List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
                 var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
                 storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
                 storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(

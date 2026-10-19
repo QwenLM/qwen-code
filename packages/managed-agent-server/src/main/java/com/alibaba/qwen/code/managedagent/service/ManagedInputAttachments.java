@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import org.springframework.http.HttpStatus;
 
 import java.net.URLEncoder;
@@ -13,7 +14,7 @@ import java.util.Map;
 import java.util.Set;
 
 final class ManagedInputAttachments {
-    static final int MAX_INPUT_BYTES = 48 * 1024;
+    static final int MAX_INPUT_BYTES = ManagedSessionStoreModels.MAX_ATTACHMENT_INPUT_BYTES;
     private static final Set<String> TEXT_EXTENSIONS = Set.of("txt", "md", "markdown", "csv", "log",
             "json", "jsonl", "yaml", "yml", "xml", "html", "htm", "css", "scss", "js", "jsx",
             "ts", "tsx", "py", "java", "sql", "sh", "bash", "rs", "go", "c", "h", "cpp",

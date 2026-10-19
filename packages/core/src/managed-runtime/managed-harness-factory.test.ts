@@ -165,6 +165,50 @@ async function settleTurnComplete(
 }
 
 describe('managed harness factory', () => {
+  it('assigns checkpoint command identity and digest after an intervening activation renewal', async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const authority = session.authority;
+    const before = authority.committedSequence;
+    const commit = authority.commitCheckpoint.bind(authority);
+    const boundary = vi
+      .spyOn(authority, 'commitCheckpoint')
+      .mockImplementationOnce(async (...args) => {
+        now += 10_000;
+        await authority.renewActivation({ leaseDurationMs: 60_000 });
+        return commit(...args);
+      });
+    try {
+      const checkpoint =
+        await createManagedHarnessHandle(session).ensureRunnable();
+      expect(checkpoint.identity.coveredSequence).toBe(before + 1);
+      const published = await authority.readCheckpointState();
+      const records = (await fs.readFile(workspace.transcriptPath, 'utf8'))
+        .trim()
+        .split('\n')
+        .map(
+          (line) =>
+            JSON.parse(line) as { managedSession?: Record<string, unknown> },
+        );
+      const marker = records.find(
+        (record) => record.managedSession?.['operation'] === 'commitCheckpoint',
+      )?.managedSession;
+      expect(marker).toMatchObject({
+        commandId: `harness:before_model:${session.activation.activationId}:${before + 1}`,
+        contentDigest: createHash('sha256').update(published!).digest('hex'),
+      });
+      expect(authority.latestCheckpoint?.stateRef.digest).toBe(
+        marker?.['contentDigest'],
+      );
+    } finally {
+      boundary.mockRestore();
+      clock.mockRestore();
+      await session.close();
+    }
+  });
+
   it('does not treat opening or accepted input as a runnable start', async () => {
     const session = await open(await createWorkspace());
     expect(session.authority.restoreBasis()).toBe('initial');

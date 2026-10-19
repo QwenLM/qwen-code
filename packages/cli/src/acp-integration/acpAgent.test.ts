@@ -35942,6 +35942,122 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('refreshes only selected skill sessions after validating the entire selection', async () => {
+    const selectedId = '550e8400-e29b-41d4-a716-446655440000';
+    const settings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const bootstrapRefresh = vi.fn().mockResolvedValue(undefined);
+    const bootstrapConfig = makeConfig({
+      getSkillManager: vi
+        .fn()
+        .mockReturnValue({ refreshCache: bootstrapRefresh }),
+    });
+    const states = [selectedId, 'omitted'].map((id) => {
+      const refreshCache = vi.fn().mockResolvedValue(undefined);
+      return {
+        id,
+        config: makeConfig({
+          getSessionId: vi.fn().mockReturnValue(id),
+          getSkillManager: vi.fn().mockReturnValue({ refreshCache }),
+        }),
+        refreshCache,
+        reloadSkillSettings: vi.fn(),
+        refreshSkillsFromSettings: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(states[0]!.config as unknown as Config)
+      .mockResolvedValueOnce(states[1]!.config as unknown as Config);
+    vi.mocked(Session).mockImplementation((id) => {
+      const state = states.find((state) => state.id === id)!;
+      return {
+        getDefaultReasoningConfig: vi.fn(),
+        getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+        getConfig: vi.fn().mockReturnValue(state.config),
+        isIdle: vi.fn().mockReturnValue(false),
+        reloadSkillSettings: state.reloadSkillSettings,
+        refreshSkillsFromSettings: state.refreshSkillsFromSettings,
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    const agentPromise = runAcpAgent(
+      bootstrapConfig as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.newSession({ cwd: '/skills', mcpServers: [] });
+      await agent.newSession({ cwd: '/skills', mcpServers: [] });
+      vi.mocked(settings.reloadScopeFromDisk).mockClear();
+      const method = SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh;
+      await expect(
+        agent.extMethod(method, { sessionIds: [] }),
+      ).resolves.toEqual({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 0,
+        configsFailed: 0,
+        reason: 'all',
+      });
+      for (const sessionIds of [null, 'all', [1], [' ']]) {
+        await expect(agent.extMethod(method, { sessionIds })).rejects.toThrow(
+          'sessionIds must be an array of non-empty strings',
+        );
+      }
+      await expect(
+        agent.extMethod(method, { sessionIds: [selectedId, 'missing'] }),
+      ).rejects.toThrow('Session not found for id: missing');
+      expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      expect(bootstrapRefresh).not.toHaveBeenCalled();
+      await expect(
+        agent.extMethod(method, {
+          reason: 'all',
+          sessionIds: [selectedId, selectedId.toUpperCase()],
+        }),
+      ).resolves.toEqual({
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+        configsRefreshed: 2,
+        configsFailed: 0,
+        reason: 'all',
+      });
+      expect(settings.reloadScopeFromDisk).toHaveBeenCalledExactlyOnceWith(
+        SettingScope.Workspace,
+      );
+      expect(bootstrapRefresh).toHaveBeenCalledOnce();
+      expect(states[0]!.refreshCache).toHaveBeenCalledOnce();
+      expect(states[0]!.reloadSkillSettings).toHaveBeenCalledOnce();
+      expect(
+        states[0]!.refreshSkillsFromSettings,
+      ).toHaveBeenCalledExactlyOnceWith({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+      expect(states[1]!.refreshCache).not.toHaveBeenCalled();
+      expect(states[1]!.reloadSkillSettings).not.toHaveBeenCalled();
+      expect(states[1]!.refreshSkillsFromSettings).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('refreshes skill content once per config before publishing session updates', async () => {
     const bootstrapSettings = {
       merged: {},
