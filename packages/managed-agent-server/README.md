@@ -451,7 +451,13 @@ execution/restore evidence can delay recovery beyond the lease and retry time.
 
 Schema V11 adds a revision-stamped wake hint and retry timestamp to the existing
 Session head. Unknown or stale hints rebuild from committed journal events;
-compacted, missing or corrupt proof is refused rather than marked consumed.
+compacted heads are excluded without marking their inputs consumed, while missing
+or corrupt proof is refused. Each proof invocation reads at most 32 transactions
+and yields with its complete continuation for a later claim; partial proof never
+clears the hint or triggers a load. At most 128 exact-prefix continuations or
+positive memos are retained. Live partials keep their slots; new long proofs wait
+for completed or ineligible holders to free capacity. A new revision or process
+restart begins proof at zero with the durable hint intact.
 Upgrade the Server and Broker together; rollback binaries must understand V11.
 This scan is locally verified on macOS/MySQL 8.4. Linux/Windows, real MQ-on and
 deployed provider acceptance remain unverified; see also [Hosted recovery scope](#hosted-recovery-scope).

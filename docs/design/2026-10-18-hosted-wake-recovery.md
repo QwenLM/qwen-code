@@ -64,13 +64,26 @@ the head-to-Session inversion an update with a Session subquery would introduce.
 The scanner reads one journal transaction per page (at most 8 MiB of stored
 record bytes), verifies its scope, byte digest and
 contiguous committed prefix, and derives the pending set from input acceptance
-and Turn settlement. A missing, compacted or corrupt prefix is refused and logged;
-it is never interpreted as no pending work. The Harness independently verifies
-its restore before running anything.
+and Turn settlement. Discovery, claim and the proof stamp exclude compacted
+heads, whose complete proof material is permanently unavailable. Missing or
+corrupt prefixes are refused and logged; neither is interpreted as no pending
+work. The Harness independently verifies its restore before running anything.
 
-A bounded cache retains at most 128 positive proofs keyed by the complete
-immutable candidate prefix. An unchanged failed load avoids rereading the same
-history. Negative results are never cached or used to clear a later revision.
+A proof invocation reads at most 32 transactions, so one long history yields to
+other candidates instead of monopolizing the scheduler. A cache retains at most
+128 entries keyed by the complete immutable candidate prefix: either a partial
+proof with its revision, event sequence and pending/settled Turn sets, or a
+completed positive memo. A partial result neither stamps the head nor requests a
+load. The durable retry delay spaces its next claim, which resumes the cached
+strict prefix. Only a complete walk whose terminal sequence matches the exact
+candidate can conclude that nothing is pending. Completed negative results are
+never cached; a new revision or process restart starts at zero without clearing
+the durable hint. Live partials are not evicted to admit new work: completed
+memos free slots first, and a full cache rotates one exact scoped eligibility
+check to reclaim a stale holder. A new long proof without a slot yields without
+retaining its partial state; short proofs can still complete. Once an admitted
+proof completes or becomes ineligible, waiting long proofs can retain progress.
+A new candidate replaces an older cached prefix for the same Session.
 
 ## Reattachment and policy
 
@@ -110,18 +123,16 @@ relay give-up states remain unchanged: the scan does not re-admit an input that
 never committed, or upgrade an unknown source receipt into success. Each failure
 names its tenant and Session in the server log.
 
-Proof still reads the complete history after any new journal revision, cache
-eviction or process restart. Its work grows with history length, and repeated
-claims after intervening commits repeat that cost. Candidate filtering may visit
+Proof still reads the complete history after a new journal revision or process
+restart, across bounded invocations. Total work grows with history length, partial proofs retain Turn identities, and a full cache delays
+admission of new long proofs. The per-invocation transaction bound is not a
+database query timeout or a byte bound on retained continuation state. Candidate filtering may visit
 live-writer, HARNESS, closed, retired and CSI historical heads; those index
-entries need not converge away. The page limit bounds returned candidates, not
-database work or whole-proof time. Large catalogs and histories can delay the
-single scanner. Incremental/resumable proof and catalog cleanup remain capacity
-work. A fixed budget that always restarts from revision zero would permanently
-exclude long journals, so it is not a safe substitute. Any resumable proof must
-retain the pending/settled sets and sequence continuity and must never clear a
-hint from a partial prefix. Lifecycle cleanup must not bless unexamined history
-for a state that can later become eligible again.
+entries need not converge away. The candidate page bounds returned rows, not
+index traversal. Large catalogs and histories can therefore still delay recovery.
+Durable incremental proof and catalog cleanup remain capacity work. Lifecycle
+cleanup must not bless unexamined history for a state that can later become
+eligible again.
 
 MQ continues to accelerate first discovery. Its `wake_covered_sequence` is only
 notice deduplication; an `OWNED`, duplicate, failed or dropped notice cannot hide
@@ -141,6 +152,9 @@ SQL-pending work from this scan.
 4. Cover settlement, multiple inputs, old/stale hints, rollback, concurrent
    admission and claim, tenant/Workspace separation, live writers, lifecycle,
    private CSI, stopped children, stale attachments and transient failures.
+   Long journals must yield, preserve both Turn sets and sequence continuity,
+   resume to completion, and retain their hint across restart or head changes.
+   Compacted heads must be excluded without certifying consumption.
 5. Run affected Java tests, full Maven verification, the matching MySQL and
    Hosted recovery profiles. Any fixture source production or unavailable
    provider/platform acceptance is reported explicitly.

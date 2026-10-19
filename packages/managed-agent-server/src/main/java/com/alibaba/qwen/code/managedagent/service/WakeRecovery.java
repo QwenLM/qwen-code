@@ -41,7 +41,11 @@ public class WakeRecovery {
                 if (!store.claim(candidate)) {
                     continue;
                 }
-                boolean pending = store.hasPendingInput(candidate);
+                var proof = store.hasPendingInput(candidate);
+                if (proof.isEmpty()) {
+                    continue;
+                }
+                boolean pending = proof.get();
                 if (!store.recordPending(candidate, pending) || !pending) {
                     continue;
                 }
