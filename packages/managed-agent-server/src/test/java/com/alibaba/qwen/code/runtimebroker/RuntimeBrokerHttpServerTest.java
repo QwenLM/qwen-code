@@ -163,6 +163,68 @@ class RuntimeBrokerHttpServerTest {
         }
     }
 
+    @Test
+    void releaseDecodesTheDrainFlagFromTheWire() throws Exception {
+        // #13930 R1-19: the close's drain and the routine release differ
+        // only by this body flag; a stringified or renamed key must not
+        // degrade a drain into the routine arm that answers held.
+        try (Fixture fixture = new Fixture()) {
+            RuntimeSessionRecord session = fixture.service
+                    .acquire("harness", "runtime-drain", "bootstrap")
+                    .toCompletableFuture().join();
+            String digest = "sha256:" + "a".repeat(64);
+            ToolExecutionRecord invocation = fixture.executions.findOrCreate(
+                    ToolExecutionRecord.prepared(
+                            "call-drain", "call-drain-key",
+                            session.getBindingId(),
+                            session.getRuntimeGeneration(), "harness",
+                            "runtime-drain", "prompt", "call-drain", digest,
+                            Map.of("sessionId", "runtime-drain", "promptId",
+                                    "prompt", "callId", "call-drain",
+                                    "argsDigest", digest)));
+            fixture.executions.settlePrepared(invocation,
+                    Map.of("state", "exited", "executionStatus", "success"),
+                    Instant.now());
+            Map<String, Object> processReference = new java.util.LinkedHashMap<>();
+            processReference.put("dispatchMode", "background_v3_process");
+            processReference.put("processOf", "call-drain");
+            processReference.put("sessionId", "runtime-drain");
+            processReference.put("promptId", "prompt");
+            processReference.put("callId", "call-drain");
+            processReference.put("argsDigest", digest);
+            fixture.executions.findOrCreate(ToolExecutionRecord.prepared(
+                    "call-drain:process", "call-drain:process",
+                    session.getBindingId(), session.getRuntimeGeneration(),
+                    "harness", "runtime-drain", "prompt", "call-drain",
+                    digest, processReference));
+
+            fixture.transport.controlResults.put("shell-status",
+                    CompletableFuture.completedFuture(
+                            Map.of("operationId", "call-drain",
+                                    "state", "running")));
+            fixture.transport.controlResults.put("shell-terminate",
+                    CompletableFuture.completedFuture(
+                            Map.of("operationId", "call-drain",
+                                    "state", "exited",
+                                    "evidence", Map.of("exitCode", 0))));
+            HttpResponse<String> routine = fixture.post(
+                    "/tool-sessions/runtime-drain:release", Map.of(
+                            "protocolVersion", 1, "requestId", "routine",
+                            "harnessSessionId", "harness"));
+            assertEquals(409, routine.statusCode(), routine.body());
+            assertTrue(routine.body().contains("runtime_session_held"),
+                    routine.body());
+
+            HttpResponse<String> drained = fixture.post(
+                    "/tool-sessions/runtime-drain:release", Map.of(
+                            "protocolVersion", 1, "requestId", "drained",
+                            "harnessSessionId", "harness", "drain", true));
+            assertEquals(200, drained.statusCode(), drained.body());
+            assertTrue(drained.body().contains("\"released\":true"),
+                    drained.body());
+        }
+    }
+
     private static ToolExecutionRecord admitHold(Fixture fixture,
             RuntimeSessionRecord session, String callId, String dispatchMode) {
         return fixture.executions.findOrCreate(ToolExecutionRecord.prepared(
@@ -1660,6 +1722,8 @@ class RuntimeBrokerHttpServerTest {
         private int v3RefusalStatus = 501;
         private Map<String, Object> lastReference;
         private Map<String, Object> runtimeStatus = Map.of("state", "unknown");
+        private final Map<String, CompletionStage<Object>> controlResults =
+                new HashMap<>();
 
         @Override
         public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session, Map<String, Object> publisher) {
@@ -1692,6 +1756,10 @@ class RuntimeBrokerHttpServerTest {
         public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> operation) {
             controls.incrementAndGet();
+            CompletionStage<Object> result = controlResults.get(operation.get("kind"));
+            if (result != null) {
+                return result;
+            }
             return CompletableFuture.completedFuture(
                     "manifest".equals(operation.get("kind")) ? MANIFEST : null);
         }
