@@ -12777,6 +12777,7 @@ describe('useLlmStream', () => {
         // recorded user text the cancel handler restores.
         text: 'what time is it?',
         submittedPrompt: 'what time is it?',
+        modelText: '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
       });
       expect(info?.canUndoLastLoggedUserMessage).toBe(true);
     });
@@ -18622,6 +18623,7 @@ describe('useLlmStream', () => {
           id: expect.any(Number),
           text: 'First query',
           submittedPrompt: 'First query',
+          modelText: '<system-reminder>managed</system-reminder>\n\nFirst query',
         });
         expect(
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.canUndoLastLoggedUserMessage,
@@ -18716,6 +18718,7 @@ describe('useLlmStream', () => {
           id: expect.any(Number),
           text: 'First query',
           submittedPrompt: 'First query',
+          modelText: '<system-reminder>managed</system-reminder>\n\nFirst query',
         });
       } finally {
         resolveFirstCall();

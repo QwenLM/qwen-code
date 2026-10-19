@@ -1653,14 +1653,11 @@ export const useLlmStream = (
         const isSlash = isSlashCommand(trimmedQuery);
         // One-shot notices the TUI folded into this prompt stay on the model
         // side only: the recall log, the transcript row and the cancel-restore
-        // buffer use the user-authored text (#11553). The composer's own
-        // projection wins, because reverse-parsing the rendered prompt cannot
-        // tell an injected envelope from one the user typed; the strip only
-        // covers prompts whose producer is outside this process. Slash
-        // commands keep their own text, since an argument may legitimately
-        // start with an envelope-shaped block. Logged here, before the slash
-        // and shell arms below can return, so handled commands stay
-        // recallable.
+        // buffer use the composer's projection (#11553), since reverse-parsing
+        // cannot tell an injected envelope from one the user typed. The strip
+        // is the fallback for producers outside this process; slash commands
+        // keep their own text. Logged before the slash and shell arms can
+        // return, so handled commands stay recallable.
         const userText =
           submittedPrompt ??
           (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
