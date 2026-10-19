@@ -116,10 +116,19 @@ export interface ModelMetrics extends ModelMetricsCore {
   bySource: Record<string, ModelMetricsCore>;
 }
 
+/**
+ * Model totals for the daemon stats route. Generation timing lives here, not
+ * in `ModelMetrics`, because `models` is also written to managed usage records
+ * whose model entries are validated against a closed set of keys.
+ */
+export interface StatsModelMetrics extends ModelMetricsCore {
+  generation?: GenerationMetrics;
+}
+
 export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
   /** Provider-normalized model totals exposed by the daemon stats route. */
-  statsModels?: Record<string, ModelMetricsCore>;
+  statsModels?: Record<string, StatsModelMetrics>;
   generation?: GenerationMetrics;
   /**
    * Per-instance subagent metadata (invocation id → business name + agent
@@ -649,29 +658,44 @@ export class UiTelemetryService extends EventEmitter {
       );
     }
 
+    const ttftMs = event.ttft_ms;
     if (
-      event.ttft_ms === undefined ||
-      !Number.isFinite(event.ttft_ms) ||
-      event.ttft_ms < 0 ||
+      ttftMs === undefined ||
+      !Number.isFinite(ttftMs) ||
+      ttftMs < 0 ||
       isInternalPromptId(event.prompt_id)
     ) {
       return;
     }
 
-    const generation =
-      metrics.generation ??
-      (metrics.generation = createInitialGenerationMetrics());
-    const generationDurationMs = Math.max(0, event.duration_ms - event.ttft_ms);
+    // Events recorded before `generation_ms` existed fall back to everything
+    // after the first visible output.
+    const generationDurationMs =
+      event.generation_ms !== undefined &&
+      Number.isFinite(event.generation_ms) &&
+      event.generation_ms >= 0
+        ? event.generation_ms
+        : Math.max(0, event.duration_ms - ttftMs);
+    const accumulateGeneration = (generation: GenerationMetrics) => {
+      generation.timedRequests++;
+      generation.totalTtftMs += ttftMs;
+      if (generationDurationMs > 0) {
+        generation.totalGenerationDurationMs += generationDurationMs;
+        generation.totalThroughputOutputTokens += event.output_token_count;
+      }
+    };
 
-    generation.timedRequests++;
-    generation.totalTtftMs += event.ttft_ms;
-    if (generationDurationMs > 0) {
-      generation.totalGenerationDurationMs += generationDurationMs;
-      generation.totalThroughputOutputTokens += event.output_token_count;
+    const generation = (metrics.generation ??=
+      createInitialGenerationMetrics());
+    accumulateGeneration(generation);
+    if (statsModelMetrics) {
+      accumulateGeneration(
+        (statsModelMetrics.generation ??= createInitialGenerationMetrics()),
+      );
     }
     generation.last = {
       model: event.model,
-      ttftMs: event.ttft_ms,
+      ttftMs,
       generationDurationMs,
       outputTokens: event.output_token_count,
     };
@@ -844,10 +868,10 @@ export class UiTelemetryService extends EventEmitter {
   #getOrCreateStatsModelMetrics(
     metrics: SessionMetrics,
     modelName: string,
-  ): ModelMetricsCore {
+  ): StatsModelMetrics {
     const statsModels = (metrics.statsModels ??= Object.create(null) as Record<
       string,
-      ModelMetricsCore
+      StatsModelMetrics
     >);
     return (statsModels[modelName] ??= createInitialModelMetricsCore());
   }
