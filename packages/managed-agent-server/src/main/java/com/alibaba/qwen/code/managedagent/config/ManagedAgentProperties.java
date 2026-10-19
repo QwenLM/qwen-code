@@ -159,6 +159,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
         this.environment = environment;
     }
 
+    /** Runs the startup validation without a Spring context. */
+    public void validateForPreflight() {
+        validateWorkspaceFiles();
+    }
+
     @PostConstruct
     void validateWorkspaceFiles() {
         // The sweep runs first, so a bare milliseconds-style override
