@@ -1158,7 +1158,9 @@ it('cancels a Hook while the dispatch acquisition is held, before dispatch_start
     .mockImplementation(async () => {
       entered();
       await held;
-      return undefined as never;
+      return {
+        runtime: { bindingId: 'fg13d-binding', generation: '1' },
+      } as never;
     });
   const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
   await enteredPromise;
