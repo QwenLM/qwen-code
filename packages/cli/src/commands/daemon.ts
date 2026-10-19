@@ -1,0 +1,469 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
+import type { CommandModule, Argv } from 'yargs';
+import {
+  isProcessAlive,
+  readDaemonDiscoveries,
+  removeDaemonDiscovery,
+  resolveDaemonDiscoveryDir,
+  type DaemonDiscoveryEntry,
+  type DaemonDiscoveryRecord,
+} from '../serve/daemon-discovery.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLine,
+} from '../utils/stdioHelpers.js';
+import { sanitizeTerminalText } from '../ui/utils/textUtils.js';
+
+const HEALTH_TIMEOUT_MS = 1_000;
+const STOP_TIMEOUT_MS = 10_000;
+const STOP_POLL_MS = 100;
+const FOLLOW_POLL_MS = 250;
+
+type DaemonHealth = 'running' | 'unreachable' | 'stale';
+
+interface DaemonStatusRow {
+  entry: DaemonDiscoveryEntry;
+  health: DaemonHealth;
+}
+
+interface StatusArgs {
+  json?: boolean;
+  prune?: boolean;
+}
+
+interface LogsArgs {
+  port?: number;
+  follow?: boolean;
+  lines?: number;
+}
+
+interface StopArgs {
+  port?: number;
+  all?: boolean;
+  force?: boolean;
+}
+
+function age(iso: string, now = Date.now()): number {
+  const started = Date.parse(iso);
+  return Number.isFinite(started) ? Math.max(0, now - started) : 0;
+}
+
+export function formatDaemonAge(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+function sanitize(value: string): string {
+  return sanitizeTerminalText(value).replace(/[\t\n]/g, '');
+}
+
+async function probeHealth(
+  record: DaemonDiscoveryRecord,
+): Promise<DaemonHealth> {
+  try {
+    await fetch(new URL('/health', record.url), {
+      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      redirect: 'manual',
+    });
+    // Any HTTP answer — including 401 from --require-auth — proves the
+    // listener is alive. A connection failure is what makes it stale.
+    return 'running';
+  } catch {
+    return isProcessAlive(record.pid) ? 'unreachable' : 'stale';
+  }
+}
+
+export function selectDaemonEntries(
+  entries: readonly DaemonDiscoveryEntry[],
+  options: { port?: number; all?: boolean },
+): DaemonDiscoveryEntry[] {
+  if (options.port !== undefined) {
+    return entries.filter((entry) => entry.record.port === options.port);
+  }
+  if (options.all === true) {
+    return [...entries];
+  }
+  if (entries.length === 1) {
+    return [entries[0]!];
+  }
+  return [];
+}
+
+function selectionError(
+  entries: readonly DaemonDiscoveryEntry[],
+  options: { port?: number; all?: boolean },
+): string | undefined {
+  if (options.port !== undefined) {
+    return entries.some((entry) => entry.record.port === options.port)
+      ? undefined
+      : `No daemon is registered on port ${options.port}.`;
+  }
+  if (options.all === true) return undefined;
+  if (entries.length > 1) {
+    return (
+      `${entries.length} daemons are registered; pass --port <port> ` +
+      'or --all to choose one.'
+    );
+  }
+  return undefined;
+}
+
+export function tailLines(text: string, count: number): string[] {
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines.slice(-count);
+}
+
+function fallbackLogPath(): string {
+  return path.join(
+    path.dirname(resolveDaemonDiscoveryDir()),
+    'debug',
+    'daemon',
+    'daemon.log',
+  );
+}
+
+function logPathFor(record: DaemonDiscoveryRecord): string {
+  return record.logPath ?? fallbackLogPath();
+}
+
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, STOP_POLL_MS));
+  }
+  return !isProcessAlive(pid);
+}
+
+async function handleStatus(argv: StatusArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const { entries, invalid } = readDaemonDiscoveries();
+  const rows: DaemonStatusRow[] = [];
+  for (const entry of entries) {
+    rows.push({ entry, health: await probeHealth(entry.record) });
+  }
+
+  if (argv.prune === true) {
+    for (const row of rows) {
+      if (row.health !== 'stale') continue;
+      removeDaemonDiscovery(row.entry.record.port, {
+        expectedPid: row.entry.record.pid,
+      });
+    }
+  }
+
+  for (const bad of invalid) {
+    writeStderrLine(`qwen daemon: ignoring ${bad.path}: ${bad.reason}`);
+  }
+
+  if (argv.json === true) {
+    for (const row of rows) {
+      writeStdoutLine(
+        JSON.stringify({
+          status: row.health,
+          pid: row.entry.record.pid,
+          port: row.entry.record.port,
+          url: row.entry.record.url,
+          workspaces: row.entry.record.workspaces,
+          primaryWorkspace: row.entry.record.primaryWorkspace,
+          auth: row.entry.record.auth,
+          startedAt: row.entry.record.startedAt,
+          ageMs: age(row.entry.record.startedAt),
+          logPath: logPathFor(row.entry.record),
+        }),
+      );
+    }
+    return;
+  }
+
+  if (rows.length === 0) {
+    writeStdoutLine(
+      'No local qwen serve daemon is registered. Start one with `qwen serve`.',
+    );
+    return;
+  }
+
+  writeStdoutLine('STATUS       PID       PORT   AGE   WORKSPACES / URL');
+  for (const row of rows) {
+    const { record } = row.entry;
+    const workspaces = record.workspaces
+      .map((workspace) => sanitize(workspace))
+      .join(', ');
+    writeStdoutLine(
+      `${row.health.padEnd(12)}${String(record.pid).padEnd(10)}` +
+        `${String(record.port).padEnd(7)}` +
+        `${formatDaemonAge(age(record.startedAt)).padEnd(6)}` +
+        `${workspaces}  ${sanitize(record.url)}`,
+    );
+  }
+  writeStdoutLine('');
+  writeStdoutLine('Use `qwen daemon logs --port <port> --follow` to tail one.');
+}
+
+async function printTail(file: string, count: number): Promise<number> {
+  let text: string;
+  try {
+    text = await fsp.readFile(file, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      writeStderrLine(`qwen daemon: log file not found: ${file}`);
+      return 0;
+    }
+    throw error;
+  }
+  for (const line of tailLines(text, count)) {
+    writeStdoutLine(line);
+  }
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return Buffer.byteLength(text, 'utf8');
+  }
+}
+
+async function followFile(file: string, startOffset: number): Promise<void> {
+  let offset = startOffset;
+  writeStderrLine(`qwen daemon: following ${file} (Ctrl+C to stop)`);
+  const timer = setInterval(() => {
+    void (async () => {
+      try {
+        const stat = await fsp.stat(file);
+        if (stat.size < offset) {
+          offset = 0;
+        }
+        if (stat.size === offset) return;
+        const handle = await fsp.open(file, 'r');
+        try {
+          const length = stat.size - offset;
+          const buffer = Buffer.alloc(length);
+          await handle.read(buffer, 0, length, offset);
+          offset = stat.size;
+          const text = buffer.toString('utf8');
+          for (const line of text.split(/\r?\n/)) {
+            if (line.length > 0) writeStdoutLine(line);
+          }
+        } finally {
+          await handle.close();
+        }
+      } catch {
+        // A rotated or removed file is picked up on the next poll.
+      }
+    })();
+  }, FOLLOW_POLL_MS);
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      clearInterval(timer);
+      process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+      resolve();
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+  });
+}
+
+async function handleLogs(argv: LogsArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const { entries } = readDaemonDiscoveries();
+  const error = selectionError(entries, argv);
+  if (error) {
+    writeStderrLine(`qwen daemon: ${error}`);
+    process.exitCode = 1;
+    return;
+  }
+  const selected = selectDaemonEntries(entries, argv);
+  const entry = selected[0];
+  if (!entry) {
+    writeStderrLine(
+      'qwen daemon: no daemon is registered. Start one with `qwen serve`.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const file = logPathFor(entry.record);
+  const count = argv.lines ?? 50;
+  if (!Number.isInteger(count) || count <= 0) {
+    writeStderrLine('qwen daemon: --lines must be a positive integer.');
+    process.exitCode = 1;
+    return;
+  }
+  const offset = await printTail(file, count);
+  if (argv.follow === true) {
+    await followFile(file, offset);
+  }
+}
+
+async function handleStop(argv: StopArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const { entries } = readDaemonDiscoveries();
+  const error = selectionError(entries, argv);
+  if (error) {
+    writeStderrLine(`qwen daemon: ${error}`);
+    process.exitCode = 1;
+    return;
+  }
+  const selected = selectDaemonEntries(entries, argv);
+  if (selected.length === 0) {
+    writeStderrLine(
+      'qwen daemon: no daemon is registered. Start one with `qwen serve`.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  let failed = false;
+  for (const entry of selected) {
+    const { record } = entry;
+    const health = await probeHealth(record);
+    if (health === 'stale') {
+      removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+      writeStdoutLine(
+        `qwen daemon: removed stale record for port ${record.port} (pid ${record.pid} is gone).`,
+      );
+      continue;
+    }
+    if (record.pid === process.pid) {
+      writeStderrLine('qwen daemon: refusing to stop the current process.');
+      failed = true;
+      continue;
+    }
+    try {
+      process.kill(record.pid, 'SIGTERM');
+    } catch (killError) {
+      writeStderrLine(
+        `qwen daemon: could not signal pid ${record.pid}: ${
+          killError instanceof Error ? killError.message : String(killError)
+        }`,
+      );
+      failed = true;
+      continue;
+    }
+    const exited = await waitForExit(record.pid, STOP_TIMEOUT_MS);
+    if (exited) {
+      removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+      writeStdoutLine(
+        `qwen daemon: stopped port ${record.port} (pid ${record.pid}).`,
+      );
+      continue;
+    }
+    if (argv.force === true) {
+      try {
+        process.kill(record.pid, 'SIGKILL');
+      } catch {
+        // Reported below by the final liveness check.
+      }
+      const forced = await waitForExit(record.pid, STOP_TIMEOUT_MS);
+      if (forced) {
+        removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+        writeStdoutLine(
+          `qwen daemon: force-stopped port ${record.port} (pid ${record.pid}).`,
+        );
+        continue;
+      }
+    }
+    writeStderrLine(
+      `qwen daemon: port ${record.port} (pid ${record.pid}) did not exit within ${STOP_TIMEOUT_MS / 1000}s; ` +
+        'retry with --force if it is safe to SIGKILL it.',
+    );
+    failed = true;
+  }
+  if (failed) process.exitCode = 1;
+}
+
+const statusCommand: CommandModule<unknown, StatusArgs> = {
+  command: 'status',
+  describe: 'List local qwen serve daemons and their health',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('json', {
+        type: 'boolean',
+        default: false,
+        describe: 'Output one JSON object per daemon',
+      })
+      .option('prune', {
+        type: 'boolean',
+        default: false,
+        describe: 'Remove records whose process is gone',
+      }),
+  handler: async (argv) => {
+    await handleStatus(argv);
+  },
+};
+
+const logsCommand: CommandModule<unknown, LogsArgs> = {
+  command: 'logs',
+  describe: 'Show or follow a local daemon log file',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        describe: 'Daemon port; required when more than one is registered',
+      })
+      .option('follow', {
+        alias: 'f',
+        type: 'boolean',
+        default: false,
+        describe: 'Keep printing new lines',
+      })
+      .option('lines', {
+        alias: 'n',
+        type: 'number',
+        default: 50,
+        describe: 'Number of trailing lines to print first',
+      }),
+  handler: async (argv) => {
+    await handleLogs(argv);
+  },
+};
+
+const stopCommand: CommandModule<unknown, StopArgs> = {
+  command: 'stop',
+  describe: 'Stop a local qwen serve daemon',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        describe: 'Daemon port; required when more than one is registered',
+      })
+      .option('all', {
+        type: 'boolean',
+        default: false,
+        describe: 'Stop every registered daemon',
+      })
+      .option('force', {
+        type: 'boolean',
+        default: false,
+        describe: 'SIGKILL a daemon that does not exit after SIGTERM',
+      }),
+  handler: async (argv) => {
+    await handleStop(argv);
+  },
+};
+
+export const daemonCommand: CommandModule = {
+  command: 'daemon',
+  describe: 'Inspect and control local qwen serve daemons',
+  builder: (yargs: Argv) =>
+    yargs
+      .command(statusCommand)
+      .command(logsCommand)
+      .command(stopCommand)
+      .demandCommand(1, 'You need at least one command before continuing.')
+      .version(false),
+  handler: () => {},
+};
