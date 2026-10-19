@@ -350,7 +350,17 @@ printf '%s\\n' '${liveAttempt}'
       const resolved = detect('2');
       expect(resolved.output).toBe('superseded=true\n');
       expect(resolved.stdout).toContain('::warning::');
-      expect(resolved.args).toContain('39237270547');
+      expect(resolved.args).toBe(
+        'api\nrepos/QwenLM/qwen-code/actions/runs/39237270547\n--jq\n.run_attempt\n',
+      );
+      // The own-run spellings would query this workflow's run, whose attempt
+      // is always 1, and the guard could never see a re-run.
+      expect(live.env.WORKFLOW_RUN_ID).toBe(
+        '${{ github.event.workflow_run.id }}',
+      );
+      expect(live.env.RUN_ATTEMPT).toBe(
+        '${{ github.event.workflow_run.run_attempt }}',
+      );
     });
     it('reports the attempt that is still the latest', () => {
       expect(detect('1').output).toBe('superseded=false\n');
@@ -364,12 +374,23 @@ printf '%s\\n' '${liveAttempt}'
       const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
       const resolved = detect('', {}, gh);
       expect(resolved.output).toBe('superseded=false\n');
-      expect(resolved.stdout).not.toContain('::warning::');
+      expect(resolved.stdout).toContain('::warning::');
+      expect(resolved.stdout).toContain('Could not read run 39237270547');
     });
-    it('gates the failure destination on the supersession check', () => {
-      // Without this wiring the check would run and still file the issue.
-      expect(String(destination.if)).toBe(
-        "${{ steps.live.outputs.superseded != 'true' }}",
+    it('gates every failure reader on the supersession check', () => {
+      // Without this wiring the check would run and still file the issue; the
+      // order matters too, because a gate reading an empty output is a no-op.
+      const download = jobs.analyze.steps.find(
+        (step) => step.name === 'Download failed job logs',
+      );
+      const infra = jobs.analyze.steps.find((step) => step.id === 'infra');
+      for (const step of [destination, download, infra]) {
+        expect(String(step.if), step.name).toBe(
+          "${{ steps.live.outputs.superseded != 'true' }}",
+        );
+      }
+      expect(jobs.analyze.steps.indexOf(live)).toBeLessThan(
+        jobs.analyze.steps.indexOf(destination),
       );
     });
   });
@@ -422,7 +443,9 @@ printf '%s\\n' '${liveAttempt}'
     expect(workflow).toContain('searchMarkers');
     // The failing tests are read from the triggering run's failed-job logs, so
     // the dedupe key is recovered even when the run reported no test result.
-    expect(workflow).toContain('actions/runs/${WORKFLOW_RUN_ID}/jobs');
+    expect(workflow).toContain(
+      'actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs',
+    );
     expect(workflow).toContain('actions/jobs/${job_id}/logs');
     expect(workflow).toContain('gh issue list');
     expect(workflow).toContain('gh issue create');
@@ -444,9 +467,10 @@ printf '%s\\n' '${liveAttempt}'
     // them is cut. Collapsing the line continuations first keeps the pins
     // reading like the shell they pin rather than like this file's indentation.
     const steps = jobs.analyze.steps;
-    const download = oneLine(
-      steps.find((step) => step.name === 'Download failed job logs').run,
+    const downloadStep = steps.find(
+      (step) => step.name === 'Download failed job logs',
     );
+    const download = oneLine(downloadStep.run);
     const summary = oneLine(steps.find((step) => step.id === 'summary').run);
 
     // `gh api` writes a non-2xx body to stdout before exiting non-zero, so the
@@ -459,13 +483,19 @@ printf '%s\\n' '${liveAttempt}'
     // run wider than one page would silently render a comment naming no job
     // without it.
     expect(download).toContain(
-      'if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate | jq -s \'{jobs: [ .[].jobs[]? ]}\' > "${jobs_json}"; then echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}" fi',
+      'if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" --paginate | jq -s \'{jobs: [ .[].jobs[]? ]}\' > "${jobs_json}"; then echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}" fi',
+    );
+    expect(downloadStep.env.RUN_ATTEMPT).toBe(
+      '${{ github.event.workflow_run.run_attempt }}',
     );
     // Counted over the whole workflow: both projections read the file this one
     // fetch wrote, so the payload must be fetched exactly once.
     expect(
-      (workflow.match(/actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/jobs/g) ?? [])
-        .length,
+      (
+        workflow.match(
+          /actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/attempts\/\$\{RUN_ATTEMPT\}\/jobs/g,
+        ) ?? []
+      ).length,
     ).toBe(1);
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
@@ -493,6 +523,44 @@ printf '%s\\n' '${liveAttempt}'
     expect(analyzeInvocation, 'the analyze invocation').toContain(
       '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
     );
+  });
+
+  it('reads the jobs of the event attempt, not the latest attempt', () => {
+    // Measured on run 39237270547: attempt 1's jobs carry the host-lock
+    // annotation while attempt 2's are green. The supersession guard clears
+    // the event when it starts, but the run can move on while this step
+    // paginates, so the read itself must name the event's attempt.
+    const step = jobs.analyze.steps.find(
+      (candidate) => candidate.name === 'Download failed job logs',
+    );
+    const tmp = mkdtempSync(join(tmpdir(), 'java-ci-download-'));
+    try {
+      writeFileSync(
+        join(tmp, 'gh'),
+        `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${RUNNER_TEMP}/jobs-args"
+printf '%s\\n' '{"jobs":[]}'
+`,
+      );
+      chmodSync(join(tmp, 'gh'), 0o755);
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tmp}:${process.env.PATH}`,
+          RUNNER_TEMP: tmp,
+          REPO: 'QwenLM/qwen-code',
+          WORKFLOW_RUN_ID: '39237270547',
+          RUN_ATTEMPT: '1',
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(join(tmp, 'jobs-args'), 'utf8')).toContain(
+        'attempts/1/jobs',
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('passes --allow-escape-sequences so gh does not refuse the colourised logs', () => {
