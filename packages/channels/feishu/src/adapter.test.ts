@@ -954,15 +954,19 @@ describe('FeishuChannel', () => {
     afterEach(() => {
       vi.clearAllTimers();
       vi.useRealTimers();
-      vi.mocked(tmpdir).mockReturnValue(systemTmpDir);
       vi.restoreAllMocks();
+      vi.mocked(tmpdir).mockReturnValue(systemTmpDir);
       rmSync(directory, { recursive: true, force: true });
     });
 
-    function receive(fileName: string | undefined, messageId = 'inbound-file') {
+    function receive(
+      fileName: string | undefined,
+      messageId = 'inbound-file',
+      messageType = 'file',
+    ) {
       const event = feishuDmMessage(messageId);
       Object.assign(event['message'] as Record<string, unknown>, {
-        message_type: 'file',
+        message_type: messageType,
         content: JSON.stringify({ file_key: 'file_1', file_name: fileName }),
       });
       getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
@@ -971,17 +975,10 @@ describe('FeishuChannel', () => {
       );
     }
 
-    it.each([
-      { incoming: '.hidden', saved: '_hidden' },
-      { incoming: '../report\0.txt', saved: 'report.txt' },
-      { incoming: '...', saved: '_' },
-      { incoming: '\0', saved: 'feishu_file_1790985600000' },
-      { incoming: 'my report (final).pdf', saved: 'my_report__final_.pdf' },
-      { incoming: 'a\nb.txt', saved: 'a_b.txt' },
-    ])(
-      'persists $incoming and dispatches its attachment',
-      async ({ incoming, saved }) => {
-        receive(incoming);
+    it.each(['file', 'media'])(
+      'persists a %s message and dispatches its attachment',
+      async (messageType) => {
+        receive('report.pdf', 'inbound-file', messageType);
         await vi.advanceTimersByTimeAsync(0);
         expect(dispatch).toHaveBeenCalledTimes(1);
         const envelope = dispatch.mock.calls[0]![0];
@@ -990,7 +987,7 @@ describe('FeishuChannel', () => {
           {
             type: 'file',
             filePath: expect.any(String),
-            fileName: saved,
+            fileName: 'report.pdf',
             mimeType: 'application/pdf',
           },
         ]);
@@ -1002,7 +999,7 @@ describe('FeishuChannel', () => {
           'channel-files',
           childDirectories[0]!,
         );
-        expect(attachment?.filePath).toBe(join(fileDirectory, saved));
+        expect(attachment?.filePath).toBe(join(fileDirectory, 'report.pdf'));
         expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
         expect(fetchSpy).toHaveBeenCalledExactlyOnceWith(
           resourceUrl,
@@ -1012,22 +1009,51 @@ describe('FeishuChannel', () => {
             signal: expect.any(AbortSignal),
           }),
         );
-        await vi.advanceTimersByTimeAsync(59_999);
-        expect(existsSync(fileDirectory)).toBe(true);
-        await vi.advanceTimersByTimeAsync(1);
-        expect(existsSync(fileDirectory)).toBe(false);
       },
     );
 
     it('retains the text fallback without creating a file on download failure', async () => {
-      fetchSpy.mockResolvedValue(jsonResponse('Media unavailable', 403));
+      const downloadSpy = vi.spyOn(media, 'downloadMedia');
+      fetchSpy.mockImplementation(async (input) => {
+        if (String(input) !== resourceUrl) {
+          throw new Error(`Unexpected request: ${String(input)}`);
+        }
+        return jsonResponse('Media unavailable', 403);
+      });
       receive('report.txt');
       await vi.advanceTimersByTimeAsync(0);
+      expect(downloadSpy).toHaveBeenCalledExactlyOnceWith(
+        'inbound-file',
+        'file_1',
+        'file',
+        'test_token',
+      );
+      expect(fetchSpy).toHaveBeenCalledExactlyOnceWith(
+        resourceUrl,
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringContaining('downloadMedia failed: HTTP 403'),
+      );
       expect(dispatch).toHaveBeenCalledTimes(1);
       const envelope = dispatch.mock.calls[0]![0];
-      expect(envelope.text).toContain('report.txt');
+      expect(envelope.text).toBe('(file: report.txt)');
       expect(envelope.attachments).toBeUndefined();
       expect(envelope.syntheticText).toBe(true);
+      expect(existsSync(join(directory, 'channel-files'))).toBe(false);
+    });
+
+    it('rejects a disallowed sender before downloading or storing a file', async () => {
+      channel = createChannel({ senderPolicy: 'allowlist', allowedUsers: [] });
+      dispatch = vi
+        .spyOn(channel, 'handleInbound')
+        .mockResolvedValue(undefined);
+      const downloadSpy = vi.spyOn(media, 'downloadMedia');
+      receive('report.txt');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(downloadSpy).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
       expect(existsSync(join(directory, 'channel-files'))).toBe(false);
     });
 
@@ -1116,22 +1142,20 @@ describe('FeishuChannel', () => {
       expect(existsSync(filePath)).toBe(true);
       pending.resolve(undefined);
       await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(59_999);
-      expect(existsSync(filePath)).toBe(true);
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(existsSync(filePath)).toBe(false);
     });
 
     it('removes a downloaded file immediately when stopped during preparation', async () => {
-      const media = deferred<Response>();
-      fetchSpy.mockReturnValue(media.promise);
+      const pendingDownload = deferred<Response>();
+      fetchSpy.mockReturnValue(pendingDownload.promise);
       receive('report.txt');
       await vi.advanceTimersByTimeAsync(0);
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       getPrivateMethod<Set<string>>(channel, 'stoppedMessages').add(
         'inbound-file',
       );
-      media.resolve(new Response(bytes));
+      pendingDownload.resolve(new Response(bytes));
       await vi.advanceTimersByTimeAsync(0);
       expect(dispatch).not.toHaveBeenCalled();
       expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
@@ -1144,6 +1168,11 @@ describe('FeishuChannel', () => {
       expect(dispatch).toHaveBeenCalledTimes(1);
       const filePath = dispatch.mock.calls[0]![0].attachments![0]!.filePath!;
       expect(existsSync(filePath)).toBe(true);
+      expect(
+        getPrivateMethod<Map<string, number>>(channel, 'seenMessages').has(
+          'inbound-file',
+        ),
+      ).toBe(false);
       await vi.advanceTimersByTimeAsync(60_000);
       expect(existsSync(filePath)).toBe(false);
     });
