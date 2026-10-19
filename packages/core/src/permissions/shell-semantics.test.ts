@@ -585,6 +585,41 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(across(command)).toEqual(expected);
   });
 
+  // A bare `cd` goes to bash's `$HOME`, which the analyzer reads from its own
+  // environment. Once the command reassigns HOME, that reading is no longer
+  // what bash expands, so the target must stay unknown instead of certifying
+  // the analyzer's HOME (#14095 R3-7).
+  it('forfeits the analyzer HOME for a bare `cd` after the command reassigns it', () => {
+    expect(
+      across('export HOME=/tmp/attacker && cd && echo {} > settings.json'),
+    ).toEqual([uncertainWrite('/repo/settings.json')]);
+    expect(across('HOME=/tmp/attacker ; cd ; echo {} > settings.json')).toEqual(
+      [uncertainWrite('/repo/settings.json')],
+    );
+    expect(across('unset HOME && cd && echo {} > settings.json')).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+  });
+
+  // Over-correction guard: with no reassignment the bare `cd` still resolves to
+  // the analyzer's HOME, so ordinary `cd && …` stays statically known.
+  it('still resolves a bare `cd` to the analyzer HOME when nothing reassigns it', () => {
+    const previous = process.env['HOME'];
+    process.env['HOME'] = '/home/tester';
+    try {
+      expect(across('cd && echo {} > settings.json')).toEqual([
+        write('/home/tester/settings.json'),
+      ]);
+      // `export HOME` without a value does not change it.
+      expect(across('export HOME && cd && echo {} > settings.json')).toEqual([
+        write('/home/tester/settings.json'),
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = previous;
+    }
+  });
+
   // A backgrounded `cd` runs in a subshell, so the parent's cwd is untouched
   // and the next segment's relative write lands in the *original* directory —
   // which is exactly where a protected settings file lives. Attributing the

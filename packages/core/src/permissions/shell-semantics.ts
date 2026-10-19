@@ -2058,10 +2058,34 @@ function isDynamicShellPath(word: string): boolean {
   return word.includes('$') || word.includes('`');
 }
 
+/**
+ * Whether a segment reassigns `HOME`, which forfeits the analyzer process's own
+ * `HOME` for a bare `cd` later in the same compound command: bash expands the
+ * value the command just set, not the one the analyzer inherited. Only forms
+ * that change the value count — `HOME=…` (a leading assignment, or after
+ * `export` / `declare` / `local`) and `unset HOME` — since a bare `export HOME`
+ * or a read of the variable leaves the value alone.
+ */
+function segmentReassignsHome(command: string): boolean {
+  const words = tokenize(command);
+  if (
+    words.some((word) => isEnvAssignmentToken(word) && word.startsWith('HOME='))
+  ) {
+    return true;
+  }
+  return words.some(
+    (word, index) =>
+      word === 'unset' &&
+      (words[index + 1] === 'HOME' ||
+        (words[index + 1] === '-v' && words[index + 2] === 'HOME')),
+  );
+}
+
 function resolveCdTargetCwd(
   command: string,
   cwd: string,
   cwdUnknown: boolean,
+  homeReassigned: boolean,
 ): CdResolution {
   const words = tokenize(command);
   extractRedirects(words, cwd);
@@ -2090,7 +2114,15 @@ function resolveCdTargetCwd(
     targetIndex++;
   }
 
-  const target = words[targetIndex] ?? process.env['HOME'];
+  // A bare `cd` goes to bash's `$HOME`. Once an earlier segment in the same
+  // compound command reassigned `HOME`, the analyzer process's own value is not
+  // what bash expands, so the target is unknown rather than the parent's HOME.
+  const explicitTarget = words[targetIndex];
+  if (explicitTarget === undefined && homeReassigned) {
+    return { kind: 'dynamic' };
+  }
+
+  const target = explicitTarget ?? process.env['HOME'];
   if (!target || target === '-' || isDynamicShellPath(target)) {
     return { kind: 'dynamic' };
   }
@@ -2140,7 +2172,7 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return walkCompoundCommand(command, cwd, 0, false, false);
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
@@ -2262,12 +2294,14 @@ function walkCompoundCommand(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  initialHomeReassigned: boolean,
 ): ShellOperation[] {
   const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
+  let homeReassigned = initialHomeReassigned;
 
   for (const { command: sub, terminator } of subCommands) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
@@ -2277,7 +2311,16 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
+    if (segmentReassignsHome(sub)) {
+      homeReassigned = true;
+    }
+
+    const cdTarget = resolveCdTargetCwd(
+      sub,
+      effectiveCwd,
+      cwdUnknown,
+      homeReassigned,
+    );
     if (cdTarget.kind === 'static') {
       if (!backgrounded) {
         effectiveCwd = cdTarget.cwd;
@@ -2303,6 +2346,7 @@ function walkCompoundCommand(
             effectiveCwd,
             depth + 1,
             cwdUnknown,
+            homeReassigned,
           ),
         );
         continue;
