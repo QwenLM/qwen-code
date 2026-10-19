@@ -10,7 +10,7 @@ ReadFile and Shell details should be loaded only when a user expands a settled c
 
 ## Read policy and ownership
 
-Contract version `1.67.0` adds `POST /api/agent/web-shell/v1/tool-details/get`, using the existing Session/Item request. It is a persisted Workspace-scoped read: require a trusted actor, current Session visibility and Workspace read grant, and recheck them before returning. Responses use `Cache-Control: private, no-store`. The route never starts a Harness, acquires a Runtime, executes a command or falls back to another Workspace.
+Contract version `1.68.0` adds `POST /api/agent/web-shell/v1/tool-details/get`, using the existing Session/Item request. It is a persisted Workspace-scoped read: require a trusted actor, current Session visibility and Workspace read grant, and recheck them before returning. Responses use `Cache-Control: private, no-store`. The route never starts a Harness, acquires a Runtime, executes a command or falls back to another Workspace.
 
 Any authorized Session/Workspace reader may read these bounded tool details without a feature switch. Artifact publication and original-download permissions remain independent; no extra publication switch or object storage is required. Saved text can contain sensitive content and is not automatically redacted.
 

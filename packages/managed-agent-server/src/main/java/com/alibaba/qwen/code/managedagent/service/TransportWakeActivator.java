@@ -35,12 +35,12 @@ import java.util.function.Consumer;
  * every other Session's wake. Every outcome is final for the message (the
  * consumer always acknowledges). A wake a notice missed — lost, or claimed
  * and then not loaded — recovers exactly as with the transport off: the
- * ledger of the source that committed its input, where that source has one,
- * re-drives the Session (the public Turn dispatcher, the session-message
- * consume loop, the child and automation relays), and a loaded Session's
- * wake pump runs what its journal holds. No generic scan backs the
- * transport; the MQ2 design records the sources without a ledger and the
- * gaps the ledgers already have. A claim never blocks a later wake: the
+ * independent SQL wake recovery scan discovers committed unconsumed inputs
+ * after writer loss, and a loaded Session's wake pump runs what its journal
+ * holds. The scan excludes private CSI and sources outside its admitted six;
+ * those retain their source-ledger/dispatcher recovery. See
+ * {@code docs/design/2026-10-18-hosted-wake-recovery.md} for the boundary.
+ * Source relays continue their own delivery work. A claim never blocks a later wake: the
  * watermark refuses only its own and older sequences.
  */
 public class TransportWakeActivator implements Closeable {
@@ -70,7 +70,7 @@ public class TransportWakeActivator implements Closeable {
         DUPLICATE,
         /** Claimed, and the load handed to the load pool. */
         SCHEDULED,
-        /** Claimed, but the load pool was full; left to its source's ledger. */
+        /** Claimed, but the load pool was full; SQL scan or source-ledger recovery applies. */
         DROPPED
     }
 
@@ -82,7 +82,7 @@ public class TransportWakeActivator implements Closeable {
         ALREADY_ATTACHED,
         /** The load failed and SQL now shows another live writer. */
         FENCED,
-        /** The load failed otherwise; left to its source's ledger. */
+        /** The load failed otherwise; SQL scan or source-ledger recovery applies. */
         FAILED
     }
 
@@ -175,7 +175,8 @@ public class TransportWakeActivator implements Closeable {
             return Outcome.SCHEDULED;
         } catch (RejectedExecutionException full) {
             LOG.warn("transport wake load pool is full; the wake is left to"
-                    + " its source's ledger tenant={} session={} sequence={}",
+                    + " SQL wake recovery where eligible, otherwise its source ledger"
+                    + " tenant={} session={} sequence={}",
                     tenantId, sessionId, envelope.sequence());
             return Outcome.DROPPED;
         }

@@ -33,6 +33,8 @@ import {
   getManagedClientId,
   managedRequestId,
 } from './managed-session-storage';
+import { useManagedFileReferences } from './use-managed-file-references';
+import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
@@ -170,6 +172,16 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const fileReferences = useManagedFileReferences(
+    provider,
+    clientId,
+    detail.summary &&
+      detail.summary.sessionId === sessionId &&
+      detail.summary.capabilities.inputAttachments
+      ? detail.summary.workspace
+      : undefined,
+    sessionId,
+  );
   const skills = useManagedSkills(provider, clientId, sessionId);
   const pageRef = useRef<HTMLDivElement>(null);
   const taskTriggerRef = useRef<HTMLButtonElement>(null);
@@ -445,6 +457,7 @@ function ManagedSessionsContent({
     commit?: ComposerSubmitCommit,
     images?: PromptImage[],
     files?: PromptFile[],
+    metadata?: ComposerSubmitMetadata,
   ) {
     const abort = lifetime.current;
     if (
@@ -469,7 +482,13 @@ function ManagedSessionsContent({
       encoding.current = true;
       setBusy(true);
       try {
-        input = await encodeManagedInput(submittedText, images, files);
+        const prepared = await fileReferences.prepareInput(
+          submittedText,
+          files,
+          metadata,
+        );
+        input = await encodeManagedInput(prepared.text, images, prepared.files);
+        fileReferences.assertCurrent();
       } catch (failure) {
         setError(failure instanceof Error ? failure.message : String(failure));
         return;
@@ -484,7 +503,12 @@ function ManagedSessionsContent({
         draftText: composerRef.current?.getText(),
         sessionId,
         cwd: workspaceCwd,
-        ...(images?.length || files?.length ? { input } : {}),
+        ...(input.some(
+          (block) =>
+            block.type === 'input_file' || block.type === 'input_image',
+        )
+          ? { input }
+          : {}),
       };
       if (!persistPending(pendingKey, attempt)) {
         setError(t('managed.workspaceStorageUnavailable'));
@@ -542,7 +566,7 @@ function ManagedSessionsContent({
         editor &&
         [attempt.draftText, attempt.text].includes(editor.getText())
       ) {
-        editor.clearText();
+        editor.clear();
         setText('');
       }
       if (selection.current === selectedAtSubmit) {
@@ -1171,6 +1195,9 @@ function ManagedSessionsContent({
               ref={composerContainerRef}
               className={`${shellStyles.footer} flex flex-col gap-2`}
             >
+              {fileReferences.error && (
+                <p role="alert">{fileReferences.error}</p>
+              )}
               <ChatEditor
                 key={`${provider.storageKey}:${sessionId ?? 'new'}`}
                 ref={composerRef}
@@ -1184,8 +1211,8 @@ function ManagedSessionsContent({
                 }
                 composerInputVersion={0}
                 onInputTextChange={setText}
-                onSubmit={(value, images, files, commit) => {
-                  void submit(value, commit, images, files);
+                onSubmit={(value, images, files, commit, metadata) => {
+                  void submit(value, commit, images, files, metadata);
                   return false;
                 }}
                 commands={[]}
@@ -1197,6 +1224,8 @@ function ManagedSessionsContent({
                 skillsLoadError={skills.error}
                 skillsLoaded={skills.loaded}
                 workspaceFeaturesEnabled={false}
+                fileReferenceActions={fileReferences.actions}
+                persistFileReferences
                 attachmentsEnabled={
                   summary?.capabilities.inputAttachments === true
                 }
@@ -1204,6 +1233,7 @@ function ManagedSessionsContent({
                   interactive
                     ? [
                         ...(summary?.capabilities.inputAttachments ||
+                        fileReferences.actions ||
                         summary?.planModeSupported ||
                         skills.supported
                           ? ['addMenu' as const]
@@ -1338,7 +1368,11 @@ function ManagedSessionsContent({
                 }
                 showChatWidthToggle={false}
                 isPreparing={
-                  busy || cwd.blocked || modelChange.busy || approvalChange.busy
+                  busy ||
+                  fileReferences.busy ||
+                  cwd.blocked ||
+                  modelChange.busy ||
+                  approvalChange.busy
                 }
                 dialogOpen={!interactive}
                 isRunning={home && Boolean(active)}
