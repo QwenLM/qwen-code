@@ -3650,9 +3650,9 @@ export class HostedWorkspaceToolTurn {
         }
         // The inline Session Store limit keeps rejecting exactly as main
         // does for the ordinary tools. A call that already carries its own
-        // refusal never reads its encoding. Owned profile surfaces declare
-        // their refusal in their validation arm: the limit becomes the call's
-        // refusal, never a failure of the whole Turn (review D1/R2-12).
+        // refusal never reads its encoding. Profile surfaces that declare an
+        // inline-limit refusal in their validation arm return that refusal;
+        // other surfaces keep the ordinary whole-Turn failure.
         let encoded: HostedEncodedToolInput;
         try {
           encoded = this.encodeToolInput(

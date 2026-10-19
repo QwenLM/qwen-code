@@ -41,6 +41,7 @@ import {
   hostedShellLaneAttachesChildAgents,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
+import { hostedTranscriptFitsInline } from './hosted-transcript-budget.test-helper.js';
 
 // H4b: the kind gate admits `child_agent` for real, so this suite runs
 // without an enablement mock. The Broker is mocked as in the sibling
@@ -889,6 +890,9 @@ it('answers an over-size prompt with the byte_limit refusal, not recovery', asyn
 });
 
 it('answers an encoded-overflow prompt with the byte_limit refusal', async () => {
+  messageFitsInline.mockImplementation(
+    hostedTranscriptFitsInline(root, sessionKey.sessionId),
+  );
   const turn = createTurn();
   const responses = await executeAgent(
     turn,

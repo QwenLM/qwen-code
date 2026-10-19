@@ -24,14 +24,12 @@ import {
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import {
-  HTTP_MANAGED_SESSION_STORE_CONTRACT,
-  ManagedSessionStoreTransportError,
-} from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import { ManagedSessionStoreTransportError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   HostedSessionMessageSession,
   type HostedSessionLineage,
 } from './hosted-session-message-session.js';
+import { hostedTranscriptFitsInline } from './hosted-transcript-budget.test-helper.js';
 
 // H4d-b: `session_message` and continuations are enabled for real, so this
 // suite runs without an enablement mock. The Broker is mocked as in the
@@ -315,21 +313,7 @@ it('queues a message to a running child without taking the mount', async () => {
 it('#14062: refuses parent-side encoded overflow without sending a message', async () => {
   const taskId = await launchChild();
   messageFitsInline.mockImplementation(
-    (type, parts, model) =>
-      Buffer.byteLength(
-        JSON.stringify({
-          uuid: randomUUID(),
-          parentUuid: randomUUID(),
-          sessionId: sessionKey.sessionId,
-          timestamp: new Date().toISOString(),
-          type,
-          cwd: root,
-          version: 'hosted-harness/1',
-          daemonPromptId: 'prompt',
-          model,
-          message: { role: type === 'assistant' ? 'model' : 'user', parts },
-        }),
-      ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+    hostedTranscriptFitsInline(root, sessionKey.sessionId),
   );
   const message = '"'.repeat(20_000);
   expect(Buffer.byteLength(message)).toBeLessThan(65_536);

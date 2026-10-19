@@ -17,7 +17,6 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
-import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
@@ -38,6 +37,7 @@ import {
   type HostedSessionLineage,
 } from './hosted-session-message-session.js';
 import { hostedPromptKey, teamMemberPreamble } from './hosted-member-chain.js';
+import { hostedTranscriptFitsInline } from './hosted-transcript-budget.test-helper.js';
 
 // H4e-b3: a member Session's board tools ride the command channel. The
 // suite runs the real funnel chain — the park checkpoint, the outbound
@@ -121,21 +121,7 @@ const messageFitsInline = vi.fn<
 
 function useTranscriptBudget() {
   messageFitsInline.mockImplementation(
-    (type, parts, model) =>
-      Buffer.byteLength(
-        JSON.stringify({
-          uuid: randomUUID(),
-          parentUuid: randomUUID(),
-          sessionId: sessionKey.sessionId,
-          timestamp: new Date().toISOString(),
-          type,
-          cwd: rootDir,
-          version: 'hosted-harness/1',
-          daemonPromptId: 'prompt',
-          model,
-          message: { role: type === 'assistant' ? 'model' : 'user', parts },
-        }),
-      ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+    hostedTranscriptFitsInline(rootDir, sessionKey.sessionId),
   );
 }
 
