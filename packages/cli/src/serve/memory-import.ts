@@ -6,6 +6,7 @@
 import type { Application, Request, Response, RequestHandler } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import type { MemoryImportBatchProposal } from '@qwen-code/qwen-code-core/memory/import-model.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { runWithMemoryProjectScope } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { previewSource } from '../memory-import/source.js';
 import { MemoryImportService } from '../memory-import/service.js';
@@ -16,6 +17,10 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 
+const debugLogger = createDebugLogger('MEMORY_IMPORT');
+
+class MemoryImportRecoveryError extends Error {}
+
 export function mountMemoryImportRoutes(
   app: Application,
   deps: {
@@ -24,6 +29,7 @@ export function mountMemoryImportRoutes(
   },
 ): void {
   const services = new WeakMap<WorkspaceRuntime, MemoryImportService>();
+  const recoveries = new WeakMap<WorkspaceRuntime, Promise<void>>();
   function active(runtime: WorkspaceRuntime): void {
     const entry = deps.workspaceRegistry.getEntryByWorkspaceId(
       runtime.workspaceId,
@@ -61,7 +67,9 @@ export function mountMemoryImportRoutes(
       runWithMemoryProjectScope(scope, run),
     );
   }
-  function service(runtime: WorkspaceRuntime): MemoryImportService {
+  async function service(
+    runtime: WorkspaceRuntime,
+  ): Promise<MemoryImportService> {
     active(runtime);
     let value = services.get(runtime);
     if (!value) {
@@ -83,10 +91,20 @@ export function mountMemoryImportRoutes(
         },
       });
       services.set(runtime, value);
-      void value.recover().catch(() => {
-        /* Explicit status/retry reports storage failures. */
-      });
     }
+    let recovery = recoveries.get(runtime);
+    if (!recovery) {
+      recovery = value.recover().catch((cause: unknown) => {
+        recoveries.delete(runtime);
+        debugLogger.warn('Workspace memory import recovery failed.', cause);
+        throw new MemoryImportRecoveryError(
+          'Memory import recovery is unavailable.',
+          { cause },
+        );
+      });
+      recoveries.set(runtime, recovery);
+    }
+    await recovery;
     return value;
   }
   const handle =
@@ -120,8 +138,8 @@ export function mountMemoryImportRoutes(
     `${base}/batches`,
     deps.mutate({ strict: true }),
     handle(
-      (req, runtime) =>
-        service(runtime).submit(
+      async (req, runtime) =>
+        (await service(runtime)).submit(
           req.body?.source,
           req.body?.selection,
           req.body?.idempotencyKey,
@@ -131,16 +149,18 @@ export function mountMemoryImportRoutes(
   );
   app.get(
     `${base}/batches`,
-    handle((_req, runtime) => service(runtime).list()),
+    handle(async (_req, runtime) => (await service(runtime)).list()),
   );
   app.get(
     `${base}/batches/:batch`,
-    handle((req, runtime) => service(runtime).get(String(req.params['batch']))),
+    handle(async (req, runtime) =>
+      (await service(runtime)).get(String(req.params['batch'])),
+    ),
   );
   app.get(
     `${base}/batches/:batch/sources/:section`,
-    handle((req, runtime) =>
-      service(runtime).source(
+    handle(async (req, runtime) =>
+      (await service(runtime)).source(
         String(req.params['batch']),
         String(req.params['section']),
       ),
@@ -149,29 +169,37 @@ export function mountMemoryImportRoutes(
   app.post(
     `${base}/batches/:batch/cancel`,
     deps.mutate({ strict: true }),
-    handle((req, runtime) =>
-      service(runtime).cancel(String(req.params['batch'])),
+    handle(async (req, runtime) =>
+      (await service(runtime)).cancel(String(req.params['batch'])),
     ),
   );
   app.post(
     `${base}/batches/:batch/retry`,
     deps.mutate({ strict: true }),
     handle(
-      (req, runtime) => service(runtime).retry(String(req.params['batch'])),
+      async (req, runtime) =>
+        (await service(runtime)).retry(String(req.params['batch'])),
       202,
     ),
   );
   // Recover registered trusted runtimes at daemon startup; later runtimes recover
   // on their first import request. No source/model work occurs for previews.
   for (const runtime of deps.workspaceRegistry.list()) {
-    try {
-      withRuntime(runtime, () => service(runtime));
-    } catch {
-      /* Unsupported runtimes stay unavailable. */
-    }
+    void withRuntime(runtime, () => service(runtime)).catch(() => {
+      // Recovery failures are logged and retried by the next import request.
+      // Unsupported runtimes stay unavailable.
+    });
   }
 }
 function sendError(res: Response, error: unknown): void {
+  if (error instanceof MemoryImportRecoveryError) {
+    res.set('Retry-After', '1');
+    res.status(503).json({
+      code: 'memory_import_recovery_unavailable',
+      error: 'Import recovery failed. Check workspace storage and retry.',
+    });
+    return;
+  }
   if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
     res.status(404).json({
       code: 'memory_import_not_found',

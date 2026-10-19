@@ -41,7 +41,7 @@ ledger prevent repeated imports from restoring edited or forgotten output.
 Commits are serialized and recheck the scanned memory version after model work.
 Validated output is journaled before publication; recovery distinguishes an
 unpublished intent from completed output. Cancellation stops further commits.
-Recovery resumes durable tasks on runtime service activation; failed model calls
+Recovery resumes durable tasks on runtime service activation. Failed recovery is logged and returns HTTP 503 with `Retry-After: 1` on import task requests; the next task request retries recovery. Concurrent requests share recovery, successful recovery is cached, and previews do not trigger it. Failed model calls
 require explicit retry, avoiding an unbounded paid retry loop. Unknown retry IDs do
 not allocate task directories. Each lock signals loss only to dependent work; once
 detected, that holder cannot replace journals or publish staged documents. Other

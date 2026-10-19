@@ -9,6 +9,8 @@ import request from 'supertest';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
+import { MemoryImportService } from '../memory-import/service.js';
 import {
   createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
@@ -45,6 +47,7 @@ beforeEach(async () => {
     vi.stubEnv(key, undefined);
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   await fs.rm(root, { recursive: true, force: true });
 });
@@ -134,6 +137,128 @@ describe('selected-workspace memory import HTTP', () => {
     await expect(
       fs.stat(h.secondary.sessionRuntimeBaseDir),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('retries failed startup recovery and resumes a queued task', async () => {
+    const h = await setup();
+    const invoke = vi.mocked(h.secondary.bridge.invokeWorkspaceCommand);
+    const originalModel = invoke.getMockImplementation()!;
+    invoke.mockRejectedValueOnce(new Error('Synthetic model interruption'));
+    const base = '/workspaces/secondary/memory/import';
+    const submitted = await request(h.app)
+      .post(`${base}/batches`)
+      .set('x-confirm', 'yes')
+      .send({ source, selection: selection(), idempotencyKey: 'restart' });
+    expect((await terminal(h.app, base, submitted.body.id))['status']).toBe(
+      'partial',
+    );
+    const owner = createHash('sha256')
+      .update(path.resolve(h.secondary.workspaceCwd))
+      .digest('hex');
+    const taskPath = path.join(
+      h.secondary.sessionRuntimeBaseDir,
+      'memory-import',
+      'batches',
+      owner,
+      submitted.body.id,
+      'task.json',
+    );
+    const task = JSON.parse(await fs.readFile(taskPath, 'utf8'));
+    task.status = 'queued';
+    task.items[0].status = 'pending';
+    await fs.writeFile(taskPath, JSON.stringify(task));
+    invoke.mockImplementation(originalModel);
+    invoke.mockClear();
+    const originalRecover = MemoryImportService.prototype.recover;
+    const attempted = new Set<MemoryImportService>();
+    const recover = vi
+      .spyOn(MemoryImportService.prototype, 'recover')
+      .mockImplementation(async function (this: MemoryImportService) {
+        if (!attempted.has(this)) {
+          attempted.add(this);
+          throw Object.assign(new Error('Synthetic root I/O failure'), {
+            code: 'EIO',
+          });
+        }
+        return originalRecover.call(this);
+      });
+    const app = express();
+    app.use(express.json());
+    mountMemoryImportRoutes(app, {
+      workspaceRegistry: h.registry,
+      mutate: () => (_req, _res, next) => next(),
+    });
+    await vi.waitFor(() => expect(recover).toHaveBeenCalledTimes(2));
+    expect((await terminal(app, base, submitted.body.id))['status']).toBe(
+      'completed',
+    );
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledTimes(3);
+    await request(app).get(`${base}/batches`);
+    expect(recover).toHaveBeenCalledTimes(3);
+    expect(h.primary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+  it('reports recovery failure without returning stale status or affecting preview', async () => {
+    const recover = vi
+      .spyOn(MemoryImportService.prototype, 'recover')
+      .mockRejectedValue(
+        Object.assign(new Error('Synthetic recovery I/O failure'), {
+          code: 'EIO',
+        }),
+      );
+    const h = await setup();
+    await vi.waitFor(() => expect(recover).toHaveBeenCalledTimes(2));
+    const base = '/workspaces/secondary/memory/import';
+    const preview = await request(h.app)
+      .post(`${base}/preview`)
+      .set('x-confirm', 'yes')
+      .send(source);
+    expect(preview.status).toBe(200);
+    expect(recover).toHaveBeenCalledTimes(2);
+    for (const suffix of ['/batches', `/batches/${'a'.repeat(64)}`]) {
+      const response = await request(h.app).get(base + suffix);
+      expect(response.status).toBe(503);
+      expect(response.headers['retry-after']).toBe('1');
+      expect(response.body.code).toBe('memory_import_recovery_unavailable');
+      expect(response.body).not.toHaveProperty('status');
+    }
+    expect(recover).toHaveBeenCalledTimes(4);
+    expect(h.secondary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    await expect(
+      fs.stat(h.secondary.sessionRuntimeBaseDir),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('shares an in-flight recovery and does not rescan after success', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const recover = vi
+      .spyOn(MemoryImportService.prototype, 'recover')
+      .mockReturnValue(gate);
+    const h = await setup();
+    const list = vi.spyOn(MemoryImportService.prototype, 'list');
+    let completed = 0;
+    const requests = [0, 1].map(() =>
+      request(h.app)
+        .get('/workspaces/secondary/memory/import/batches')
+        .then((response) => {
+          completed++;
+          return response;
+        }),
+    );
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(completed).toBe(0);
+      expect(list).not.toHaveBeenCalled();
+      expect(recover).toHaveBeenCalledTimes(2);
+    } finally {
+      release();
+    }
+    expect(
+      (await Promise.all(requests)).map((response) => response.status),
+    ).toEqual([200, 200]);
+    await request(h.app).get('/workspaces/secondary/memory/import/batches');
+    expect(recover).toHaveBeenCalledTimes(2);
   });
   it('uses secondary model/storage and exposes only selected retained sources', async () => {
     const h = await setup();
