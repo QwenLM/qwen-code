@@ -6787,17 +6787,29 @@ describe('AppContainer State Management', () => {
           await ready;
           if (fails) throw new Error('tool.call is unsupported');
         });
+        const session = {
+          initialize,
+          subscribe: (listener: (text: string) => void) => {
+            emit = listener;
+            return () => {};
+          },
+          setPresentation: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession;
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
-          .mockReturnValue({
-            initialize,
-            subscribe: (listener: (text: string) => void) => {
-              emit = listener;
-              return () => {};
-            },
-            setPresentation: vi.fn(),
-          } as unknown as interactiveMods.InteractiveModSession);
+          // Startup work left pending by an earlier unmounted render resumes
+          // with its own Config; scope the session so only this test's mount
+          // can call its initialize.
+          .mockImplementation((config) =>
+            config === mockConfig ? session : undefined,
+          );
         try {
+          // Only this test's Config may resolve to the session: startup work
+          // from an earlier unmounted render resumes against the live module
+          // mock and must not inflate this test's call count.
+          expect(
+            interactiveMods.getInteractiveModSession(makeFakeConfig()),
+          ).toBeUndefined();
           render(
             <AppContainer
               config={mockConfig}
