@@ -364,6 +364,31 @@ describe('managed session assembly', () => {
     }
   });
 
+  it('does not stack activation renewals behind one in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    let finishRenewal!: () => void;
+    const pendingRenewal = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockImplementation(async () => {
+        await pendingRenewal;
+        return undefined;
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+    } finally {
+      finishRenewal();
+      await session.close().catch(() => undefined);
+    }
+  });
+
   it('seals with the commit proof and reopens through a certified takeover', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);

@@ -103,11 +103,17 @@ describe('Hosted immutable attachment input', () => {
     expect(() => parseHostedInput(within)).not.toThrow();
     expect(() =>
       parseHostedInput([...within, { type: 'text', text: 'one byte too far' }]),
-    ).toThrow('48 KiB');
+    ).toThrow('8 MiB');
     expect(() =>
       parseHostedInput([
-        { ...file, resource: { ...file.resource, text: '界'.repeat(17000) } },
+        {
+          ...file,
+          resource: {
+            ...file.resource,
+            text: '界'.repeat(Math.ceil(HOSTED_ATTACHMENT_INPUT_BYTES / 3)),
+          },
+        },
       ]),
-    ).toThrow('48 KiB');
+    ).toThrow('8 MiB');
   });
 });
