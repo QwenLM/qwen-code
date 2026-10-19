@@ -57,6 +57,10 @@ import {
   isManagedInput,
   restoreManagedAttachments,
 } from './managed-input';
+import {
+  readManagedPending,
+  saveManagedPending,
+} from './managed-pending-storage';
 
 interface PendingPrompt {
   idempotencyKey: string;
@@ -67,9 +71,13 @@ interface PendingPrompt {
   input?: ManagedInputBlock[];
 }
 
-function readPending(key: string): PendingPrompt | undefined {
+function readPending(
+  key: string,
+  restored?: unknown,
+): PendingPrompt | undefined {
   try {
-    const value: unknown = JSON.parse(sessionStorage.getItem(key) ?? 'null');
+    const value: unknown =
+      restored ?? JSON.parse(sessionStorage.getItem(key) ?? 'null');
     if (typeof value !== 'object' || value === null) return undefined;
     const pending = value as Record<string, unknown>;
     if (
@@ -96,17 +104,11 @@ function readPending(key: string): PendingPrompt | undefined {
   }
 }
 
-function persistPending(
+async function persistPending(
   key: string,
   value: PendingPrompt | undefined,
-): boolean {
-  try {
-    if (value) sessionStorage.setItem(key, JSON.stringify(value));
-    else sessionStorage.removeItem(key);
-    return true;
-  } catch {
-    return false;
-  }
+): Promise<boolean> {
+  return saveManagedPending(key, value);
 }
 
 export function ManagedSessionsPage({
@@ -222,7 +224,8 @@ function ManagedSessionsContent({
   const [error, setError] = useState<string>();
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(true);
+  const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [outputTarget, setOutputTarget] = useState<{
     sessionId: string;
     itemId?: string;
@@ -313,10 +316,20 @@ function ManagedSessionsContent({
   useEffect(() => {
     const abort = new AbortController();
     lifetime.current = abort;
-    const saved = readPending(pendingKey);
-    pendingRef.current = saved;
-    setPending(saved);
-    setBusy(false);
+    setPendingRestoreFailed(false);
+    setBusy(true);
+    void readManagedPending(pendingKey).then(
+      (value) => {
+        if (abort.signal.aborted) return;
+        const saved = readPending(pendingKey, value);
+        pendingRef.current = saved;
+        setPending(saved);
+        setBusy(false);
+      },
+      () => {
+        if (!abort.signal.aborted) setPendingRestoreFailed(true);
+      },
+    );
     return () => abort.abort();
   }, [pendingKey]);
 
@@ -489,13 +502,23 @@ function ManagedSessionsContent({
           ? { input }
           : {}),
       };
-      if (!persistPending(pendingKey, attempt)) {
+      encoding.current = true;
+      setBusy(true);
+      const persisted = await persistPending(pendingKey, attempt);
+      encoding.current = false;
+      if (abort.signal.aborted) return;
+      if (!persisted) {
         setError(t('managed.workspaceStorageUnavailable'));
+        setBusy(false);
         return;
       }
       pendingRef.current = attempt;
       setPending(attempt);
       composerCommit.current = commit;
+      if (selection.current !== sessionId) {
+        setBusy(false);
+        return;
+      }
     }
     setBusy(true);
     setError(undefined);
@@ -528,7 +551,8 @@ function ManagedSessionsContent({
       if (abort.signal.aborted) return;
       pendingRef.current = undefined;
       setPending(undefined);
-      persistPending(pendingKey, undefined);
+      await persistPending(pendingKey, undefined);
+      if (abort.signal.aborted) return;
       setListRevision((current) => current + 1);
       composerCommit.current?.();
       composerCommit.current = undefined;
@@ -557,7 +581,8 @@ function ManagedSessionsContent({
       if (isNonRetryableClientError(failure)) {
         pendingRef.current = undefined;
         setPending(undefined);
-        persistPending(pendingKey, undefined);
+        await persistPending(pendingKey, undefined);
+        if (abort.signal.aborted) return;
         if (selection.current === selectedAtSubmit) setText(attempt.text);
         if (selection.current === selectedAtSubmit)
           restoreManagedAttachments(composerRef.current, attempt.input);
@@ -776,6 +801,33 @@ function ManagedSessionsContent({
           {message}
         </p>
       ))}
+      {pendingRestoreFailed && (
+        <div>
+          <p role="alert" className="text-sm text-destructive">
+            {t('managed.pendingRestoreFailed')}
+          </p>
+          <Button
+            variant="outline"
+            onClick={async () => {
+              const abort = lifetime.current;
+              if (!abort || abort.signal.aborted) return;
+              const discarded = await persistPending(pendingKey, undefined);
+              if (abort.signal.aborted) return;
+              if (!discarded) {
+                setError(t('managed.pendingDiscardFailed'));
+                return;
+              }
+              pendingRef.current = undefined;
+              setPending(undefined);
+              setPendingRestoreFailed(false);
+              setBusy(false);
+              setError(undefined);
+            }}
+          >
+            {t('managed.discard')}
+          </Button>
+        </div>
+      )}
       <div
         className={`grid min-h-0 flex-1 gap-4 ${home ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]'}`}
         style={
@@ -1030,7 +1082,7 @@ function ManagedSessionsContent({
                     // draft text without minting a new idempotency key.
                     pendingRef.current = undefined;
                     setPending(undefined);
-                    persistPending(pendingKey, undefined);
+                    void persistPending(pendingKey, undefined);
                     // The pending record is client-scoped but the draft
                     // belongs to the session it was written for: restore it
                     // only there.

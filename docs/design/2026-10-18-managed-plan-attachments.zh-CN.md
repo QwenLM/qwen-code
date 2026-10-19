@@ -38,7 +38,7 @@ Java 投影有效且已批准的公开 Plan Action 时，验证其输入与 Turn
 
 扩展封闭的公开输入联合类型：`input_file` 包含 `name`、`mime_type`、UTF-8 `text`，`input_image` 包含 `mime_type` 和 base64 `data`。保留 `input_text` 与旧 `text` 行为。拒绝混用或未知字段、空附件、任意 URL、宿主机路径、二进制文件、非法 base64 和不匹配的图片签名。文本附件使用保守的文本 MIME/扩展名白名单，并拒绝 NUL。图片支持 PNG、JPEG、WebP。PDF、Office、音频和视频不在范围内。
 
-文件归一为带生成的非宿主 URI 的内联 ACP 文本资源，图片归一为 ACP image。语义摘要和 payload 摘要覆盖每个附件字节及名称、MIME。带附件请求的整份 canonical JSON 含文字最多 48 KiB，Java 与 Hosted 使用同一上限。Hosted 还精确检查真实用户消息是否满足既有 64 KiB 资源上限。不提高全局存储限制，不增加上传服务或存储表，不自动截断或省略内容。
+文件归一为带生成的非宿主 URI 的内联 ACP 文本资源，图片归一为 ACP image。语义摘要和 payload 摘要覆盖每个附件字节及名称、MIME。带附件请求的整份 canonical JSON 含文字最多 8 MiB，Java 与 Hosted 使用同一上限。Hosted 精确检查带附件的真实用户消息是否满足 9 MiB 预算，并使用既有消息分片保存。[附件容量设计](2026-10-18-managed-attachment-budget.zh-CN.md)定义专用输入、模型资源和浏览器持久化预算。普通资源保留既有上限，不增加上传服务或存储表，不自动截断或省略内容。
 
 声明 `input-attachments/1`；非文本派发必须具备该能力，纯文本兼容旧 Harness。已接收的不可变输入转换为同一组模型 parts，用于用户消息、首次生成、Hook 和恢复。文本资源带明确文件名边界，图片转为 `inlineData`。Hook 修改用户文字时保留附件 parts。应用最终定义 pin/会话模型选择后检查图片支持，包括保留的图片历史；纯文本模型明确失败，不能收到“图片不支持”的占位内容。
 
@@ -62,7 +62,7 @@ Managed 输入框显式启用共享添加菜单、Plan 控件和附件接入。�
 
 Java Harness 客户端构造时会固定能力快照。如果已经协商到不支持的 generation，恢复能力后需要重启控制面以构造新客户端；被阻断的 Turn 不会自动探测或绕过缺失能力。启用 Plan 前，停止或隔离共享 catalog 的旧 Server/Broker 二进制。备份并在隔离环境验证后，再应用 V9 到 V10 的增量迁移。同步部署兼容 Java、SDK、Harness 和 UI。旧二进制不能安全操作已经开启 Plan 的 catalog。保留已有数据、Workspace 绑定、凭据和不可变定义身份。
 
-48 KiB 是单次输入预算，不保证无限会话。预备模型请求还包含历史、工具与系统指令，仍可能超过原有 64 KiB 快照预算。此时保留既有明确的恢复限制，不宣称完整恢复，也不静默删历史。本次不包括大文件/对象存储、远程 Shell 分类、其他输入框操作、跨 profile 继承、Linux Hook/cgroup 认证或真实上游模型认证。
+8 MiB 是单次输入预算，不保证无限会话。预备模型请求还包含历史、工具与系统指令，仍可能超过 32 MiB 快照预算。此时保留既有明确的恢复限制，不宣称完整恢复，也不静默删历史。本次不包括大文件/对象存储、远程 Shell 分类、其他输入框操作、跨 profile 继承、Linux Hook/cgroup 认证或真实上游模型认证。
 
 ## 验证与验收标准
 
