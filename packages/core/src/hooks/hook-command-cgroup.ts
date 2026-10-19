@@ -138,16 +138,24 @@ child.on('exit', (code, signal) => {
       // The delegated root may refuse the unit; fall back to the old exit.
     }
     if (moved) {
-      const wait = setInterval(() => {
-        let empty = true;
+      const drained = () => {
         try {
-          empty = /^populated 0$/m.test(
+          return /^populated 0$/m.test(
             readFileSync(group + '/cgroup.events', 'utf8'),
           );
         } catch {
           // A removed unit has no members left.
+          return true;
         }
-        if (!empty) return;
+      };
+      // The foreground may have been the last member: do not tax every
+      // successful command with the poll interval's first tick.
+      if (drained()) {
+        exitLikeChild();
+        return;
+      }
+      const wait = setInterval(() => {
+        if (!drained()) return;
         clearInterval(wait);
         exitLikeChild();
       }, 100);
@@ -351,5 +359,20 @@ export class HookCommandCgroup {
 
   remove(): void {
     if (this.empty()) rmdirSync(this.directory);
+  }
+
+  removeReaper(pid: number): void {
+    const reaper = `${this.directory}-reaper-${pid}`;
+    try {
+      if (
+        /^populated 0$/m.test(
+          readFileSync(join(reaper, 'cgroup.events'), 'utf8'),
+        )
+      ) {
+        rmdirSync(reaper);
+      }
+    } catch {
+      // Missing or still populated: the worker-start sweep owns it.
+    }
   }
 }

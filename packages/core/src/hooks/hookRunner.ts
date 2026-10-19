@@ -1353,6 +1353,14 @@ export class HookRunner {
             debugLogger.warn('Failed to remove an empty hook cgroup');
           }
         }
+        if (child.pid) {
+          try {
+            processUnit?.removeReaper(child.pid);
+          } catch {
+            // The launcher may still be resident; the worker-start sweep
+            // owns the leftover sibling unit.
+          }
+        }
         if (signal && abortListenerAttached) {
           signal.removeEventListener('abort', abortHandler);
           abortListenerAttached = false;

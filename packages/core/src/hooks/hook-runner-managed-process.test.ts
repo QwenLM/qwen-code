@@ -66,6 +66,7 @@ describe('managed command admission', () => {
       }),
       empty: () => true,
       covers: () => true,
+      removeReaper: () => undefined,
       waitForEmpty,
       kill: vi.fn(),
       terminate,

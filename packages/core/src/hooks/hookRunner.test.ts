@@ -262,6 +262,7 @@ describe('HookRunner', () => {
 
     const cancelWithUnit = async (covered: boolean) => {
       const events: string[] = [];
+      const removeReaper = vi.fn();
       const unit = {
         launch: vi.fn().mockReturnValue({
           executable: process.execPath,
@@ -274,6 +275,7 @@ describe('HookRunner', () => {
         }),
         waitForEmpty: vi.fn().mockResolvedValue(true),
         remove: vi.fn(),
+        removeReaper,
       } as unknown as HookCommandCgroup;
       vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
       const mockProcess = spawnControllable(4321);
@@ -301,18 +303,19 @@ describe('HookRunner', () => {
       controller.abort();
       mockProcess.emit('close', null);
       await resultPromise;
-      return events;
+      return { events, removeReaper };
     };
 
     it('drains a covered launcher before the final kill on cancellation', async () => {
-      const events = await cancelWithUnit(true);
+      const { events, removeReaper } = await cancelWithUnit(true);
 
       expect(events[0]).toBe('terminate');
       expect(events.at(-1)).toBe('kill');
+      expect(removeReaper).toHaveBeenCalledWith(4321);
     });
 
     it('stops an uncovered launcher before terminating the unit', async () => {
-      const events = await cancelWithUnit(false);
+      const { events } = await cancelWithUnit(false);
 
       expect(events[0]).toBe('kill');
       expect(events.indexOf('terminate')).toBeGreaterThan(0);

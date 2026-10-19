@@ -21,9 +21,22 @@ import {
   HookCommandIsolationUnavailableError,
 } from './hook-command-cgroup.js';
 
+// A real cgroup directory accepts rmdir while its virtual files stay; a
+// regular directory with a `cgroup.events` file cannot model that, so the
+// removal decision is observed on the call instead.
+const rmdirSync = vi.hoisted(() => vi.fn());
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  rmdirSync.mockImplementation(actual.rmdirSync);
+  return { ...actual, rmdirSync };
+});
+
 let root: string;
 let directory: string;
 beforeEach(async () => {
+  const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  rmdirSync.mockImplementation(actualFs.rmdirSync);
   root = await mkdtemp(join(tmpdir(), 'hook-launcher-'));
   directory = join(root, 'unit');
   await mkdir(directory);
@@ -140,6 +153,25 @@ describe('unit creation and attachment', () => {
     expect(unit.covers(1)).toBe(true);
     expect(unit.covers(4321)).toBe(true);
     expect(unit.covers(9999)).toBe(false);
+  });
+
+  it('removes an empty reaper sibling and keeps a populated one', async () => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const emptySibling = `${directory}-reaper-4321`;
+    await mkdir(emptySibling);
+    await writeFile(join(emptySibling, 'cgroup.events'), 'populated 0\n');
+    rmdirSync.mockClear();
+    unit.removeReaper(4321);
+    expect(rmdirSync).toHaveBeenCalledWith(emptySibling);
+
+    const busySibling = `${directory}-reaper-5678`;
+    await mkdir(busySibling);
+    await writeFile(join(busySibling, 'cgroup.events'), 'populated 1\n');
+    rmdirSync.mockClear();
+    unit.removeReaper(5678);
+    expect(rmdirSync).not.toHaveBeenCalled();
   });
 });
 
