@@ -1446,7 +1446,11 @@ export class MemoryManager {
     // `processedOffset` counts entries in its own (possibly pre-compaction)
     // index space, so it must never delete that snapshot.
     const runSeq = this.seqOfExtractParams(params);
-    if (result && !result.skippedReason) {
+    // Only a run that forked read turns. `runAutoMemoryExtract`'s early
+    // returns (no new user text, session mismatch, memory pressure) still
+    // advance the cursor, so none of them is coverage for a parked snapshot.
+    const forked = result?.extractorEngaged !== undefined;
+    if (forked && result && !result.skippedReason) {
       const covered = this.extractCadence.get(params.sessionId);
       if (
         covered?.pending !== undefined &&
@@ -1474,9 +1478,11 @@ export class MemoryManager {
     ) {
       return;
     }
-    // A failed or unconsumed run retries without dropping skipped history.
+    // A failed, unconsumed, or never-forked run retries without dropping
+    // skipped history.
     if (
       !result ||
+      !forked ||
       (!result.skippedReason &&
         (result.cursor.processedOffset ?? 0) < params.history.length)
     ) {
@@ -1692,7 +1698,11 @@ export class MemoryManager {
       // downward while the parked snapshot keeps a length no live history has.
       // Leave the newer entry alone; only clear one this snapshot still owns.
       const state = this.extractCadence.get(sessionId);
-      if (state !== undefined && state.pending !== pending) return false;
+      // A deleted entry owns nothing: the snapshot was discarded while this
+      // run was parked (a session switch, compaction, or another flush's
+      // coverage), so replaying it would fork turns no live state claims and
+      // persist their cursor over the live one.
+      if (state === undefined || state.pending !== pending) return false;
       // Staleness is an ordering test plus a length test: only a run
       // scheduled AFTER this snapshot was parked can have covered it, and a
       // bare length comparison mis-dates post-compaction settles (a run can

@@ -2678,6 +2678,62 @@ describe('MemoryManager', () => {
       expect(lengths).toContain(8);
     });
 
+    it('refuses a parked flush whose snapshot a session switch deleted outright', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        (params) =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
+          }),
+      );
+      const other = turn(mgr, 2, 'other');
+      const flushing = mgr.flushPendingExtract('sess', 30_000);
+
+      // startNewSession() discards the cadence entry before it decides whether
+      // the session id actually changed, so resuming the session already in
+      // use deletes it under the parked flush while the live id stays put.
+      mgr.discardExtractCadence('sess', 'sess');
+
+      release();
+      await other;
+      await expect(flushing).resolves.toBe(false);
+      // The orphaned snapshot is not forked: its cursor would land over the
+      // live one and nothing owns the turns it carries.
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(4);
+    });
+
+    it('keeps a parked snapshot when the run that advanced past it never forked', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      // The no-new-user-text early return writes the cursor and returns
+      // without forking: no `extractorEngaged`, so its offset is not coverage
+      // for turns it never read.
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+        extractResult('sess', [], 6) as never,
+      );
+      await turn(mgr, 6);
+
+      await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toContain(4);
+    });
+
     it('extracts a snapshot that replaced the parked run it did not join', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
       const mgr = new MemoryManager();
