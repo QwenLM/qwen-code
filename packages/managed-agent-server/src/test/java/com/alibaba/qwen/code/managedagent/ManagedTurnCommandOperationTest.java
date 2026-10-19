@@ -408,6 +408,33 @@ class ManagedTurnCommandOperationTest {
     }
 
     @Test
+    void aCancelSubmittedAfterAnUnknownFailureFailsAlreadySettled() {
+        Admission admitted = admit("submit-1");
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "managed_runtime_recovery_blocked",
+                "prior tool execution unknown");
+        now.addAndGet(1);
+        Admission late = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(late.commandEffect()).isFalse();
+        OperationRecord operation = operation(late.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
+    }
+
+    @Test
+    void aCancelOfAnAdmittedTurnFailedOtherwiseFailsAlreadySettled() {
+        Admission admitted = admit("submit-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "hosted_harness_unavailable", "gone");
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
+    }
+
+    @Test
     void aCancelOfAnEndedTurnSettlesAtAdmission() {
         Admission completed = admit("submit-1");
         finish(completed, "turn.completed", "COMPLETED");

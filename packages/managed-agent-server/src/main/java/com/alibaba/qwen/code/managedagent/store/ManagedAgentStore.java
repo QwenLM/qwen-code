@@ -2101,11 +2101,17 @@ public class ManagedAgentStore implements AgentStateStore {
             if (admitted && "managed_runtime_recovery_blocked".equals(
                     turn.errorCode())) {
                 // The cancel was admitted, but whether it reached the
-                // unobserved execution is itself unknown. Park it instead
-                // of claiming a terminal turn_already_settled.
+                // unobserved execution is itself unknown. Park only a
+                // cancel that already existed when the Turn ended; a cancel
+                // submitted afterwards could never have reached it.
+                long endedAt = turn.completedAt() == null ? now
+                        : turn.completedAt();
                 settleTurnCommand(tenantId, sessionId, turnId,
                         OperationKind.CANCEL, "RECOVERY_BLOCKED",
-                        "JAVA_DURABLE", CANCEL_UNCONFIRMED, now);
+                        "JAVA_DURABLE", CANCEL_UNCONFIRMED, now, endedAt);
+                settleTurnCommand(tenantId, sessionId, turnId,
+                        OperationKind.CANCEL, "FAILED", "JAVA_DURABLE",
+                        "turn_already_settled", now);
             } else {
                 settleTurnCommand(tenantId, sessionId, turnId,
                         OperationKind.CANCEL, "FAILED", "JAVA_DURABLE",
@@ -2120,6 +2126,14 @@ public class ManagedAgentStore implements AgentStateStore {
     private void settleTurnCommand(String tenantId, String sessionId,
             String turnId, OperationKind kind, String state,
             String admissionStage, String failureCode, long now) {
+        settleTurnCommand(tenantId, sessionId, turnId, kind, state,
+                admissionStage, failureCode, now, Long.MAX_VALUE);
+    }
+
+    private void settleTurnCommand(String tenantId, String sessionId,
+            String turnId, OperationKind kind, String state,
+            String admissionStage, String failureCode, long now,
+            long createdBefore) {
         boolean completed = "COMPLETED".equals(state);
         boolean parked = "RECOVERY_BLOCKED".equals(state);
         // The identity index confines this locking scan to the Turn's own
@@ -2130,9 +2144,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " FROM ma_operation /*! FORCE INDEX (uq_ma_operation_identity) */"
                         + " WHERE scope_key = ? AND"
                         + " operation_kind = ? AND target_key = ? AND state ="
-                        + " 'PENDING' FOR UPDATE", String.class,
+                        + " 'PENDING' AND gmt_create <= ? FOR UPDATE",
+                String.class,
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                kind.name(), turnOperationTarget(turnId))) {
+                kind.name(), turnOperationTarget(turnId), createdBefore)) {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ?,"
                             + " admission_stage = ?, delivery_state = ?,"
                             + " receipt_id = ?, failure_code = ?,"
