@@ -68,7 +68,7 @@ public final class WorkspaceCsiRuntimeMain {
     }
 
     static void run(String[] args) throws Exception {
-        if (args.length == 3 && "text".equals(args[0])) {
+        if (args.length == 3 && ("text".equals(args[0]) || "retire".equals(args[0]))) {
             WorkspaceCsiHostedMain.run(args);
             return;
         }
@@ -97,6 +97,9 @@ public final class WorkspaceCsiRuntimeMain {
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
         var sessions = new JdbcRuntimeSessionRepository(source);
         var http = new HttpRuntimeTransport();
+        var nativeStore = new ManagedSessionStore(jdbc);
+        nativeStore.setCsiBindings(bindings);
+        var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions);
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
                 request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http);
         access.resolve(request.sessionId()).toCompletableFuture().join();
@@ -113,6 +116,8 @@ public final class WorkspaceCsiRuntimeMain {
                 var server = new RuntimeBrokerHttpServer(new InetSocketAddress(InetAddress.getLoopbackAddress(), port),
                         token, service, false, access::readNative)) {
             requireAuthorityOrigin(authorityOrigin, server.getBaseUri());
+            server.registerCsiApplicationAuthority(request.registration().tenantId(), request.sessionId(),
+                    (credential, body) -> application.workerAuthority(request.registration().tenantId(), request.sessionId(), credential, body));
             var stopped = new CountDownLatch(1);
             var shutdown = new Thread(() -> {
                 server.close();
@@ -123,6 +128,16 @@ public final class WorkspaceCsiRuntimeMain {
             System.out.println(json.writeValueAsString(Map.of("sessionId", request.sessionId(),
                     "runtimeRequestKey", request.runtimeRequestKey(), "baseUri", server.getBaseUri().toString())));
             stopped.await();
+        }
+    }
+
+    static void requireSelected(Request request, com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
+        if (binding == null || !request.runtimeRequestKey().equals(binding.getRequest().requestKey())
+                || !request.sessionId().equals(binding.getRequest().getIsolationKey())
+                || !request.registration().tenantId().equals(binding.getRequest().getScope().getTenantId())
+                || !request.registration().storageId().equals(binding.getRequest().getStorageId())
+                || !request.registration().mountRoot().equals(binding.getRequest().getScope().getCanonicalCwd())) {
+            throw new IllegalArgumentException("Reviewed original CSI Runtime is unavailable");
         }
     }
 
