@@ -27,7 +27,7 @@ class CsiNodeSourceJournalTest {
     @Test
     void consumesSyntheticV7BytesAndFrontendWithoutChangingBodyOrder() throws Exception {
         Fixture fixture = fixture();
-        assertEquals("d2e829ba7ae8248b09bf01c40e3a57e6338f8951c8a843ae298a3b7a20472fa9",
+        assertEquals("a27fd1b05b3a25a03e342b25bd9a3bca20d3fa7791941bbc971d16b7282f38f9",
                 CsiNativeActivationProof.sha256(fixture.bytes()));
         var stream = CsiNodeSourceJournal.read(fixture.bytes(), fixture.head());
         assertEquals(fixture.head(), stream.head());
