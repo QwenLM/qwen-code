@@ -74,8 +74,36 @@ jobs:
         with:
           persist-credentials: false
 
+      # A workflow_run event is delivered once, but this job can sit in the
+      # queue long enough for the same run to be re-run. Attempt 1 of run
+      # 39237270547 waited hours here; by the time it ran, attempt 2 was green,
+      # so the failed-jobs list read from the latest attempt was empty and a
+      # per-commit issue was filed for an already-green head (#14768). A later
+      # attempt owns the run: its own completion event reports the result.
+      - name: 'Skip a superseded attempt'
+        id: 'live'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          REPO: '${{ github.repository }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+        run: |-
+          set -euo pipefail
+          superseded=false
+          if live_attempt="$(
+            gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
+              --jq '.run_attempt' 2>/dev/null
+          )"; then
+            if [[ "${live_attempt}" -gt "${RUN_ATTEMPT}" ]]; then
+              superseded=true
+              echo "::warning::Run ${WORKFLOW_RUN_ID} is on attempt ${live_attempt}; this attempt-${RUN_ATTEMPT} event is stale and its own completion event reports the result."
+            fi
+          fi
+          echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Select the failure destination'
         id: 'destination'
+        if: "${{ steps.live.outputs.superseded != 'true' }}"
         env:
           GH_TOKEN: '${{ github.token }}'
           REPO: '${{ github.repository }}'

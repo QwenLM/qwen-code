@@ -299,6 +299,81 @@ cat "\${RUNNER_TEMP}/pulls.json"
     });
   });
 
+  describe('superseded attempts', () => {
+    const live = jobs.analyze.steps.find((step) => step.id === 'live');
+    const destination = jobs.analyze.steps.find(
+      (step) => step.id === 'destination',
+    );
+    const detect = (liveAttempt, overrides = {}, ghScript) => {
+      const tmp = mkdtempSync(join(tmpdir(), 'java-ci-live-'));
+      try {
+        writeFileSync(
+          join(tmp, 'gh'),
+          ghScript ??
+            `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${RUNNER_TEMP}/lookup-args"
+printf '%s\\n' '${liveAttempt}'
+`,
+        );
+        chmodSync(join(tmp, 'gh'), 0o755);
+        const output = join(tmp, 'output');
+        const result = spawnSync('bash', ['-eo', 'pipefail', '-c', live.run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${tmp}:${process.env.PATH}`,
+            RUNNER_TEMP: tmp,
+            GITHUB_OUTPUT: output,
+            REPO: 'QwenLM/qwen-code',
+            WORKFLOW_RUN_ID: '39237270547',
+            RUN_ATTEMPT: '1',
+            ...overrides,
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        return {
+          output: existsSync(output) ? readFileSync(output, 'utf8') : '',
+          stdout: result.stdout,
+          args: existsSync(join(tmp, 'lookup-args'))
+            ? readFileSync(join(tmp, 'lookup-args'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    it('skips reporting when the run has moved on to a later attempt', () => {
+      // Measured on run 39237270547: attempt 1 failed on the host lock,
+      // attempt 2 went green, and this job started hours later, read the green
+      // attempt's empty failure list, and filed #14768 for the green head.
+      const resolved = detect('2');
+      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.stdout).toContain('::warning::');
+      expect(resolved.args).toContain('39237270547');
+    });
+    it('reports the attempt that is still the latest', () => {
+      expect(detect('1').output).toBe('superseded=false\n');
+      expect(detect('2', { RUN_ATTEMPT: '2' }).output).toBe(
+        'superseded=false\n',
+      );
+    });
+    it('fails open when the live run cannot be read', () => {
+      // Reporting on a transient read error is the safe direction: an issue
+      // for a real failure beats silently dropping it.
+      const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
+      const resolved = detect('', {}, gh);
+      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.stdout).not.toContain('::warning::');
+    });
+    it('gates the failure destination on the supersession check', () => {
+      // Without this wiring the check would run and still file the issue.
+      expect(String(destination.if)).toBe(
+        "${{ steps.live.outputs.superseded != 'true' }}",
+      );
+    });
+  });
+
   it('pins the watched name to the name key of sdk-java.yml', () => {
     // `workflow_run.workflows` matches the watched workflow's `name:` key, not
     // its filename — renaming sdk-java.yml's name must fail here instead of
