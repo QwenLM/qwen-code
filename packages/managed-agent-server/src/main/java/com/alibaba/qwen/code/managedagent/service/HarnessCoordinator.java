@@ -1319,6 +1319,14 @@ public class HarnessCoordinator {
         if (claimed == null) {
             return;
         }
+        if ("CANCELLING".equals(claimed.status())) {
+            // A user cancel landed between the park scan and the claim. The
+            // normal sweep owns that lane; releasing the lease lets it drive
+            // the cancel instead of settling the Turn as FAILED here.
+            store.releaseTurnLease(claimed.tenantId(), claimed.sessionId(),
+                    claimed.turnId(), owner);
+            return;
+        }
         try {
             harness.discardManagedRecovery(claimed.tenantId(),
                     claimed.sessionId());

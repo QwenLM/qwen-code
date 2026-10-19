@@ -3008,6 +3008,40 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyLong());
     }
 
+    @Test
+    void leavesAConcurrentUserCancelToTheCancellationLane() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(harness.isAvailable()).thenReturn(true);
+        when(store.findDispatchable(anyLong(), eq(50))).thenReturn(List.of());
+        when(store.findRuntimeRecoveryParked(anyLong(), eq(50)))
+                .thenReturn(List.of(new DispatchTarget("tenant", "session", "turn")));
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                "epoch-old", 4, "CANCELLING", true, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(claimed));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer, directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.recoverExpiredTurns();
+        } finally {
+            coordinator.close();
+        }
+        // The cancel that raced the recheck keeps the cancellation lane: the
+        // lease is released and the recovery path is never entered.
+        verify(store).releaseTurnLease(eq("tenant"), eq("session"), eq("turn"),
+                anyString());
+        verify(harness, never()).discardManagedRecovery(anyString(), anyString());
+        verify(harness, never()).recoverManagedFailureCancellation(anyString(), anyString(),
+                anyString(), anyString());
+        verify(store, never()).parkTurnForRuntimeRecovery(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+    }
+
     private static SessionRecord workspaceSession() {
         return new SessionRecord("tenant", "session", "qwen-code", null,
                 null, "ACTIVE", "boot-old", "epoch-old", 4, 4, 0, 1, 1, null, 1,
