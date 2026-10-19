@@ -96,7 +96,8 @@ public final class CsiNativeReadbackProtocol {
     public static Map<String, Object> bindRequest(Map<String, Object> boot, RuntimeProvisionRequest original,
             ContextBinding binding, String requestId) {
         ManagedCsiFilesProtocol.validateBoot(boot);
-        require(Long.valueOf(5).equals(BrokerValues.exactLong(boot.get("version"))));
+        require(Long.valueOf(5).equals(BrokerValues.exactLong(boot.get("version")))
+                || Long.valueOf(6).equals(BrokerValues.exactLong(boot.get("version"))));
         String owner = original.getIsolationKey();
         var value = new LinkedHashMap<String, Object>();
         value.put("protocolVersion", 1);
