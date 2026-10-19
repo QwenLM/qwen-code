@@ -34,6 +34,7 @@ owner 重启矩阵；本切片是 **FG13d 的前半部分：取消与超时**，
 | `timeout-held-command`       | 同样的保持型命令，Hook 超时 2 s，后代忽略 SIGTERM。                                     | 命令超时，输出不被采用，记录结算为 `outcome=timeout`，单元被杀并到达 `populated 0`，模型看到阻断而不是文件正文。                                                                                          |
 | `cancel-with-stopped-worker` | 同样的保持型命令；对 durable worker 发 SIGSTOP，再通过 Harness 路由取消。               | 取消被记录，但 owner 无法应答：记录停在 `recovery_blocked` / `outcome_unknown`，命令与后代继续占据单元，且不会发生第二次调用。                                                                            |
 | `cancel-with-dropped-reply`  | 同样的保持型命令；broker 代理在 worker 中止后丢弃 `hook-cancel` 控制调用的回复。        | 取消已记录，因此同一 owner 的后续状态轮询会结算它：记录为 `cancelled`、单元只 drain 一次、恰好一次物理调用，代理日志证明这次丢弃。                                                                        |
+| `pre-dispatch-cancel`        | 在记录仍处于 `intent`、worker 尚未启动命令时，通过 Harness 路由取消。                   | 存储可证明什么都没跑：记录为 `cancelled` / `not_started_proven`，没有任何 `hook.call`，turn 看到取消而不是文件内容。                                                                                      |
 
 ## 变异见证
 
@@ -53,12 +54,14 @@ owner 重启矩阵；本切片是 **FG13d 的前半部分：取消与超时**，
 - `cancel-with-dropped-reply`：破坏取消派发的 operation-id 幂等（或移除解析同一
   occurrence 的状态轮询）。重试会产生第二次物理调用，或记录停在未知态；一次
   调用或 `cancelled` 断言失败。
+- `pre-dispatch-cancel`：去掉 broker 获取与 `dispatch_started` 提交之间的取消
+  检查，取消会等到 worker 启动，记录带着一次物理调用结算；零调用断言失败。
 
 ## 非目标
 
-FG13d 其余部分——派发前取消、以及带 `SessionEnd`/`SessionDelete` 的 DELETE
-异步 drain——仍留在 #14449。同样不在范围：FG13a、FG13b、FG13e、FG13f、本地
-非托管 Hook、Windows/macOS，以及 #13133 的设计项。
+带 `SessionEnd`/`SessionDelete` 的 DELETE 异步 drain 仍留在 #14449。同样不在
+范围：FG13a、FG13b、FG13e、FG13f、本地非托管 Hook、Windows/macOS，以及
+#13133 的设计项。
 
 ## 验证
 

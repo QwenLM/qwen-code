@@ -222,6 +222,44 @@ class HostedHookCancelFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13dPreDispatchCancelSettlesNotStartedProvenOnMySql() throws Exception {
+        boot("60000", "60000", "hook-solo");
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_PRE_DISPATCH");
+        // Cancel while the record still sits at intent, before the worker is
+        // asked to start the command: that is the only window in which the
+        // store may claim nothing ran.
+        String executionId = awaitIntent(session);
+        JsonNode cancelled = cancelHook(session, executionId);
+        assertThat(cancelled.path("cancelRequested").asBoolean()).isTrue();
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("cancelled");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("not_started_proven");
+        });
+        assertThat(events("hook.call")).isEmpty();
+        assertThat(events("hook.allow")).isEmpty();
+        assertThat(modelRequests.toString()).doesNotContain(PROOF);
+        assertThat(modelFailure.get()).isNull();
+    }
+
+    private String awaitIntent(String session) throws Exception {
+        AtomicReference<String> id = new AtomicReference<>();
+        waitFor(() -> {
+            List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
+                    .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
+                    .toList();
+            assertThat(records).as("hook execution records").hasSize(1);
+            JsonNode record = records.getFirst();
+            assertThat(record.at("/run/execution").asText()).isEqualTo("intent");
+            id.set(record.path("hookExecutionId").asText());
+        });
+        return id.get();
+    }
+
     // The record may report a terminal state only once the unit is empty:
     // inspect the first observation, not a later poll, so a regression that
     // settles early while the drain continues still fails the cell.
