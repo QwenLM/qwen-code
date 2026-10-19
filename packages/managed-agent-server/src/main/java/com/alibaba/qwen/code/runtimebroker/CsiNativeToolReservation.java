@@ -134,12 +134,18 @@ final class CsiNativeToolReservation {
     static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources,
             long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
-        return complete(connection, original, prefix, resources, false, candidateHistorySequence, candidateHistoryRevision, JdbcCsiActivationAdmission.JournalRead.LIVE);
+        return complete(connection, original, prefix, resources, false, candidateHistorySequence, candidateHistoryRevision);
     }
 
     static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, boolean recovery) throws SQLException {
-        return complete(connection, original, prefix, resources, recovery, 0, 0, JdbcCsiActivationAdmission.JournalRead.LIVE);
+        return complete(connection, original, prefix, resources, recovery, 0, 0);
+    }
+
+    static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources, boolean recovery,
+            long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
+        return complete(connection, original, prefix, resources, recovery, candidateHistorySequence, candidateHistoryRevision, JdbcCsiActivationAdmission.JournalRead.LIVE);
     }
 
     static List<ToolExecutionRecord> complete(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
