@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
+import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
@@ -1402,8 +1404,8 @@ final class WorkspaceCsiApplicationInventory {
                             envelope.path("commitBodyBase64"), 128 * 1024), 128 * 1024);
                     var active = new ArrayList<JsonNode>(List.of(envelope, body,
                             WorkspaceCsiApplicationJson.object(WorkspaceCsiApplicationJson.base64(
-                                    envelope.path("preCutObservationBase64"), com.alibaba.qwen.code.runtimebroker.CsiFileFinalizeProtocol.RESPONSE_LIMIT),
-                                    com.alibaba.qwen.code.runtimebroker.CsiFileFinalizeProtocol.RESPONSE_LIMIT)));
+                                    envelope.path("preCutObservationBase64"), com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol.RESPONSE_LIMIT),
+                                    com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol.RESPONSE_LIMIT)));
                     active.addAll(CsiNativeActivationProof.records(WorkspaceCsiApplicationJson.base64(body.path("recordBytesBase64"), 128 * 1024)));
                     for (String field : List.of("cut_bytes", "finalize_receipt_bytes")) {
                         if (row.binary(field) != null) {

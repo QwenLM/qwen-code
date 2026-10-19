@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher;
+import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
@@ -557,7 +558,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private void requireCsiJournalIsolation() {
         if (journalEventTransportEnabled || journalEventTransport != null) {
-            throw new ApiException(HttpStatus.CONFLICT, "csi_journal_transport_unsupported",
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "csi_journal_transport_unsupported",
                     "The private CSI lane requires an isolated journal without an event transport.");
         }
     }

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -43,7 +45,7 @@ public class WorkspaceCsiApplicationController {
     public Map<String, Object> workerAuthority(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization, @RequestBody byte[] bytes) {
         if (authorization.length() > 519 || !authorization.matches("Bearer [A-Za-z0-9._~+/-]{1,512}=*")) {
-            throw new ApiException(org.springframework.http.HttpStatus.UNAUTHORIZED, "csi_application_authority_unauthorized", "Original Runtime authentication failed.");
+            throw new ManagedAgentException(org.springframework.http.HttpStatus.UNAUTHORIZED, "csi_application_authority_unauthorized", "Original Runtime authentication failed.");
         }
         return store.workerAuthority(tenant.tenantId(), sessionId, authorization.substring(7), bytes);
     }

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiFilesProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
