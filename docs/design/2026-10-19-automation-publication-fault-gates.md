@@ -99,7 +99,8 @@ differ:
    to the expected bytes and readable through the store; otherwise the tool
    result is explicitly failed or unknown, never a fabricated success.
 4. **Settled once.** The occurrence is terminal exactly once, and the wake
-   turn's Workspace lease is released.
+   turn's Workspace lease is released — with no leftover `READY` owner row
+   still holding it.
 
 Slice 2 repeats 1, 2 and 4 across the kill.
 
@@ -133,7 +134,8 @@ are recorded here instead of being rediscovered:
   `O4OssGate` remains the only real-bucket fault gate.
 - `publisher-death` pins the publisher dying, not the Harness. A Harness
   death mid-capture is FG11c's `turn-crash` window.
-- The stream-gap gate (`FG11e`) is untouched here.
+- The stream-gap gate (`FG11e`) — the second gap the audit named — is
+  untouched here.
 
 ## Acceptance
 
