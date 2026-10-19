@@ -144,7 +144,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-bundle</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoveryMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -152,7 +152,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-migration</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceMigrationMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceMigrationMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -160,7 +160,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>workspace-maintenance-recovery</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceMaintenanceRecoveryMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceMaintenanceRecoveryMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -168,7 +168,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>csi-session</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiSessionMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiSessionMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -176,7 +176,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>csi-runtime</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeMain</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRuntimeMain</mainClass>
                         </configuration>
                     </execution>
                     <execution>
@@ -184,7 +184,7 @@
                         <goals><goal>repackage</goal></goals>
                         <configuration>
                             <classifier>operator-recovery</classifier>
-                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand</mainClass>
+                            <mainClass>com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryCommand</mainClass>
                         </configuration>
                     </execution>
                 </executions>
@@ -451,10 +451,47 @@
                                  keepalive / 45 s bound, 214.4-215.0 s
                                  healthy locally on JDK 21 and 25
                                  across four runs, ~440 s budgeted at
-                                 2x) raise the healthy sum to 5473 s,
-                                 so the fork moves to 6083 s and the
-                                 Verify step to 115 minutes. -->
-                            <forkedProcessTimeoutInSeconds>6083</forkedProcessTimeoutInSeconds>
+                                 2x) raise the healthy sum to 5743 s;
+                                 these sums already include the FG13d
+                                 dropped-reply cancel cell (issue
+                                 #14449, 150 s) and the FG12b
+                                 store-failure class
+                                 (HostedMcpStoreFaultGatesIT, eight
+                                 cases, 49.6 s measured locally on
+                                 JDK 21 + MySQL 8.0.46, ~120 s
+                                 budgeted). The FG12f stream-gap class
+                                 (HostedMcpStreamGapIT, three cases,
+                                 three cold boots) measures 121.1 s
+                                 locally on the merged base (~242 s
+                                 budgeted): the healthy sum becomes
+                                 5985 s, so the fork moves to 6585 s
+                                 and the Verify step to 120 minutes.
+                                 The FG13a execute lost-reply cell
+                                 (issue #14449) adds 150 s: the healthy
+                                 sum becomes 6135 s, so the fork moves
+                                 to 6735 s. The FG13a status lost-reply
+                                 cell (issue #14449) adds 150 s: the
+                                 healthy sum becomes 6285 s; the FG11c
+                                 Harness-crash method (three cases, 144.8 s
+                                 measured, 550 s budgeted) moves it to
+                                 6835 s, so the fork moves to 7435 s and
+                                 the Verify step to 134 minutes. The FG13d
+                                 DELETE-drain cell (issue #14449) adds
+                                 150 s: the healthy sum becomes 6985 s,
+                                 so the fork moves to 7585 s and the
+                                 Verify step to 137 minutes. The FG11c
+                                 Spring-crash class (five cases, 262.0 s
+                                 measured) is budgeted at 524 s: the healthy
+                                 sum becomes 7509 s, so the fork moves to
+                                 8109 s and the Verify step to 146 minutes.
+                                 The FG13a catalog lost-reply cell (issue
+                                 #14449) adds 150 s: the healthy sum becomes
+                                 7659 s, so the fork moves to 8259 s and the
+                                 Verify step to 148 minutes. The FG13a HTTP
+                                 lost-reply cell adds 150 s: the healthy sum
+                                 becomes 7809 s, so the fork moves to 8409 s
+                                 and the Verify step to 151 minutes. -->
+                            <forkedProcessTimeoutInSeconds>8409</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -608,9 +645,9 @@
                     <includes><include>**/HostedMcp*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
-                         per-ceiling rule for this class: one @Timeout
-                         ceiling (600 s) plus the healthy runtime must
-                         fit 1200 s. -->
+                         per-class rule for the four MCP classes: the
+                         largest @Timeout ceiling (600 s) plus the
+                         classes' healthy runtime must fit 1200 s. -->
                     <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>

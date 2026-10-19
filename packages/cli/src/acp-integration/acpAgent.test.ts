@@ -4562,12 +4562,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it.each([undefined, '', 'private-parent'])(
-    'H01/H04 injects ancestor trust only for direct ACP provenance %s',
+    'H01/H04 preserves provenance and transport binding for %s',
     async (capability) => {
-      await setupSessionMocks('ancestor-session');
-      const { agent, agentPromise } = await bootAcpAgent({
-        privateParentCapability: capability,
-      });
+      const innerConfig = await setupSessionMocks('ancestor-session');
+      const target = await fs.realpath(process.cwd());
+      const linkRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-ancestor-alias-'),
+      );
+      const alias = path.join(linkRoot, 'alias');
+      await fs.symlink(target, alias, 'junction');
+      innerConfig.getTargetDir = vi.fn().mockReturnValue(alias);
+      const extMethod = vi.fn(
+        async (_method: string, params: Record<string, unknown>) => ({
+          v: 1,
+          trusted: [params['sessionId'] === 'ancestor-session'],
+        }),
+      );
+      const { agent, agentPromise } = await bootAcpAgent(
+        {
+          privateParentCapability: capability,
+        },
+        extMethod,
+      );
       try {
         if (capability !== undefined) {
           await expect(
@@ -4595,14 +4611,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         if (capability === undefined) {
           expect(provider).toBeTypeOf('function');
           await expect(
-            provider?.([process.cwd()], path.join(process.cwd(), 'project')),
+            provider?.([path.dirname(target)], target),
           ).resolves.toEqual([true]);
         } else {
-          expect(provider).toBeUndefined();
+          expect(provider).toBeTypeOf('function');
+          await expect(
+            provider?.([path.dirname(target)], target),
+          ).resolves.toEqual([true]);
+          expect(extMethod).toHaveBeenCalledWith(
+            'qwen/control/workflow/ancestor-trust',
+            {
+              v: 1,
+              sessionId: 'ancestor-session',
+              canonicalTargetDir: target,
+              ancestorDirs: [path.dirname(target)],
+            },
+          );
+        }
+        const caseAlias = path.join(
+          path.dirname(target),
+          path.basename(target).toUpperCase(),
+        );
+        if ((await fs.realpath(caseAlias).catch(() => undefined)) === target) {
+          innerConfig.getTargetDir.mockReturnValue(caseAlias);
+          await expect(
+            provider?.([path.dirname(target)], target),
+          ).resolves.toEqual([true]);
+        }
+        innerConfig.getSessionId.mockReturnValue('new-recording-session');
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        if (capability !== undefined) {
+          expect(extMethod).toHaveBeenLastCalledWith(
+            'qwen/control/workflow/ancestor-trust',
+            expect.objectContaining({ sessionId: 'ancestor-session' }),
+          );
         }
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
+        await fs.rm(linkRoot, { recursive: true, force: true });
       }
     },
   );
@@ -6091,7 +6140,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return innerConfig;
   }
 
-  async function bootAcpAgent(options?: Parameters<typeof runAcpAgent>[3]) {
+  async function bootAcpAgent(
+    options?: Parameters<typeof runAcpAgent>[3],
+    extMethod?: (
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>,
+  ) {
     const agentPromise = runAcpAgent(
       mockConfig,
       makeSessionSettings(),
@@ -6099,11 +6154,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       options,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    let connectionReady = false;
     const agent = capturedAgentFactory!({
+      ...(extMethod ? { extMethod } : {}),
       get closed() {
+        if (!connectionReady) {
+          throw new Error(
+            'ACP connection is not initialized during agent construction',
+          );
+        }
         return mockConnectionState.promise;
       },
     }) as AgentLike;
+    connectionReady = true;
     return { agent, agentPromise };
   }
 
@@ -8227,6 +8290,101 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['success', 'failure', 'cancelled', 'partial-failure'])(
+    'invalidates private ancestor replies across a %s cwd transition',
+    async (outcome) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const root = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-ancestor-cd-')),
+      );
+      const target = path.join(root, 'nested');
+      await fs.mkdir(target);
+      let currentDir = root;
+      const innerConfig = await setupSessionMocks(sessionId);
+      let releaseCd!: () => void;
+      const cdBlocked = new Promise<void>((resolve) => {
+        releaseCd = resolve;
+      });
+      let enteredCd!: () => void;
+      const cdEntered = new Promise<void>((resolve) => {
+        enteredCd = resolve;
+      });
+      Object.assign(innerConfig, {
+        getTargetDir: vi.fn(() => currentDir),
+        isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+        relocateWorkingDirectory: vi.fn(async () => {
+          currentDir = target;
+          enteredCd();
+          await cdBlocked;
+          if (outcome !== 'success') {
+            if (outcome !== 'partial-failure') currentDir = root;
+            throw new Error('cd ' + outcome);
+          }
+          return {};
+        }),
+      });
+      Object.assign(innerConfig.getLlmClient(), {
+        addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+      });
+      const extMethod = vi.fn().mockResolvedValue({ v: 1, trusted: [true] });
+      const { agent, agentPromise } = await bootAcpAgent(
+        { privateParentCapability: 'private-parent' },
+        extMethod,
+      );
+      try {
+        await agent.initialize({
+          clientCapabilities: {},
+          _meta: { 'qwen-code/private-parent-capability': 'private-parent' },
+        });
+        await agent.newSession({ cwd: root, mcpServers: [] });
+        const provider =
+          vi.mocked(loadCliConfig).mock.calls[0]![9]!
+            .workflowAncestorTrustProvider!;
+        let releaseTrust!: (value: Record<string, unknown>) => void;
+        extMethod.mockReturnValueOnce(
+          new Promise((resolve) => {
+            releaseTrust = resolve;
+          }),
+        );
+        const pending = provider([path.dirname(root)], root);
+        const cd = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: target,
+        });
+        const settledCd = cd.then(
+          () => undefined,
+          () => undefined,
+        );
+        await cdEntered;
+        releaseTrust({ v: 1, trusted: [true] });
+        await expect(pending).resolves.toEqual([false]);
+        extMethod.mockClear();
+        await expect(provider([root], target)).resolves.toEqual([false]);
+        expect(extMethod).not.toHaveBeenCalled();
+        releaseCd();
+        if (outcome === 'success')
+          await expect(cd).resolves.toMatchObject({ newCwd: target });
+        else await expect(cd).rejects.toThrow('cd ' + outcome);
+        await settledCd;
+        if (outcome === 'partial-failure') {
+          extMethod.mockClear();
+          await expect(provider([path.dirname(root)], root)).resolves.toEqual([
+            false,
+          ]);
+          expect(extMethod).not.toHaveBeenCalled();
+        }
+        await expect(
+          provider([path.dirname(currentDir)], currentDir),
+        ).resolves.toEqual([true]);
+      } finally {
+        releaseCd();
+        mockConnectionState.resolve();
+        await agentPromise;
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('rechecks a no-op working-directory change after a concurrent relocation', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
@@ -29202,11 +29360,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       privateParentCapability ? { privateParentCapability } : undefined,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
+    const connection = {
+      extMethod: vi.fn(),
       get closed() {
         return mockConnectionState.promise;
       },
-    });
+    };
+    const agent = capturedAgentFactory!(connection);
     if (privateParentCapability) {
       await agent.initialize({
         clientCapabilities: {},
@@ -29215,7 +29375,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         },
       });
     }
-    return { agent, agentPromise };
+    return { agent, agentPromise, extMethod: connection.extMethod };
   }
 
   it.each([
@@ -30107,10 +30267,20 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         persistedSpelling: storageSessionId,
       });
       innerConfig.getSessionId.mockReturnValue(storageSessionId);
-      const { agent, agentPromise } = await spawnAgent();
+      const target = await fs.realpath(process.cwd());
+      innerConfig.getTargetDir.mockReturnValue(target);
+      const { agent, agentPromise, extMethod } = await spawnAgent(
+        'expected-capability',
+      );
+      extMethod.mockImplementation(
+        async (_method: string, params: Record<string, unknown>) => ({
+          v: 1,
+          trusted: [params['sessionId'] === sessionId],
+        }),
+      );
 
       try {
-        const params = { cwd: '/tmp', sessionId, mcpServers: [] };
+        const params = { cwd: target, sessionId, mcpServers: [] };
         if (action === 'load') {
           await agent.loadSession(params);
         } else {
@@ -30121,6 +30291,27 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           | CliArgs
           | undefined;
         expect(argv?.resume).toBe(storageSessionId);
+
+        expect(vi.mocked(Session).mock.calls.at(-1)?.[0]).toBe(sessionId);
+        const provider = vi
+          .mocked(loadCliConfig)
+          .mock.calls.at(-1)?.[9]?.workflowAncestorTrustProvider;
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        innerConfig.getSessionId.mockReturnValue('new-recording-session');
+        await expect(
+          provider?.([path.dirname(target)], target),
+        ).resolves.toEqual([true]);
+        expect(extMethod).toHaveBeenLastCalledWith(
+          'qwen/control/workflow/ancestor-trust',
+          {
+            v: 1,
+            sessionId,
+            canonicalTargetDir: target,
+            ancestorDirs: [path.dirname(target)],
+          },
+        );
 
         // The in-memory session map key is normalized, so caller-case
         // follow-up operations still reach the adopted session.
@@ -35940,6 +36131,122 @@ describe('sessionLanguage multi-session propagation', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('refreshes only selected skill sessions after validating the entire selection', async () => {
+    const selectedId = '550e8400-e29b-41d4-a716-446655440000';
+    const settings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const bootstrapRefresh = vi.fn().mockResolvedValue(undefined);
+    const bootstrapConfig = makeConfig({
+      getSkillManager: vi
+        .fn()
+        .mockReturnValue({ refreshCache: bootstrapRefresh }),
+    });
+    const states = [selectedId, 'omitted'].map((id) => {
+      const refreshCache = vi.fn().mockResolvedValue(undefined);
+      return {
+        id,
+        config: makeConfig({
+          getSessionId: vi.fn().mockReturnValue(id),
+          getSkillManager: vi.fn().mockReturnValue({ refreshCache }),
+        }),
+        refreshCache,
+        reloadSkillSettings: vi.fn(),
+        refreshSkillsFromSettings: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(states[0]!.config as unknown as Config)
+      .mockResolvedValueOnce(states[1]!.config as unknown as Config);
+    vi.mocked(Session).mockImplementation((id) => {
+      const state = states.find((state) => state.id === id)!;
+      return {
+        getDefaultReasoningConfig: vi.fn(),
+        getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+        getConfig: vi.fn().mockReturnValue(state.config),
+        isIdle: vi.fn().mockReturnValue(false),
+        reloadSkillSettings: state.reloadSkillSettings,
+        refreshSkillsFromSettings: state.refreshSkillsFromSettings,
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    const agentPromise = runAcpAgent(
+      bootstrapConfig as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.newSession({ cwd: '/skills', mcpServers: [] });
+      await agent.newSession({ cwd: '/skills', mcpServers: [] });
+      vi.mocked(settings.reloadScopeFromDisk).mockClear();
+      const method = SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh;
+      await expect(
+        agent.extMethod(method, { sessionIds: [] }),
+      ).resolves.toEqual({
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        configsRefreshed: 0,
+        configsFailed: 0,
+        reason: 'all',
+      });
+      for (const sessionIds of [null, 'all', [1], [' ']]) {
+        await expect(agent.extMethod(method, { sessionIds })).rejects.toThrow(
+          'sessionIds must be an array of non-empty strings',
+        );
+      }
+      await expect(
+        agent.extMethod(method, { sessionIds: [selectedId, 'missing'] }),
+      ).rejects.toThrow('Session not found for id: missing');
+      expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      expect(bootstrapRefresh).not.toHaveBeenCalled();
+      await expect(
+        agent.extMethod(method, {
+          reason: 'all',
+          sessionIds: [selectedId, selectedId.toUpperCase()],
+        }),
+      ).resolves.toEqual({
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+        configsRefreshed: 2,
+        configsFailed: 0,
+        reason: 'all',
+      });
+      expect(settings.reloadScopeFromDisk).toHaveBeenCalledExactlyOnceWith(
+        SettingScope.Workspace,
+      );
+      expect(bootstrapRefresh).toHaveBeenCalledOnce();
+      expect(states[0]!.refreshCache).toHaveBeenCalledOnce();
+      expect(states[0]!.reloadSkillSettings).toHaveBeenCalledOnce();
+      expect(
+        states[0]!.refreshSkillsFromSettings,
+      ).toHaveBeenCalledExactlyOnceWith({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+      expect(states[1]!.refreshCache).not.toHaveBeenCalled();
+      expect(states[1]!.reloadSkillSettings).not.toHaveBeenCalled();
+      expect(states[1]!.refreshSkillsFromSettings).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('refreshes skill content once per config before publishing session updates', async () => {

@@ -392,6 +392,7 @@ import {
   isWorkspaceTrusted,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
+import { createParentWorkflowAncestorTrustProvider } from './workflow-ancestor-trust.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
@@ -4003,6 +4004,11 @@ class QwenAgent implements Agent {
     ApprovalMode
   >();
   private managedShuttingDown = false;
+  private workflowAncestorTrustConnected = true;
+  private readonly workflowAncestorTrustCwdEpochs = new WeakMap<
+    Config,
+    number
+  >();
   /**
    * A workspace change is being applied. New prompts wait for it, so no turn
    * is admitted under the revision the change replaces.
@@ -5304,6 +5310,15 @@ class QwenAgent implements Agent {
     private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
     private readonly managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'],
   ) {
+    if (expectedPrivateParentCapability !== undefined) {
+      const onClosed = () => {
+        this.workflowAncestorTrustConnected = false;
+      };
+      // ACP initializes the connection after its agent factory returns.
+      void Promise.resolve()
+        .then(() => connection.closed)
+        .then(onClosed, onClosed);
+    }
     if (config.getShellExecutionSandbox?.()) {
       throw new Error(
         'Tool execution sandbox does not support ACP sessions yet.',
@@ -12614,6 +12629,8 @@ class QwenAgent implements Agent {
           session,
           SESSION_DRAIN_TIMEOUT_MS,
         );
+        const cwdEpoch = this.workflowAncestorTrustCwdEpochs.get(config) ?? 0;
+        this.workflowAncestorTrustCwdEpochs.set(config, cwdEpoch + 1);
         try {
           const settledPreviousCwd = config.getTargetDir();
           if (
@@ -12708,6 +12725,7 @@ class QwenAgent implements Agent {
             warnings,
           };
         } finally {
+          this.workflowAncestorTrustCwdEpochs.set(config, cwdEpoch + 2);
           releaseGate();
         }
       }
@@ -15247,6 +15265,19 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh: {
         const rawReason = params['reason'];
+        const rawSessionIds = params['sessionIds'];
+        if (
+          rawSessionIds !== undefined &&
+          (!Array.isArray(rawSessionIds) ||
+            !rawSessionIds.every(
+              (id) => typeof id === 'string' && id.trim().length > 0,
+            ))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'sessionIds must be an array of non-empty strings',
+          );
+        }
         if (
           rawReason !== undefined &&
           rawReason !== 'settings' &&
@@ -15259,12 +15290,29 @@ class QwenAgent implements Agent {
           );
         }
         const reason = rawReason ?? 'all';
+        const selectedSessions =
+          rawSessionIds === undefined
+            ? undefined
+            : [
+                ...new Set(
+                  (rawSessionIds as string[]).map(normalizeSessionIdForLookup),
+                ),
+              ].map((id) => this.sessionOrThrow(id));
+        if (selectedSessions?.length === 0) {
+          return {
+            sessionsRefreshed: 0,
+            sessionsFailed: 0,
+            configsRefreshed: 0,
+            configsFailed: 0,
+            reason,
+          };
+        }
         const refreshSettings = reason !== 'content';
         const refreshContent = reason !== 'settings';
         if (refreshSettings) {
           this.settings.reloadScopeFromDisk(SettingScope.Workspace);
         }
-        const sessions = this.getActiveSessions();
+        const sessions = selectedSessions ?? this.getActiveSessions();
         const settingsReloadResults = refreshSettings
           ? await Promise.allSettled(
               sessions.map((session) =>
@@ -15632,12 +15680,41 @@ class QwenAgent implements Agent {
       ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
+    const workflowAncestorTrustSession: {
+      config: Config | undefined;
+      sessionId: string | undefined;
+    } = {
+      config: undefined,
+      sessionId: undefined,
+    };
     const workflowAncestorTrustProvider =
       this.expectedPrivateParentCapability === undefined
         ? createLocalWorkflowAncestorTrustProvider(
             getOperatorTrustSettings(settings),
           )
-        : undefined;
+        : this.hostExecutionEngine === 'legacy' && executionEngine !== 'managed'
+          ? createParentWorkflowAncestorTrustProvider(this.connection, {
+              isParentTrusted: () =>
+                this.isTrustedManagedParent() &&
+                this.workflowAncestorTrustConnected &&
+                !this.managedShuttingDown,
+              getSessionId: () => workflowAncestorTrustSession.sessionId,
+              getCwdState: () => {
+                const config = workflowAncestorTrustSession.config;
+                if (!config) return undefined;
+                try {
+                  return {
+                    canonicalTargetDir: realpathSync.native(
+                      config.getTargetDir(),
+                    ),
+                    epoch: this.workflowAncestorTrustCwdEpochs.get(config) ?? 0,
+                  };
+                } catch {
+                  return undefined;
+                }
+              },
+            })
+          : undefined;
     const config = await loadCliConfig(
       mergedSettings,
       argvForSession,
@@ -15712,6 +15789,11 @@ class QwenAgent implements Agent {
           }
         : undefined,
       agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
+    );
+    workflowAncestorTrustSession.config = config;
+    // /clear rotates the recording ID while the ACP transport keeps its ID.
+    workflowAncestorTrustSession.sessionId = normalizeSessionIdForLookup(
+      config.getSessionId(),
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);

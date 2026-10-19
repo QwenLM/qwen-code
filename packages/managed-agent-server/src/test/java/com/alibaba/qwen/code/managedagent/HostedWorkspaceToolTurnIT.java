@@ -1,17 +1,17 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;

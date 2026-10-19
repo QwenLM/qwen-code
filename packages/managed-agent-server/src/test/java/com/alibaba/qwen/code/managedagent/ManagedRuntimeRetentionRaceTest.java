@@ -1,12 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedRuntimeRetentionGuard;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceTestStorage;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedRuntimeRetentionGuard;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
@@ -20,6 +19,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -211,7 +211,7 @@ class ManagedRuntimeRetentionRaceTest {
             this.source = source;
             this.reference = reference;
             Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+            jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
             WorkspaceTestStorage.register(jdbc, "tenant", "storage");
             var manager = new DataSourceTransactionManager(source);
             if (reference == Reference.PUBLICATION || reference == Reference.CSI_RETIREMENT) {

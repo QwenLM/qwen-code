@@ -106,6 +106,9 @@ class HostedAutomationFaultGatesIT {
     private HostedLifecycleRelay storeRelay;
     private final AtomicReference<String> storeDrop = new AtomicReference<>();
     private final List<String> storeCommits = new CopyOnWriteArrayList<>();
+    // Commits a crash case parks before the store sees them, then drops: the killed Harness
+    // never committed that revision.
+    private final Map<String, Hold> storeHolds = new ConcurrentHashMap<>();
     private Path decoy;
     private String node;
     private int port;
@@ -383,6 +386,140 @@ class HostedAutomationFaultGatesIT {
         assertNoModelFailure();
     }
 
+    @Test
+    @Timeout(600)
+    void fg11cHarnessCrashesNeverRunTwiceOnMySql() throws Exception {
+        assumeTrue(anySelected("fg11c", "claim-crash", "turn-crash", "settled-crash"));
+        // A restarted Harness takes a Session over once its dead writer's lease lapses.
+        springExtras.add("--qwen.managed-agent.session-store.writer-lease-duration=15s");
+        storeRelayed = true;
+        boot("fg11c");
+        if (selected("fg11c", "claim-crash")) {
+            claimCrash();
+        }
+        if (selected("fg11c", "turn-crash")) {
+            turnCrash();
+        }
+        if (selected("fg11c", "settled-crash")) {
+            settledCrash();
+        }
+        assertThat(storeHolds).as("every store hold was reached").isEmpty();
+        assertThat(jdbc.queryForList("SELECT CONCAT(occurrence_key, ' ', reason) FROM ma_schedule_occurrence"
+                + " WHERE tenant_id = ? AND outcome = 'unknown'", String.class, tenant))
+                .as("unknown occurrences").isEmpty();
+        assertNoModelFailure();
+    }
+
+    // claim-crash: the Harness dies between the run's claim (revision 1) and its dispatch
+    // (revision 2), which it was holding before the store. The scanner re-drives the same
+    // claim, the replay completes the dispatch on the reloaded Session, and the run executes
+    // once: one chain, one accepted input and one model Turn.
+    private void claimCrash() throws Exception {
+        String session = createSession("claim-crash");
+        String id = create(session, "FG11C_CLAIM", "0 0 1 1 *", "claim-crash-base");
+        String key = "claim-crash-run";
+        String runId = com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.automationRunId(id,
+                "manual:" + key);
+        Hold hold = storeHold("claim-crash", body -> (runId + ":2").equals(body.path("commandId").asText()));
+        var answer = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+            try {
+                return send("POST", "/v1/agent-automations/" + id + "/runs", null, key);
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+        }, modelExecutor);
+        assertThat(hold.reached().await(90, TimeUnit.SECONDS)).as("revision 2 reached the store").isTrue();
+        assertThat(commands(session, "fireRun")).containsExactly(runId + ":1");
+        long generation = coldRestart(session);
+        hold.release().countDown();
+        assertUnknown(answer.get(90, TimeUnit.SECONDS));
+        waiting().atMost(Duration.ofSeconds(120)).until(() -> "completed".equals(runState(runId)));
+        assertThat(writerGeneration(session)).as("the reloaded Session's writer").isGreaterThan(generation);
+        // The first fire never answered; each later re-drive meets the same run.
+        assertOneRun(session, id, runId, "manual:" + key, -1, 0);
+    }
+
+    // turn-crash: the Harness dies with the wake turn's model call in flight. The later slot's
+    // reconcile loads the Session, whose aftermath settles the run exactly once as
+    // failed/outcome_unknown: the input stays consumed and the turn is never re-run.
+    private void turnCrash() throws Exception {
+        String session = createSession("turn-crash");
+        // Park the scanner until the manual run reaches the crash point: a minute boundary
+        // during setup would otherwise admit a scheduled occurrence of its own.
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
+        String id = create(session, "FG11C_HOLD", "* * * * *", "turn-crash-base");
+        String key = "turn-crash-run";
+        String runId = request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(90)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("Automation ID: " + id)));
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":1", runId + ":2");
+        long generation = coldRestart(session);
+        // Let the next minute slot drive the reconcile now that the crash is in place.
+        scannerHold.countDown();
+        waiting().atMost(Duration.ofSeconds(210)).untilAsserted(() -> {
+            assertNoModelFailure();
+            assertThat(runState(runId)).isEqualTo("failed");
+        });
+        assertThat(writerGeneration(session)).as("the reloaded Session's writer").isGreaterThan(generation);
+        assertThat(commands(session, "settleRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":3");
+        assertThat(events(session, "input.accepted")).filteredOn(event -> event.startsWith(runId + ":"))
+                .containsExactly(runId + ":input:accepted");
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id)
+                && prompt.contains("Occurrence: manual:" + key)).as("model Turns of the crashed run").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "turn-crash-retire", 202);
+    }
+
+    // settled-crash: the turn settled, and the Harness died before revision 3 reached the
+    // store. On reload the run settles from the journal's turn.settled as completed, exactly
+    // once, and the input is not run again.
+    private void settledCrash() throws Exception {
+        String session = createSession("settled-crash");
+        // Park the scanner until the manual run reaches the crash point: a minute boundary
+        // during setup would otherwise admit a scheduled occurrence of its own.
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
+        String id = create(session, "FG11C_SETTLED", "* * * * *", "settled-crash-base");
+        String key = "settled-crash-run";
+        String runId = com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.automationRunId(id,
+                "manual:" + key);
+        // Arm the hold before the POST: the Harness kicks the wake pump before answering
+        // fire_run, so revision 3 can otherwise reach the store before the hold exists.
+        Hold hold = storeHold("settled-crash", body -> (runId + ":3").equals(body.path("commandId").asText()));
+        assertThat(request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202)
+                .path("id").asText()).isEqualTo(runId);
+        assertThat(hold.reached().await(90, TimeUnit.SECONDS)).as("revision 3 reached the store").isTrue();
+        assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":1", runId + ":2");
+        assertThat(events(session, "turn.settled")).filteredOn(event -> event.contains(runId))
+                .containsExactly("turn:" + runId + ":input");
+        long generation = coldRestart(session);
+        hold.release().countDown();
+        // Let the next minute slot drive the reconcile now that the crash is in place.
+        scannerHold.countDown();
+        waiting().atMost(Duration.ofSeconds(210)).untilAsserted(() -> {
+            assertNoModelFailure();
+            assertThat(runState(runId)).isEqualTo("completed");
+        });
+        assertThat(writerGeneration(session)).as("the reloaded Session's writer").isGreaterThan(generation);
+        assertThat(commands(session, "settleRun")).filteredOn(command -> command.startsWith(runId + ":"))
+                .containsExactly(runId + ":3");
+        assertThat(events(session, "input.accepted")).filteredOn(event -> event.startsWith(runId + ":"))
+                .containsExactly(runId + ":input:accepted");
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id)
+                && prompt.contains("Occurrence: manual:" + key)).as("model Turns of the settled run").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "settled-crash-retire", 202);
+    }
+
+    private Hold storeHold(String name, Predicate<JsonNode> rule) {
+        Hold hold = new Hold(rule, new CountDownLatch(1), new CountDownLatch(1));
+        assertThat(storeHolds.putIfAbsent(name, hold)).as(name).isNull();
+        return hold;
+    }
+
     // revision-1 / revision-2: the journal refuses one revision of a manual run's fire. The
     // Harness's store client gives up after its bounded retry, the manual run answers a
     // retryable 503, and the Session stops writing: once the refusal drops, the same key still
@@ -435,7 +572,7 @@ class HostedAutomationFaultGatesIT {
         String session = createSession("transport");
         String id = create(session, "FG11B_TRANSPORT", "0 0 1 1 *", "transport-base");
         String key = "transport-run";
-        String runId = com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.automationRunId(id,
+        String runId = com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.automationRunId(id,
                 "manual:" + key);
         storeDrop.set(runId + ":1");
         JsonNode run = request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202);
@@ -825,7 +962,13 @@ class HostedAutomationFaultGatesIT {
         waiting().atMost(Duration.ofSeconds(60)).until(() -> "completed".equals(runState(runId)));
         var fired = operations.stream().filter(operation -> scheduleId.equals(operation.scheduleId())
                 && "fire_run".equals(operation.kind()) && occurrenceKey.equals(operation.occurrenceKey())).toList();
-        assertThat(fired).as("fires of %s", occurrenceKey).hasSize(fires);
+        // A negative count asks only that the occurrence was fired at least once: a crash
+        // case cannot know how many transient refusals its re-drive met first.
+        if (fires < 0) {
+            assertThat(fired).as("fires of %s", occurrenceKey).isNotEmpty();
+        } else {
+            assertThat(fired).as("fires of %s", occurrenceKey).hasSize(fires);
+        }
         assertThat(fired).filteredOn(Operation::dropped).hasSize(dropped);
         assertThat(commands(session, "fireRun")).filteredOn(command -> command.startsWith(runId + ":"))
                 .containsExactly(runId + ":1", runId + ":2");
@@ -943,6 +1086,11 @@ class HostedAutomationFaultGatesIT {
             storeRelay.backend(URI.create("http://127.0.0.1:" + port));
             storeRelay.fault(new HostedLifecycleRelay.Fault() {
                 @Override
+                public boolean before(HostedLifecycleRelay.Request request) throws Exception {
+                    return storeHeld(request);
+                }
+
+                @Override
                 public boolean after(HostedLifecycleRelay.Request request, int status) throws Exception {
                     return storeAnswered(request, status);
                 }
@@ -981,6 +1129,23 @@ class HostedAutomationFaultGatesIT {
         boolean drop = status / 100 == 2 && command.equals(wanted) && storeDrop.compareAndSet(wanted, null);
         storeCommits.add(command + (drop ? " dropped" : " " + status));
         return !drop;
+    }
+
+    // Parks the armed journal commit before the store sees it, then drops it: the Harness that
+    // sent it is killed while it waits, and the revision never commits.
+    private boolean storeHeld(HostedLifecycleRelay.Request request) throws Exception {
+        if (!"POST".equals(request.method()) || !request.path().contains("/transactions:commit")) {
+            return true;
+        }
+        JsonNode body = json.readTree(request.body());
+        for (var hold : storeHolds.entrySet()) {
+            if (hold.getValue().rule().test(body) && storeHolds.remove(hold.getKey()) != null) {
+                hold.getValue().reached().countDown();
+                assertThat(hold.getValue().release().await(90, TimeUnit.SECONDS)).as(hold.getKey()).isTrue();
+                return false;
+            }
+        }
+        return true;
     }
 
     // Parks the first automation operation a hold rule matches until its case releases it, then
@@ -1070,7 +1235,7 @@ class HostedAutomationFaultGatesIT {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, ?, ?, 'OPERATOR')", tenant, "workspace-0", "actor".getBytes(StandardCharsets.UTF_8));
         if ("Linux".equals(System.getProperty("os.name"))) {
-            spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class)
+            spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }
     }
@@ -1166,8 +1331,13 @@ class HostedAutomationFaultGatesIT {
                 }
             }
             modelPrompts.add(prompt);
-            if (prompt.contains("FG11A_HOLD")) {
-                heldModel.await(120, TimeUnit.SECONDS);
+            // FG11c's turn-crash holds only its manual run's wake turn: later slots of the
+            // same definition must keep running while the crashed one is reconciled.
+            if (prompt.contains("FG11A_HOLD")
+                    || (prompt.contains("FG11C_HOLD") && prompt.contains("Occurrence: manual:"))) {
+                // Outlive the whole method: a crash case releases this in teardown, and a
+                // timeout here would surface as a broken pipe during the NEXT case.
+                heldModel.await(900, TimeUnit.SECONDS);
             }
             var chunk = json.createObjectNode().put("id", "fg11").put("object", "chat.completion.chunk")
                     .put("created", 1).put("model", "fg11-fixture");
@@ -1193,6 +1363,9 @@ class HostedAutomationFaultGatesIT {
         assertThat(modelFailure.get()).as("model stub").isNull();
         assertThat(harnessRelay.failure()).as("Harness relay").isNull();
         assertThat(publicRelay.failure()).as("public relay").isNull();
+        if (storeRelay != null) {
+            assertThat(storeRelay.failure()).as("store relay").isNull();
+        }
     }
 
     private JsonNode request(String method, String path, Object body, String key, int expected) throws Exception {
@@ -1256,6 +1429,9 @@ class HostedAutomationFaultGatesIT {
             scannerHold.countDown();
         }
         holds.values().forEach(hold -> hold.release().countDown());
+        // A crash case that failed before its SIGKILL must not leave the relay waiting on a
+        // commit the store will never see.
+        storeHolds.values().forEach(hold -> hold.release().countDown());
         Throwable failure = null;
         List<org.junit.jupiter.api.function.Executable> cleanup = List.of(
                 this::writeEvidence,

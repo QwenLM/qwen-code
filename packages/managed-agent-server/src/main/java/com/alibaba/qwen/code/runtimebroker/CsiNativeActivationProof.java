@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiNativeReadbackProtocol;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadConstraints;
 import com.fasterxml.jackson.core.StreamReadFeature;
@@ -8,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -80,7 +83,14 @@ public final class CsiNativeActivationProof {
     public record FunctionCall(String id, String name, JsonNode args, int partIndex, int ordinal) {
     }
 
-    public record PendingBatch(String messageId, JsonNode contentRef, List<FunctionCall> calls) {
+    public record PendingBatch(String messageId, JsonNode contentRef, List<FunctionCall> calls, Set<String> refusedFunctionIds) {
+        public PendingBatch {
+            refusedFunctionIds = Set.copyOf(refusedFunctionIds);
+        }
+
+        public PendingBatch(String messageId, JsonNode contentRef, List<FunctionCall> calls) {
+            this(messageId, contentRef, calls, Set.of());
+        }
     }
 
     public record OriginalBatch(String promptId, PendingBatch batch) {
@@ -384,22 +394,51 @@ public final class CsiNativeActivationProof {
         String messageId = id(payload, "messageId");
         require("tool_result".equals(text(payload, "role")) && ("message:" + messageId).equals(id(event, "eventId"))
                 && ("recorder:" + messageId).equals(id(metadata, "commandId")));
-        var entry = previous.receipts().entrySet().stream().filter(item ->
-                messageId.equals(item.getValue().body().path("history").path("messageId").textValue()))
-                .findFirst().orElseThrow(CsiNativeActivationProof::invalid);
-        var receipt = entry.getValue();
-        require(receipt.messageSequence() == 0 && receipt.sequence() < previousSequence + 1);
         JsonNode record = messageBody(payload.path("contentRef"), resources);
         closed(record, Set.of("uuid", "parentUuid", "sessionId", "timestamp", "type", "cwd", "version", "daemonPromptId", "message", "model"));
         chatRecord(record, original);
-        JsonNode history = receipt.body().path("history");
         require(messageId.equals(id(record, "uuid")) && "tool_result".equals(text(record, "type"))
                 && previous.input().inputId().equals(id(record, "daemonPromptId"))
                 && Objects.equals(previous.lastMessageId(), nullableId(payload, "parentMessageId"))
-                && Objects.equals(previous.lastMessageId(), nullableId(record, "parentUuid"))
-                && text(history, "timestamp").equals(text(record, "timestamp")) && text(history, "model").equals(text(record, "model")));
+                && Objects.equals(previous.lastMessageId(), nullableId(record, "parentUuid")));
         closed(record.path("message"), Set.of("role", "parts"));
-        require("user".equals(text(record.path("message"), "role"))
+        require("user".equals(text(record.path("message"), "role")));
+        var entry = previous.receipts().entrySet().stream().filter(item ->
+                messageId.equals(item.getValue().body().path("history").path("messageId").textValue()))
+                .findFirst().orElse(null);
+        if (entry == null) {
+            require(undispatched(previous) && previous.attempt() != null
+                    && "output_committed".equals(previous.attempt().stage())
+                    && text(previous.attempt().route(), "model").equals(text(record, "model"))
+                    && previous.intents().values().stream().noneMatch(intent ->
+                            previous.pendingBatch().messageId().equals(id(intent.payload(), "batchId"))));
+            JsonNode parts = record.path("message").path("parts");
+            require(parts.isArray() && parts.size() == 1);
+            closed(parts.get(0), Set.of("functionResponse"));
+            JsonNode response = parts.get(0).path("functionResponse");
+            closed(response, Set.of("id", "name", "response"));
+            closed(response.path("response"), Set.of("error"));
+            var batch = previous.pendingBatch();
+            String functionId = id(response, "id");
+            var call = batch.calls().stream().filter(item -> functionId.equals(item.id()))
+                    .findFirst().orElseThrow(CsiNativeActivationProof::invalid);
+            String reason = CsiNativeToolReservation.refusalReason(original, call);
+            require(reason != null && reason.equals(text(response.path("response"), "error"))
+                    && call.name().equals(text(response, "name")));
+            Set<String> refused = new HashSet<>(batch.refusedFunctionIds());
+            require(refused.add(functionId));
+            boolean complete = refused.size() == batch.calls().size();
+            var updated = new PendingBatch(batch.messageId(), batch.contentRef(), batch.calls(), refused);
+            Map<String, OriginalBatch> batches = new HashMap<>(previous.batches());
+            batches.put(batch.messageId(), new OriginalBatch(previous.batches().get(batch.messageId()).promptId(), updated));
+            return new Prefix(previous.input(), previous.checkpoint(), messageId, complete ? null : previous.attempt(), false,
+                    previous.stream(), useId(previous, messageId), complete ? null : updated,
+                    batches, previous.fileHistory(), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
+        }
+        var receipt = entry.getValue();
+        require(receipt.messageSequence() == 0 && receipt.sequence() < previousSequence + 1);
+        JsonNode history = receipt.body().path("history");
+        require(text(history, "timestamp").equals(text(record, "timestamp")) && text(history, "model").equals(text(record, "model"))
                 && canonical(history.path("parts")).equals(canonical(record.path("message").path("parts"))));
         Map<String, ToolReceipt> receipts = new HashMap<>(previous.receipts());
         receipts.put(entry.getKey(), new ToolReceipt(receipt.ref(), receipt.body(), receipt.revision(), receipt.sequence(), previousSequence + 1));
@@ -968,7 +1007,7 @@ public final class CsiNativeActivationProof {
                 false, null, previous.usedIds(), null, previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), 0);
     }
 
-    static byte[] utf8(String text) {
+    public static byte[] utf8(String text) {
         try {
             ByteBuffer encoded = StandardCharsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(text));
@@ -1230,20 +1269,20 @@ public final class CsiNativeActivationProof {
         require(canonical(checkpointRef).equals(canonical(previous.checkpoint().ref())));
         require(canonical(readObject(reference(checkpointRef, "managed-checkpoint", resources)))
                 .equals(canonical(previous.checkpoint().state())));
-        if (finalOutput) {
+        if (finalOutput && previous.checkpoint().state().path("tools").isNull()) {
+            require("output_committed".equals(stage)
+                    && "before_model".equals(previous.checkpoint().state().path("continuation").path("phase").textValue()));
+        } else if (finalOutput) {
             require("output_committed".equals(stage)
                     && "results_ready".equals(previous.checkpoint().state().path("continuation").path("phase").textValue())
                     && previous.checkpoint().state().path("tools").path("items").isArray()
                     && !previous.checkpoint().state().path("tools").path("items").isEmpty());
-            boolean pending = false;
             for (JsonNode item : previous.checkpoint().state().path("tools").path("items")) {
                 var receipt = previous.receipts().get(id(item, "executionCallId"));
                 require("settled".equals(text(item, "state")) && item.path("consumed").isBoolean()
                         && receipt != null && receipt.messageSequence() > 0
                         && canonical(item.path("outcomeRef")).equals(canonical(receipt.ref())));
-                pending |= !item.path("consumed").booleanValue();
             }
-            require(pending);
         }
         Set<String> ids = previous.usedIds();
         if ("started".equals(stage)) {
@@ -1280,6 +1319,31 @@ public final class CsiNativeActivationProof {
         return messageRecord(message, messagePayload, original, completed, resources, true);
     }
 
+    static Set<String> completeOutputTail(Prefix prefix, long sequence) {
+        require(prefix.input() != null && prefix.input().noDeadline() && prefix.pendingBatch() == null
+                && prefix.batches().size() == 1 && prefix.checkpoint() != null && prefix.attempt() != null
+                && "output_committed".equals(prefix.attempt().stage()) && prefix.attempt().finalMessageRef() != null
+                && prefix.assistantCommitted() && prefix.stream() == null && prefix.fileHistory() != null
+                && prefix.fileHistory().body().path("preparation").isNull()
+                && "results_ready".equals(prefix.checkpoint().state().path("continuation").path("phase").textValue())
+                && canonical(prefix.attempt().checkpointRef()).equals(canonical(prefix.checkpoint().ref())));
+        Set<String> executions = new HashSet<>();
+        JsonNode items = prefix.checkpoint().state().path("tools").path("items");
+        require(items.isArray() && !items.isEmpty());
+        String batchId = prefix.batches().keySet().iterator().next();
+        for (JsonNode item : items) {
+            String execution = id(item, "executionCallId");
+            ToolReceipt receipt = prefix.receipts().get(execution);
+            require(executions.add(execution) && "settled".equals(text(item, "state"))
+                    && item.path("consumed").isBoolean() && !item.path("consumed").booleanValue()
+                    && batchId.equals(id(item, "modelMessageId")) && receipt != null
+                    && receipt.messageSequence() > 0 && receipt.messageSequence() <= sequence
+                    && canonical(item.path("outcomeRef")).equals(canonical(receipt.ref())));
+        }
+        require(executions.equals(prefix.intents().keySet()) && executions.equals(prefix.receipts().keySet()));
+        return Set.copyOf(executions);
+    }
+
     private static void usage(JsonNode usage, JsonNode route, String stage) {
         closed(usage, Set.of("version", "turnId", "model", "attempts", "budget", "models"));
         require(number(usage.get("version")) == 1 && id(route, "turnId").equals(id(usage, "turnId"))
@@ -1288,7 +1352,14 @@ public final class CsiNativeActivationProof {
                 && usage.path("attempts").isArray()
                 && usage.path("attempts").size() == ("output_committed".equals(stage) ? 1 : 0));
         for (JsonNode value : usage.path("attempts")) {
-            metrics(value, Set.of("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount",
+            ObjectNode counters = object(value).deepCopy();
+            JsonNode contextWindowSize = counters.remove("contextWindowSize");
+            if (contextWindowSize != null) {
+                finite(contextWindowSize);
+                double size = contextWindowSize.doubleValue();
+                require(size > 0 && size <= MAX_SAFE + 1 && size == Math.rint(size));
+            }
+            metrics(counters, Set.of("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount",
                     "totalTokenCount", "cachedContentTokenCount"));
         }
         JsonNode models = object(usage.path("models"));
@@ -1587,7 +1658,10 @@ public final class CsiNativeActivationProof {
             require(install && generation == 1 && epoch == 1 && number(metadata.get("firstSequence")) == 1
                     && number(body.get("leaseDurationMs")) == lease);
         } else if (install) {
-            throw invalid();
+            require(generation > previous.writerGeneration() && epoch == previous.epoch() + 1
+                    && !id.equals(previous.activationId()) && !writerId.equals(previous.workerId())
+                    && time(event.get("occurredAt")) >= previous.expiresAt()
+                    && number(body.get("leaseDurationMs")) == lease);
         } else {
             require(id.equals(previous.activationId()) && writerId.equals(previous.workerId())
                     && generation == previous.writerGeneration() && epoch == previous.epoch()
@@ -1663,26 +1737,26 @@ public final class CsiNativeActivationProof {
         }
     }
 
-    static void closed(JsonNode node, Set<String> fields) {
+    public static void closed(JsonNode node, Set<String> fields) {
         object(node);
         require(node.size() == fields.size());
         node.fieldNames().forEachRemaining(field -> require(fields.contains(field)));
     }
 
-    static String text(JsonNode node, String field) {
+    public static String text(JsonNode node, String field) {
         JsonNode value = node.get(field);
         require(value != null && value.isTextual() && !value.textValue().isEmpty()
                 && value.textValue().length() <= 4096);
         return value.textValue();
     }
 
-    static long number(JsonNode value) {
+    public static long number(JsonNode value) {
         require(value != null && value.isIntegralNumber() && value.canConvertToLong()
                 && value.longValue() >= 0 && value.longValue() <= MAX_SAFE);
         return value.longValue();
     }
 
-    static String id(JsonNode node, String field) {
+    public static String id(JsonNode node, String field) {
         String value = text(node, field);
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
         require(utf8.length <= 512 && new String(utf8, StandardCharsets.UTF_8).equals(value)
@@ -1697,7 +1771,7 @@ public final class CsiNativeActivationProof {
         return value;
     }
 
-    static String canonical(JsonNode node) {
+    public static String canonical(JsonNode node) {
         require(node != null);
         if (node.isObject()) {
             List<String> fields = new ArrayList<>();

@@ -216,6 +216,13 @@ export function semanticInputDigest(value: object): string {
     .digest('hex');
 }
 
+/** Whether a saved plan was made for these event fields. */
+function plannedFor(plan: HookPlan, fields: object): boolean {
+  return plan.refusedInputDigest
+    ? plan.refusedInputDigest === semanticInputDigest(fields)
+    : isDeepStrictEqual(semanticInput(plan.input), semanticInput(fields));
+}
+
 function cancelledResult(): ManagedHookResult {
   return {
     success: false,
@@ -894,12 +901,18 @@ export class HostedHookSession {
       });
   }
 
+  /**
+   * `earlier` holds the fields an earlier release built for the same
+   * occurrence. A saved plan made for them is resumed as saved; a new
+   * occurrence is always planned for `fields`.
+   */
   async fire(
     event: HookEventName,
     occurrenceId: string,
     fields: Record<string, unknown>,
     signal: AbortSignal,
     prompt?: HostedPromptHookRunner,
+    earlier?: Record<string, unknown>,
   ): Promise<HookOutput | undefined> {
     const key = hostedHookOccurrenceId(event, occurrenceId);
     const input = semanticInput(fields);
@@ -910,7 +923,7 @@ export class HostedHookSession {
       return running.result;
     }
     const promise = this.occurrenceQueue.then(() =>
-      this.fireOccurrence(event, key, fields, signal, prompt),
+      this.fireOccurrence(event, key, fields, signal, prompt, earlier),
     );
     this.occurrenceQueue = promise.then(
       () => undefined,
@@ -930,6 +943,7 @@ export class HostedHookSession {
     fields: Record<string, unknown>,
     signal: AbortSignal,
     prompt?: HostedPromptHookRunner,
+    earlier?: Record<string, unknown>,
   ): Promise<HookOutput | undefined> {
     await this.ensureReady(signal);
     const previous = this.session.authority.extensionRecord(
@@ -941,11 +955,7 @@ export class HostedHookSession {
     if (previous) {
       marker = parseHookExecution(previous.record);
       plan = await this.read<HookPlan>(marker.planRef);
-      if (
-        plan.refusedInputDigest
-          ? plan.refusedInputDigest !== semanticInputDigest(fields)
-          : !isDeepStrictEqual(semanticInput(plan.input), semanticInput(fields))
-      )
+      if (!plannedFor(plan, fields) && !(earlier && plannedFor(plan, earlier)))
         throw new HostedHookInputConflictError();
       if (marker.run.execution === 'not_started_proven')
         return cancelledResult().output;
