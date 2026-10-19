@@ -25249,6 +25249,7 @@ describe('App session callbacks', () => {
   });
 
   it('keeps manual /recap working when the Show Session Recap setting is off', async () => {
+    testState.settings = [showSessionRecapSetting(false)];
     const manual = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession.mockReturnValueOnce(manual.promise);
 

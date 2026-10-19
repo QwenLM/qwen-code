@@ -14508,6 +14508,11 @@ export function App({
   // the *current* toggle state, not the one captured when the call was made.
   const autoRecapEnabledRef = useRef(autoRecapEnabled);
   autoRecapEnabledRef.current = autoRecapEnabled;
+  // Clear the away clock when the feature is disabled so a stale timestamp
+  // cannot trigger a recap for a window the user never opted into.
+  useEffect(() => {
+    if (!autoRecapEnabled) hiddenAtRef.current = null;
+  }, [autoRecapEnabled]);
   useEffect(() => {
     lastRecapBlockCountRef.current = 0;
     autoRecapVersionRef.current += 1;
