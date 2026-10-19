@@ -281,6 +281,20 @@ test('ships systemd units with the documented kill modes', async () => {
   assert.doesNotMatch(harness, /\t/);
 });
 
+test('enables the Session Store wherever the env template enables the Harness', async () => {
+  const template = await readFile(
+    new URL(
+      '../../packages/managed-agent-server/distribution/systemd/server.env.example',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  assert.match(template, /^QWEN_MANAGED_AGENT_HARNESS_ENABLED=true$/m);
+  assert.match(template, /^QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=true$/m);
+  assert.match(template, /^QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL=\S+$/m);
+  assert.match(template, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=\S+$/m);
+});
+
 test('rejects a stable distribution version', async () => {
   await assert.rejects(
     createReferenceDistribution({
