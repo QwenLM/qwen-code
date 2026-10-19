@@ -9,8 +9,10 @@ merge.
 
 ## Why
 
-FG11a already pins lost replies for `retire_schedule`, and FG11b pins store
-faults around the ledger. Neither answers the lifecycle questions:
+FG11a already pins lost replies for `retire_schedule` — including the dropped
+retire answer and the no-slot-after-retire property — and FG11b pins store
+faults around the ledger. This round does not repeat that cell; it covers the
+lifecycle questions neither slice answers:
 
 - What happens to a claim that has reached the Harness as `intent` when its
   definition is retired?
@@ -37,12 +39,11 @@ scheduler is held while a case arms. No new fixture is needed for slice 1.
 
 ## Slice 1: retire, disable, close
 
-| Cell                    | Setup                                                                                  | Expected                                                                                                                                                                                   |
-| ----------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `retire-at-intent`      | Retire while the claim sits at the Harness as `intent` (the relay parks the operation) | The claim settles `cancelled` with `not_started_proven`; the occurrence is not `unknown`.                                                                                                  |
-| `retire-dropped-answer` | Drop the retire's `202` after the Harness committed it                                 | The re-driven retire answers the committed retire, never re-arms, and no slot after the retire fires.                                                                                      |
-| `disable-span`          | Disable the definition across two due slots, then enable it                            | The disabled span records no `fired` occurrence and no run; the first slot after re-enabling fires once.                                                                                   |
-| `close-queued-input`    | Close the Session while an automation input is queued behind a held turn               | The queued input settles without a model Turn; a live definition on the closed Session records `skipped(session_not_active)` for each slot, which is today's behaviour and is pinned here. |
+| Cell                 | Setup                                                                                  | Expected                                                                                                                                                                                   |
+| -------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `retire-at-intent`   | Retire while the claim sits at the Harness as `intent` (the relay parks the operation) | The claim settles `cancelled` with `not_started_proven`; the occurrence is not `unknown`.                                                                                                  |
+| `disable-span`       | Disable the definition across two due slots, then enable it                            | The disabled span records no `fired` occurrence and no run; the first slot after re-enabling fires once.                                                                                   |
+| `close-queued-input` | Close the Session while an automation input is queued behind a held turn               | The queued input settles without a model Turn; a live definition on the closed Session records `skipped(session_not_active)` for each slot, which is today's behaviour and is pinned here. |
 
 ## Slice 2: the cancellation matrix
 

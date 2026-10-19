@@ -7,8 +7,9 @@ retire、disable、close 与 round 级取消矩阵并未因该合并而结清。
 
 ## 为什么
 
-FG11a 已钉住 `retire_schedule` 的丢失应答，FG11b 钉住账本周围的存储故障。
-二者都没有回答生命周期问题：
+FG11a 已钉住 `retire_schedule` 的丢失应答（含丢 202 后只回答已提交的
+retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障。本轮不
+重复该格，只覆盖两者都未回答的生命周期问题：
 
 - 定义被 retire 时，已经以 `intent` 抵达 Harness 的 claim 会怎样？
 - 已 retire 或已 disable 的定义是否还会再 fire，包括已经到期的那个 slot？
@@ -32,12 +33,11 @@ FG11a 已钉住 `retire_schedule` 的丢失应答，FG11b 钉住账本周围的�
 
 ## 第 1 片：retire、disable、close
 
-| 格子                    | 构造                                                       | 预期                                                                                                                              |
-| ----------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `retire-at-intent`      | claim 以 `intent` 停在 Harness 时 retire（relay 扣住操作） | claim 结算为 `cancelled`/`not_started_proven`；occurrence 不是 `unknown`                                                          |
-| `retire-dropped-answer` | Harness 提交 retire 之后丢掉 202                           | 重驱动的 retire 回答已提交的 retire，绝不重新武装；retire 之后没有 slot 再 fire                                                   |
-| `disable-span`          | 跨两个到期 slot disable，再 enable                         | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                |
-| `close-queued-input`    | 有 automation input 排在 held turn 之后时关闭 Session      | 排队的 input 结算且不产生模型 Turn；关闭 Session 上的存活定义每个 slot 记 `skipped(session_not_active)`，这是今天的行为，在此钉住 |
+| 格子                 | 构造                                                       | 预期                                                                                                                              |
+| -------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `retire-at-intent`   | claim 以 `intent` 停在 Harness 时 retire（relay 扣住操作） | claim 结算为 `cancelled`/`not_started_proven`；occurrence 不是 `unknown`                                                          |
+| `disable-span`       | 跨两个到期 slot disable，再 enable                         | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                |
+| `close-queued-input` | 有 automation input 排在 held turn 之后时关闭 Session      | 排队的 input 结算且不产生模型 Turn；关闭 Session 上的存活定义每个 slot 记 `skipped(session_not_active)`，这是今天的行为，在此钉住 |
 
 ## 第 2 片：取消矩阵
 
