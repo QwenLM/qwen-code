@@ -865,8 +865,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "runtime_broker_invalid_request",
                     "Runtime Broker request is invalid.", false);
         } else if (actual instanceof IllegalStateException
-                && actual.getMessage() != null
-                && actual.getMessage().contains("closed")) {
+                && "Runtime Broker is closed".equals(actual.getMessage())) {
             failure = new RuntimeBrokerException(503,
                     "runtime_broker_closed",
                     "Runtime Broker is closed.", false);

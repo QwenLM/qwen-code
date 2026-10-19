@@ -526,8 +526,10 @@ describe('build artifact — transcript entry (#11031)', () => {
     // User-message slash-command highlighting (#14171) adds the
     // renderUserMessageText helper and the host-fragment merge to this
     // graph; the merge tree at 093054d5b5 measures 1,338,278 versus
-    // 1,337,827 on main at 720eff873a. A 1,340,000 ceiling retains 1,722
-    // units of margin. Re-measure and lower it if the entry gets leaner.
+    // 1,337,827 on main at 720eff873a. Attachment recovery copy adds 251
+    // units of shared i18n at 9c3555b334. Merging both measures 1,338,691.
+    // A 1,340,000 ceiling retains 1,309 units of margin.
+    // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',

@@ -161,6 +161,10 @@ const EN: Messages = {
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
   'managed.discard': 'Discard this request',
+  'managed.pendingRestoreFailed':
+    'The pending request cannot be restored and may already have been submitted. Check the session before discarding this pending record.',
+  'managed.pendingDiscardFailed':
+    'Could not discard this request. Browser storage is unavailable. Retry or reload the page.',
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
@@ -296,7 +300,7 @@ const EN: Messages = {
   'managed.approvalOptionsInvalid':
     'The service returned unsupported approval modes.',
   'managed.approvalFixed':
-    'Approval mode is fixed for this task. Start a new task to choose another mode.',
+    'This session does not support changing its approval policy.',
   'managed.newWorkspaceDescription':
     'Choose an existing project directory, or name a new empty workspace.',
   'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
@@ -4562,6 +4566,10 @@ const ZH: Messages = {
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
   'managed.discard': '丢弃本次请求',
+  'managed.pendingRestoreFailed':
+    '无法恢复待确认请求，此前的提交可能已成功。请先检查会话，再决定是否丢弃这条待确认记录。',
+  'managed.pendingDiscardFailed':
+    '无法丢弃此请求，浏览器存储不可用。请重试或刷新页面。',
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
@@ -4675,7 +4683,7 @@ const ZH: Messages = {
   'managed.approvalOptionsLoading': '正在加载审批策略…',
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
-  'managed.approvalFixed': '当前任务的审批策略已固定；如需更换，请新建任务。',
+  'managed.approvalFixed': '当前会话不支持更改审批策略。',
   'managed.newWorkspaceDescription':
     '选择已有项目目录，或输入名称创建空工作区。',
   'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',

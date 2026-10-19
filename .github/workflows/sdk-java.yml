@@ -38,7 +38,7 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -216,8 +216,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 2400 9; then
-            echo "::error::sdk-java host lock not acquired within 40 minutes"
+          if ! flock --wait 3600 9; then
+            echo "::error::sdk-java host lock not acquired within 60 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test
@@ -415,16 +415,11 @@ jobs:
     # pool-safe: the database is a per-job service container on a random host
     # port, and every Maven run holds the test job's per-host sdk-java lock.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # 15 covered the hosted lane. On the pool this job takes the per-host
-    # sdk-java lock once per Maven step — three acquisitions today. The
-    # 20-minute per-acquisition budget was sized on one quiet window
-    # (measured run 37743332082: 1193 s of waits against 818 s of holds),
-    # and main run 38258395829 exhausted it — the verify step below starved
-    # a full 1200 s behind cross-run pool traffic and failed before Maven
-    # started (#13989). Each acquisition now waits out two full sibling
-    # holds (flock --wait 2400); the ceiling is three 40-minute lock waits
-    # plus the ~14 minutes of measured Maven work, plus margin: 140.
-    timeout-minutes: 140
+    # Run 39097018288 held the host lock for 47m26s during verification;
+    # its sibling fast gate exhausted the old 40-minute wait before Maven
+    # started. Each of these two Maven steps can now wait one hour. Allow
+    # both waits, 50 minutes of verification and 30 minutes of setup/margin.
+    timeout-minutes: 200
     services:
       mariadb:
         image: 'mariadb:10.11.18'
@@ -624,8 +619,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 2400 9; then
-            echo "::error::sdk-java host lock not acquired within 40 minutes"
+          if ! flock --wait 3600 9; then
+            echo "::error::sdk-java host lock not acquired within 60 minutes"
             exit 1
           fi
           # Seed from the host-shared repo (cache-restored on hosted runners)
@@ -642,8 +637,8 @@ jobs:
           set -o pipefail
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 2400 9; then
-            echo "::error::sdk-java host lock not acquired within 40 minutes"
+          if ! flock --wait 3600 9; then
+            echo "::error::sdk-java host lock not acquired within 60 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
@@ -676,14 +671,31 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (90 + 10 + 20 + 50 = 170 — the FG8 letters
-    # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s and
-    # the FG10b/c/e/f workflow relay letters to 4353 s, so Verify wraps it
-    # at its fork + 600 s plus margin, the Broker fault gates keep 10, and
-    # admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
+    # The step ceilings today (120 + 10 + 20 + 50 = 200 — the FG8 letters
+    # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
+    # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
+    # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
+    # owner-restart cells to 4848 s, the FG13d cancel/timeout cells to
+    # 5048 s, the FG11a automation lost-reply letter to 5218 s, which moved
+    # Verify to 100 minutes, the FG13d worker-stop cell to 5368 s and the
+    # FG11b store faults to 5498 s, which moved Verify to 105 minutes,
+    # FG11b slice 2 to 5643 s, still inside them, the event-stream
+    # liveness gates to 6083 s, which moves Verify to 115 minutes, the
+    # FG13d dropped-reply cancel cell to 6233 s, still inside those 115
+    # minutes, and the FG12b store-failure class to 6353 s; the FG12f
+    # stream-gap class adds 242 s, so the fork moves to 6585 s; the FG13a
+    # execute lost-reply cell adds 150 s and the FG13a status lost-reply
+    # cell another 150 s, moving the fork to 6885 s and Verify to 125
+    # minutes; the FG11c Harness-crash method (144.8 s measured) is budgeted
+    # at 550 s, so the fork moves to 7435 s; the FG13d DELETE-drain cell adds
+    # 150 s, moving the fork to 7585 s and Verify to 137 minutes; the FG11c
+    # Spring-crash class (262.0 s measured) is budgeted at 524 s, so the fork
+    # moves to 8109 s and Verify to 146 minutes, which wraps its fork + 600 s
+    # plus margin; the Broker fault gates keep 10,
+    # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 183 + 2. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 185
+    # checks): 226 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 239
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -772,8 +784,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 4353 s, so the step wraps to fork + 600 s plus margin.
-        timeout-minutes: 90
+        # 8109 s, so the step wraps to fork + 600 s plus margin.
+        timeout-minutes: 146
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -812,6 +824,8 @@ jobs:
             packages/managed-agent-server/target/fg8-cases/
             packages/managed-agent-server/target/fg9-cases/
             packages/managed-agent-server/target/fg10-cases/
+            packages/managed-agent-server/target/fg11-cases/
+            packages/managed-agent-server/target/fg12-cases/
             packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
 

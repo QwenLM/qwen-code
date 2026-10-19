@@ -100,6 +100,7 @@ import {
 /** The narrow authority/resource pair a HostedChildAgentSession commits through. */
 export interface HostedChildAgentStore {
   readonly authority: {
+    settlePendingAppend(): Promise<void>;
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
@@ -1507,9 +1508,11 @@ export class HostedChildAgentSession {
       const previous = this.parseSessionRun(existing.record, childRunId);
       const next = childRecoveryBlockedBody(previous, params);
       if (isDeepStrictEqual(previous, next)) return;
+      // The line renders the blocked revision this commit lands, never
+      // the running one it replaces (#14165 FG10d).
       const notification =
         previous.completion === 'sent'
-          ? await this.buildBlockedNotification(childRunId, previous)
+          ? await this.buildBlockedNotification(childRunId, next)
           : undefined;
       await this.store.authority.commitExtensionRecord(
         {
