@@ -129,37 +129,37 @@ final class ExecutionTakeoverContract {
         assertThrows(IllegalArgumentException.class,
                 () -> repository.findHoldRowsByHarnessSession(null, null, 100));
 
-        List<ToolExecutionRecord> holds =
+        List<ToolHoldRow> holds =
                 repository.findHoldRowsByHarnessSession(harness, null, 100);
         assertEquals(Set.of(shell.getExecutionCallId(), monitor.getExecutionCallId(),
                         exited.getExecutionCallId()),
-                holds.stream().map(ToolExecutionRecord::getExecutionCallId)
+                holds.stream().map(ToolHoldRow::executionCallId)
                         .collect(Collectors.toSet()));
         assertEquals(Set.of(first.getRuntimeSessionId(), second.getRuntimeSessionId()),
-                holds.stream().map(ToolExecutionRecord::getRuntimeSessionId)
+                holds.stream().map(ToolHoldRow::runtimeSessionId)
                         .collect(Collectors.toSet()));
         assertEquals(List.of(prefix + "-foreign"),
                 repository.findHoldRowsByHarnessSession(
                         foreign.getSession().getHarnessSessionId(), null, 100)
-                        .stream().map(ToolExecutionRecord::getExecutionCallId)
+                        .stream().map(ToolHoldRow::executionCallId)
                         .toList());
         assertTrue(repository.findHoldRowsByHarnessSession(
                 prefix + "-unknown", null, 100).isEmpty());
 
-        List<ToolExecutionRecord> pageOne =
+        List<ToolHoldRow> pageOne =
                 repository.findHoldRowsByHarnessSession(harness, null, 1);
         assertEquals(1, pageOne.size());
-        List<ToolExecutionRecord> pageTwo = repository.findHoldRowsByHarnessSession(
-                harness, pageOne.get(0).getExecutionCallId(), 1);
+        List<ToolHoldRow> pageTwo = repository.findHoldRowsByHarnessSession(
+                harness, pageOne.get(0).executionCallId(), 1);
         assertEquals(1, pageTwo.size());
-        List<ToolExecutionRecord> pageThree = repository.findHoldRowsByHarnessSession(
-                harness, pageTwo.get(0).getExecutionCallId(), 1);
+        List<ToolHoldRow> pageThree = repository.findHoldRowsByHarnessSession(
+                harness, pageTwo.get(0).executionCallId(), 1);
         assertEquals(1, pageThree.size());
-        assertEquals(3, Set.of(pageOne.get(0).getExecutionCallId(),
-                pageTwo.get(0).getExecutionCallId(),
-                pageThree.get(0).getExecutionCallId()).size());
+        assertEquals(3, Set.of(pageOne.get(0).executionCallId(),
+                pageTwo.get(0).executionCallId(),
+                pageThree.get(0).executionCallId()).size());
         assertTrue(repository.findHoldRowsByHarnessSession(
-                harness, pageThree.get(0).getExecutionCallId(), 1).isEmpty());
+                harness, pageThree.get(0).executionCallId(), 1).isEmpty());
     }
 
     private static ToolExecutionRecord executing(ToolExecutionRepository repository,
