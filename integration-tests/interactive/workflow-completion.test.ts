@@ -120,9 +120,15 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       const isSlash = testCase.source === 'slash';
       rig = new TestRig();
       restoreNoProxy = applyContainerSandboxNoProxy();
-      await rig.setup(`workflow-completion-${testCase.status}`, {
-        settings: { telemetry: { enabled: false } },
-      });
+      // The marker keeps same-status cases from sharing a directory: CI sets
+      // KEEP_OUTPUT, so setup() would remove a directory the previous case's
+      // CLI is still writing and fail with ENOTEMPTY before the body runs.
+      await rig.setup(
+        `workflow-completion-${testCase.status}-${testCase.marker}`,
+        {
+          settings: { telemetry: { enabled: false } },
+        },
+      );
       const qwenHome = join(rig.testDir!, '.qwen-home');
       mkdirSync(qwenHome, { recursive: true });
       writeFileSync(
