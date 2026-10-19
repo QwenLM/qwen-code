@@ -30,7 +30,15 @@
 ```text
 bin/qwen-managed-agent-server
 bin/qwen-managed-agent-operator-recovery
+bin/qwen-managed-agent-bootstrap
+bin/qwen-managed-agent-bootstrap.mjs
 config/application.example.yml
+systemd/qwen-hosted-harness.service
+systemd/qwen-managed-agent-server.service
+systemd/harness.env.example
+systemd/server.env.example
+systemd/README.md
+systemd/README.zh-CN.md
 lib/qwen-managed-agent-server-<component-version>.jar
 lib/qwen-managed-agent-server-<component-version>-operator-recovery.jar
 docs/deployment.md
@@ -43,9 +51,13 @@ SHA256SUMS
 LICENSE
 ```
 
-启动脚本只使用 bundle 内的相对 JAR 路径。运维人员在 bundle 根目录创建 `config/application.yml` 后，启动脚本会在该变量未设置时导出 `SPRING_CONFIG_ADDITIONAL_LOCATION`，位置参数原样传给 Java。模板本身不包含生效配置，复制后在编辑前不改变任何行为。Server JAR 包含 Broker 类和资源，不另行提供 Broker 产物或进程。
+启动脚本只使用 bundle 内的相对 JAR 路径。运维人员在 bundle 根目录创建 `config/application.yml` 后，启动脚本会在该变量未设置时导出 `SPRING_CONFIG_ADDITIONAL_LOCATION`，位置参数原样传给 Java。模板本身不包含生效配置，复制后在编辑前不改变任何行为。Server JAR 包含 Broker 类和资源，不另行提供 Broker 产物或进程。`systemd/` 模板落实了文档要求的 kill mode：控制面使用 `process`，使 Runtime worker 在 Broker 重启后继续存活；Harness 使用 `mixed`，使其工具进程随 Harness 终止。
 
 发布页同时提供独立的 `manifest.json` 副本与 `SHA256SUMS.txt`。外层校验和覆盖压缩包和独立 manifest；bundle 内的校验和覆盖全部载荷文件以及 `manifest.json`。
+
+## 凭据生成
+
+`bin/qwen-managed-agent-bootstrap` 生成共享的 Harness token 与 capability digest、broker token 与 Runtime 凭据密钥，并写出 `harness.env`、`server.env` 与 `application.yml`，权限为 0600。目标文件已存在时除非传入 `--force` 否则拒绝覆盖；只打印路径。digest 是任意共享标识：Harness 回显配置值，而不是从能力集推导。生成器不会编造数据源凭据。
 
 ## Manifest 契约
 

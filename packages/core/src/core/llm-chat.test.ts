@@ -990,6 +990,90 @@ describe('LlmChat', async () => {
       });
     });
 
+    it('refuses a saved request whose model no longer matches the route', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'other-model',
+          contents: [userText('normalized request')],
+          config: { maxOutputTokens: 77 },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const failure = await chat
+        .sendPreparedMessageStream(
+          saved,
+          'route-drift',
+          new AbortController().signal,
+        )
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(LlmRequestPreparationError);
+      expect((failure as LlmRequestPreparationError).cause).toBe(
+        'Saved model route changed.',
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
+    it('refuses a saved request whose provider pin changed', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: { maxOutputTokens: 77 },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: 'stale-provider-pin',
+        promptTokensForClamp: 15,
+      };
+      const failure = await chat
+        .sendPreparedMessageStream(
+          saved,
+          'pin-drift',
+          new AbortController().signal,
+        )
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(LlmRequestPreparationError);
+      expect((failure as LlmRequestPreparationError).cause).toBe(
+        'Saved model route changed.',
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
     it('preserves primary persistent retry intent through prepared replay', async () => {
       vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');
       try {

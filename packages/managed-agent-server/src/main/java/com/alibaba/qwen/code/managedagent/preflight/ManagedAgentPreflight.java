@@ -339,10 +339,18 @@ public final class ManagedAgentPreflight {
             HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                     .timeout(Duration.ofMillis(TIMEOUT_MILLIS))
                     .header("Accept", "application/json")
+                    .header("Authorization", "Bearer " + harness.getToken())
                     .GET()
                     .build();
             HttpResponse<String> response = client.send(request,
                     HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 401 || response.statusCode() == 403) {
+                return new Check("harness", Status.FAIL,
+                        url + " rejected the configured token ("
+                                + response.statusCode() + ")",
+                        "set QWEN_MANAGED_AGENT_HARNESS_TOKEN to the token the"
+                                + " Harness accepts");
+            }
             if (response.statusCode() != 200) {
                 return new Check("harness", Status.FAIL,
                         url + " answered " + response.statusCode(),
@@ -365,8 +373,21 @@ public final class ManagedAgentPreflight {
 
     static Check toolPathCheck(ManagedAgentProperties properties) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
+        if (broker.getSsh().isEnabled()
+                && (!files || broker.getSsh().getNodes().isEmpty())) {
+            return new Check("tool-path", Status.FAIL,
+                    "SSH Runtime requires Workspace files and configured nodes",
+                    "enable Workspace files and add runtime-broker.ssh.nodes");
+        }
+        if (!StringUtils.isBlank(broker.getWorkspaceCreationRoot()) && !files) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace creation requires Workspace files",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true");
+        }
         if (shell && !files) {
             return new Check("tool-path", Status.FAIL,
                     "Workspace Shell requires Workspace files",
@@ -403,8 +424,6 @@ public final class ManagedAgentPreflight {
                     "Workspace files require the Runtime Broker",
                     "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED=true");
         }
-        ManagedAgentProperties.RuntimeBroker broker =
-                properties.getRuntimeBroker();
         if ("static".equals(broker.getProvisioner())) {
             return new Check("tool-path", Status.FAIL,
                     "Workspace files cannot use the static provisioner",

@@ -764,6 +764,8 @@ interface SessionEntry {
   closing: boolean;
   /** Tail of cwd changes that direct shell commands must not overtake. */
   cwdChangeQueue: Promise<void>;
+  /** Odd during a physical cd; advances again on settlement. */
+  cwdChangeEpoch: number;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -4956,6 +4958,7 @@ export function createSessionControlPlane(
           })
           .catch(() => undefined);
       },
+      opts.onWorkflowAncestorTrust,
     );
     const connection = harness.createConnection(client, channel);
     // Add to `aliveChannels` + register the `channel.exited` handler
@@ -7441,6 +7444,7 @@ export function createSessionControlPlane(
       recordingDegraded: false,
       closing: false,
       cwdChangeQueue: Promise.resolve(),
+      cwdChangeEpoch: 0,
       promptQueue: Promise.resolve(),
       rewindTail: Promise.resolve(),
       pendingPromptCount: 0,
@@ -12656,6 +12660,7 @@ export function createSessionControlPlane(
       const cdPromise = entry.promptQueue.then(async () => {
         const ci = assertLivePromptEntry(sessionId, entry);
         harness.reserveRuntimeOperation(ci.harness.executionEngine);
+        entry.cwdChangeEpoch += 1;
         try {
           if (entry.promptActive || entry.backgroundTurn) {
             throw new CdWhilePromptActiveError(sessionId);
@@ -12717,10 +12722,14 @@ export function createSessionControlPlane(
           }
           return extResult;
         } finally {
-          await harness.releaseRuntimeOperationReservation(
-            'session cwd change',
-            ci.harness.executionEngine,
-          );
+          try {
+            await harness.releaseRuntimeOperationReservation(
+              'session cwd change',
+              ci.harness.executionEngine,
+            );
+          } finally {
+            entry.cwdChangeEpoch += 1;
+          }
         }
       });
 
