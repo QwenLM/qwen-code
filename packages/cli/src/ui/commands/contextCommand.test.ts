@@ -11,6 +11,7 @@ import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   buildAvailableSkillsReminder,
+  buildContextFilesReminder,
   buildMcpServerInstructionsReminderFromEntries,
   buildSkillLlmContent,
   DiscoveredMCPTool,
@@ -82,6 +83,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
     isInteractive: vi.fn().mockReturnValue(true),
     getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+    getProjectRoot: vi.fn().mockReturnValue(process.cwd()),
   } as unknown as Config;
 }
 
@@ -122,6 +124,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      getProjectRoot: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
   });
 
@@ -407,6 +410,214 @@ describe('collectContextData (contextCommand)', () => {
         }),
       ]);
       expect(data.breakdown.messages).toBe(300);
+    });
+
+    it('bills sent instruction files once with their prelude and message source labels', async () => {
+      const files = [
+        {
+          path: '/work/QWEN.md',
+          content:
+            '--- Context from: /work/QWEN.md ---\nold project rules\n--- End of Context from: /work/QWEN.md ---',
+        },
+        {
+          path: '/work/.qwen/rules/language.md',
+          content:
+            '--- Rule from: /work/.qwen/rules/language.md ---\nUse English\n--- End of Rule from: /work/.qwen/rules/language.md ---',
+        },
+      ];
+      const initial = buildContextFilesReminder(files)!;
+      const update = buildContextFilesReminder(
+        [{ ...files[0]!, content: files[0]!.content.replace('old', 'new') }],
+        files,
+      )!;
+      const history = [
+        { ...prelude, parts: [...prelude.parts!, { text: initial }] },
+        ...conversation,
+        { role: 'user', parts: [{ text: update }] },
+      ];
+      const config = {
+        ...makeChatConfig({ total: 0, history }),
+        getWorkingDir: vi.fn().mockReturnValue('/work'),
+        getUserMemory: vi
+          .fn()
+          .mockReturnValue('Unannounced configuration'.repeat(100)),
+      } as unknown as Config;
+      const control = await collectContextData(
+        makeChatConfig({ total: 0, history: [prelude, ...conversation] }),
+        true,
+      );
+      const data = await collectContextData(config, true);
+      const reminderTokens =
+        estimateContextTextTokens(initial) + estimateContextTextTokens(update);
+
+      expect(config.getUserMemory).not.toHaveBeenCalled();
+      expect(data.breakdown.memoryFiles).toBe(reminderTokens);
+      expect(data.breakdown.startupContext).toBe(
+        control.breakdown.startupContext,
+      );
+      expect(data.breakdown.messages).toBe(control.breakdown.messages);
+      expect(sumRows(data.breakdown) - sumRows(control.breakdown)).toBe(
+        reminderTokens,
+      );
+      expect(data.memoryFiles.map((file) => file.path)).toEqual([
+        `${t('Startup context')}: QWEN.md`,
+        `${t('Startup context')}: ${path.join('.qwen', 'rules', 'language.md')}`,
+        `${t('Messages')}: QWEN.md`,
+      ]);
+
+      vi.mocked(config.getUserMemory).mockReturnValue(
+        'A different pending reload',
+      );
+      expect(await collectContextData(config, true)).toEqual(data);
+
+      const scaled = await collectContextData(
+        {
+          ...config,
+          getLlmClient: makeChatConfig({ total: 1_000, history }).getLlmClient,
+        } as Config,
+        true,
+      );
+      expect(sumRows(scaled.breakdown)).toBe(1_000);
+    });
+
+    it.each([0, 1_000])(
+      'does not count the first reloaded instruction file until it enters history (provider total %s)',
+      async (total) => {
+        const history = [prelude, ...conversation];
+        const getUserMemory = vi.fn().mockReturnValue('');
+        const config = {
+          ...makeChatConfig({ total, history }),
+          getUserMemory,
+        } as unknown as Config;
+        const beforeReload = await collectContextData(config, true);
+        const file = {
+          path: '/work/QWEN.md',
+          content:
+            '--- Context from: /work/QWEN.md ---\n' +
+            'New project instructions.\n'.repeat(20) +
+            '--- End of Context from: /work/QWEN.md ---',
+        };
+
+        getUserMemory.mockReturnValue(file.content);
+        const beforeSend = await collectContextData(config, true);
+        const reminder = buildContextFilesReminder([file], [])!;
+        history.push({
+          role: 'user',
+          parts: [{ text: reminder }, { text: 'next query' }],
+        });
+        const afterSend = await collectContextData(config, true);
+
+        expect(beforeReload.breakdown.memoryFiles).toBe(0);
+        expect(beforeSend).toEqual(beforeReload);
+        expect(getUserMemory).not.toHaveBeenCalled();
+        expect(afterSend.breakdown.memoryFiles).toBeGreaterThan(0);
+        expect(afterSend.memoryFiles).toHaveLength(1);
+        if (total === 0) {
+          expect(afterSend.breakdown.memoryFiles).toBe(
+            estimateContextTextTokens(reminder),
+          );
+        } else {
+          expect(sumRows(afterSend.breakdown)).toBe(total);
+        }
+      },
+    );
+
+    it('keeps auto-memory policy and catalog costs alongside an empty complete instruction set', async () => {
+      const reminder = buildContextFilesReminder([])!;
+      const policy = 'Stable auto-memory policy';
+      const catalog = 'Current catalog';
+      const config = {
+        ...makeChatConfig({
+          total: 0,
+          history: [
+            { ...prelude, parts: [...prelude.parts!, { text: reminder }] },
+          ],
+        }),
+        getUserMemory: vi.fn().mockReturnValue('Removed file contents'),
+        getAutoMemoryPrompt: vi.fn().mockReturnValue(policy),
+        getAutoMemoryContext: vi.fn().mockReturnValue(catalog),
+      } as unknown as Config;
+      const data = await collectContextData(config, true);
+
+      expect(data.breakdown.memoryFiles).toBe(
+        estimateContextTextTokens(reminder) +
+          estimateContextTextTokens(`${policy}\n\n${catalog}`),
+      );
+      expect(data.breakdown.startupContext).toBe(
+        estimateContextTextTokens(environmentReminder),
+      );
+      expect(data.memoryFiles.at(-1)).toEqual({
+        path: t('auto memory'),
+        tokens: estimateContextTextTokens(`${policy}\n\n${catalog}`),
+      });
+    });
+
+    it.each(['legacy', 'prelude'] as const)(
+      'resolves %s rule markers from the project root while context markers use the working directory',
+      async (source) => {
+        const projectRoot = path.join(os.tmpdir(), 'context-project-root');
+        const workingDir = path.join(projectRoot, 'packages', 'app');
+        const files = [
+          {
+            path: path.join(workingDir, 'QWEN.md'),
+            content:
+              '--- Context from: QWEN.md ---\nworkspace instructions\n--- End of Context from: QWEN.md ---',
+          },
+          {
+            path: path.join(projectRoot, '.qwen', 'rules', 'testing.md'),
+            content:
+              '--- Rule from: .qwen/rules/testing.md ---\nproject test rules\n--- End of Rule from: .qwen/rules/testing.md ---',
+          },
+        ];
+        const reminder = buildContextFilesReminder(files)!;
+        const config = {
+          ...(source === 'prelude'
+            ? makeChatConfig({
+                total: 0,
+                history: [{ role: 'user', parts: [{ text: reminder }] }],
+              })
+            : makeMockConfig(200_000)),
+          getWorkingDir: vi.fn().mockReturnValue(workingDir),
+          getProjectRoot: vi.fn().mockReturnValue(projectRoot),
+          getUserMemory: vi
+            .fn()
+            .mockReturnValue(files.map((file) => file.content).join('\n\n')),
+        } as unknown as Config;
+
+        const data = await collectContextData(config, true);
+        const prefix = source === 'prelude' ? `${t('Startup context')}: ` : '';
+        expect(data.memoryFiles.map((file) => file.path)).toEqual([
+          `${prefix}QWEN.md`,
+          `${prefix}${path.join('..', '..', '.qwen', 'rules', 'testing.md')}`,
+        ]);
+        expect(data.breakdown.memoryFiles).toBe(
+          source === 'prelude'
+            ? estimateContextTextTokens(reminder)
+            : estimateContextTextTokens('workspace instructions\n') +
+                estimateContextTextTokens('project test rules\n'),
+        );
+      },
+    );
+
+    it('does not attribute quoted or model-authored instruction reminders as file costs', async () => {
+      const reminder = buildContextFilesReminder([])!;
+      const quoted = `Explain this reminder:\n${reminder}`;
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 0,
+          history: [
+            prelude,
+            { role: 'user', parts: [{ text: quoted }] },
+            { role: 'model', parts: [{ text: reminder }] },
+          ],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.memoryFiles).toBe(0);
+      expect(data.breakdown.messages).toBe(
+        estimateContextTextTokens(quoted) + estimateContextTextTokens(reminder),
+      );
     });
 
     it('closes the rows against the provider total, reporting the gap as unattributed', async () => {
@@ -1520,6 +1731,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      getProjectRoot: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -1571,6 +1783,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      getProjectRoot: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);

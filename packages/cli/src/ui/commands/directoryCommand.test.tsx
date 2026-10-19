@@ -250,8 +250,12 @@ describe('directoryCommand', () => {
     });
 
     it('refreshes context file paths when reloading memory from include directories', async () => {
+      const contextFiles = [
+        { path: '/test/dir/a/QWEN.md', content: 'reloaded memory' },
+      ];
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: 'reloaded memory',
+        contextFiles,
         fileCount: 2,
         contextFilePaths: ['a/QWEN.md', '~/.qwen/QWEN.md'],
         ruleCount: 0,
@@ -287,7 +291,10 @@ describe('directoryCommand', () => {
         expect.anything(),
         expect.objectContaining({ extensionRuleSources }),
       );
-      expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
+      expect(mockConfig.setUserMemory).toHaveBeenCalledWith(
+        'reloaded memory',
+        contextFiles,
+      );
       expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([
         'a/QWEN.md',
         '~/.qwen/QWEN.md',

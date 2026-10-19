@@ -3592,6 +3592,49 @@ describe('LlmChat', async () => {
       expect(infoOf(events[0]).newTokenCount).toBe(200);
     });
 
+    it.each(['auto', 'reactive'] as const)(
+      'sends and budgets instructions restored in the same %s compression request',
+      async (mode) => {
+        mockGeneratorConfig({ contextWindowSize: 64_000 });
+        const prelude = userText(
+          '<system-reminder>\n' + 'R'.repeat(200_000) + '\n</system-reminder>',
+        );
+        if (mode === 'auto') {
+          mockCompressOnce(compressed(1000, 200));
+          mockStream(textStream('answer'));
+        } else {
+          mockCompressOnce(
+            noop(),
+            compressed(135_000, 1000, [...summaryAck(), userText('latest')]),
+          );
+          mockRequests(tooLong(), textStream('answer'));
+        }
+        const stream = await send('latest', `prompt-restored-${mode}`);
+        let restored = false;
+        for await (const event of stream) {
+          if (event.type === StreamEventType.COMPRESSED) {
+            chat.setHistory([prelude, ...chat.getHistory()]);
+            restored = true;
+          }
+        }
+        expect(restored).toBe(true);
+        const request = requestAt(mode === 'auto' ? 0 : 1);
+        const contents = request.contents;
+        expect(contents).toContainEqual({
+          role: 'user',
+          parts: expect.arrayContaining(prelude.parts!),
+        });
+        expect(JSON.stringify(contents)).toContain('latest');
+        const visibleTokens = estimateContentTokens(contents as Content[]);
+        expect(visibleTokens).toBeGreaterThan(50_000);
+        expect(
+          visibleTokens + request.config!.maxOutputTokens!,
+        ).toBeLessThanOrEqual(64_000);
+        expect(chat.getLastPromptTokenCount()).toBeGreaterThan(50_000);
+        expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+      },
+    );
+
     it('persists the in-flight user turn in the in-send compression snapshot', async () => {
       // Resume replaces history with this pre-push compression snapshot.
       const compressedHistory: Content[] = [

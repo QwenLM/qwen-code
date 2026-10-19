@@ -21,9 +21,11 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { findProjectRoot } from '../utils/projectRoot.js';
 import {
   loadRules,
+  formatRules,
   type ExtensionRuleSource,
   type RuleFile,
 } from '../config/rulesDiscovery.js';
+import type { ContextFileSnapshot } from '../core/context-files.js';
 import type {
   InstructionLoadReason,
   InstructionMemoryType,
@@ -377,7 +379,7 @@ export function formatContextFileDisplayPath(
   return stripAnsiAndControl(relativePath);
 }
 
-// The attachment rule for the system prompt: only non-blank string content
+// The attachment rule for instruction context: only non-blank string content
 // reaches it. Shared by concatenateInstructions and contextFilePaths so the
 // "displayed = attached" property holds by construction.
 function hasAttachedContent(item: MemoryFileContent): boolean {
@@ -409,6 +411,7 @@ function concatenateInstructions(
 
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
+  contextFiles: ContextFileSnapshot;
   fileCount: number;
   /**
    * Display paths of the loaded context (memory) files: CWD-relative when
@@ -580,6 +583,7 @@ export async function loadServerHierarchicalMemory(
   const dedupedFilePaths = await dedupeByCanonicalIdentity(filePaths);
 
   let combinedInstructions = '';
+  let contextFiles: ContextFileSnapshot = [];
   let fileCount = 0;
   let contextFilePaths: string[] = [];
 
@@ -601,6 +605,10 @@ export async function loadServerHierarchicalMemory(
       contentsWithPaths,
       currentWorkingDirectory,
     );
+    contextFiles = contentsWithPaths.filter(hasAttachedContent).map((item) => ({
+      path: path.resolve(item.filePath),
+      content: concatenateInstructions([item], currentWorkingDirectory),
+    }));
 
     // Only count files that match configured memory filenames (e.g., QWEN.md),
     // excluding system context files like output-language.md. Note: this is
@@ -617,7 +625,7 @@ export async function loadServerHierarchicalMemory(
     );
     fileCount = memoryItems.length;
     // Announce every top-level file whose content actually reached the
-    // system prompt (see hasAttachedContent) — not just memory-named files —
+    // instruction context (see hasAttachedContent) — not just memory-named files —
     // so the list matches what concatenateInstructions attached. Files
     // pulled in via @import are inlined into their importer's content and
     // are not listed separately.
@@ -635,12 +643,14 @@ export async function loadServerHierarchicalMemory(
   // Load path-based context rules from .qwen/rules/ directories.
   const {
     content: rulesContent,
+    baselineRules,
     ruleCount,
     conditionalRules,
     ignoredExtensionRules,
   } = options.explicitOnly
     ? {
         content: '',
+        baselineRules: [],
         ruleCount: 0,
         conditionalRules: [],
         ignoredExtensionRules: [],
@@ -652,7 +662,15 @@ export async function loadServerHierarchicalMemory(
         options.extensionRuleSources ?? [],
       );
 
-  // Baseline rules go into the system prompt
+  contextFiles = [
+    ...contextFiles,
+    ...baselineRules.map((rule) => ({
+      path: path.resolve(rule.filePath),
+      content: formatRules([rule], effectiveRoot),
+    })),
+  ];
+
+  // Keep the aggregate for consumers that still use a system context layer.
   let memoryContent = combinedInstructions;
   if (rulesContent) {
     memoryContent = memoryContent
@@ -666,6 +684,7 @@ export async function loadServerHierarchicalMemory(
 
   return {
     memoryContent,
+    contextFiles,
     fileCount,
     contextFilePaths,
     ruleCount,

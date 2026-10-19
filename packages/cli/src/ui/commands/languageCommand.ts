@@ -226,14 +226,11 @@ async function setOutputLanguage(
       }
     }
 
-    // Apply the new rule to the running session: refresh hierarchical memory
-    // so output-language.md is re-read into userMemory, then rebuild and
-    // re-bind the system instruction on the live chat.
+    // Reload output-language.md for the next context-files reminder.
     const config = context.services.config;
     if (config) {
       try {
         await config.refreshHierarchicalMemory();
-        await config.getLlmClient().refreshSystemInstruction();
       } catch (error) {
         debugLogger.warn(
           'Failed to apply output language to running session:',

@@ -121,6 +121,7 @@ import {
   type SendSdkMcpMessage,
 } from '../tools/mcp-client.js';
 import { setMemoryFilename } from '../utils/memory-constants.js';
+import type { ContextFileSnapshot } from '../core/context-files.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
@@ -2982,9 +2983,10 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  private contextFiles: ContextFileSnapshot | undefined;
   /**
    * The cross-session-stable prefix of the main-session system prompt —
-   * the stable → context layers `LlmClient.getMainSessionSystemInstruction()`
+   * the stable layers `LlmClient.getMainSessionSystemInstruction()`
    * assembles before the volatile tails (git status, auto-memory). Recorded
    * so the Anthropic converter can place an early cache breakpoint on the
    * stable prefix; consumers match it via `startsWith` and fail open to the
@@ -5419,6 +5421,7 @@ export class Config {
     }
     const {
       memoryContent,
+      contextFiles,
       fileCount,
       contextFilePaths,
       conditionalRules,
@@ -5581,7 +5584,7 @@ export class Config {
       // there. When empty the prompt builder emits a "MEMORY.md is currently
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
-      this.setUserMemory(memoryContent);
+      this.setUserMemory(memoryContent, contextFiles);
       const memoryDir = getAutoMemoryRoot(this.getProjectRoot());
       const userSection = {
         memoryDir: getUserAutoMemoryRoot(),
@@ -5617,7 +5620,7 @@ export class Config {
         this.autoMemoryContext = catalog;
       }
     } else {
-      this.setUserMemory(memoryContent);
+      this.setUserMemory(memoryContent, contextFiles);
       this.autoMemoryPrompt = '';
       this.autoMemoryContext = '';
     }
@@ -9032,6 +9035,10 @@ export class Config {
     return this.userMemory;
   }
 
+  getContextFiles(): ContextFileSnapshot | undefined {
+    return this.contextFiles;
+  }
+
   getStaticSystemPrefix(): string | undefined {
     return this.staticSystemPrefix;
   }
@@ -9186,8 +9193,12 @@ export class Config {
     this.outputLanguageFilePath = filePath;
   }
 
-  setUserMemory(newUserMemory: string): void {
+  setUserMemory(
+    newUserMemory: string,
+    contextFiles?: ContextFileSnapshot,
+  ): void {
     this.userMemory = newUserMemory;
+    this.contextFiles = contextFiles;
   }
 
   getMemoryFileCount(): number {

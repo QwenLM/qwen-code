@@ -2725,6 +2725,32 @@ export class LlmChat {
     this.tokenCountsByRouteKey.delete(this.tokenCountsRouteKey);
   }
 
+  accountForRestoredHistory(previousHistory: Content[]): number {
+    const { imageTokenEstimate } = resolveSlimmingConfig(
+      this.config.getChatCompression(),
+    );
+    const addedTokens = Math.max(
+      0,
+      estimateContentTokens(this.history, imageTokenEstimate) -
+        estimateContentTokens(previousHistory, imageTokenEstimate),
+    );
+    if (addedTokens === 0) return 0;
+    // A zero baseline must keep using the full-history estimate. Other routes
+    // retained after compression see the same restored conversation.
+    if (this.lastPromptTokenCount > 0) {
+      this.lastPromptTokenCount += addedTokens;
+      this.lastPromptTokenCountIsEstimated = true;
+      this.telemetryService?.setLastPromptTokenCount(this.lastPromptTokenCount);
+    }
+    for (const counts of this.tokenCountsByRouteKey.values()) {
+      if (counts.promptTokenCount > 0) {
+        counts.promptTokenCount += addedTokens;
+        counts.promptTokenCountIsEstimated = true;
+      }
+    }
+    return addedTokens;
+  }
+
   isLastPromptTokenCountEstimated(): boolean {
     this.adoptTokenCountsForRoute();
     return this.lastPromptTokenCountIsEstimated;
@@ -3643,6 +3669,40 @@ export class LlmChat {
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
+    const refreshAfterCompression = (previousHistory: Content[]) => {
+      const addedTokens = self.accountForRestoredHistory(previousHistory);
+      requestContents = self.getRequestHistoryForRoute(
+        currentUserContent,
+        requestModalities,
+      );
+      if (addedTokens === 0) return;
+      const { imageTokenEstimate } = resolveSlimmingConfig(
+        self.config.getChatCompression(),
+      );
+      promptTokensForClamp =
+        self.lastPromptTokenCount > 0
+          ? estimatePromptTokens(
+              [],
+              currentUserContent ?? { role: 'user', parts: [] },
+              self.lastPromptTokenCount,
+              self.lastOutputTokenCount,
+              imageTokenEstimate,
+              true,
+            )
+          : estimateContentTokens(requestContents, imageTokenEstimate);
+      promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
+      params = {
+        ...params,
+        config: {
+          ...params.config,
+          maxOutputTokens: clampOutputTokensToWindow(
+            outputCeiling,
+            contextWindowForClamp,
+            promptTokensForClamp,
+          ),
+        },
+      };
+    };
     return (async function* () {
       let successfulRecoveries = 0;
       let activeRecoveryUser: Content | undefined;
@@ -3660,10 +3720,14 @@ export class LlmChat {
         if (
           compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
         ) {
+          const beforeRestore = self.getHistoryShallow();
           yield {
             type: StreamEventType.COMPRESSED,
             info: compressionInfo,
           };
+          // The main client restores startup instructions while consuming
+          // this event. Include them in this request, not only the next turn.
+          refreshAfterCompression(beforeRestore);
         }
 
         let lastError: unknown = new Error('Request failed after all retries.');
@@ -4496,10 +4560,12 @@ export class LlmChat {
                         `${reactiveInfo.originalTokenCount} -> ` +
                         `${reactiveInfo.newTokenCount} tokens.`,
                     );
+                    const beforeRestore = self.getHistoryShallow();
                     yield {
                       type: StreamEventType.COMPRESSED,
                       info: reactiveInfo,
                     };
+                    refreshAfterCompression(beforeRestore);
                     // Drop the stale continuation before telling the UI to
                     // clear it: the consumer may cancel at the RETRY yield.
                     resetTransportContinuation();

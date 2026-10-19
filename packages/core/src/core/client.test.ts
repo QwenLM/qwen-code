@@ -36,6 +36,13 @@ import {
   type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
+import { createUserContent } from './genai-compat.js';
+import { estimateContentTokens } from '../services/tokenEstimation.js';
+import {
+  buildContextFilesReminder,
+  isContextFilesReminder,
+  type ContextFileSnapshot,
+} from './context-files.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   AuthType,
@@ -2070,6 +2077,157 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('main-session context file delivery', () => {
+    let files: ContextFileSnapshot;
+
+    beforeEach(async () => {
+      const actual = await vi.importActual<
+        typeof import('./environmentContext.js')
+      >('./environmentContext.js');
+      vi.mocked(getInitialChatHistory).mockImplementation(
+        actual.getInitialChatHistory,
+      );
+      files = [{ path: '/project/QWEN.md', content: 'PROJECT_RULE_V1' }];
+      Object.assign(mockConfig, {
+        getSkipStartupContext: () => true,
+        getContextFiles: () => files,
+      });
+      vi.mocked(mockConfig.getUserMemory).mockImplementation(() =>
+        files.map((file) => file.content).join('\n'),
+      );
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('BASE');
+      mockTurnRunFn.mockImplementation(async function* (
+        _model: string,
+        request: PartListUnion,
+      ) {
+        client.getChat().addHistory(createUserContent(request));
+        yield* textTurn('answer');
+      });
+      await client.startChat();
+    });
+
+    const send = (
+      request: PartListUnion = ['next'],
+      type = SendMessageType.UserQuery,
+    ) => run(request, `context-${mockTurnRunFn.mock.calls.length}`, { type });
+    const instructionParts = () =>
+      client
+        .getHistoryShallow()
+        .flatMap((content) =>
+          content.role === 'user'
+            ? (content.parts ?? []).filter(
+                (part) => part.text && isContextFilesReminder(part.text),
+              )
+            : [],
+        );
+
+    it('keeps main system and static prefix independent of files and preserves append/policy order', async () => {
+      vi.mocked(mockConfig.getAppendSystemPrompt).mockReturnValue('APPEND');
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue('POLICY');
+      await client.startChat();
+      const system = client.getChat()['generationConfig'].systemInstruction;
+      expect(system).toBe('BASE\n\n---\n\nAPPEND\n\n---\n\nPOLICY');
+      expect(mockConfig.setStaticSystemPrefix).toHaveBeenLastCalledWith(
+        'BASE\n\n---\n\nAPPEND',
+      );
+      expect(instructionParts()[0]?.text).toContain('PROJECT_RULE_V1');
+      files = [{ path: '/project/QWEN.md', content: 'PROJECT_RULE_V2' }];
+      await client.refreshSystemInstruction();
+      expect(client.getChat()['generationConfig'].systemInstruction).toBe(
+        system,
+      );
+    });
+
+    it('sends a delta once while preserving the previously sent prefix', async () => {
+      const prefix = client.getHistory();
+      await send();
+      expect(instructionParts()).toHaveLength(1);
+      files = [{ path: '/project/QWEN.md', content: 'PROJECT_RULE_V2' }];
+      await send();
+      expect(client.getHistory()[0]).toEqual(prefix[0]);
+      expect(instructionParts()).toHaveLength(2);
+      expect(instructionParts()[1]?.text).toContain('updated:');
+      expect(instructionParts()[1]?.text).toContain('PROJECT_RULE_V2');
+      expect(instructionParts()[1]?.text).not.toContain('PROJECT_RULE_V1');
+      await send();
+      expect(instructionParts()).toHaveLength(2);
+      expect(getLastTurnRequestText()).not.toContain(
+        'User and project instructions',
+      );
+    });
+
+    it('places a reload after pending tool results and before new user text', async () => {
+      files = [{ path: '/project/QWEN.md', content: 'PROJECT_RULE_V2' }];
+      const result = fnResponse('read_file', { output: 'ok' }, 'context-call');
+      client.getChat().addHistory({
+        role: 'model',
+        parts: [fnCall('read_file', {}, 'context-call')],
+      });
+      await send([result, { text: 'continue' }], SendMessageType.ToolResult);
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(request[0]).toEqual(result);
+      expect(request[1]).toEqual({
+        text: expect.stringContaining('PROJECT_RULE_V2'),
+      });
+      expect(request[2]).toBe('continue');
+      expect(instructionParts()).toHaveLength(2);
+    });
+
+    it('reannounces the complete current set after rewind removes a delivered delta', async () => {
+      const beforeUpdate = client.getHistory();
+      files = [{ path: '/project/QWEN.md', content: 'PROJECT_RULE_V2' }];
+      await send();
+      client.getChat().setHistory(beforeUpdate);
+      await send();
+      expect(instructionParts().at(-1)?.text).toContain('current complete set');
+      expect(instructionParts().at(-1)?.text).toContain('PROJECT_RULE_V2');
+      await send();
+      expect(instructionParts()).toHaveLength(2);
+    });
+
+    it('revokes removed files once and rebuilds an empty baseline on resume', async () => {
+      files = [];
+      await send();
+      expect(instructionParts().at(-1)?.text).toContain(
+        'Instructions no longer present: "/project/QWEN.md"',
+      );
+      await send();
+      expect(instructionParts()).toHaveLength(2);
+      const history = client.getHistory();
+      await client.startChat(history, SessionStartSource.Resume);
+      expect(instructionParts()).toHaveLength(1);
+      expect(instructionParts()[0]?.text).toContain(
+        'No instruction files are currently loaded.',
+      );
+      expect(JSON.stringify(client.getHistory())).not.toContain(
+        'PROJECT_RULE_V1',
+      );
+    });
+
+    it('rebuilds current instructions after compaction and removes retained stale deltas', async () => {
+      files = [{ path: '/project/QWEN.md', content: 'PROJECT_RULE_V2' }];
+      const old = buildContextFilesReminder([
+        { path: '/project/QWEN.md', content: 'OLD_RETAINED_RULE' },
+      ])!;
+      client
+        .getChat()
+        .setHistory([
+          userText('summary'),
+          modelText('ack'),
+          { role: 'user', parts: [{ text: old }, { text: 'latest' }] },
+        ]);
+      await client['restoreStartupContextAfterCompaction']();
+      expect(instructionParts()).toHaveLength(1);
+      expect(instructionParts()[0]?.text).toContain('PROJECT_RULE_V2');
+      expect(JSON.stringify(client.getHistory())).not.toContain(
+        'OLD_RETAINED_RULE',
+      );
+      expect(client.getHistory().at(-1)).toEqual(userText('latest'));
+      await send();
+      expect(instructionParts()).toHaveLength(1);
+    });
+  });
+
   describe('refreshStartupContextReminder', () => {
     /** Refreshes over `history` with `prelude` rebuilt; returns setHistory. */
     const refreshOver = async (history: Content[], prelude: Content[]) => {
@@ -3760,7 +3918,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(getInitialChatHistory).toHaveBeenLastCalledWith(
         expect.anything(),
         undefined,
-        { gitStatus: 'Git snapshot A' },
+        {
+          gitStatus: 'Git snapshot A',
+          contextFiles: [],
+          announceEmptyContextFiles: false,
+        },
       );
 
       await client.addWorkingDirectoryChangedContext(
@@ -3802,7 +3964,11 @@ describe('Gemini Client (client.ts)', () => {
       expect(getInitialChatHistory).toHaveBeenLastCalledWith(
         expect.anything(),
         undefined,
-        { gitStatus: 'Git snapshot B' },
+        {
+          gitStatus: 'Git snapshot B',
+          contextFiles: [],
+          announceEmptyContextFiles: false,
+        },
       );
       expect(client['getCachedGitStatus']()).toBe('Git snapshot B');
       expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
@@ -5317,14 +5483,19 @@ describe('Gemini Client (client.ts)', () => {
       });
       client['forceFullIdeContext'] = false;
 
-      await client.tryCompressChat('p4');
+      const result = await client.tryCompressChat('p4');
 
       expect(client.getChat()).not.toBe(originalChat);
       expect(client.getHistory()).toEqual([
         userText('<system-reminder>\nMocked env context\n</system-reminder>'),
         ...compressedHistory,
       ]);
-      expect(client.getChat().getLastPromptTokenCount()).toBe(200);
+      const expectedTokens =
+        200 +
+        estimateContentTokens(client.getHistory()) -
+        estimateContentTokens(compressedHistory);
+      expect(client.getChat().getLastPromptTokenCount()).toBe(expectedTokens);
+      expect(result.newTokenCount).toBe(expectedTokens);
       expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
       expect(client.getChat().getCompletedToolCallIds()).toEqual([
         'completed-call',

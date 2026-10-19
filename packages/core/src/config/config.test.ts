@@ -274,6 +274,7 @@ vi.mock('../tools/tool-registry', () => {
 vi.mock('../memory/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
+    contextFiles: [],
     fileCount: 0,
     contextFilePaths: [],
     ruleCount: 0,
@@ -501,6 +502,7 @@ const PROJECT_RULES = '--- Context from: QWEN.md ---\nProject rules';
 /** A loadServerHierarchicalMemory result that loaded nothing unless overridden. */
 const memoryLoad = (overrides: Partial<MemoryLoad> = {}): MemoryLoad => ({
   memoryContent: '',
+  contextFiles: [],
   fileCount: 0,
   contextFilePaths: [],
   ruleCount: 0,
@@ -7396,6 +7398,7 @@ describe('Server Config (config.ts)', () => {
     const config = makeConfig();
 
     expect(config.getUserMemory()).toBe(USER_MEMORY);
+    expect(config.getContextFiles()).toBeUndefined();
     expect(config.getTargetDir()).toBe(path.resolve(TARGET_DIR));
   });
 
@@ -7405,6 +7408,38 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(paramsWithoutMemory);
 
     expect(config.getUserMemory()).toBe('');
+    expect(config.getContextFiles()).toBeUndefined();
+  });
+
+  it('clears a structured snapshot when legacy callers replace or clear user memory', () => {
+    const config = makeConfig();
+    const contextFiles = [{ path: '/project/QWEN.md', content: 'file rules' }];
+
+    config.setUserMemory('file rules', contextFiles);
+    expect(config.getContextFiles()).toEqual(contextFiles);
+
+    config.setUserMemory('legacy instructions');
+    expect(config.getUserMemory()).toBe('legacy instructions');
+    expect(config.getContextFiles()).toBeUndefined();
+
+    config.setUserMemory('file rules', contextFiles);
+    config.setUserMemory('');
+    expect(config.getUserMemory()).toBe('');
+    expect(config.getContextFiles()).toBeUndefined();
+  });
+
+  it('clears structured context in safe mode without loading files', async () => {
+    const config = makeConfig({ safeMode: true });
+    config.setUserMemory('old file rules', [
+      { path: '/project/QWEN.md', content: 'old file rules' },
+    ]);
+    vi.mocked(loadServerHierarchicalMemory).mockClear();
+
+    await config.refreshHierarchicalMemory();
+
+    expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
+    expect(config.getUserMemory()).toBe('');
+    expect(config.getContextFiles()).toBeUndefined();
   });
 
   it('Config constructor should enable runtime sleep prevention by default', () => {
@@ -7812,9 +7847,13 @@ describe('Server Config (config.ts)', () => {
 
   it('refreshHierarchicalMemory should expose loaded context file paths', async () => {
     const config = makeConfig();
+    const contextFiles = [
+      { path: path.join(TARGET_DIR, 'QWEN.md'), content: PROJECT_RULES },
+    ];
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue(
       memoryLoad({
         memoryContent: PROJECT_RULES,
+        contextFiles,
         fileCount: 1,
         contextFilePaths: ['QWEN.md'],
       }),
@@ -7822,11 +7861,15 @@ describe('Server Config (config.ts)', () => {
 
     await config.refreshHierarchicalMemory();
     expect(config.getContextFilePaths()).toEqual(['QWEN.md']);
+    expect(config.getContextFiles()).toEqual(contextFiles);
+    expect(config.getUserMemory()).toBe(PROJECT_RULES);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue(memoryLoad());
 
     await config.refreshHierarchicalMemory();
     expect(config.getContextFilePaths()).toEqual([]);
+    expect(config.getContextFiles()).toEqual([]);
+    expect(config.getUserMemory()).toBe('');
   });
 
   it('guards and rolls back the memory recall mode transition by revision', async () => {
@@ -7993,6 +8036,7 @@ describe('Server Config (config.ts)', () => {
       vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: '',
+        contextFiles: [],
         fileCount: 0,
         contextFilePaths: [],
         ruleCount: 0,

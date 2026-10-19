@@ -16,6 +16,7 @@ import type {
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { getCustomSystemPrompt } from '../prompts.js';
+import { isContextFilesReminder } from '../context-files.js';
 import { computeThresholds } from '../../services/chatCompressionService.js';
 import {
   estimateContentTokens,
@@ -130,6 +131,27 @@ function extractMemoryTokens(
   }
 
   return { systemInstruction: remaining, memoryTokens };
+}
+
+function attributeContextFiles(contents: Content[]): {
+  contents: Content[];
+  tokens: number;
+} {
+  let tokens = 0;
+  const attributedContents = contents.map((content) => {
+    if (content.role !== 'user' || !content.parts) return content;
+    const parts = content.parts.filter((part) => {
+      if (typeof part.text !== 'string' || !isContextFilesReminder(part.text)) {
+        return true;
+      }
+      tokens += estimateContextTextTokens(part.text);
+      return false;
+    });
+    return parts.length === content.parts.length
+      ? content
+      : { ...content, parts };
+  });
+  return { contents: attributedContents, tokens };
 }
 
 type LoadedSkillBodies = {
@@ -266,8 +288,9 @@ export function createContextUsageSnapshot(
   const conversation = hasCatalog
     ? [...contents.slice(0, -1), { ...last, parts: last.parts!.slice(0, -1) }]
     : contents;
+  const contextFiles = attributeContextFiles(conversation);
   const attributedSkills = attributeLoadedSkillBodies(
-    conversation,
+    contextFiles.contents,
     loadedSkillBodies(config),
   );
   const thresholds = computeThresholds(
@@ -283,6 +306,7 @@ export function createContextUsageSnapshot(
       mcp_tools_tokens: tools.mcpTools,
       memory_files_tokens:
         memory.memoryTokens +
+        contextFiles.tokens +
         (hasCatalog ? estimateContextTextTokens(catalog) : 0),
       skills_tokens: tools.skillTool + attributedSkills.skillBodyTokens,
       messages_tokens: estimateContentTokens(attributedSkills.contents),

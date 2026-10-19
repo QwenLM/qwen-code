@@ -27,6 +27,7 @@ import {
   ToolNames,
   buildAvailableSkillsReminder,
   isSkillListingReminder,
+  isContextFilesReminder,
   computeThresholds,
   getStartupContextLength,
   isMediaPolicyToolHiddenFromModel,
@@ -87,29 +88,31 @@ function extensionContextFileOwners(
 
 /**
  * Parse concatenated memory content into individual file entries.
- * Memory content format: "--- Context from: <path> ---\n<content>\n--- End of Context from: <path> ---"
+ * Context and baseline-rule blocks carry matching source-path markers.
  */
 function parseMemoryFiles(
   memoryContent: string,
   workingDir: string,
+  projectRoot: string,
   extensionOwners: ReadonlyMap<string, string> = new Map(),
 ): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
-  // Use backreference (\1) to ensure start/end path markers match
+  // Both the marker kind and the path must match at the end of a block.
   const regex =
-    /--- Context from: (.+?) ---\n([\s\S]*?)--- End of Context from: \1 ---/g;
+    /--- (Context|Rule) from: (.+?) ---\n([\s\S]*?)--- End of \1 from: \2 ---/g;
   let match: RegExpExecArray | null;
 
   while ((match = regex.exec(memoryContent)) !== null) {
-    const filePath = match[1]!;
-    const content = match[2]!;
-    // Marker paths are relative to the session working directory (where
-    // memory discovery ran, which may differ from process.cwd() in
-    // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
-    // global memory files don't render as `../../..` chains.
-    const absolutePath = path.resolve(workingDir, filePath);
+    const filePath = match[2]!;
+    const content = match[3]!;
+    // Context discovery uses the session working directory; rule formatting
+    // uses the project root, which can be above it.
+    const absolutePath = path.resolve(
+      match[1] === 'Rule' ? projectRoot : workingDir,
+      filePath,
+    );
     const owner = extensionOwners.get(absolutePath);
     results.push({
       // An extension's file is named by its extension rather than by a path
@@ -129,6 +132,38 @@ function parseMemoryFiles(
   }
 
   return results;
+}
+
+function measureContextFileReminders(
+  history: Content[],
+  preludeLength: number,
+  workingDir: string,
+  projectRoot: string,
+  extensionOwners: ReadonlyMap<string, string>,
+): { tokens: number; files: ContextMemoryDetail[] } {
+  let tokens = 0;
+  const files: ContextMemoryDetail[] = [];
+  for (const [index, content] of history.entries()) {
+    if (content.role !== 'user') continue;
+    for (const part of content.parts ?? []) {
+      if (typeof part.text !== 'string' || !isContextFilesReminder(part.text)) {
+        continue;
+      }
+      tokens += estimateContextTextTokens(part.text);
+      const location = t(
+        index < preludeLength ? 'Startup context' : 'Messages',
+      );
+      for (const file of parseMemoryFiles(
+        part.text,
+        workingDir,
+        projectRoot,
+        extensionOwners,
+      )) {
+        files.push({ ...file, path: `${location}: ${file.path}` });
+      }
+    }
+  }
+  return { tokens, files };
 }
 
 /** Inverse of core's `escapeXml`; `&amp;` is decoded last. */
@@ -225,7 +260,7 @@ function measureTailSkillListings(conversation: Content[]): {
 
 interface StartupPreludeCost {
   skillListing: SkillListingCost;
-  /** Prelude text outside the skill listing (environment context, MCP server instructions, deferred-tools reminder). */
+  /** Prelude text outside separately attributed skill and context-file reminders. */
   startupContextTokens: number;
 }
 
@@ -237,6 +272,8 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
       if (typeof part.text !== 'string') continue;
       if (isSkillListingReminder(part.text)) {
         mergeSkillListing(skillListing, measureSkillListing(part.text));
+      } else if (content.role === 'user' && isContextFilesReminder(part.text)) {
+        continue;
       } else {
         startupContextTokens += estimateContextTextTokens(part.text);
       }
@@ -323,7 +360,8 @@ interface ConversationBilling {
 /**
  * Content estimate of the conversation after the startup prelude. A part whose
  * cost another category already owns is skipped here: tracked skill bodies and
- * tail skill-listing reminders are both billed under `skills`. Top-level media
+ * tail skill-listing reminders are billed under `skills`, and instruction
+ * reminders under `memoryFiles`. Top-level media
  * is charged at the same flat per-image budget as the nested carrier: a pasted
  * screenshot is the ordinary shape, and leaving it uncounted would hide it from
  * `freeSpace` and `tierTokens`, which read this estimate.
@@ -339,6 +377,8 @@ function estimateConversationTokens(
     for (const part of content.parts ?? []) {
       if (typeof part.text === 'string') {
         if (billing.billedListingTexts.has(part.text)) continue;
+        if (content.role === 'user' && isContextFilesReminder(part.text))
+          continue;
         tokens += estimateContextTextTokens(part.text);
       } else if (part.inlineData || part.fileData) {
         tokens += billing.imageTokenEstimate;
@@ -455,12 +495,28 @@ export async function collectContextData(
     }
   }
 
-  const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(
-    memoryContent,
+  const extensionOwners = extensionContextFileOwners(
+    config,
     config.getWorkingDir(),
-    extensionContextFileOwners(config, config.getWorkingDir()),
   );
+  const contextFiles = measureContextFileReminders(
+    history,
+    preludeLength,
+    config.getWorkingDir(),
+    config.getProjectRoot(),
+    extensionOwners,
+  );
+  const memoryFiles = activeChat
+    ? contextFiles.files
+    : parseMemoryFiles(
+        config.getUserMemory(),
+        config.getWorkingDir(),
+        config.getProjectRoot(),
+        extensionOwners,
+      );
+  let memoryFilesTokens = activeChat
+    ? contextFiles.tokens
+    : memoryFiles.reduce((sum, file) => sum + file.tokens, 0);
   const autoMemoryPrompt = [
     config.getAutoMemoryPrompt(),
     config.getAutoMemoryContext?.() ?? '',
@@ -468,12 +524,13 @@ export async function collectContextData(
     .filter(Boolean)
     .join('\n\n');
   if (autoMemoryPrompt) {
+    const tokens = estimateContextTextTokens(autoMemoryPrompt);
     memoryFiles.push({
       path: t('auto memory'),
-      tokens: estimateContextTextTokens(autoMemoryPrompt),
+      tokens,
     });
+    memoryFilesTokens += tokens;
   }
-  const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
   const skillToolDefinitionTokens = skillTool

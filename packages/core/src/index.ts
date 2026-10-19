@@ -706,6 +706,7 @@ export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
 export * from './core/environmentContext.js';
+export * from './core/context-files.js';
 export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';

@@ -670,8 +670,8 @@ describe('Hosted Harness model boundary', () => {
       }),
     ).resolves.toMatchObject({ text: 'answer' });
     expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
-    // setUserMemory only writes the field; without the refresh the cached
-    // system instruction still carries the pre-injection prompt.
+    // The initial tool snapshot still binds the system prompt. Context is
+    // available to the client's reminder synchronization before the request.
     expect(order).toEqual(['initialize', 'inject', 'refresh', 'request']);
   });
 
@@ -748,13 +748,7 @@ describe('Hosted Harness model boundary', () => {
     ).resolves.toMatchObject({ text: 'done', model: 'test-model' });
     expect(toolTurn.execute).toHaveBeenCalledOnce();
     expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
-    expect(order).toEqual([
-      'refresh',
-      'request',
-      'inject',
-      'refresh',
-      'request',
-    ]);
+    expect(order).toEqual(['refresh', 'request', 'inject', 'request']);
   });
 
   it('refreshes changed tool names and context together without refreshing for reordered names', async () => {

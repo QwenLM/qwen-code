@@ -74,6 +74,10 @@ import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
 import { truncateWorkflowText } from '../../agents/workflow-result-format.js';
 import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
+  ensureCurrentContextFiles,
+  getContextFileSnapshot,
+} from '../../core/context-files.js';
+import {
   childLaunchDepth,
   getCurrentAgentConfiguredToolAllowlist,
   getCurrentAgentDisallowedTools,
@@ -2115,6 +2119,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let toolConfig: ToolConfig;
 
     if (generationConfig?.systemInstruction) {
+      initialMessages = ensureCurrentContextFiles(
+        initialMessages ?? [],
+        getContextFileSnapshot(this.config),
+      );
       // Keep the parent's current allowlist, but pass names rather than inline
       // schemas so AgentCore resolves every declaration through the fork's
       // current ToolRegistry. This preserves the parent's tool surface and

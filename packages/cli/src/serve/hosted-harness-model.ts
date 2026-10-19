@@ -376,8 +376,6 @@ export async function runHostedHarnessTextTurn(input: {
       config.getEffectiveInputModalities().image !== true
     )
       throw new HostedImageInputUnsupportedError();
-    if (input.agentInstructions || input.skills)
-      await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
       ? createHostedPromptHookRunner(config, input.modelScope)
@@ -588,9 +586,7 @@ export async function runHostedHarnessTextTurn(input: {
           config.setUserMemory(contextAvailable ?? '');
           injectedContext = contextAvailable;
         }
-        // Config changes alone do not update the chat's cached instruction.
-        if (toolsChanged || contextChanged)
-          await client.refreshSystemInstruction();
+        if (toolsChanged) await client.refreshSystemInstruction();
       }
       let calls: ToolCallRequestInfo[] = [];
       let text = '';

@@ -160,6 +160,7 @@ Also visible.
       // here rather than being hidden from it (#12030).
       expect(result).toEqual({
         content: '',
+        baselineRules: [],
         ruleCount: 0,
         conditionalRules: [],
         ignoredExtensionRules: [],
@@ -174,6 +175,14 @@ Also visible.
       const result = await loadRules(projectRoot, true);
       expect(result.ruleCount).toBe(1);
       expect(result.content).toContain('Always write tests.');
+      expect(result.baselineRules).toEqual([
+        {
+          filePath: path.join(projectRoot, QWEN_DIR, 'rules', 'general.md'),
+          description: 'General',
+          paths: undefined,
+          content: 'Always write tests.',
+        },
+      ]);
       expect(result.conditionalRules).toEqual([]);
     });
 
@@ -185,6 +194,7 @@ Also visible.
       const result = await loadRules(projectRoot, true);
       expect(result.ruleCount).toBe(0);
       expect(result.content).toBe('');
+      expect(result.baselineRules).toEqual([]);
       expect(result.conditionalRules).toHaveLength(1);
       expect(result.conditionalRules[0].content).toBe('Use hooks.');
     });
@@ -199,6 +209,14 @@ Also visible.
       const result = await loadRules(projectRoot, true);
       expect(result.ruleCount).toBe(1);
       expect(result.content).toContain('Write clean code.');
+      expect(result.baselineRules).toEqual([
+        {
+          filePath: path.join(projectRoot, QWEN_DIR, 'rules', '01-general.md'),
+          description: undefined,
+          paths: undefined,
+          content: 'Write clean code.',
+        },
+      ]);
       expect(result.conditionalRules).toHaveLength(2);
     });
 

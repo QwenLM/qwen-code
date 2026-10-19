@@ -8648,8 +8648,10 @@ describe('AppContainer State Management', () => {
     });
 
     it('performMemoryRefresh anchors on config.getWorkingDir() and updates contextFilePaths', async () => {
+      const contextFiles = [{ path: '/custom/QWEN.md', content: 'content' }];
       mockLoadHierarchicalMemory.mockResolvedValue({
         memoryContent: 'content',
+        contextFiles,
         fileCount: 1,
         contextFilePaths: ['/custom/QWEN.md'],
         conditionalRules: [],
@@ -8677,6 +8679,7 @@ describe('AppContainer State Management', () => {
         mockConfig,
         'setContextFilePaths',
       );
+      const setUserMemorySpy = vi.spyOn(mockConfig, 'setUserMemory');
 
       render(
         <AppContainer
@@ -8710,6 +8713,7 @@ describe('AppContainer State Management', () => {
         expect.objectContaining({ extensionRuleSources }),
       );
       expect(setContextFilePathsSpy).toHaveBeenCalledWith(['/custom/QWEN.md']);
+      expect(setUserMemorySpy).toHaveBeenCalledWith('content', contextFiles);
     });
   });
 

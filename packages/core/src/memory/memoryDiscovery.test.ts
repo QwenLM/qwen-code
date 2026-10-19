@@ -58,6 +58,14 @@ describe('loadServerHierarchicalMemory', () => {
     return path.resolve(testRootDir, fullPath);
   }
 
+  function contextFile(filePath: string, content: string) {
+    const source = path.relative(cwd, filePath);
+    return {
+      path: filePath,
+      content: `--- Context from: ${source} ---\n${content}\n--- End of Context from: ${source} ---`,
+    };
+  }
+
   beforeEach(async () => {
     testRootDir = await fsPromises.mkdtemp(
       path.join(os.tmpdir(), 'folder-structure-test-'),
@@ -145,6 +153,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: '',
+      contextFiles: [],
       fileCount: 0,
       contextFilePaths: [],
       ruleCount: 0,
@@ -184,6 +193,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: '',
+      contextFiles: [],
       fileCount: 0,
       contextFilePaths: [],
       ruleCount: 0,
@@ -224,6 +234,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, explicitContextFile)} ---\nexplicit context\n--- End of Context from: ${path.relative(cwd, explicitContextFile)} ---`,
+      contextFiles: [contextFile(explicitContextFile, 'explicit context')],
       fileCount: 1,
       contextFilePaths: [path.relative(cwd, explicitContextFile)],
       ruleCount: 0,
@@ -248,6 +259,9 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---`,
+      contextFiles: [
+        contextFile(defaultContextFile, 'default context content'),
+      ],
       fileCount: 1,
       contextFilePaths: [
         path.join('~', path.relative(homedir, defaultContextFile)),
@@ -277,6 +291,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, customContextFile)} ---\ncustom context content\n--- End of Context from: ${path.relative(cwd, customContextFile)} ---`,
+      contextFiles: [contextFile(customContextFile, 'custom context content')],
       fileCount: 1,
       contextFilePaths: [
         path.join('~', path.relative(homedir, customContextFile)),
@@ -310,6 +325,10 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, projectContextFile)} ---\nproject context content\n--- End of Context from: ${path.relative(cwd, projectContextFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdContextFile)} ---\ncwd context content\n--- End of Context from: ${path.relative(cwd, cwdContextFile)} ---`,
+      contextFiles: [
+        contextFile(projectContextFile, 'project context content'),
+        contextFile(cwdContextFile, 'cwd context content'),
+      ],
       fileCount: 2,
       contextFilePaths: [
         path.relative(cwd, projectContextFile),
@@ -342,6 +361,9 @@ describe('loadServerHierarchicalMemory', () => {
     // Only upward traversal is performed, subdirectory files are not loaded
     expect(result).toEqual({
       memoryContent: `--- Context from: ${customFilename} ---\nCWD custom memory\n--- End of Context from: ${customFilename} ---`,
+      contextFiles: [
+        contextFile(path.join(cwd, customFilename), 'CWD custom memory'),
+      ],
       fileCount: 1,
       contextFilePaths: [customFilename],
       ruleCount: 0,
@@ -370,6 +392,10 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, srcMemoryFile)} ---\nSrc directory memory\n--- End of Context from: ${path.relative(cwd, srcMemoryFile)} ---`,
+      contextFiles: [
+        contextFile(projectRootMemoryFile, 'Project root memory'),
+        contextFile(srcMemoryFile, 'Src directory memory'),
+      ],
       fileCount: 2,
       contextFilePaths: [
         path.relative(cwd, projectRootMemoryFile),
@@ -402,6 +428,9 @@ describe('loadServerHierarchicalMemory', () => {
     // Subdirectory files are not loaded, only CWD and upward
     expect(result).toEqual({
       memoryContent: `--- Context from: ${DEFAULT_CONTEXT_FILENAME} ---\nCWD memory\n--- End of Context from: ${DEFAULT_CONTEXT_FILENAME} ---`,
+      contextFiles: [
+        contextFile(path.join(cwd, DEFAULT_CONTEXT_FILENAME), 'CWD memory'),
+      ],
       fileCount: 1,
       contextFilePaths: [DEFAULT_CONTEXT_FILENAME],
       ruleCount: 0,
@@ -443,6 +472,12 @@ describe('loadServerHierarchicalMemory', () => {
     // Subdirectory files are not loaded, only global and upward from CWD
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---\n\n--- Context from: ${path.relative(cwd, rootMemoryFile)} ---\nProject parent memory\n--- End of Context from: ${path.relative(cwd, rootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdMemoryFile)} ---\nCWD memory\n--- End of Context from: ${path.relative(cwd, cwdMemoryFile)} ---`,
+      contextFiles: [
+        contextFile(defaultContextFile, 'default context content'),
+        contextFile(rootMemoryFile, 'Project parent memory'),
+        contextFile(projectRootMemoryFile, 'Project root memory'),
+        contextFile(cwdMemoryFile, 'CWD memory'),
+      ],
       fileCount: 4,
       contextFilePaths: [
         path.join('~', path.relative(homedir, defaultContextFile)),
@@ -531,6 +566,9 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, extensionFilePath)} ---\nExtension memory content\n--- End of Context from: ${path.relative(cwd, extensionFilePath)} ---`,
+      contextFiles: [
+        contextFile(extensionFilePath, 'Extension memory content'),
+      ],
       fileCount: 1,
       contextFilePaths: [path.relative(cwd, extensionFilePath)],
       ruleCount: 0,
@@ -560,6 +598,71 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result.contextFilePaths).toEqual([
       path.relative(cwd, extensionFilePath),
     ]);
+    expect(result.contextFiles).toEqual([
+      contextFile(extensionFilePath, 'Extension custom context content'),
+    ]);
+  });
+
+  it('keeps extension, output-language and baseline rule snapshots distinct across reloads', async () => {
+    await createEmptyDir(path.join(projectRoot, '.git'));
+    const extensionFile = await createTestFile(
+      path.join(testRootDir, 'extensions/ext1/context.md'),
+      'Extension instructions',
+    );
+    const languageFile = await createTestFile(
+      path.join(homedir, QWEN_DIR, 'output-language.md'),
+      'Respond in Japanese.',
+    );
+    const baselineFile = await createTestFile(
+      path.join(projectRoot, QWEN_DIR, 'rules', 'baseline.md'),
+      '---\ndescription: Testing\n---\nRun tests.',
+    );
+    const conditionalFile = await createTestFile(
+      path.join(projectRoot, QWEN_DIR, 'rules', 'conditional.md'),
+      '---\npaths: "**/*.ts"\n---\nUse strict types.',
+    );
+    const load = () =>
+      loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [extensionFile, languageFile],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+    const loaded = await load();
+    const expected = [
+      contextFile(extensionFile, 'Extension instructions'),
+      contextFile(languageFile, 'Respond in Japanese.'),
+      {
+        path: baselineFile,
+        content:
+          '--- Rule from: .qwen/rules/baseline.md ---\nRun tests.\n--- End of Rule from: .qwen/rules/baseline.md ---',
+      },
+    ];
+    expect(loaded.contextFiles).toEqual(expected);
+    expect(loaded.memoryContent).toBe(
+      expected.map((file) => file.content).join('\n\n'),
+    );
+    expect(loaded.ruleCount).toBe(1);
+    expect(loaded.conditionalRules.map((rule) => rule.filePath)).toEqual([
+      conditionalFile,
+    ]);
+
+    await fsPromises.unlink(extensionFile);
+    await fsPromises.unlink(baselineFile);
+    await fsPromises.writeFile(languageFile, 'Respond in French.');
+    const reloaded = await load();
+    expect(reloaded.contextFiles).toEqual([
+      contextFile(languageFile, 'Respond in French.'),
+    ]);
+    expect(reloaded.memoryContent).toBe(reloaded.contextFiles[0].content);
+    expect(reloaded.ruleCount).toBe(0);
+
+    await fsPromises.writeFile(languageFile, ' \n\t ');
+    const empty = await load();
+    expect(empty.contextFiles).toEqual([]);
+    expect(empty.memoryContent).toBe('');
   });
 
   it('counts but does not announce whitespace-only context files', async () => {
@@ -578,6 +681,7 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result.fileCount).toBe(1);
     expect(result.memoryContent).toBe('');
     expect(result.contextFilePaths).toEqual([]);
+    expect(result.contextFiles).toEqual([]);
   });
 
   it('notifies when startup instruction files are loaded', async () => {
@@ -716,7 +820,7 @@ describe('loadServerHierarchicalMemory', () => {
     );
     const notifications: InstructionsLoadedNotification[] = [];
 
-    await loadServerHierarchicalMemory(
+    const result = await loadServerHierarchicalMemory(
       cwd,
       [],
       new FileDiscoveryService(projectRoot),
@@ -752,6 +856,28 @@ describe('loadServerHierarchicalMemory', () => {
     ).toBeGreaterThan(
       notifications.findIndex((item) => item.filePath === importedFile),
     );
+    expect(result.contextFiles).toEqual([
+      contextFile(
+        projectFile,
+        'project context <!-- Imported from: ./included.md -->\nincluded content\n<!-- End of import from: ./included.md -->',
+      ),
+    ]);
+    expect(result.memoryContent).toBe(result.contextFiles[0].content);
+
+    await fsPromises.writeFile(importedFile, 'updated included content');
+    const updated = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+    );
+    expect(updated.contextFiles).toEqual([
+      contextFile(
+        projectFile,
+        'project context <!-- Imported from: ./included.md -->\nupdated included content\n<!-- End of import from: ./included.md -->',
+      ),
+    ]);
   });
 
   it('inherits memory type from the importing instruction file', async () => {
@@ -975,6 +1101,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     expect(result).toEqual({
       memoryContent: `--- Context from: ${path.relative(cwd, includedFile)} ---\nincluded directory memory\n--- End of Context from: ${path.relative(cwd, includedFile)} ---`,
+      contextFiles: [contextFile(includedFile, 'included directory memory')],
       fileCount: 1,
       contextFilePaths: [path.relative(cwd, includedFile)],
       ruleCount: 0,

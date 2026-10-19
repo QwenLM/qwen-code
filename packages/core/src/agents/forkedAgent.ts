@@ -43,6 +43,10 @@ import {
 } from './runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { LlmChat, StreamEventType } from '../core/llm-chat.js';
+import {
+  ensureCurrentContextFiles,
+  getContextFileSnapshot,
+} from '../core/context-files.js';
 import { FunctionCallingConfigMode } from '../core/genai-compat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
@@ -235,7 +239,7 @@ export function createForkedChat(
       // and it doesn't affect the cache prefix.
       thinkingConfig: { includeThoughts: false },
     },
-    [...history],
+    ensureCurrentContextFiles([...history], getContextFileSnapshot(config)),
     undefined, // no chatRecordingService
     undefined, // no telemetryService
   );

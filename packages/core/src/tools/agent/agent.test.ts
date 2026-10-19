@@ -47,6 +47,7 @@ import type {
 } from '../../agents/runtime/agent-events.js';
 import { partToString } from '../../utils/partUtils.js';
 import { AuthType } from '../../core/contentGenerator.js';
+import { buildContextFilesReminder } from '../../core/context-files.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
 import {
@@ -349,6 +350,8 @@ describe('AgentTool', () => {
       stop: vi.fn().mockResolvedValue(undefined),
     };
     config = {
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getContextFiles: vi.fn().mockReturnValue(undefined),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getCwd: vi.fn().mockReturnValue('/test/project'),
@@ -3353,6 +3356,76 @@ describe('AgentTool', () => {
       expect(getHistoryShallow).toHaveBeenCalledWith(true);
       // Seeded verbatim: it ends on model text, so no synthetic ack.
       expectSeed(h.all());
+    });
+
+    it.each(['1', 'all'] as const)(
+      'appends current instructions after selecting the %s fork history',
+      async (forkTurns) => {
+        const h = history();
+        const old = [{ path: '/project/QWEN.md', content: 'old rules' }];
+        const current = [
+          { path: '/project/QWEN.md', content: 'current rules' },
+        ];
+        const startup = userText(buildContextFilesReminder(old)!);
+        const parentHistory = [startup, ...h.all().slice(1)];
+        vi.mocked(config.getUserMemory).mockReturnValue('current rules');
+        vi.mocked(config.getContextFiles).mockReturnValue(current);
+        llmClient({
+          getHistoryShallow: vi.fn().mockReturnValue(parentHistory),
+          getHistoryForForkWindow: vi.fn().mockReturnValue(h.all().slice(1)),
+          ...chatWith({ systemInstruction: 'parent system' }),
+        });
+
+        await runFork(forkParams('some task', { fork_turns: forkTurns }));
+
+        expectSeed([
+          ...(forkTurns === 'all'
+            ? parentHistory
+            : [startup, h.secondUser, h.secondModel]),
+          userText(buildContextFilesReminder(current)!),
+        ]);
+        expect(createArgs()?.[2]).toMatchObject({
+          renderedSystemPrompt: 'parent system',
+        });
+      },
+    );
+
+    it('retires removed instructions without dropping repaired fork tool responses', async () => {
+      const oldReminder = userText(
+        buildContextFilesReminder([
+          { path: '/project/QWEN.md', content: 'removed rules' },
+        ])!,
+      );
+      llmClient({
+        getHistoryShallow: vi
+          .fn()
+          .mockReturnValue([
+            oldReminder,
+            userText('launch fork'),
+            content(
+              'model',
+              fnCall(
+                'agent',
+                { subagent_type: 'fork', prompt: 'inspect' },
+                'fork-call',
+              ),
+            ),
+          ]),
+        ...chatWith({ systemInstruction: 'parent system' }),
+      });
+
+      await runFork(forkParams('some task', { fork_turns: 'all' }));
+
+      const seeded = createArgs()?.[2].initialMessages ?? [];
+      expect(seeded.at(-1)).toEqual(userText(buildContextFilesReminder([])!));
+      expect(
+        seeded.some((entry) =>
+          entry.parts?.some(
+            (part) => part.functionResponse?.id === 'fork-call',
+          ),
+        ),
+      ).toBe(true);
+      expect(seeded.at(-2)?.role).toBe('model');
     });
 
     it("does not seed a fork with its siblings' directives", async () => {

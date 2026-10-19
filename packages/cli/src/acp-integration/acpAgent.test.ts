@@ -729,23 +729,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   runManagedRememberByAgent: mockRunManagedRememberByAgent,
   runManagedAutoMemoryDream: mockRunManagedAutoMemoryDream,
   refreshMemoryInstruction: vi.fn(
-    async (config: {
-      refreshHierarchicalMemory?: () => Promise<void>;
-      getLlmClient?: () =>
-        | { refreshSystemInstruction?: () => Promise<void> }
-        | undefined;
-    }) => {
-      try {
-        await config.refreshHierarchicalMemory?.();
-      } catch {
-        // Best-effort, matching the real helper.
-      }
-      try {
-        await config.getLlmClient?.()?.refreshSystemInstruction?.();
-      } catch {
-        // Best-effort, matching the real helper.
-      }
-    },
+    (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
+      .refreshMemoryInstruction,
   ),
   clearCachedCredentialFile: vi.fn(),
   getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
@@ -5645,6 +5630,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     let providers: ReturnType<Config['getModelProvidersConfig']>;
     let protocols: ReturnType<Config['getProviderProtocolConfig']> = {};
     return {
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       initialize: vi.fn().mockResolvedValue(undefined),
       shutdown: vi.fn().mockResolvedValue(undefined),
       closeSessionWriter: vi.fn().mockResolvedValue(undefined),
@@ -15183,7 +15169,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       touchedScopes: ['project'],
     });
     expect(sessionRefreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-    expect(sessionRefreshSystemInstruction).toHaveBeenCalledTimes(1);
+    expect(sessionRefreshSystemInstruction).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -15343,7 +15329,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       touchedScopes: ['project'],
     });
     expect(sessionRefreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-    expect(sessionRefreshSystemInstruction).toHaveBeenCalledTimes(1);
+    expect(sessionRefreshSystemInstruction).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -33756,10 +33742,9 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(cfgB.refreshHierarchicalMemory).toHaveBeenCalled();
     expect(cfgC.refreshHierarchicalMemory).toHaveBeenCalled();
 
-    // All sessions' system instruction refreshed
-    expect(cfgA.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
-    expect(cfgB.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
-    expect(cfgC.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgA.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
+    expect(cfgB.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
+    expect(cfgC.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
 
     // Session C registered the global path
     expect(cfgC.setOutputLanguageFilePath).toHaveBeenCalled();
@@ -33938,7 +33923,9 @@ describe('sessionLanguage multi-session propagation', () => {
     // Both sessions still refreshed despite cfgFail's write failure
     expect(cfgOk.refreshHierarchicalMemory).toHaveBeenCalled();
     expect(cfgFail.refreshHierarchicalMemory).toHaveBeenCalled();
-    expect(cfgFail.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(
+      cfgFail.getLlmClient().refreshSystemInstruction,
+    ).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -36707,7 +36694,7 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(result).toEqual({ language: 'zh', sessions: 2, failed: 1 });
     expect(cfgA.refreshHierarchicalMemory).toHaveBeenCalled();
     expect(cfgB.refreshHierarchicalMemory).toHaveBeenCalled();
-    expect(cfgA.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgA.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
     expect(cfgB.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
     // Unlike the session-scoped route, project-bound output-language files
     // stay untouched: cfgA keeps its project override.

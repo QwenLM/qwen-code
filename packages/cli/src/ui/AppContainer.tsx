@@ -2399,6 +2399,7 @@ export const AppContainer = (props: AppContainerProps) => {
     try {
       const {
         memoryContent,
+        contextFiles,
         fileCount,
         contextFilePaths,
         conditionalRules,
@@ -2422,7 +2423,7 @@ export const AppContainer = (props: AppContainerProps) => {
         },
       );
 
-      config.setUserMemory(memoryContent);
+      config.setUserMemory(memoryContent, contextFiles);
       config.setMemoryFileCount(fileCount);
       config.setContextFilePaths(contextFilePaths);
       config.setConditionalRulesRegistry(

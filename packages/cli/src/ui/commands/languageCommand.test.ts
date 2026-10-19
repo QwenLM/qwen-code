@@ -627,15 +627,8 @@ describe('languageCommand', () => {
       );
 
       expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-      expect(getLlmClient).toHaveBeenCalledTimes(1);
-      expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
-      // Memory MUST be refreshed before the system instruction is rebuilt;
-      // otherwise the new instruction would be built from stale userMemory
-      // and the language switch would silently fail to take effect.
-      const memoryOrder = refreshHierarchicalMemory.mock.invocationCallOrder[0];
-      const instructionOrder =
-        refreshSystemInstruction.mock.invocationCallOrder[0];
-      expect(memoryOrder).toBeLessThan(instructionOrder);
+      expect(getLlmClient).not.toHaveBeenCalled();
+      expect(refreshSystemInstruction).not.toHaveBeenCalled();
       // The success message no longer asks the user to restart.
       expect(result).toEqual({
         type: 'message',

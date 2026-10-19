@@ -53,8 +53,9 @@ export interface ExtensionRuleSource {
 }
 
 export interface LoadRulesResponse {
-  /** Formatted baseline rules (no `paths:`) for the system prompt. */
+  /** Formatted baseline rules (no `paths:`). */
   content: string;
+  baselineRules: RuleFile[];
   /** Number of baseline rules injected at session start. */
   ruleCount: number;
   /** Conditional rules (with `paths:`) for turn-level lazy injection. */
@@ -405,6 +406,7 @@ export async function loadRules(
 
   return {
     content,
+    baselineRules,
     ruleCount: baselineRules.length,
     conditionalRules,
     ignoredExtensionRules,

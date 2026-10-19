@@ -148,12 +148,17 @@ export async function refreshMemoryInstruction(
   config: Config,
   options?: Pick<RefreshMemoryAfterWriteOptions, 'logContext'>,
 ): Promise<void> {
+  const previousPolicy = config.getAutoMemoryPrompt();
   try {
     await config.refreshHierarchicalMemory();
   } catch (err) {
     debugLogger.warn(
       `${logPrefix(options)}refreshHierarchicalMemory failed: ${err}`,
     );
+  }
+
+  if (config.getAutoMemoryPrompt() === previousPolicy) {
+    return;
   }
 
   try {

@@ -40,6 +40,7 @@ function createConfig(projectRoot: string, managed = true): Config {
   return {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
+    getAutoMemoryPrompt: vi.fn().mockReturnValue('unchanged memory policy'),
     refreshHierarchicalMemory: vi.fn().mockResolvedValue(undefined),
     getLlmClient: vi.fn().mockReturnValue({
       refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
@@ -57,9 +58,7 @@ const writeFile = (file_path: string, status = 'success') =>
 
 function expectRefreshedOnce(config: Config) {
   expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-  expect(config.getLlmClient().refreshSystemInstruction).toHaveBeenCalledTimes(
-    1,
-  );
+  expect(config.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
 }
 
 function expectNotRefreshed(config: Config) {
@@ -204,7 +203,7 @@ describe('managed memory refresh helper', () => {
     expectRefreshedOnce(config);
   });
 
-  it('keeps refreshing the system instruction when hierarchical refresh fails', async () => {
+  it('does not rewrite an unchanged policy when hierarchical refresh fails', async () => {
     const config = createConfig(projectRoot);
     vi.mocked(config.refreshHierarchicalMemory).mockRejectedValueOnce(
       new Error('hierarchical refresh failed'),
@@ -213,6 +212,42 @@ describe('managed memory refresh helper', () => {
     await expect(refreshMemoryInstruction(config)).resolves.toBeUndefined();
 
     expectRefreshedOnce(config);
+  });
+
+  it('refreshes the system instruction only when the memory policy changes', async () => {
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getAutoMemoryPrompt)
+      .mockReturnValueOnce('old policy')
+      .mockReturnValue('new policy');
+
+    await refreshMemoryInstruction(config);
+
+    expect(config.refreshHierarchicalMemory).toHaveBeenCalledOnce();
+    expect(
+      config.getLlmClient().refreshSystemInstruction,
+    ).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(config.refreshHierarchicalMemory).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(config.getLlmClient().refreshSystemInstruction).mock
+        .invocationCallOrder[0],
+    );
+  });
+
+  it('still binds a changed policy after a later hierarchical refresh failure', async () => {
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getAutoMemoryPrompt)
+      .mockReturnValueOnce('old policy')
+      .mockReturnValue('');
+    vi.mocked(config.refreshHierarchicalMemory).mockRejectedValueOnce(
+      new Error('later refresh failed'),
+    );
+
+    await expect(refreshMemoryInstruction(config)).resolves.toBeUndefined();
+
+    expect(
+      config.getLlmClient().refreshSystemInstruction,
+    ).toHaveBeenCalledOnce();
   });
 
   it('returns false without refreshing when managed memory is unavailable', async () => {

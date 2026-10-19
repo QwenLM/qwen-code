@@ -31,6 +31,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from './environmentContext.js';
 import { prependToFirstTextPart } from '../utils/partUtils.js';
+import { buildContextFilesReminder } from './context-files.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -316,6 +317,96 @@ describe('getInitialChatHistory', () => {
     expect(history).toHaveLength(2);
     expect(firstText(history)).toContain(SYSTEM_REMINDER_OPEN);
     expect(history[1]).toBe(extraHistory[0]);
+  });
+
+  it('places opted-in instructions first even when environment context is disabled', async () => {
+    skipStartupContext();
+    const contextFiles = [
+      { path: '/project/QWEN.md', content: 'PROJECT_RULE' },
+    ];
+    const [history] = await getInitialChatHistory(
+      mockConfig as Config,
+      undefined,
+      {
+        contextFiles,
+        gitStatus: 'GIT_SNAPSHOT',
+      },
+    );
+    expect(history).toHaveLength(1);
+    expect(history[0]?.parts?.map((part) => part.text)).toEqual([
+      buildContextFilesReminder(contextFiles),
+      wrapSystemReminder('GIT_SNAPSHOT'),
+    ]);
+    expect(getStartupContextLength(history)).toBe(1);
+    expect(stripStartupContext(history)).toEqual([]);
+  });
+
+  it('replaces restored instructions and updates without deleting mixed user or tool parts', async () => {
+    skipStartupContext();
+    const old = [{ path: '/project/QWEN.md', content: 'OLD_RULE' }];
+    const current = [{ path: '/project/QWEN.md', content: 'CURRENT_RULE' }];
+    const call = fnCall('read_file', { path: 'file' }, 'call-1');
+    const response = fnResponse('read_file', { output: 'ok' }, 'call-1');
+    const extraHistory: Content[] = [
+      userText(buildContextFilesReminder(old)!),
+      modelText('earlier answer'),
+      { role: 'model', parts: [call] },
+      {
+        role: 'user',
+        parts: [
+          response,
+          { text: buildContextFilesReminder([], old)! },
+          { text: 'continue' },
+        ],
+      },
+    ];
+    const [history] = await getInitialChatHistory(
+      mockConfig as Config,
+      extraHistory,
+      { contextFiles: current },
+    );
+    expect(firstText(history)).toContain('CURRENT_RULE');
+    expect(JSON.stringify(history)).not.toContain('OLD_RULE');
+    expect(JSON.stringify(history)).not.toContain(
+      'Instructions no longer present',
+    );
+    expect(history.slice(1)).toEqual([
+      extraHistory[1],
+      extraHistory[2],
+      { role: 'user', parts: [response, { text: 'continue' }] },
+    ]);
+  });
+
+  it('revokes old files on empty resume and leaves non-opted-in consumers unchanged', async () => {
+    skipStartupContext();
+    const previous = [
+      userText(
+        buildContextFilesReminder([{ path: '/QWEN.md', content: 'OLD' }])!,
+      ),
+    ];
+    const [restored] = await getInitialChatHistory(
+      mockConfig as Config,
+      previous,
+      { contextFiles: [] },
+    );
+    expect(firstText(restored)).toContain(
+      'No instruction files are currently loaded.',
+    );
+    expect(restored).toHaveLength(1);
+    const [subagent] = await getInitialChatHistory(
+      mockConfig as Config,
+      previous,
+    );
+    expect(subagent).toEqual(previous);
+    const [compacted] = await getInitialChatHistory(
+      mockConfig as Config,
+      [userText('summary')],
+      { contextFiles: [], announceEmptyContextFiles: true },
+    );
+    expect(firstText(compacted)).toContain(
+      'instructions from files absent here no longer apply',
+    );
+    expect(compacted[1]).toEqual(userText('summary'));
   });
 
   it('returns only extra history when skipStartupContext is true and no tool reminders exist', async () => {

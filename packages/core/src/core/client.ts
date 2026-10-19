@@ -172,6 +172,14 @@ import {
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
 import {
+  buildContextFilesReminder,
+  getContextFileSnapshot,
+  getContextFilesHistoryFingerprint,
+  getLastContextFilesReminder,
+  stripContextFilesReminders,
+  type ContextFileSnapshot,
+} from './context-files.js';
+import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
@@ -566,6 +574,8 @@ export class LlmClient {
   private pendingRemovedMcpToolNames = new Set<string>();
   private announcedMcpServerInstructions = new Map<string, string>();
   private pendingMcpServerInstructions = new Map<string, string>();
+  private announcedContextFiles: ContextFileSnapshot = [];
+  private announcedContextFilesFingerprint: string | undefined;
   private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
@@ -2048,14 +2058,13 @@ export class LlmClient {
       // fuller evidence. Stable — omni config/provider don't change
       // in-session — so it belongs inside the cached static prefix.
       mediaGuidance: buildOmniMediaGuidanceSection(this.config),
-      contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
     };
-    // Record the stable → context layers (everything before the autoMemory
+    // Record the stable layers (everything before the autoMemory
     // tail) as the cross-session-stable system prefix. The Anthropic
     // converter splits the outgoing system prompt at this boundary and puts
     // an early cache breakpoint on the stable part. Recorded on every
-    // rebuild so it tracks memory/model/mode changes; consumers match via
+    // rebuild so it tracks model/mode changes; consumers match via
     // `startsWith` and fail open when it goes stale.
     //
     // The git snapshot is deliberately not a layer here: it changes whenever
@@ -2087,17 +2096,27 @@ export class LlmClient {
     // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
     // the orphaned model-ack entry behind when re-prepending the prelude.
     const remaining = currentHistory.slice(startupLength);
+    const contextFiles = getContextFileSnapshot(this.config);
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
       undefined,
-      { gitStatus: this.getCachedGitStatus() },
+      {
+        gitStatus: this.getCachedGitStatus(),
+        contextFiles,
+        announceEmptyContextFiles:
+          !!getLastContextFilesReminder(currentHistory),
+      },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     this.getChat().setHistory(
-      startupContext ? [startupContext, ...remaining] : remaining,
+      [
+        ...(startupContext ? [startupContext] : []),
+        ...stripContextFilesReminders(remaining),
+      ],
       this.getChat().getCompletedToolCallIds(),
     );
+    this.rememberContextFiles(contextFiles);
   }
 
   /**
@@ -2127,27 +2146,33 @@ export class LlmClient {
       return;
     }
 
+    const contextFiles = getContextFileSnapshot(this.config);
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
       undefined,
-      { gitStatus: this.getCachedGitStatus() },
+      {
+        gitStatus: this.getCachedGitStatus(),
+        contextFiles,
+        announceEmptyContextFiles: true,
+      },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
       this.getChat().setHistory(
-        [startupContext, ...currentHistory],
+        [startupContext, ...stripContextFilesReminders(currentHistory)],
         this.getChat().getCompletedToolCallIds(),
       );
+      this.rememberContextFiles(contextFiles);
     }
   }
 
   /**
    * Rebuilds the main-session system instruction from the current
-   * `userMemory` / model / prompt overrides and re-binds it to the live chat.
+   * model / prompt overrides / memory policy and re-binds it to the live chat.
    *
    * Use this after mutating inputs that feed into the system instruction
-   * (e.g. user memory refreshed from `output-language.md`) so the change
+   * (e.g. output style or memory recall policy) so the change
    * takes effect on the next turn without restarting the session. No-op if
    * no chat has been started yet.
    */
@@ -2163,6 +2188,13 @@ export class LlmClient {
         this.lastSessionStartSource,
       );
     }
+  }
+
+  private rememberContextFiles(files: ContextFileSnapshot): void {
+    this.announcedContextFiles = files;
+    this.announcedContextFilesFingerprint = getContextFilesHistoryFingerprint(
+      this.getChat().getHistoryShallow?.() ?? this.getChat().getHistory(),
+    );
   }
 
   /**
@@ -2811,11 +2843,16 @@ export class LlmClient {
           (isDeferredToolBridgeAvailable(toolRegistry) &&
             deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
       );
+      const contextFiles = getContextFileSnapshot(this.config);
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
         () =>
           getInitialChatHistory(this.config, extraHistory, {
             gitStatus: this.getCachedGitStatus(),
+            contextFiles,
+            announceEmptyContextFiles:
+              sessionStartSource === SessionStartSource.Resume ||
+              sessionStartSource === SessionStartSource.Compact,
           }),
       );
       this.config
@@ -2848,6 +2885,7 @@ export class LlmClient {
       );
       chat.enableManualPlanExitNotices();
       this.chat = chat;
+      this.rememberContextFiles(contextFiles);
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`
       // never made it back into the transcript before we wrote the JSONL.
@@ -5036,9 +5074,37 @@ export class LlmClient {
       // client-side snapshot taken here would still cover the send-lock
       // and compression awaits between `turn.run` and that push.
       attachedSnapshotSource = requestToSend;
+      const contextFiles = getContextFileSnapshot(this.config);
+      const contextFingerprint = getContextFilesHistoryFingerprint(
+        this.getHistoryShallow(),
+      );
+      const contextReminder = options?.isConcurrentSideQuery
+        ? null
+        : buildContextFilesReminder(
+            contextFiles,
+            contextFingerprint === this.announcedContextFilesFingerprint
+              ? this.announcedContextFiles
+              : undefined,
+          );
+      if (contextReminder) {
+        // Keep tool results adjacent to their calls, and instructions before
+        // any new user text. Commit the snapshot only after it enters history.
+        const insertAt = requestToSend.findIndex(
+          (part) =>
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part),
+        );
+        requestToSend.splice(
+          insertAt < 0 ? requestToSend.length : insertAt,
+          0,
+          { text: contextReminder },
+        );
+      }
       pushInitiated = true;
       agentOutput.beginResponse();
       const resultStream = turn.run(model, requestToSend, signal);
+      let contextReminderObserved = false;
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
       // callIds already fed to the loop guards this attempt. Mirrors the
@@ -5052,6 +5118,17 @@ export class LlmClient {
       const loopGuardFedCallIds = new Set<string>();
       try {
         for await (const event of resultStream) {
+          if (contextReminder && !contextReminderObserved) {
+            const lastPart = getLastContextFilesReminder(
+              this.getHistoryShallow(),
+            );
+            if (lastPart?.text === contextReminder) {
+              this.announcedContextFiles = contextFiles;
+              this.announcedContextFilesFingerprint =
+                getContextFilesHistoryFingerprint(this.getHistoryShallow());
+            }
+            contextReminderObserved = true;
+          }
           const acceptsModelInput =
             event.type === LlmEventType.Content ||
             event.type === LlmEventType.Thought ||
@@ -5899,7 +5976,13 @@ export class LlmClient {
             contextFiles: this.config.getUserMemory(),
             autoMemory: this.config.getAutoMemoryPrompt(),
           })
-        : this.getMainSessionSystemInstruction();
+        : assembleSystemPrompt({
+            base: getMainSessionBaseSystemPrompt(this.config),
+            mediaGuidance: buildOmniMediaGuidanceSection(this.config),
+            contextFiles: this.config.getUserMemory(),
+            appendPrompt: this.config.getAppendSystemPrompt(),
+            autoMemory: this.config.getAutoMemoryPrompt(),
+          });
 
       const requestConfig: GenerateContentConfig = {
         abortSignal,
@@ -6037,6 +6120,10 @@ export class LlmClient {
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,
       );
+      if (this.getChat().accountForRestoredHistory(compressedHistory) > 0) {
+        info.newTokenCount = this.getChat().getLastPromptTokenCount();
+        info.newTokenCountIsEstimated = true;
+      }
       this.resetManagedAutoMemoryAfterCompression();
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context

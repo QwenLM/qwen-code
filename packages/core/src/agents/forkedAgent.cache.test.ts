@@ -23,6 +23,7 @@ import type {
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { LlmChat, StreamEventType } from '../core/llm-chat.js';
+import { buildContextFilesReminder } from '../core/context-files.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import type { RuntimeContentGeneratorView } from './runtime/agent-context.js';
 import {
@@ -229,11 +230,78 @@ describe('createForkedChat', () => {
 
     saveCacheSafeParams({ systemInstruction: 'si' }, [], 'test-model');
     const chat = createForkedChat(
-      {} as unknown as Config,
+      { getUserMemory: () => '' } as unknown as Config,
       getCacheSafeParams()!,
     );
 
     expect(chat.isForkedChat).toBe(true);
+  });
+
+  it('restores current context after the cached history window drops its earlier copy', () => {
+    vi.mocked(LlmChat).mockImplementation(() => ({}) as LlmChat);
+    const current = [{ path: '/project/QWEN.md', content: 'current rules' }];
+    const history: Content[] = [
+      userText(
+        buildContextFilesReminder([
+          { path: '/project/QWEN.md', content: 'old rules' },
+        ])!,
+      ),
+      ...Array.from({ length: 45 }, (_, index) => modelText(`reply ${index}`)),
+    ];
+    saveCacheSafeParams(
+      { systemInstruction: 'stable system' },
+      history,
+      'model',
+    );
+
+    createForkedChat(
+      {
+        getUserMemory: () => 'current rules',
+        getContextFiles: () => current,
+      } as unknown as Config,
+      getCacheSafeParams()!,
+    );
+
+    expect(vi.mocked(LlmChat).mock.calls[0][2]).toEqual([
+      ...history.slice(-40),
+      userText(buildContextFilesReminder(current)!),
+    ]);
+    expect(history).toHaveLength(46);
+  });
+
+  it('retires removed instruction files after a retained earlier snapshot', () => {
+    vi.mocked(LlmChat).mockImplementation(() => ({}) as LlmChat);
+    const history = [
+      userText(
+        buildContextFilesReminder([
+          { path: '/project/QWEN.md', content: 'removed rules' },
+        ])!,
+      ),
+      modelText('previous reply'),
+    ];
+    saveCacheSafeParams(
+      { systemInstruction: 'stable system' },
+      history,
+      'model',
+    );
+
+    createForkedChat(
+      {
+        getUserMemory: () => '',
+        getContextFiles: () => [],
+      } as unknown as Config,
+      getCacheSafeParams()!,
+    );
+
+    const seededHistory = vi.mocked(LlmChat).mock.calls[0][2]!;
+    expect(seededHistory).toEqual([
+      ...history,
+      userText(buildContextFilesReminder([])!),
+    ]);
+    expect(seededHistory.at(-1)?.parts?.[0]?.text).toContain(
+      'No instruction files are currently loaded.',
+    );
+    expect(history).toHaveLength(2);
   });
 });
 
@@ -274,7 +342,7 @@ const sentConfig = (send: ReturnType<typeof mockForkStream>) =>
 /** Runs the cache path on the saved params; `opts` override the defaults. */
 const runFork = (opts: Partial<CachePathParams> = {}) =>
   runForkedAgent({
-    config: {} as Config,
+    config: { getUserMemory: () => '' } as Config,
     userMessage: 'suggest something',
     cacheSafeParams: getCacheSafeParams()!,
     ...opts,
@@ -452,6 +520,7 @@ describe('runForkedAgent (cache path)', () => {
     );
     const send = mockForkStream([modelChunk([{ text: 'commit this' }])]);
     const mockConfig = {
+      getUserMemory: () => '',
       getModel: vi.fn().mockReturnValue(parentModel),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         model: parentModel,
@@ -505,6 +574,7 @@ describe('runForkedAgent (cache path)', () => {
     );
     const send = mockForkStream([modelChunk([{ text: 'ok' }])]);
     const mockConfig = {
+      getUserMemory: () => '',
       getModel: vi.fn().mockReturnValue('parent-model'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         model: 'parent-model',
@@ -565,7 +635,10 @@ describe('runForkedAgent (cache path)', () => {
       ]);
 
       const result = await runFork({
-        config: { getAgentExecutionBackend: () => backend } as Config,
+        config: {
+          getAgentExecutionBackend: () => backend,
+          getUserMemory: () => '',
+        } as Config,
         preserveTools: true,
       });
 

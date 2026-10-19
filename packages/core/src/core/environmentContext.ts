@@ -15,6 +15,12 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import {
+  buildContextFilesReminder,
+  getLastContextFilesReminder,
+  stripContextFilesReminders,
+  type ContextFileSnapshot,
+} from './context-files.js';
+import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
@@ -551,6 +557,10 @@ export async function buildStartupContextReminder(
 }
 
 export interface InitialChatHistoryOptions {
+  /** Main-session instructions; other consumers retain their system layer. */
+  contextFiles?: ContextFileSnapshot;
+  /** Revoke instructions retained in a restored/compacted summary. */
+  announceEmptyContextFiles?: boolean;
   includeDeferredToolsReminder?: boolean;
   // Whether to include the session-start <available_skills> snapshot. Defaults
   // to true; subagents pass false (they often run with a restricted tool list
@@ -600,12 +610,18 @@ export async function getInitialChatHistory(
     ? await buildAvailableSkillsReminder(config)
     : null;
 
-  // Stable parts first (MCP, skills, startup, git snapshot) so prefix-caching
+  // Stable parts first (instructions, MCP, skills, startup, git snapshot) so prefix-caching
   // servers retain the KV-cache for the shared prefix. The git snapshot is
   // computed once per session, so it sits with the other session-constant
   // parts. Deferred-tools is last because progressive MCP discovery can
   // change it — only the tail recomputes.
   const reminderParts = [
+    options.contextFiles !== undefined &&
+    (options.contextFiles.length > 0 ||
+      options.announceEmptyContextFiles ||
+      getLastContextFilesReminder(extraHistory ?? []))
+      ? buildContextFilesReminder(options.contextFiles)
+      : null,
     buildMcpServerInstructionsReminder(toolRegistry),
     skillsResult?.reminder ?? null,
     startupReminder,
@@ -628,7 +644,12 @@ export async function getInitialChatHistory(
         ];
 
   return [
-    [...prelude, ...(extraHistory ?? [])],
+    [
+      ...prelude,
+      ...(options.contextFiles !== undefined
+        ? stripContextFilesReminders(extraHistory ?? [])
+        : (extraHistory ?? [])),
+    ],
     skillsResult?.renderedEntries ?? [],
   ];
 }

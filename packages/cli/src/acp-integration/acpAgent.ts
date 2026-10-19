@@ -12954,7 +12954,6 @@ class QwenAgent implements Agent {
                   );
                 }
                 await cfg.refreshHierarchicalMemory();
-                await cfg.getLlmClient()?.refreshSystemInstruction();
               }),
             );
             const failedCount = results.filter(
@@ -13023,7 +13022,6 @@ class QwenAgent implements Agent {
             allSessions.map(async (s) => {
               const cfg = s.getConfig();
               await cfg.refreshHierarchicalMemory();
-              await cfg.getLlmClient()?.refreshSystemInstruction();
             }),
           );
           sessions = results.length;

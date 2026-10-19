@@ -25,6 +25,7 @@ import { serializeContextUsage } from '../../telemetry/context-usage.js';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { appendAdditionalContext } from '../toolHookTriggers.js';
 import { createContextUsageSnapshot } from './context-usage-snapshot.js';
+import { buildContextFilesReminder } from '../context-files.js';
 import {
   content,
   fnResponse,
@@ -324,6 +325,95 @@ describe('createContextUsageSnapshot', () => {
 });
 
 describe('request-only memory attribution', () => {
+  it('attributes initial and updated instruction reminders without charging configured files again', () => {
+    const initialFiles = [
+      { path: '/work/QWEN.md', content: 'Old project rules' },
+    ];
+    const updatedFiles = [
+      { path: '/work/QWEN.md', content: 'New project rules' },
+    ];
+    const initial = buildContextFilesReminder(initialFiles)!;
+    const update = buildContextFilesReminder(updatedFiles, initialFiles)!;
+    const catalog = 'current catalog';
+    const toolResult = fnResponse('read_file', { output: 'file result' });
+    const contents = [
+      content('user', { text: 'Environment' }, { text: initial }),
+      userText('question'),
+      content('user', toolResult, { text: update }),
+      content('user', { text: 'next question' }, { text: catalog }),
+    ];
+    const original = structuredClone(contents);
+    const snapshot = createContextUsageSnapshot(
+      requestOf(contents, { systemInstruction: 'Base prompt\npolicy' }),
+      createConfig({
+        userMemory: 'Configured rules not yet announced'.repeat(100),
+        autoMemory: 'policy',
+        autoMemoryContext: catalog,
+      }),
+      100_000,
+    )!;
+
+    expect(snapshot.breakdown.system_prompt_tokens).toBe(
+      estimateContextTextTokens('Base prompt\n'),
+    );
+    expect(snapshot.breakdown.memory_files_tokens).toBe(
+      [initial, update, 'policy', catalog].reduce(
+        (sum, text) => sum + estimateContextTextTokens(text),
+        0,
+      ),
+    );
+    expect(snapshot.breakdown.messages_tokens).toBe(
+      estimateContentTokens([
+        userText('Environment'),
+        userText('question'),
+        content('user', toolResult),
+        userText('next question'),
+      ]),
+    );
+    expect(contents).toEqual(original);
+  });
+
+  it('counts each sent reminder while leaving quoted text, model text and tool output in messages', () => {
+    const reminder = buildContextFilesReminder([])!;
+    const quoted = userText(`Please explain this:\n${reminder}`);
+    const model = content('model', { text: reminder });
+    const tool = content('user', fnResponse('read_file', { output: reminder }));
+    const conversation = [quoted, model, tool];
+    const snapshot = createContextUsageSnapshot(
+      requestOf([userText(reminder), ...conversation, userText(reminder)]),
+      createConfig(),
+      100_000,
+    )!;
+
+    expect(snapshot.breakdown.memory_files_tokens).toBe(
+      2 * estimateContextTextTokens(reminder),
+    );
+    expect(snapshot.breakdown.messages_tokens).toBe(
+      estimateContentTokens(conversation),
+    );
+  });
+
+  it('still attributes instruction files supplied in an auxiliary request system prompt', () => {
+    const snapshot = createContextUsageSnapshot(
+      requestOf([userText('side query')], {
+        systemInstruction: 'Custom system\nProject rules\npolicy',
+      }),
+      createConfig({ userMemory: 'Project rules', autoMemory: 'policy' }),
+      100_000,
+    )!;
+
+    expect(snapshot.breakdown.system_prompt_tokens).toBe(
+      estimateContextTextTokens('Custom system\n\n'),
+    );
+    expect(snapshot.breakdown.memory_files_tokens).toBe(
+      estimateContextTextTokens('Project rules') +
+        estimateContextTextTokens('policy'),
+    );
+    expect(snapshot.breakdown.messages_tokens).toBe(
+      estimateContentTokens([userText('side query')]),
+    );
+  });
+
   it('counts only the injected final catalog as memory, preserving prior identical user text', () => {
     const catalog = 'current catalog';
     const config = createConfig({

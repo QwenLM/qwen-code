@@ -243,6 +243,7 @@ export const directoryCommand: SlashCommand = {
               } else if (config.shouldLoadMemoryFromIncludeDirectories()) {
                 const {
                   memoryContent,
+                  contextFiles,
                   fileCount,
                   contextFilePaths,
                   conditionalRules,
@@ -258,7 +259,7 @@ export const directoryCommand: SlashCommand = {
                   config.getContextRuleExcludes(),
                   { extensionRuleSources: config.getExtensionRuleSources() },
                 );
-                config.setUserMemory(memoryContent);
+                config.setUserMemory(memoryContent, contextFiles);
                 config.setMemoryFileCount(fileCount);
                 config.setContextFilePaths(contextFilePaths);
                 config.setConditionalRulesRegistry(
