@@ -52,14 +52,14 @@ Adjust `ExecStart` in the Harness unit when `qwen` is installed outside
 
 ## Verify
 
-Load the same environment the unit uses, then run the preflight while the
+Load the same environment file the unit uses, then run the preflight while the
 service is stopped:
 
 ```bash
-sudo -u qwen-managed-agent sh -c '
-  set -a; . /etc/qwen-managed-agent/server.env; set +a
+sudo systemd-run --wait --pipe --collect \
+  --property=User=qwen-managed-agent \
+  --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
-'
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
