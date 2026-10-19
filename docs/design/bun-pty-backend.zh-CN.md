@@ -184,6 +184,21 @@ node-pty 包（"getPty() 在 Bun 下返回 null"）。现在 `bun` flavor 也一
 
 ## 验证
 
+### R2-8 待执行验证清单
+
+仅为计划，NOT_RUN，不代表已通过：
+
+- [ ] 逻辑关闭时分别保持真实异步 read 回调、write 回调在途，观察
+  `closeSync(fd)` 延迟、新 I/O 被拒绝，以及最后持有回调收敛之前数字 fd
+  仍打开；覆盖两者同时在途及两种完成顺序，第一个回调完成不得关闭 fd。
+- [ ] 成功路径记录最后回调完成后的恰好一次 close 尝试及独立的描述符
+  关闭见证。`onExit`、`fdClosed` 或预算释放均不能单独证明物理关闭。
+- [ ] 注入非 EBADF 的 close 失败，记录尝试、errno 与描述符状态；当前
+  catch 吞掉错误，没有独立见证不得称已释放，无法证明物理关闭则保留
+  UNKNOWN。解释 EBADF 时须控制描述符复用，不外推树/FD 整体收敛。
+
+### 既有验证清单（本轮未复验）
+
 - `packages/core/src/utils/bun-pty.test.ts` — vitest/Node 下的行为套件
   （后端是主线程异步代码，与运行时无关）：输出流、写入、`resize` 后
   子进程的 `stty size`、kill→`onExit` 带 signal、进程回收、pause/resume、

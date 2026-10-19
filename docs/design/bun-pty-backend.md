@@ -224,6 +224,26 @@ inherits automatically since the same step now runs for both flavors.
 
 ## Validation
 
+### Pending R2-8 validation
+
+Checklist only; NOT_RUN, not evidence of a pass:
+
+- [ ] Hold an actual asynchronous read callback in flight at logical close;
+  separately hold an asynchronous write callback. Observe that physical
+  `closeSync(fd)` is deferred, new I/O is rejected, and the numeric fd remains
+  open until the last owning callback settles. Cover both callbacks in flight
+  and both settlement orders; the first settlement must not close the fd.
+- [ ] On the successful-close path, record exactly one close attempt after
+  the last settlement and an independent descriptor-close witness. Neither
+  `onExit`, `fdClosed`, nor released budget counters prove physical close.
+- [ ] Inject a non-EBADF close failure and record the attempted close, errno,
+  and descriptor state. The current catch suppresses the error; do not label
+  the descriptor released without an independent witness. Retain UNKNOWN
+  where physical closure cannot be established. Control descriptor reuse
+  when interpreting an EBADF observation; do not infer tree/FD convergence.
+
+### Existing validation inventory (not revalidated in this batch)
+
 - `packages/core/src/utils/bun-pty.test.ts` — behaviour suite under
   vitest/Node (the backend is main-thread async code, runtime-agnostic):
   output streaming, writes, `stty size` after `resize`, kill→`onExit` with
