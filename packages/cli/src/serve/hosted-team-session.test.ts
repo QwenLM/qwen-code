@@ -524,6 +524,7 @@ describe('team plans', () => {
     );
     expect(answer).toContain('submit-1');
     expect(answer).toContain('stopped before alice was continued');
+    expect(answer).not.toContain('member was continued');
     expect(teams.plan('submit-1')?.decision).toBe('approved');
     expect(children.record('split')).toBeUndefined();
     expect(
@@ -604,6 +605,7 @@ describe('team plans', () => {
       'stale',
     );
     expect(answer).toContain('stopped before alice was continued');
+    expect(answer).not.toContain('member was continued');
     expect(children.record('race-head')).toBeDefined();
     expect(children.record('stale')).toBeUndefined();
     expect(
@@ -728,6 +730,42 @@ describe('team plans', () => {
         message: '界'.repeat(1366),
       }),
     ).toContain('4096');
+  });
+
+  it('names the escaped plan size and the room left, exact at the bound', async () => {
+    await member();
+    const sizes = (message: string) => {
+      const found =
+        /needs (\d+) bytes after XML and JSON escaping and (\d+) fit\./.exec(
+          message,
+        );
+      expect(found).not.toBeNull();
+      return { needed: Number(found![1]), available: Number(found![2]) };
+    };
+    // UTF-8 bytes once escaped: '<' is '&lt;' (4), '界' 3, '😀' 4 and the
+    // newline JSON-encodes as '\n' (2) — 13, though only 9 UTF-16 units.
+    const first = sizes(
+      await refusal(
+        teams.submitPlan('big-1', 'run-alice', '<界😀\n'.repeat(2000)),
+      ),
+    );
+    expect(first.needed).toBe(2000 * 13);
+    expect(first.available).toBeGreaterThan(0);
+    expect(first.available).toBeLessThan(first.needed);
+    expect(
+      sizes(
+        await refusal(
+          teams.submitPlan(
+            'big-2',
+            'run-alice',
+            'B'.repeat(first.available + 1),
+          ),
+        ),
+      ),
+    ).toEqual({ needed: first.available + 1, available: first.available });
+    expect(teams.plans()).toHaveLength(0);
+    await teams.submitPlan('fits', 'run-alice', 'B'.repeat(first.available));
+    expect(teams.plan('fits')?.planRevision).toBe(1);
   });
 });
 
@@ -1948,7 +1986,7 @@ describe('members through their continuation chains', () => {
         ),
       ),
     ).toBe(
-      'Member "alice" has finished, and its latest continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it. Send that work and those messages again with send_message to "alice", then update the task in the same turn.',
+      'Member "alice" has finished, and its latest continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it. Send that work again with send_message to "alice"; 1 message sent to it also did not arrive; resend it only if its own send_message answer has not already asked you to resend it. Then update the task in the same turn.',
     );
   });
 
@@ -1972,6 +2010,17 @@ describe('members through their continuation chains', () => {
       ),
     ).toBe(
       'Member "bob" is being stopped and cannot own a task. Launch a new member for this work.',
+    );
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'completed', owner: 'bob' },
+          'turn:complete-stopping',
+        ),
+      ),
+    ).toBe(
+      'Member "bob" is being stopped and has not completed a run yet. Complete the task with this owner only after task_list shows its run completed; otherwise record the member that did it, or "leader".',
     );
     await settle('run-bob');
     expect(await line('bob')).toBe('bob: completed (stop requested)');
@@ -2130,6 +2179,96 @@ describe('members through their continuation chains', () => {
         ),
       ),
     ).toContain('completed after a stop was requested');
+  });
+
+  it('reports a restated owner whose continuation is settling', async () => {
+    await createTeam();
+    await addMember('alice');
+    await settle('run-alice');
+    await teams.run(
+      'task_create',
+      { subject: 'fix', description: 'fix' },
+      'turn:create',
+    );
+    await sendTo('run-alice', 'fix #1', 'turn-1:c1');
+    await teams.run(
+      'task_update',
+      { taskId: '1', status: 'in_progress', owner: 'alice' },
+      'turn-1:own',
+      'turn-1:',
+    );
+    await children.requestStop('turn-1:c1');
+    expect(
+      await teams.run(
+        'task_update',
+        {
+          taskId: '1',
+          status: 'in_progress',
+          owner: 'alice',
+          description: 'fix it now',
+        },
+        'turn-1:restate',
+        'turn-1:',
+      ),
+    ).toBe(
+      'Task #1 updated (status: in_progress, owner: alice). "alice" was not notified: task_update records the board only. alice\'s latest continuation is being stopped before it started; if it ends without starting, alice can take work again. Check task_list once it settles.',
+    );
+  });
+
+  it('refreshes the owner state after an update commit waits', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'fix', description: 'fix' },
+      'turn:create',
+    );
+    let entered!: () => void;
+    const commitEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const commitReleased = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const delayed = new HostedTeamSession(
+      {
+        resources: session.resources,
+        authority: Object.create(session.authority, {
+          commitExtensionRecord: {
+            value: async (
+              ...args: Parameters<
+                HostedTeamStore['authority']['commitExtensionRecord']
+              >
+            ) => {
+              if (args[0].operation === 'updateTeamTask') {
+                entered();
+                await commitReleased;
+              }
+              return session.authority.commitExtensionRecord(...args);
+            },
+          },
+        }),
+      },
+      sessionKey,
+      children,
+    );
+    const update = delayed.run(
+      'task_update',
+      { taskId: '1', status: 'in_progress', owner: 'alice' },
+      'turn:assign',
+      'turn:',
+    );
+    await commitEntered;
+    await children.settleFailed('run-alice', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    release();
+    expect(await update).toBe(
+      'Task #1 updated (status: in_progress, owner: alice). "alice" was not notified: task_update records the board only. alice cannot take more work: it has failed.',
+    );
   });
 
   it('keeps a finished owner on a task this Turn gave it work for', async () => {
@@ -2459,7 +2598,7 @@ describe('members through their continuation chains', () => {
         ),
       ),
     ).toBe(
-      'Member "alice" has finished, and its latest continuation was cancelled before it started (stop_requested), so the work it carried did not arrive. If that work is still wanted, send it again with send_message to "alice", then update the task in the same turn.',
+      'Member "alice" has finished, and its latest continuation was cancelled before it started (stop_requested), so the work it carried did not arrive. If that work is still wanted, send it again with send_message to "alice". Then update the task in the same turn.',
     );
   });
 });

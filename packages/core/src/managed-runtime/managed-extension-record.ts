@@ -25,7 +25,7 @@ import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 // The managed-extension-record/1 contract (H0b of #12827): the records that
 // the Stage H capabilities share. The shared fixtures in
 // contracts/managed-extension-record-v1.fixtures.json pin it, and
-// ManagedExtensionRecords in packages/sdk-java/managed-agent-server replays
+// ManagedExtensionRecords in packages/managed-agent-server replays
 // the same cases. The Session authority commits them (H0c, see
 // managed-extension-projection.ts).
 

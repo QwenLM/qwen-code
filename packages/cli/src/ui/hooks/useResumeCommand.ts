@@ -5,6 +5,7 @@
  */
 
 import { useState, useCallback } from 'react';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   SessionService,
   buildSessionRecoveryPlan,
@@ -246,6 +247,7 @@ export function useResumeCommand(
         );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
+        await getInteractiveModSession(config)?.syncSession('resume');
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();
         clearItems();
