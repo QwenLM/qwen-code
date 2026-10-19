@@ -3,7 +3,7 @@
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
 Status: slice 1 is partially delivered. `disable-span` is implemented and
-green; the other three cells and slice 2 are scoped but not implemented.
+green; the other two cells and slice 2 are scoped but not implemented.
 
 Issue: #14446, the FG11 tracker. The `d` row records per-run task
 cancellation as implemented by #14526, and states that retire, disable,
@@ -33,12 +33,15 @@ packaged lane runs these questions on the real schema with the real scanner.
 
 Both slices live in `HostedAutomationFaultGatesIT`, which already provides the
 packaged stack: in-JVM Spring with the scanner on, a real Harness behind
-`HostedLifecycleRelay`, real MySQL and a model stub. These cells never run a
-Workspace tool, so they avoid the execution-authority path that blocks FG11f.
+`HostedLifecycleRelay`, real MySQL and a model stub. The relays carry the
+faults: `held(...)` parks an operation before the Harness sees it,
+`relayed(...)` drops one answer, and the scanner's own scheduler is held while
+a case arms.
 
-The existing relays carry the faults: `held(...)` parks an operation before
-the Harness sees it, `relayed(...)` drops one answer, and the scanner's own
-scheduler is held while a case arms. No new fixture is needed for slice 1.
+Only `disable-span` runs on that stock fixture. `retire-at-intent` needs a hold
+between the run commit and the wake turn, and `close-*` needs a Session close
+the fixture can currently accept; Limits records both instead of claiming they
+are ready.
 
 ## Slice 1: retire, disable, close
 
