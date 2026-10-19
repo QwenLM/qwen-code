@@ -490,8 +490,15 @@
                                  Verify step to 148 minutes. The FG13a HTTP
                                  lost-reply cell adds 150 s: the healthy sum
                                  becomes 7809 s, so the fork moves to 8409 s
-                                 and the Verify step to 151 minutes. -->
-                            <forkedProcessTimeoutInSeconds>8409</forkedProcessTimeoutInSeconds>
+                                 and the Verify step to 151 minutes. The FG13f
+                                 deny lost-reply cell adds 150 s: the healthy
+                                 sum becomes 7959 s, so the fork moves to
+                                 8559 s and the Verify step to 153
+                                 minutes. The FG11d disabled-span cell adds
+                                 336 s: the healthy sum becomes 8295 s, so the
+                                 fork moves to 8895 s and the Verify step to
+                                 159 minutes. -->
+                            <forkedProcessTimeoutInSeconds>8895</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

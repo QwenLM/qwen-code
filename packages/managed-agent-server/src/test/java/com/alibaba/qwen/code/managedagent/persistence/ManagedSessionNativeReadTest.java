@@ -119,11 +119,11 @@ class ManagedSessionNativeReadTest {
     }
 
     @Test
-    void sealingRefusesNonCheckpointReadsBeforeHistoryOrFetch() {
+    void sealingRefusesUnactivatedReadersBeforeHistoryOrFetch() {
         retire();
         source.onFetch = () -> { throw new AssertionError("sealed read reached fetch"); };
         assertThatThrownBy(this::read).isInstanceOfSatisfying(RuntimeBrokerException.class,
-                error -> assertThat(error.getCode()).isEqualTo("runtime_admission_closed"));
+                error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
         assertThat(count("ma_request_receipt")).isZero();
         assertThat(count("ma_read_lease")).isZero();
     }

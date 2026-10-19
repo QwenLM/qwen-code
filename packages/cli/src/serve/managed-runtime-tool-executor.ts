@@ -356,12 +356,14 @@ export class ManagedToolExecutor {
     close(): Promise<void>;
   };
   private closing = false;
+  private csiClosing: Promise<void> | undefined;
   private retirementId?: string;
   private providerWasUsed = false;
   private capturePreparationStarted = false;
   private historyControlOutcomeUnknown = false;
   private ledgerIntegrityFailed = false;
   private readonly pendingStarts = new Set<Promise<unknown>>();
+  private startFailureObserved = false;
   private readonly fileHistories = new Map<string, ManagedRuntimeFileHistory>();
   private readonly historyControls = new Set<string>();
 
@@ -452,6 +454,144 @@ export class ManagedToolExecutor {
     };
   }
 
+  async csiRetirementInventory(retirementId: string, sessionId: string) {
+    this.sealAdmission(retirementId);
+    const joined = await Promise.allSettled([
+      ...this.pendingStarts,
+      ...[...this.entries.values()].flatMap((entry) =>
+        entry.promise ? [entry.promise] : [],
+      ),
+      ...[...this.fileHistories.values()].map((history) =>
+        history.history.drain(),
+      ),
+    ]);
+    const drain = this.getDrainObservation(retirementId);
+    const blockers = new Set(drain.blockers);
+    if (
+      this.startFailureObserved ||
+      joined.some((result) => result.status === 'rejected')
+    )
+      blockers.add('executor_join_failed');
+    if (
+      this.capturePublisher ||
+      this.mcp ||
+      this.hooks ||
+      this.backgroundSupervisor ||
+      this.options.ledger
+    )
+      blockers.add('configured_secondary_activity');
+    if (
+      this.backgroundRegistry.hasActivity ||
+      this.monitorRegistry.hasActivity ||
+      this.mcpCalls.size ||
+      this.providerSessions.size ||
+      this.closedSessions.size
+    )
+      blockers.add('secondary_activity_present');
+    if (this.historyControls.size) blockers.add('history_control_pending');
+    const entries = [...this.entries.values()]
+      .sort((a, b) => a.reference.callId.localeCompare(b.reference.callId))
+      .map((entry) => {
+        if (
+          entry.reference.sessionId !== sessionId ||
+          entry.version !== 2 ||
+          !['read_file', 'write_file', 'edit'].includes(entry.toolName) ||
+          entry.state !== 'settled' ||
+          !entry.result ||
+          entry.input === undefined ||
+          entry.inputJson === undefined
+        )
+          blockers.add('unsupported_file_entry');
+        return {
+          version: entry.version,
+          reference: structuredClone(entry.reference),
+          toolName: entry.toolName,
+          input: structuredClone(entry.input ?? null),
+          inputJson: entry.inputJson ?? null,
+          state: entry.state,
+          lastSequence: entry.lastSequence,
+          result: structuredClone(entry.result ?? null),
+          v3Result: structuredClone(entry.v3Result ?? null),
+          v3Capture: structuredClone(entry.v3Capture ?? null),
+          acknowledgement: structuredClone(entry.acknowledgement ?? null),
+          aborted: entry.controller.signal.aborted,
+        };
+      });
+    const histories = [...this.fileHistories.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([id, history]) => ({
+        sessionId: id,
+        directory: history.directory,
+        state: history.state(),
+      }));
+    if (histories.some((history) => history.sessionId !== sessionId))
+      blockers.add('unrelated_file_history');
+    const result = {
+      ...drain,
+      workState: blockers.size ? ('BLOCKED' as const) : drain.workState,
+      blockers: [...blockers].sort(),
+      entries,
+      histories,
+      historyControls: [...this.historyControls].sort(),
+      secondary: {
+        captureConfigured: this.capturePublisher !== undefined,
+        mcpConfigured: this.mcp !== undefined,
+        hooksConfigured: this.hooks !== undefined,
+        supervisorConfigured: this.backgroundSupervisor !== undefined,
+        ledgerConfigured: this.options.ledger !== undefined,
+        providerUsed: this.providerWasUsed,
+        providerSessions: [...this.providerSessions].sort(),
+        closedSessions: [...this.closedSessions].sort(),
+        mcpCalls: this.mcpCalls.size,
+        backgroundActivity: this.backgroundRegistry.hasActivity,
+        monitorActivity: this.monitorRegistry.hasActivity,
+      },
+    };
+    if (
+      entries.length > 4096 ||
+      Buffer.byteLength(JSON.stringify(result)) > 32 * 1024 * 1024
+    )
+      throw new ManagedToolUnavailableError(
+        'CSI executor inventory exceeds its bound.',
+      );
+    return result;
+  }
+
+  closeCsiFiles(retirementId: string, sessionId: string): Promise<void> {
+    this.sealAdmission(retirementId);
+    this.csiClosing ??= (async () => {
+      const inventory = await this.csiRetirementInventory(
+        retirementId,
+        sessionId,
+      );
+      if (inventory.workState !== 'QUIESCENT')
+        throw new ManagedToolUnavailableError(
+          'Original CSI executor is blocked.',
+        );
+      this.closing = true;
+      await Promise.all([
+        ...this.pendingStarts,
+        ...[...this.entries.values()].flatMap((entry) =>
+          entry.promise ? [entry.promise] : [],
+        ),
+        ...[...this.fileHistories.values()].map((history) =>
+          history.history.drain(),
+        ),
+        this.backgroundRegistry.stopAll(5_000),
+        this.monitorRegistry.stopAll(5_000),
+      ]);
+      if (
+        this.pendingStarts.size ||
+        this.historyControls.size ||
+        this.startFailureObserved
+      )
+        throw new ManagedToolUnavailableError(
+          'Original CSI executor did not close.',
+        );
+    })();
+    return this.csiClosing;
+  }
+
   controlFileHistory(
     ownerSessionId: string,
     sessionId: string,
@@ -539,6 +679,7 @@ export class ManagedToolExecutor {
             ownerSessionId,
             tools.directory,
             operation.state,
+            tools.retainedFileHistory,
           );
           await history.ready();
           if (!this.isAdmissionOpen)
@@ -1980,7 +2121,10 @@ export class ManagedToolExecutor {
     this.pendingStarts.add(pending);
     void pending.then(
       () => this.pendingStarts.delete(pending),
-      () => this.pendingStarts.delete(pending),
+      () => {
+        this.startFailureObserved = true;
+        this.pendingStarts.delete(pending);
+      },
     );
     return pending;
   }
