@@ -5983,29 +5983,68 @@ describe('CoreToolScheduler', () => {
       },
     );
 
-    it('waits for a human on an ask-ruled env -S destructive call even when a PermissionRequest hook allows', async () => {
-      const command = "env -S 'git reset --hard'";
-      const execute = vi.fn().mockResolvedValue(textResult('executed'));
-      const messageBus = permissionRequestHookBus({ behavior: 'allow' });
-      const harness = autoScheduler(shellTool(command, vi.fn(), execute), {
-        messageBus,
-        disableHooks: false,
-        permissionManager: rulesResolving('ask'),
-      });
+    const opaqueDestructiveCommands = [
+      `printf 'git reset --hard\\n' > fix.sh && rg --pre bash . fix.sh`,
+      'git rese{t..t} --hard',
+      './g*t reset --hard',
+      'gi{t..t} rese{t..t} --hard',
+      `printf 'git reset --hard\\n' > fix.sh && rg --pr{e..e} bash . fix.sh`,
+    ];
 
-      await harness.scheduler.schedule(
-        shellRequest('ask-env-split', command),
-        new AbortController().signal,
-      );
+    it.each(opaqueDestructiveCommands)(
+      'blocks %s before a classifier that would allow it',
+      async (command) => {
+        runSideQueryMock.mockResolvedValue({ shouldBlock: false });
+        const execute = vi.fn().mockResolvedValue(textResult('executed'));
+        const harness = autoScheduler(shellTool(command, vi.fn(), execute));
 
-      const waiting = await waitForApproval(harness.onToolCallsUpdate);
-      expect(waiting.confirmationDetails).toMatchObject({
-        hideAlwaysAllow: true,
-      });
-      expect(permissionRequests(messageBus)).toHaveLength(1);
-      expect(runSideQueryMock).not.toHaveBeenCalled();
-      expect(execute).not.toHaveBeenCalled();
-    });
+        await scheduleAndSettle(
+          harness,
+          shellRequest('opaque-command', command),
+        );
+
+        const [blocked] = firstBatch<CompletedToolCall>(
+          harness.onAllToolCallsComplete,
+        );
+        expect(blocked.status).toBe('error');
+        expect(blocked.response.error?.message).toContain('could not verify');
+        expect(runSideQueryMock).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["env -S 'git reset --hard'", ...opaqueDestructiveCommands])(
+      'waits for a human on ask-ruled %s even when a PermissionRequest hook allows',
+      async (command) => {
+        const execute = vi.fn().mockResolvedValue(textResult('executed'));
+        const messageBus = permissionRequestHookBus({ behavior: 'allow' });
+        const harness = autoScheduler(shellTool(command, vi.fn(), execute), {
+          messageBus,
+          disableHooks: false,
+          permissionManager: rulesResolving('ask'),
+        });
+
+        await harness.scheduler.schedule(
+          shellRequest('ask-opaque-command', command),
+          new AbortController().signal,
+        );
+
+        const waiting = await waitForApproval(harness.onToolCallsUpdate);
+        expect(waiting.confirmationDetails).toMatchObject({
+          hideAlwaysAllow: true,
+        });
+        expect(permissionRequests(messageBus)).toHaveLength(1);
+        expect(runSideQueryMock).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalled();
+        await waiting.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+        );
+        await vi.waitFor(() =>
+          expect(harness.onAllToolCallsComplete).toHaveBeenCalled(),
+        );
+        expect(execute).not.toHaveBeenCalled();
+      },
+    );
   });
 
   /** Read-kind MockTools by name; each runs a mock or resolves a result. */

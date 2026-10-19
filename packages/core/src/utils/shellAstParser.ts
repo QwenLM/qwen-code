@@ -986,11 +986,15 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
   );
 }
 
-function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
+export function evaluateCommandSafety(
+  commandNode: SyntaxNode,
+  resolvedArgs?: string[],
+): ShellCommandSafety {
   const rawRoot = commandNode.childForFieldName('name')?.text;
   const root = getCommandName(commandNode);
   const argNodes = getArgumentNodes(commandNode);
-  const args = argNodes.map((node) => stripOuterQuotes(node.text));
+  const args =
+    resolvedArgs ?? argNodes.map((node) => stripOuterQuotes(node.text));
   let result: ShellCommandSafety;
   if (!root) result = 'read-only';
   else if (rawRoot !== root) result = 'unknown';

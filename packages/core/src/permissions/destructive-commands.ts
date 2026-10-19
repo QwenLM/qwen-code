@@ -24,8 +24,14 @@
 import { execSync } from 'node:child_process';
 import path from 'node:path';
 import type Parser from 'web-tree-sitter';
-import { parseShellCommand } from '../utils/shellAstParser.js';
-import { hasShellPatternExpansion } from '../utils/shell-safety-rules.js';
+import {
+  evaluateCommandSafety,
+  parseShellCommand,
+} from '../utils/shellAstParser.js';
+import {
+  hasShellBraceExpansion,
+  hasShellPatternExpansion,
+} from '../utils/shell-safety-rules.js';
 
 type SyntaxNode = Parser.SyntaxNode;
 
@@ -130,6 +136,9 @@ const DIRECTORY_CHANGES = words('cd pushd popd');
 /** Only read their arguments as data: text to print, patterns, files. */
 const DATA_ONLY = words(
   'echo printf grep egrep fgrep zgrep rg ag ack cat less more head tail wc sort uniq cut nl jq diff ls stat file test [',
+);
+const RG_VALUE_OPTIONS = words(
+  '--after-context --before-context --context --encoding --regexp --file --glob --iglob --ignore-file --threads --max-count --max-columns --replace --type --type-not --type-add --type-clear --pre-glob --color --colors --context-separator --dfa-size-limit --engine --field-context-separator --field-match-separator --hyperlink-format --max-depth --max-filesize --path-separator --regex-size-limit --sort --sortr --generate',
 );
 
 interface Wrapper {
@@ -357,6 +366,9 @@ async function scanScript(script: Script, scan: Scan): Promise<void> {
         visitAssignment(node, scan);
       } else if (
         node.type === 'file_redirect' &&
+        node.children.some((child) =>
+          /^(?:>|>>|>\||>&|&>|&>>|<>)$/.test(child.type),
+        ) &&
         GIT_METADATA_PATH.test(
           literalOf(wordOf(node.childForFieldName('destination') ?? node)),
         )
@@ -443,24 +455,13 @@ function argumentNodes(node: SyntaxNode): SyntaxNode[] {
  * `SPLIT` when the shell may turn it into several words.
  */
 function wordOf(node: SyntaxNode): string {
-  // Brace expansion (`{.,src}`) turns one word into several; the parser
-  // only marks the `{1..3}` form.
-  if (
-    (node.type === 'word' || node.type === 'concatenation') &&
-    /\{[^{}]*,[^{}]*\}/.test(node.text)
-  ) {
-    return SPLIT;
-  }
   switch (node.type) {
     case 'command_name':
       return node.firstNamedChild ? wordOf(node.firstNamedChild) : DYNAMIC;
     case 'word':
       if (node.text.startsWith('~')) return DYNAMIC;
       // Pathname expansion (`*`, `?`, `[`) turns one word into any number.
-      if (
-        node.parent?.type !== 'command_name' &&
-        hasShellPatternExpansion(node.text.replace(/\\./g, ''))
-      ) {
+      if (hasShellPatternExpansion(node.text.replace(/\\./g, ''))) {
         return SPLIT;
       }
       return node.text.replace(/\\(\n|.)/g, (_, c: string) =>
@@ -483,6 +484,13 @@ function wordOf(node: SyntaxNode): string {
         )
         .join('');
     case 'concatenation': {
+      // The parser splits prefixed brace sequences into separate words.
+      const unquoted = node.namedChildren
+        .map((part) =>
+          part.type === 'word' ? part.text.replace(/\\./g, '') : '\0',
+        )
+        .join('');
+      if (hasShellBraceExpansion(unquoted)) return SPLIT;
       const parts = node.namedChildren.map(wordOf);
       return parts.some((part) => part.includes(SPLIT))
         ? SPLIT
@@ -532,7 +540,9 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   if (isDynamic(head)) {
     // e.g. `$GIT reset --hard`: the program is only known at run time.
     scan.hiddenCode = true;
-    if (args.some((arg) => PROTECTED_OPERATIONS.has(arg))) {
+    if (
+      args.some((arg) => PROTECTED_OPERATIONS.has(arg) || arg.includes(SPLIT))
+    ) {
       scan.unverifiable = true;
     }
     return;
@@ -540,7 +550,41 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
   const program = programName(head);
   if (program === 'git') return checkGit(head, args, ctx, scan);
   if (IAC_TOOLS.has(program)) return checkIac(head, program, args, ctx, scan);
-  if (args.some((arg) => GIT_METADATA_PATH.test(literalOf(arg)))) {
+  if (program === 'rg') {
+    let preprocessor = false;
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      if (arg === '--') break;
+      if (arg.includes(SPLIT)) scan.hiddenCode = true;
+      else if (arg === '--pre') {
+        const value = args[++i];
+        if (value?.includes(SPLIT)) scan.hiddenCode = true;
+        preprocessor = value !== '';
+      } else if (arg.startsWith('--pre=')) preprocessor = arg.length > 6;
+      else if (arg === '--no-pre') preprocessor = false;
+      else if (/^(?:--hostname-bin(?:=|$)|--search-zip$)/.test(arg)) {
+        scan.hiddenCode = true;
+      } else if (RG_VALUE_OPTIONS.has(arg)) {
+        if (args[++i]?.includes(SPLIT)) scan.hiddenCode = true;
+      } else if (/^-[^-]/.test(arg)) {
+        for (let j = 1; j < arg.length; j++) {
+          if ('ABCEdefgjmMrtT'.includes(arg[j]!)) {
+            if (j === arg.length - 1 && args[++i]?.includes(SPLIT)) {
+              scan.hiddenCode = true;
+            }
+            break;
+          }
+          if (arg[j] === 'z') scan.hiddenCode = true;
+        }
+      }
+    }
+    scan.hiddenCode ||= preprocessor;
+  }
+  if (
+    args.some((arg) => GIT_METADATA_PATH.test(literalOf(arg))) &&
+    (args.some(isDynamic) ||
+      evaluateCommandSafety(ctx.node, args) !== 'read-only')
+  ) {
     // A repository's `.git` replaced or rewritten: what a later git command
     // reaches, and what its config and hooks run, are unknown.
     scan.hiddenCode = true;

@@ -39,6 +39,17 @@ describe('isDestructiveCommand — text that is not executed', () => {
     // Search patterns and file names are data, not a wrapped command.
     'grep -e git -e reset -e --hard notes.txt',
     'rg -e git -e reset -e --hard notes.txt',
+    `rg --regexp '--pre' 'git reset --hard'`,
+    `rg -ne '--pre' 'git reset --hard'`,
+    `rg -efizz 'git reset --hard'`,
+    `rg --pre-glob '--pre' 'git reset --hard'`,
+    `rg -- --pre 'git reset --hard'`,
+    `rg -- 'git reset --hard' *.md`,
+    `rg --pre= 'git reset --hard'`,
+    `rg --pre bash --no-pre 'git reset --hard'`,
+    `cat .git/config && echo 'git reset --hard'`,
+    `cat < .git/HEAD && echo 'git reset --hard'`,
+    `rg 'git reset --hard' .git/config`,
     `path=notes.txt; rg 'git -C /repo reset --hard' "$path"`,
     `rg 'git checkout -- .' . src`,
     `git commit -m 'docs: explain git reset --hard'`,
@@ -107,8 +118,13 @@ describe('isDestructiveCommand — executed git and IaC operations', () => {
     // A single file or directory is not the whole tree.
     'git checkout -- ./src',
     'git checkout .gitignore',
-    // A brace without a comma is not expanded.
+    // Reflog selectors are not brace expansions.
     'git checkout HEAD@{1} -- src',
+    `git 'rese{t..t}' --hard`,
+    `git re"se{t..t}" --hard`,
+    String.raw`git rese\{t..t\} --hard`,
+    `'./g*t' reset --hard`,
+    String.raw`./g\*t reset --hard`,
     // `-b` consumes `.x` as the new branch name.
     'git checkout -b .x',
     // A dry run wins over --force and deletes nothing.
@@ -210,6 +226,15 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     'git checkout "$TARGET"',
     // Brace expansion yields `.` among other words.
     'git checkout {.,src}',
+    'git rese{t..t} --hard',
+    'git clea{n..n} -fd',
+    'terraform destro{y..y}',
+    './g*t reset --hard',
+    './g?t reset --hard',
+    './g[i]t reset --hard',
+    'gi{t..t} rese{t..t} --hard',
+    './g*t rese{t..t} --hard',
+    `printf 'git reset --hard\\n' > fix.sh && ba{s..s}h fix.sh`,
     'git stash "$ACTION"',
     'terraform "$COMMAND"',
     `bash -c "git reset $MODE"`,
@@ -227,6 +252,12 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     `echo 'git reset --hard' | xargs -I{} sh -c '{}'`,
     // A script the same command writes and then runs.
     `printf 'git reset --hard\\n' > fixup.sh && bash fixup.sh`,
+    `printf 'git reset --hard\\n' > fixup.sh && rg --pre bash . fixup.sh`,
+    `printf 'git reset --hard\\n' > fixup.sh && rg --pre=bash . fixup.sh`,
+    `printf 'git reset --hard\\n' > fixup.sh && rg --pr{e..e} bash . fixup.sh`,
+    `printf 'git reset --hard\\n' > fixup.sh && rg --glob {x,--pre} bash . fixup.sh`,
+    `printf 'git reset --hard\\n' > fixup.sh && rg -ng {x,--pre} bash . fixup.sh`,
+    `printf 'git reset --hard\\n' > fixup.sh && rg --max-columns-preview --pre bash . fixup.sh`,
     `printf 'git reset --hard\\n' > fixup.sh && . ./fixup.sh`,
     `cat > fix.sh <<'EOF'\ngit stash drop\nEOF\nchmod +x fix.sh && ./fix.sh`,
     `printf 'git clean -fd\\n' | tee fix.sh > /dev/null && sh ./fix.sh`,
@@ -305,6 +336,8 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
   it.each([
     'echo $HOME',
     '$EDITOR notes.md',
+    '$EDITOR "$FILE"',
+    './tool{1,2} --version',
     `case "$1" in x) npm test ;; esac`,
     `echo 'npm test' | bash`,
     // The shell reads its program from the here-string, not from the pipe.
@@ -450,6 +483,44 @@ describe('isDestructiveCommand — git commit --amend', () => {
       await reasonFor(`git -C ${other} commit --amend --no-edit`, own),
     ).toContain('git commit --amend');
   });
+
+  it.each([
+    'cat .git/HEAD',
+    'cat < .git/HEAD',
+    'head -n 1 .git/HEAD',
+    'rg ref .git/HEAD',
+    'sort .git/HEAD',
+    'sort --"rev"erse .git/HEAD',
+    'uniq .git/HEAD',
+    'uniq -""f 1 .git/HEAD',
+    'ls .git/HEAD',
+  ])('allows a session amend after reading metadata with %s', async (read) => {
+    const { own } = makeRepos();
+    expect(
+      await reasonFor(`${read} && git commit --amend --no-edit`, own),
+    ).toBeNull();
+  });
+
+  it.each([
+    'cat other-head > .git/HEAD',
+    'cat other-head >> .git/HEAD',
+    'cat other-head >| .git/HEAD',
+    'cat other-head <> .git/HEAD',
+    'sort other-head -o .git/HEAD',
+    'sort --"output" .git/HEAD other-head',
+    String.raw`sort \-o .git/HEAD other-head`,
+    String.raw`sort $'\055o' .git/HEAD other-head`,
+    'uniq other-head .git/HEAD',
+    'cp other-head .git/HEAD',
+  ])(
+    'blocks a session amend after changing metadata with %s',
+    async (write) => {
+      const { own } = makeRepos();
+      expect(
+        await reasonFor(`${write} && git commit --amend --no-edit`, own),
+      ).not.toBeNull();
+    },
+  );
 
   it.each([
     [
