@@ -76,6 +76,7 @@ class HostedHookReplyLossFaultGatesIT {
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     private final AtomicInteger hookRequests = new AtomicInteger();
+    private final List<String> hookRequestLog = new CopyOnWriteArrayList<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
     private Path cli;
@@ -138,6 +139,7 @@ class HostedHookReplyLossFaultGatesIT {
             while (!hookEndpoint.isClosed()) {
                 try (Socket client = hookEndpoint.accept()) {
                     hookRequests.incrementAndGet();
+                    hookRequestLog.add("request " + hookRequests.get() + " accepted");
                     client.setSoTimeout(2000);
                     try (InputStream input = client.getInputStream()) {
                         byte[] buffer = new byte[8192];
@@ -653,6 +655,9 @@ class HostedHookReplyLossFaultGatesIT {
             if (Files.exists(source)) {
                 Files.copy(source, destination.resolve(source.getFileName()));
             }
+        }
+        if (!hookRequestLog.isEmpty()) {
+            Files.write(destination.resolve("http-hook.log"), hookRequestLog);
         }
         if (jdbc != null) {
             json.writeValue(destination.resolve("bindings.json").toFile(), jdbc.queryForList(
