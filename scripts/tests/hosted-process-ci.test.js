@@ -415,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (146 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (148 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 226, 239],
+    ['hosted-harness-mysql', 228, 241],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -616,12 +616,13 @@ describe('Hosted real-process gates', () => {
       // method (144.8 s measured, 550 s budgeted) moves the fork to 7435;
       // the FG13d DELETE-drain cell adds 150 s, so the fork moves to 7585;
       // the FG11c Spring-crash class (262.0 s measured, ~524 s budgeted at
-      // 2x) moves the fork to 8109 and the Verify step to 146 minutes):
+      // 2x) moves the fork to 8109; the FG13a catalog lost-reply cell adds
+      // 150 s, so the fork moves to 8259 and the Verify step to 148 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(8109);
+        expect(forkSeconds).toBe(8259);
       }
     },
   );
@@ -680,12 +681,13 @@ describe('Hosted real-process gates', () => {
   // adds 150s, so it becomes 6285s; the FG11c Harness-crash method (144.8s
   // measured, ~550s budgeted at 2x) becomes 6835s; the FG13d DELETE-drain
   // cell adds 150s, so it becomes 6985s; the FG11c Spring-crash class
-  // (262.0s measured, ~524s budgeted at 2x) becomes 7509s. The largest
+  // (262.0s measured, ~524s budgeted at 2x) becomes 7509s; the FG13a
+  // catalog lost-reply cell adds 150s, so it becomes 7659s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 7509;
+  const hostedForkHealthySeconds = 7659;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -815,8 +817,11 @@ describe('Hosted real-process gates', () => {
       // holds only when every wait goes through the helper that fails on
       // it.
       expect([...source.matchAll(/\bawait\(\)/g)]).toHaveLength(1);
+      // A class may configure awaitility before chaining failFast — for
+      // example to ignore a deadlock a sibling delivery thread rolled back —
+      // so pin the guard itself, not the exact `await().failFast` prefix.
       expect(read(hostedTestPath(className))).toContain(
-        'await().failFast("The case\'s @Timeout interrupted it"',
+        '.failFast("The case\'s @Timeout interrupted it"',
       );
     },
   );

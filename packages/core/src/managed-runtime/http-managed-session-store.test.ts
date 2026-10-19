@@ -1926,11 +1926,94 @@ describe('HTTP Managed Session store', () => {
       status: 409,
       remoteCode: 'managed_session_writer_conflict',
       message: 'The Managed Session has another writer.',
+      // Review #14522: the refusing route travels in its own field — the
+      // public message is shared across server predicates.
+      route: 'POST /writers:acquire',
     });
     expect((error as ManagedSessionStoreHttpError).details).toEqual({
       request_id: 'request-2',
     });
     expect(String(error)).not.toContain(TOKEN_A);
+  });
+
+  it('pairs the refused writer grant with the store head on a conflict', async () => {
+    // Review #14522 discriminator: a writer-conflict refusal must carry,
+    // in fields only, the grant this writer presented and the store-head
+    // verdict at the same instant — never the lease token.
+    const leaseUntil = Date.now() + 60_000;
+    const head = {
+      state: 'ACTIVE',
+      storageVersion: 1,
+      writerGeneration: 2,
+      journalRevision: 5,
+      committedSequence: 5,
+      lastCommitDigest: null,
+      activationEpoch: 0,
+      latestCheckpointResourceId: null,
+      compactedThroughRevision: 0,
+      recoveryStatus: 'READY',
+      recoveryDetailCode: null,
+    };
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.includes('/writers:acquire')) {
+          return jsonResponse({
+            writerGeneration: 1,
+            leaseUntil,
+            journalRevision: 5,
+            committedSequence: 5,
+            lastCommitDigest: null,
+            activationEpoch: 0,
+          });
+        }
+        if (url.includes('/writers:renew')) {
+          return jsonResponse(
+            {
+              error: {
+                code: 'managed_session_writer_conflict',
+                message:
+                  'The Managed Session writer grant is stale or unavailable.',
+              },
+            },
+            409,
+          );
+        }
+        if (url.includes('/restore')) {
+          return jsonResponse(head);
+        }
+        throw new Error(
+          `unexpected store call: ${init?.method ?? 'GET'} ${url}`,
+        );
+      });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    const refused = await stores
+      .assertWritable()
+      .catch((cause: unknown) => cause);
+    expect(refused).toMatchObject<Partial<ManagedSessionStoreHttpError>>({
+      status: 409,
+      remoteCode: 'managed_session_writer_conflict',
+      route: 'POST /writers:renew',
+    });
+    const context = (refused as ManagedSessionStoreHttpError)
+      .writerRefusalContext;
+    expect(context).toBeDefined();
+    expect(context).toContain('writerId=harness-a');
+    expect(context).toContain('grantGeneration=1');
+    expect(context).toContain('headGeneration=2');
+    expect(context).toContain('headRevision=5');
+    expect(context).toContain('state=ACTIVE');
+    expect(context ?? '').not.toContain(TOKEN_A);
+    expect(String(refused)).not.toContain(TOKEN_A);
+    await stores.close().catch(() => undefined);
   });
 
   it('carries the scalar fields of a publication refusal envelope', async () => {

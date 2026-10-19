@@ -149,10 +149,17 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
     readonly contentionExhausted?: boolean,
     // The envelope's other scalar fields, such as the limit a refusal names.
     readonly details?: Readonly<Record<string, string | number | boolean>>,
+    // The refusing store route ("POST /writers:renew", "GET /restore", …).
+    // The public message is shared across server predicates (review
+    // #14522), so the route travels in its own field.
+    readonly route?: string,
   ) {
     super(message);
     this.name = 'ManagedSessionStoreHttpError';
   }
+  // Sanitized writer-vs-store-head pairing captured at the moment of the
+  // refusal (review #14522), when the refusal carried that context.
+  writerRefusalContext?: string;
 }
 
 export class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
@@ -808,6 +815,11 @@ class ManagedSessionStoreHttpClient {
       }),
     );
     this.grant = grant;
+    // Sanitized writer-grant observation (review #14522): the boot id and
+    // generation, never the lease token.
+    debugLogger.debug(
+      `Managed Session Store writer acquired: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${grant.writerGeneration} journalRevision=${grant.journalRevision} committedSequence=${grant.committedSequence} leaseUntil=${new Date(grant.leaseUntil).toISOString()}`,
+    );
     this.scheduleRenewal();
   }
 
@@ -820,6 +832,13 @@ class ManagedSessionStoreHttpClient {
       ),
     );
     this.requireHeadMatchesGrant(head);
+    // Sanitized grant/head pair (review #14522): a restored head that
+    // matches the acquired writer generation proves the previous boot's
+    // writer stayed fenced; the lease-active verdict is implied by the
+    // acquire itself succeeding.
+    debugLogger.debug(
+      `Managed Session Store restore head matches grant: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${this.requireGrant().writerGeneration} headGeneration=${head.writerGeneration} journalRevision=${head.journalRevision} committedSequence=${head.committedSequence} state=${head.state} storageVersion=${head.storageVersion}`,
+    );
     const chunks: Buffer[] = [];
     let afterRevision = 0;
     let activationEpoch = 0;
@@ -1021,6 +1040,7 @@ class ManagedSessionStoreHttpClient {
               );
         break;
       } catch (error) {
+        await this.annotateWriterRefusal(error);
         if (
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&
@@ -1333,12 +1353,16 @@ class ManagedSessionStoreHttpClient {
         });
         if (!response.ok) {
           const error = await readHttpError(response);
+          // Record the refusing route alongside the code (review #14522):
+          // the public message is shared across server predicates, so the
+          // route must travel in its own field, not the printable text.
           throw new ManagedSessionStoreHttpError(
             response.status,
             error.code,
             error.message,
             undefined,
             error.details,
+            `${method} ${path}`,
           );
         }
         if (response.headers.get('Cache-Control') !== 'no-store')
@@ -1608,10 +1632,55 @@ class ManagedSessionStoreHttpClient {
       };
       this.scheduleRenewal();
     })();
-    this.renewPromise = renewal.finally(() => {
+    const noted = renewal.catch(async (error: unknown) => {
+      // A refused renewal currently stops the timer silently; the lease
+      // then expires and every later write meets the same shared 409 text.
+      // Record the pairing before it is swallowed (review #14522).
+      await this.annotateWriterRefusal(error);
+      throw error;
+    });
+    this.renewPromise = noted.finally(() => {
       this.renewPromise = undefined;
     });
     return this.renewPromise;
+  }
+
+  // Review #14522 discriminator: when the store refuses a writer operation
+  // with the shared writer-conflict text, record which grant this writer
+  // presented and the store-head generation/revision/state verdict at the
+  // same instant, sanitized (writer id is the boot id; never a token). The
+  // pair separates a grant the wake never re-acquired from a grant the
+  // store already judges superseded or unleased.
+  private async annotateWriterRefusal(error: unknown): Promise<void> {
+    if (
+      !(error instanceof ManagedSessionStoreHttpError) ||
+      error.status !== 409
+    )
+      return;
+    const grant = this.grant;
+    const grantView =
+      grant === undefined
+        ? 'grant=absent'
+        : `grantGeneration=${grant.writerGeneration} grantRevision=${grant.journalRevision} grantCommitted=${grant.committedSequence}`;
+    let headView: string;
+    try {
+      const head = parseRestoreHead(
+        await this.json(
+          `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
+          'GET',
+        ),
+      );
+      headView = `headGeneration=${head.writerGeneration} headRevision=${head.journalRevision} headCommitted=${head.committedSequence} state=${head.state}`;
+    } catch (probe) {
+      headView = `headProbeFailed(${
+        probe instanceof Error ? probe.message : String(probe)
+      })`;
+    }
+    const detail = `writerId=${this.writerId} ${grantView} ${headView}`;
+    error.writerRefusalContext = detail;
+    debugLogger.debug(
+      `Managed Session Store writer refused: session=${this.sessionKey.sessionId} ${detail}`,
+    );
   }
 
   private scheduleRenewal(retrying = false): void {
@@ -1811,6 +1880,7 @@ class ManagedSessionStoreHttpClient {
               // spend it, and the caller's restart stays allowed.
               guardRetries > 0 || undefined,
               contendedRefusal.details,
+              contendedRefusal.route,
             );
           }
           if (transient) {
@@ -1825,6 +1895,7 @@ class ManagedSessionStoreHttpClient {
                 detail,
                 undefined,
                 error.details,
+                error.route,
               );
             if (error instanceof ManagedSessionStoreTransportError)
               throw new ManagedSessionStoreTransportError(detail);
@@ -1889,12 +1960,16 @@ class ManagedSessionStoreHttpClient {
     }
     if (!response.ok) {
       const error = await readHttpError(response);
+      // Record the refusing route alongside the code (review #14522): the
+      // public message is shared across server predicates, so the route
+      // must travel in its own field, not the printable text.
       throw new ManagedSessionStoreHttpError(
         response.status,
         error.code,
         error.message,
         undefined,
         error.details,
+        `${method} ${path}`,
       );
     }
     if (response.headers.get('Cache-Control') !== 'no-store') {
