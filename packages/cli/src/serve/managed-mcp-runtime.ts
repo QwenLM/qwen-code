@@ -33,6 +33,7 @@ import {
   type ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { launchManagedStdio } from './managed-stdio-supervisor.js';
 
 export interface ManagedMcpDefinition {
   readonly tenantId: string;
@@ -643,24 +644,31 @@ export class ManagedMcpRuntime {
         throw new ManagedMcpError('managed_mcp_connection_quota');
       const transport =
         definition.transport === 'stdio'
-          ? new StdioClientTransport({
-              command: definition.command!,
-              args: definition.args,
-              cwd: directory!,
-              stderr: 'pipe',
-              env: {
-                ...Object.fromEntries(
-                  DEFAULT_INHERITED_ENV_VARS.map((key) => [key, '']),
-                ),
-                PATH: process.env['PATH'] ?? '',
-                HOME: directory!,
-                USERPROFILE: directory!,
-                ...(process.env['SystemRoot']
-                  ? { SYSTEMROOT: process.env['SystemRoot'] }
-                  : {}),
-                ...definition.env,
-              },
-            })
+          ? (() => {
+              const launch = launchManagedStdio(
+                definition.command!,
+                definition.args ?? [],
+                {
+                  ...Object.fromEntries(
+                    DEFAULT_INHERITED_ENV_VARS.map((key) => [key, '']),
+                  ),
+                  PATH: process.env['PATH'] ?? '',
+                  HOME: directory!,
+                  USERPROFILE: directory!,
+                  ...(process.env['SystemRoot']
+                    ? { SYSTEMROOT: process.env['SystemRoot'] }
+                    : {}),
+                  ...definition.env,
+                },
+              );
+              return new StdioClientTransport({
+                command: launch.executable,
+                args: launch.args,
+                cwd: directory!,
+                stderr: 'pipe',
+                env: launch.env,
+              });
+            })()
           : definition.transport === 'streamable-http'
             ? new StreamableHTTPClientTransport(new URL(definition.url!), {
                 requestInit: { headers: definition.headers, redirect: 'error' },
