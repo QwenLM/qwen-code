@@ -66,6 +66,11 @@ around it.
 - These cells do not exercise Workspace tools or publication; FG11f owns
   those, and is blocked on the execution-authority gap recorded in its
   design.
+- `retire-at-intent` needs a claim to exist. With the relay holding
+  `fire_run` before the Harness, Spring never commits an `automation_run`, so
+  the first construction observed an empty run list and nothing to settle
+  `cancelled`. Staging it needs a hold between the run commit and the wake
+  turn, which this fixture does not expose yet.
 - Lease takeover during a cancel is out of scope, as in FG11c.
 - The stream-gap gate (`FG11e`) is untouched.
 

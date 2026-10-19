@@ -55,6 +55,10 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 
 - 这些格子不执行 Workspace 工具、不触及发布；FG11f 负责那些，并受其设计
   中记录的执行授权缺口阻塞。
+- `retire-at-intent` 需要 claim 先存在。relay 在 Harness 之前扣住 `fire_run`
+  时，Spring 根本不会提交 `automation_run`，首次构造拿到的是空 run 列表，
+  没有东西可以结算成 `cancelled`。要构造它，需要在「run 已提交、wake turn
+  尚未开始」之间扣留，本夹具暂未暴露该注入点。
 - 取消期间的租约接管不在范围内，与 FG11c 一致。
 - stream gap 门禁（FG11e）不在此处。
 
