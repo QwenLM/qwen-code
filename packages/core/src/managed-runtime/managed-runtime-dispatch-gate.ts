@@ -10,9 +10,11 @@ import type { ManagedSessionKey } from './managed-session-records.js';
 export type ManagedRuntimeDispatchState = 'dispatch' | 'handed_off' | 'settled';
 
 /**
- * Settled entries only refuse a repeat dispatch inside this process; a
- * restart already relies on the durable checkpoint for the same guarantee.
- * Keep a recent window and drop the oldest settled entries beyond it.
+ * Settled entries are a fast in-process tripwire only. Inside an open turn the
+ * checkpoint's `tools.items` refuses a repeat dispatch; across a turn boundary
+ * `tools` is reset to null, so for an older id this window is the only
+ * in-process refusal and nothing durable re-refuses it. Its size is therefore
+ * a replay-protection decision as well as a memory one.
  */
 export const MANAGED_RUNTIME_DISPATCH_SETTLED_LIMIT = 1024;
 
@@ -50,6 +52,9 @@ export class ManagedRuntimeDispatchGate {
   settle(executionCallId: string): void {
     const current = this.states.get(executionCallId);
     if (current === 'settled') return;
+    // Move the id to the tail: the window is pruned by map order, and an id
+    // claimed early but settled late must not be the first one evicted.
+    this.states.delete(executionCallId);
     this.states.set(executionCallId, 'settled');
     this.pruneSettled();
   }

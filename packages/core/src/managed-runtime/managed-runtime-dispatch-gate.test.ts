@@ -82,6 +82,24 @@ describe('managed runtime dispatch gate', () => {
     expect(() => gate.claim('ex-last')).toThrow(ManagedSessionConflictError);
   });
 
+  it('measures the retained window by settle recency', () => {
+    const gate = managedRuntimeDispatchGate(sessionKey);
+    gate.claim('slow');
+    for (
+      let index = 0;
+      index < MANAGED_RUNTIME_DISPATCH_SETTLED_LIMIT - 1;
+      index++
+    ) {
+      gate.settle(`ex-${index}`);
+    }
+    gate.claim('live');
+    gate.settle('slow');
+
+    expect(gate.state('slow')).toBe('settled');
+    expect(gate.state('ex-0')).toBeUndefined();
+    expect(() => gate.claim('slow')).toThrow(ManagedSessionConflictError);
+  });
+
   it('never prunes an in-flight or handed-off entry', () => {
     const gate = managedRuntimeDispatchGate(sessionKey);
     gate.claim('live');
