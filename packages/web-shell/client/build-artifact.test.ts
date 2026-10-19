@@ -523,6 +523,10 @@ describe('build artifact — transcript entry (#11031)', () => {
     // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
     // increase is shared i18n copy; substituting main's table restores the
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
+    // The ru goal/goals catalog (#13391) ships its goal/goals copy into the
+    // same shared table (ru is per-key en-fallback, so only that copy is
+    // added): 1,335,719 measured over main c24e99e9cb, which keeps the
+    // ceiling above this branch's build.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
