@@ -102,6 +102,7 @@ class ManagedAgentMySqlIT {
                     List.of(Map.of("name", "read_file")),
                     null,
                     null,
+                    null,
                     Map.of("mode", "default"),
                     null,
                     null);
@@ -1547,42 +1548,50 @@ class ManagedAgentMySqlIT {
                         "session.closed",
                         "session.archived");
 
-        // A writer holds the journal until it is sealed or database time
-        // passes its lease; the lifecycle worker waits for that.
         ManagedSessionStore journals = new ManagedSessionStore(jdbc);
         String token = "mysql-lifecycle-writer-token-00000000";
+        assertThatThrownBy(() -> inTransaction(transactions,
+                () -> journals.acquireWriter(tenant, sessionId, token,
+                        new AcquireWriterRequest("workspace", "writer", 60_000L))))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("managed_session_not_writable"));
+        String leaseSessionId = store.insertSessionCommand(
+                tenant, "CREATE_SESSION", "lease-session", "digest-lease-session",
+                "qwen-code", null, null, List.of(), null).sessionId();
+        // A writer holds the journal until it is sealed or database time
+        // passes its lease; the lifecycle worker waits for that.
         long generation =
                 inTransaction(
                                 transactions,
                                 () ->
                                         journals.acquireWriter(
                                                 tenant,
-                                                sessionId,
+                                                leaseSessionId,
                                                 token,
                                                 new AcquireWriterRequest(
                                                         "workspace", "writer", 60_000L)))
                         .writerGeneration();
-        assertThat(journals.hasLiveWriter(tenant, sessionId)).isTrue();
+        assertThat(journals.hasLiveWriter(tenant, leaseSessionId)).isTrue();
         inTransaction(
                 transactions,
                 () ->
                         journals.sealWriter(
                                 tenant,
-                                sessionId,
+                                leaseSessionId,
                                 token,
                                 new SealWriterRequest("workspace", "writer", generation)));
-        assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
+        assertThat(journals.hasLiveWriter(tenant, leaseSessionId)).isFalse();
         inTransaction(
                 transactions,
                 () ->
                         journals.acquireWriter(
                                 tenant,
-                                sessionId,
+                                leaseSessionId,
                                 token,
                                 new AcquireWriterRequest("workspace", "writer", 1_000L)));
-        assertThat(journals.hasLiveWriter(tenant, sessionId)).isTrue();
+        assertThat(journals.hasLiveWriter(tenant, leaseSessionId)).isTrue();
         Thread.sleep(1_500);
-        assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
+        assertThat(journals.hasLiveWriter(tenant, leaseSessionId)).isFalse();
     }
 
     @Test
@@ -2032,6 +2041,7 @@ class ManagedAgentMySqlIT {
                         DEFINITION.tools(),
                         null,
                         null,
+                        null,
                         DEFINITION.permissionPolicy(),
                         null,
                         null);
@@ -2040,6 +2050,7 @@ class ManagedAgentMySqlIT {
                         DEFINITION.model(),
                         "Loser",
                         DEFINITION.tools(),
+                        null,
                         null,
                         null,
                         DEFINITION.permissionPolicy(),
@@ -2217,6 +2228,36 @@ class ManagedAgentMySqlIT {
         if (marker != null) {
             assertThat(output).contains(marker);
         }
+    }
+
+    @Test
+    void publishesAndReadsStaticSkillResourcesAcrossStoreInstances() throws IOException {
+        DriverManagerDataSource source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        TransactionTemplate transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        ManagedSessionStore resources = new ManagedSessionStore(jdbc);
+        String tenant = "mysql-skills-" + UUID.randomUUID();
+        String session = UUID.randomUUID().toString();
+        String token = "s".repeat(32);
+        inTransaction(transactions, () -> resources.acquireWriter(tenant, session, token,
+                new AcquireWriterRequest("workspace", "writer", 60000L)));
+        List<Map<String, Object>> skills = List.of(Map.of("name", "评审:review", "description", "Review changes",
+                "body", "Read the original diff.\n", "base_directory", ".qwen/skills/review"));
+        var published = inTransaction(transactions,
+                () -> resources.publishAgentSkills(tenant, "workspace", session, skills));
+        assertThat(inTransaction(transactions,
+                () -> resources.publishAgentSkills(tenant, "workspace", session, skills))).isEqualTo(published);
+        var reloaded = new ManagedSessionStore(new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source))
+                .readResource(tenant, "workspace", session, published.resourceId(), token);
+        assertThat(new ObjectMapper().readTree(reloaded.bytes())).isEqualTo(new ObjectMapper().valueToTree(skills));
+        assertThat(reloaded.digest()).isEqualTo(published.digest());
+        assertThat(reloaded.kind()).isEqualTo("managed-agent-skills");
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                "[]".getBytes(StandardCharsets.UTF_8), tenant, session, published.resourceId());
+        assertThatThrownBy(() -> resources.readResource(tenant, "workspace", session, published.resourceId(), token))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt"));
     }
 
     private static boolean isWindows() {

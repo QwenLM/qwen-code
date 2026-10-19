@@ -237,7 +237,7 @@ export interface ExtensionsController {
   buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
   buildLocalExtensionSummaries(): Promise<ServeWorkspaceExtensionSummaries>;
   buildLocalExtensionDetails(name: string): Promise<ServeExtensionEntry | null>;
-  refreshExtensionsForAllSessions(): Promise<{
+  refreshExtensionsForAllSessions(sessionIds?: readonly string[]): Promise<{
     refreshed: number;
     failed: number;
   }>;
@@ -278,6 +278,7 @@ export interface ExtensionsController {
       operationBasePath?: string;
       skipRefresh?: boolean;
       skillsOnly?: boolean;
+      sessionIds?: readonly string[];
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
@@ -533,7 +534,9 @@ export function createExtensionsController(
     extensionsStatusInFlight = undefined;
   };
 
-  const refreshExtensionsForAllSessions = async (): Promise<{
+  const refreshExtensionsForAllSessions = async (
+    sessionIds?: readonly string[],
+  ): Promise<{
     refreshed: number;
     failed: number;
   }> => {
@@ -543,7 +546,7 @@ export function createExtensionsController(
       async (release) => {
         releaseCommitLane = release;
         invalidateExtensionsStatus();
-        return await workspace.refreshExtensionsForAllSessions();
+        return await workspace.refreshExtensionsForAllSessions(sessionIds);
       },
       { signal: queueAbort.signal },
     );
@@ -589,6 +592,7 @@ export function createExtensionsController(
       operationBasePath?: string;
       skipRefresh?: boolean;
       skillsOnly?: boolean;
+      sessionIds?: readonly string[];
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
@@ -599,6 +603,15 @@ export function createExtensionsController(
   ): void => {
     const assertGenerationOpen =
       options.assertGenerationOpen ?? deps.captureGenerationAssertion?.();
+    const refreshOptions =
+      options.skillsOnly || options.sessionIds !== undefined
+        ? {
+            ...(options.skillsOnly ? { skillsOnly: true } : {}),
+            ...(options.sessionIds !== undefined
+              ? { sessionIds: options.sessionIds }
+              : {}),
+          }
+        : undefined;
     assertGenerationOpen?.();
     const releaseOperationSlot = acquireOperationSlot(res);
     if (!releaseOperationSlot) return;
@@ -831,9 +844,7 @@ export function createExtensionsController(
                         result:
                           await runtime.bridge.refreshExtensionsForAllSessions(
                             bridgeMutationEvent(event),
-                            ...(options.skillsOnly
-                              ? [{ skillsOnly: true }]
-                              : []),
+                            ...(refreshOptions ? [refreshOptions] : []),
                           ),
                         elapsedMs: Date.now() - startedAt,
                       };
@@ -867,7 +878,7 @@ export function createExtensionsController(
                   workspaceCwd: runtime.workspaceCwd,
                   error: `${settled.result.failed} session refresh(es) failed`,
                 });
-              } else {
+              } else if (options.sessionIds === undefined) {
                 options.onRuntimeReconciled?.(runtime, committedGeneration);
               }
             } else {
@@ -923,7 +934,7 @@ export function createExtensionsController(
               try {
                 const result = await bridge.refreshExtensionsForAllSessions(
                   bridgeMutationEvent(event),
-                  ...(options.skillsOnly ? [{ skillsOnly: true }] : []),
+                  ...(refreshOptions ? [refreshOptions] : []),
                 );
                 return { result, elapsedMs: Date.now() - startedAt };
               } finally {

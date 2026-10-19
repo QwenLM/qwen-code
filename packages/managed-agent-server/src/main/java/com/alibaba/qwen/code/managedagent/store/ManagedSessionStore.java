@@ -28,7 +28,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -54,6 +57,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @Repository
@@ -62,6 +66,11 @@ public class ManagedSessionStore {
     private static final ObjectMapper CSI_JSON = new ObjectMapper();
     private static final int MAX_ID_BYTES = 512;
     private static final int MAX_TEXT_BYTES = 4096;
+    // Hot paths touch the tenant-wide guard rows only on admission, and
+    // never wait on them past this per-statement bound: a held row degrades
+    // to a named, retryable failure instead of out-waiting the caller's own
+    // request budget (#13800).
+    static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = 5;
     private static final Pattern DIGEST = Pattern.compile("^[0-9a-f]{64}$");
     private static final Pattern WRITER_TOKEN = Pattern.compile(
             "^[A-Za-z0-9_-]{"
@@ -167,8 +176,10 @@ public class ManagedSessionStore {
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         ensureSessionRoot(tenantId, sessionId);
         jdbc.queryForList(
                 "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR"
@@ -215,21 +226,105 @@ public class ManagedSessionStore {
 
     private void checkLifecycleWriter(String tenantId, String sessionId,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-        boolean v2 = !jdbc.queryForList("SELECT o.operation_id FROM ma_operation o JOIN ma_session_head f"
-                + " ON o.tenant_id = f.tenant_id AND o.session_id ="
-                                    + " f.harness_session_id AND o.operation_id = f.operation_id"
-                                    + " WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')"
-                                    + " AND o.tenant_id = ? AND o.session_id = ? AND"
-                                    + " o.lifecycle_protocol_version = 2", tenantId, sessionId).isEmpty();
-        if (authority != null || v2) {
-            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+        // Ordinary traffic fences per Session (head row, drain admission);
+        // taking the two tenant-wide rows here would let any long holder of
+        // them wedge every Session of the tenant (#13800). No v2 probe may
+        // run here: a plain consistent read pins the REPEATABLE READ snapshot
+        // before the guard waits below; a row-locking read inverts against
+        // the claim order (guards → operation) of a concurrently claiming
+        // lifecycle; and borrowing a second pooled connection deadlocks the
+        // pool under saturation. The fence
+        // that rejects ordinary writes against a v2 Session lives in
+        // requireOrdinaryAdmission, where the caller's own guards are already
+        // held and the same consistent read layer is established.
+        if (authority == null) {
+            return;
+        }
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+    }
+
+    private static ApiException guardContended() {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                "tenant_guard_contended",
+                "A tenant-wide Managed Session guard could not be acquired"
+                        + " within the hot-path bound; retry.");
+    }
+
+    /**
+     * Runs one sweep candidate in its own transaction. A guard refusal skips that candidate
+     * instead of aborting the sweep; any other failure propagates unchanged.
+     */
+    static <T> T skipContended(
+            org.springframework.transaction.support.TransactionTemplate transactions,
+            org.springframework.transaction.support.TransactionCallback<T> body) {
+        try {
+            return transactions.execute(body);
+        } catch (ApiException refusal) {
+            if (!"tenant_guard_contended".equals(refusal.getCode())) {
+                throw refusal;
+            }
+            return null;
         }
     }
 
+    static void lockBounded(Runnable lock) {
+        lockBoundedResult(() -> {
+            lock.run();
+            return null;
+        });
+    }
+
+    static <T> T lockBoundedResult(Supplier<T> lock) {
+        try {
+            return lock.get();
+        } catch (PessimisticLockingFailureException | QueryTimeoutException error) {
+            throw guardContended();
+        }
+    }
+
+    /**
+     * The root-side half of {@link #lockBounded}'s mapping. A pinned CSI
+     * Session's continuation holds its root while it waits for the tenant
+     * guards, so a guard-first lane on that Session closes an InnoDB cycle
+     * when it reaches the root, and InnoDB may roll back either side
+     * (#13800 R1-1). The root acquisitions name that rollback the way the
+     * guard side does; an ordinary wait on the root stays unbounded and
+     * keeps its own failure. The default translator reports a deadlock
+     * (MySQL/MariaDB 1213, SQLState 40001) as CannotAcquireLockException,
+     * the error-code translator as DeadlockLoserDataAccessException, so the
+     * victim is recognized by its vendor code.
+     */
+    static <T> T namedRootDeadlock(Supplier<T> lock) {
+        try {
+            return lock.get();
+        } catch (PessimisticLockingFailureException error) {
+            if (error instanceof DeadlockLoserDataAccessException || deadlockVictim(error)) {
+                throw guardContended();
+            }
+            throw error;
+        }
+    }
+
+    private static boolean deadlockVictim(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.sql.SQLException sql && sql.getErrorCode() == 1213) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void requirePhysicalSessionOpen(String tenantId, String workspaceId, String sessionId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // Placement is the tenant-wide row migration admission shares; on
+        // these per-turn paths it stays bounded with the shared named-failure
+        // mapping, so a held row answers tenant_guard_contended instead of
+        // out-waiting the caller (#13800).
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         WorkspaceMigrationAdmission.requirePhysicalOpen(jdbc, tenantId,
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
     }
@@ -261,8 +356,12 @@ public class ManagedSessionStore {
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        // Ordinary authorisation fences per Session (drain + head): the
+        // tenant-wide guard rows stay with lifecycle/publication paths, or
+        // any long holder of them wedges unrelated Sessions (#13800). The
+        // Session root is locked before the drain admission reads the head
+        // row, keeping the root-then-head order of every other writer.
+        ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         if (!"legacy-close".equals(request.kind()) || !WorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
@@ -271,7 +370,27 @@ public class ManagedSessionStore {
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
     }
 
+    // An ordinary write against a v2-claimed Session must fail with the
+    // claim's name, and the read that names it must never walk the three
+    // cliffs the earlier probes hit: no plain consistent read ahead of the
+    // guard waits in the calling path (it pins the snapshot before the retry
+    // learns its winner), no row lock ahead of the claim order (guards →
+    // operation), and no second pooled connection while this transaction
+    // holds its own (the pool self-deadlocks at saturation).
+    // Every call site invokes this only after its own guard or head row has
+    // been taken, so the consistent read layer the flow required is already
+    // established and the classification costs one lock-free session-scoped
+    // range scan on the caller's own connection.
+    private void requireNoLifecycleClaim(String tenantId, String sessionId) {
+        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key = ?"
+                + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ?"
+                + " AND lifecycle_protocol_version = 2", sessionScopeKey(tenantId, sessionId), tenantId, sessionId).isEmpty()) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+        }
+    }
+
     private void requireOrdinaryAdmission(String tenantId, String sessionId) {
+        requireNoLifecycleClaim(tenantId, sessionId);
         if (lifecycleFenced(tenantId, sessionId)) {
             throw conflict(
                     "managed_session_lifecycle_active", "Ordinary execution admission is closed.");
@@ -358,6 +477,12 @@ public class ManagedSessionStore {
         requireCredential(tenant, workspace, session, token);
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
         requirePhysicalSessionOpen(tenant, workspace, session);
+        // Publication-lane writer: keeps the tenant CAS row before the
+        // Session root the CSI check locks and before the head row, the
+        // order retention reads take (CAS row, root, head) and the same as
+        // before #13800 decoupled ordinary traffic.
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         var continuation = lockCsiContinuation(tenant, session);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
@@ -390,17 +515,29 @@ public class ManagedSessionStore {
         checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
-        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId, request.workspaceId());
-        boolean createdRoot = insertSessionRoot(tenantId, sessionId);
-        // A new CONTROL root cannot be CSI-backed. Probing the empty CSI index
-        // would gap-lock other tenants' first inserts under REPEATABLE READ.
-        var csiOriginal = createdRoot ? null : lockCsiOriginal(tenantId, sessionId);
+        // Acquisition stays serialized with an in-flight delete/retire: while
+        // a Session has no head row, the tenant CAS row is the only ordering
+        // point, so it stays. Both acquisitions run in the codebase-wide
+        // placement-before-publication order, bounded — a held row degrades
+        // to a named failure instead of a silent wedge or a 1213 (#13800).
+        // Placement must precede the drain admission check below: begin paths
+        // insert drain rows only after locking placement, so checking the
+        // drain first would take its gap lock and deadlock against a
+        // lifecycle that already holds placement (#13800).
+        // requireSessionOpen must run after the CAS guard: it is this
+        // transaction's first consistent read, so its REPEATABLE READ
+        // snapshot only sees a retirement committed underneath the CAS wait
+        // if it is pinned after that wait (#13800 R2).
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                tenantId, GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
-        // A root that predates this writer still needs its scope keys and the
-        // SESSION event stream the session read path joins on.
-        materializeSessionRoot(tenantId, sessionId);
+        WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId, request.workspaceId());
+        ensureSessionRoot(tenantId, sessionId);
         bindControlSessionStorage(tenantId, request.workspaceId(), sessionId);
         // Materialize the key before any locking read: missing-key RR locks can
         // deadlock independent tenants when both first writers insert a head.
@@ -416,7 +553,7 @@ public class ManagedSessionStore {
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<String> closed = jdbc.query(
                         "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ? AND"
-                                + " workspace_id IS NOT NULL FOR UPDATE",
+                                + " (workspace_id IS NOT NULL OR session_kind = 'PUBLIC') FOR UPDATE",
                 (row, index) -> row.getString("status"), tenantId, sessionId);
         if (authority == null && !closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
             throw conflict("managed_session_not_writable", "The Session is closing or closed.");
@@ -437,7 +574,7 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
@@ -452,7 +589,7 @@ public class ManagedSessionStore {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -508,9 +645,20 @@ public class ManagedSessionStore {
         long generation = increment(head.writerGeneration(),
                 "writer generation");
         if (csiOriginal != null) {
-            throw conflict(
-                    "csi_original_writer_unavailable",
-                    "The original CSI writer cannot be replaced.");
+            if (!"ACTIVE".equals(head.state()) || head.storageVersion() != STORAGE_VERSION
+                    || head.compactedThroughRevision() != 0 || !"READY".equals(head.recoveryStatus())
+                    || head.writerLeaseUntil() == null || head.journalRevision() < 2 || head.activationEpoch() < 1) {
+                throw conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");
+            }
+            requireCsiHistoryOwner(csiOriginal);
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                JdbcCsiActivationAdmission.qualifyColdWriter(connection, csiOriginal, csiBindings,
+                        head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId(),
+                        head.writerGeneration(), head.activationEpoch(), epochMillis(head.writerLeaseUntil()),
+                        request.writerId());
+                return null;
+            });
+            now = databaseNow();
         }
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
         jdbc.update(
@@ -552,6 +700,9 @@ public class ManagedSessionStore {
         }
         HeadRow head = requireHeartbeatHead(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (authority == null) {
+            requireNoLifecycleClaim(tenantId, sessionId);
+        }
         requireCsiWriter(csiOriginal, head);
         Timestamp now = databaseNow();
         boolean cleanup = authority != null && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
@@ -594,6 +745,9 @@ public class ManagedSessionStore {
         }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (authority == null) {
+            requireNoLifecycleClaim(tenantId, sessionId);
+        }
         if ("SEALED".equals(head.state())
                 && request.writerGeneration() == head.writerGeneration()
                 && request.writerId().equals(head.writerId())
@@ -687,6 +841,13 @@ public class ManagedSessionStore {
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         checkLifecycleWriter(tenantId, sessionId, authority);
+        // Ordinary record commits still hold the placement guard while they
+        // fly: a begin/lifecycle admission serializes with only that row, so
+        // without it an admission sails through mid-commit. The acquisition
+        // stays bounded — a held row degrades to a named failure within the
+        // hot-path budget rather than waiting out the caller (#13800).
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
         boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
@@ -747,12 +908,20 @@ public class ManagedSessionStore {
                                 });
                 requireCsiCurrentTime(continuation);
             }
+            // A duplicate is fenced like a first attempt: before #13800 the
+            // v2 claim check ran ahead of this lookup.
+            if (authority == null) {
+                requireNoLifecycleClaim(tenantId, sessionId);
+            }
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
         requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (authority == null) {
+            requireNoLifecycleClaim(tenantId, sessionId);
+        }
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, true);
@@ -809,11 +978,13 @@ public class ManagedSessionStore {
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
         }
+        boolean wakeInput = false;
         for (String line :
                 new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = ManagedExtensionRecordStore.parse(line);
             if (record != null && record.has("managedSession")) {
                 JsonNode event = record.get("managedSession");
+                wakeInput |= WakeRecoveryStore.isWakeInput(event);
                 ManagedHostedRecoveryRecords.validateEvent(
                         event.path("kind").asText(),
                         event.path("payload"),
@@ -958,6 +1129,8 @@ public class ManagedSessionStore {
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE ma_session_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
+                        + " wake_pending = wake_pending OR ?,"
+                        + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
                         + " latest_checkpoint_resource_id = COALESCE(?,"
                         + " latest_checkpoint_resource_id),"
@@ -967,7 +1140,9 @@ public class ManagedSessionStore {
                         + " activation_head_revision = ?, storage_version = ?, gmt_modified = ?"
                         + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                         + " AND session_id = ?",
-                revision, request.lastSequence(), request.commitDigest(),
+                revision, request.lastSequence(),
+                wakeInput,
+                head.journalRevision(), revision, request.commitDigest(),
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 activation == null ? head.activationId()
@@ -1503,8 +1678,23 @@ public class ManagedSessionStore {
         if (bytes.length > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES) {
             throw payloadTooLarge("Agent instructions exceed 64 KiB.");
         }
+        return publishAgentResource(tenantId, workspaceId, sessionId,
+                "managed-agent-instructions", "agent-instructions-", bytes);
+    }
+
+    @Transactional
+    public ToolResultResourceRef publishAgentSkills(String tenantId,
+            String workspaceId, String sessionId, List<java.util.Map<String, Object>> skills) {
+        validateScope(tenantId, workspaceId, sessionId);
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
+        return publishAgentResource(tenantId, workspaceId, sessionId,
+                "managed-agent-skills", "agent-skills-", AgentDefinitionExtensions.skillsBytes(skills));
+    }
+
+    private ToolResultResourceRef publishAgentResource(String tenantId,
+            String workspaceId, String sessionId, String kind, String prefix, byte[] bytes) {
         String digest = sha256(bytes);
-        String resourceId = "agent-instructions-" + digest;
+        String resourceId = prefix + digest;
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         Timestamp now = databaseNow();
         ResourceRow existing = findResource(scopeKey, resourceId);
@@ -1514,14 +1704,14 @@ public class ManagedSessionStore {
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
                         + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
-                        + " 'managed-agent-instructions', 1, ?, ?, 'MYSQL_INLINE', ?, ?,"
-                        + " 'PUBLISHED', ?, ?)",
+                        + " ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
                     resourceKey(scopeKey, resourceId),
                     scopeKey,
                     tenantId,
                     workspaceId,
                     sessionId,
                     resourceId,
+                    kind,
                     bytes.length,
                     digest,
                     bytes,
@@ -1531,16 +1721,15 @@ public class ManagedSessionStore {
         } else {
             requireResourceScope(existing, tenantId, workspaceId, sessionId, resourceId);
             verifyStoredResource(existing);
-            if (!"managed-agent-instructions".equals(existing.kind())
+            if (!kind.equals(existing.kind())
                     || existing.schemaVersion() != 1
                     || existing.byteLength() != bytes.length
                     || !digest.equals(existing.digest())) {
                 throw conflict("managed_session_resource_conflict",
-                        "Agent instructions resource does not match.");
+                        "Agent configuration resource does not match.");
             }
         }
-        return new ToolResultResourceRef(resourceId,
-                "managed-agent-instructions", 1, bytes.length, digest);
+        return new ToolResultResourceRef(resourceId, kind, 1, bytes.length, digest);
     }
 
     @Transactional
@@ -1573,14 +1762,26 @@ public class ManagedSessionStore {
         if (bytes.length != request.byteLength() || !sha256(bytes).equals(request.digest())) {
             throw invalid("Tool result bytes do not match their length or digest.");
         }
+        requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
+        // Tool-result publication lane: keeps the tenant CAS row before the
+        // Session root the CSI check locks and before the head row, the
+        // order retention reads take (CAS row, root, head) and the same as
+        // before #13800 decoupled ordinary traffic.
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // After both bounded waits, so the CSI check's read does not pin this
+        // transaction's snapshot ahead of them.
         var continuation = lockCsiContinuation(tenantId, sessionId);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
-        requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        // Unlike the other writer paths, a v2 claim fences this lane even
+        // for the claiming lifecycle authority: tool results are never
+        // published against a Session claimed under lifecycle protocol v2.
+        requireNoLifecycleClaim(tenantId, sessionId);
         requireCsiWriter(csiOriginal, head);
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
@@ -1647,7 +1848,9 @@ public class ManagedSessionStore {
         }
         requireResourceScope(resource, tenantId, workspaceId, sessionId,
                 resourceId);
-        if (!"REFERENCED".equals(resource.state())) {
+        if (!"REFERENCED".equals(resource.state())
+                && !("PUBLISHED".equals(resource.state())
+                    && Set.of("managed-agent-instructions", "managed-agent-skills").contains(resource.kind()))) {
             throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                     "A referenced Managed Session resource is missing.");
         }
@@ -1842,19 +2045,18 @@ public class ManagedSessionStore {
             if (resource.schemaVersion() < 1 || resource.byteLength() < 0) {
                 throw invalid("Resource version or length is invalid.");
             }
-            if (resource.byteLength()
-                    > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
+            int maxResourceBytes = ManagedSessionStoreModels.inlineResourceBytes(resource.kind());
+            if (resource.byteLength() > maxResourceBytes
                     && !("managed-tool-outcome".equals(resource.kind())
                     && resource.bytesBase64() == null)) {
                 throw new ApiException(HttpStatus.NOT_IMPLEMENTED,
                         ManagedSessionStoreModels.ERROR_OSS_DISABLED,
-                        "Resources larger than 64 KiB require the disabled"
+                        "Resources larger than " + (maxResourceBytes / 1024) + " KiB require the disabled"
                                 + " OSS storage path.");
             }
             byte[] bytes = resource.bytesBase64() == null ? null
                     : decodeBase64(resource.bytesBase64(),
-                            ManagedSessionStoreModels
-                                    .MAX_INLINE_RESOURCE_BYTES,
+                            maxResourceBytes,
                             "resource bytesBase64");
             if (bytes != null && (bytes.length != resource.byteLength()
                     || !sha256(bytes).equals(resource.digest()))) {
@@ -1864,7 +2066,7 @@ public class ManagedSessionStore {
             if (bytes != null) {
                 inlineBytes += bytes.length;
                 if (inlineBytes
-                        > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                        > ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES) {
                     throw payloadTooLarge("Inline resources exceed their"
                             + " transaction byte limit.");
                 }
@@ -2002,8 +2204,14 @@ public class ManagedSessionStore {
     }
 
     private HeadRow findHeadForUpdate(String tenantId, String sessionId) {
-        ToolPublicationRetentionStore.lockSession(jdbc, tenantId, sessionId);
-        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
+        // Ordinary writers serialize on their own Session's rows only: the
+        // Session root, then the head — the per-Session order retirement
+        // also takes behind its tenant guard. Both are locking reads, so
+        // neither pins this transaction's REPEATABLE READ snapshot, and
+        // requireLive below reads after the waits end. The tenant-wide CAS
+        // row stays with explicit publication paths so ordinary writes never
+        // queue on it (#13800).
+        ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         List<HeadRow> rows =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
@@ -2012,12 +2220,15 @@ public class ManagedSessionStore {
                         JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
+        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.get(0);
     }
 
     private HeadRow requireHeartbeatHead(String tenantId, String sessionId) {
-        // checkLifecycleWriter already holds the retirement/publication tenant fence.
-        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
+        // An ordinary heartbeat holds no tenant fence (#13800): retirement
+        // serializes with it on the Session root, which the CSI check locked
+        // before its first consistent read, and on the head row, locked here
+        // before requireLive reads.
         var heads =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
@@ -2028,6 +2239,7 @@ public class ManagedSessionStore {
                         JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
+        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         if (heads.isEmpty()) {
             throw sessionNotFound();
         }
@@ -2035,17 +2247,13 @@ public class ManagedSessionStore {
     }
 
     JdbcCsiFilesRetirementGuard.Original lockCsiOriginal(String tenantId, String sessionId) {
-        var continuation = lockCsiContinuation(tenantId, sessionId, false);
+        var continuation = lockCsiContinuation(tenantId, sessionId);
         return continuation == null ? null : continuation.original();
     }
 
     private CsiContinuation lockCsiContinuation(String tenantId, String sessionId) {
-        return lockCsiContinuation(tenantId, sessionId, false);
-    }
-
-    private CsiContinuation lockCsiContinuation(String tenantId, String sessionId, boolean createRoot) {
-        return jdbc.execute(
-                (org.springframework.jdbc.core.ConnectionCallback<CsiContinuation>)
+        Boolean pinned = jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<Boolean>)
                         connection -> {
                             var target =
                                     org.springframework.jdbc.datasource.DataSourceUtils
@@ -2066,17 +2274,47 @@ public class ManagedSessionStore {
                                 }
                                 return null;
                             }
-                            JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);
-                            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-                            if (createRoot) {
-                                // A first writer has no root yet, and the
-                                // pin read below locks the root by primary
-                                // key. On a missing key that lock is a gap
-                                // other tenants' first writers insert their
-                                // roots into, so both sides would deadlock
-                                // once each inserted its own (#13996).
-                                ensureSessionRoot(tenantId, sessionId);
-                            }
+                            // An ordinary Session stops here, before the
+                            // tenant-wide guard rows and the slot/binding
+                            // range locks: taking them on every writer path
+                            // would couple per-turn traffic of unrelated
+                            // Sessions again (#13800). The root is locked
+                            // first, by primary key once it exists, so its pin
+                            // is read as committed now even under an older
+                            // REPEATABLE READ snapshot, no gap is taken that
+                            // another tenant's first writer inserts into, and
+                            // no consistent read below runs before this wait.
+                            // The runtime rows are then read plainly: a CSI
+                            // slot or binding is only created under a pinned
+                            // root, a pin never changes after its row is
+                            // inserted, and roots are never deleted, so an
+                            // unpinned root can only have legacy markers,
+                            // which no snapshot here is older than.
+                            return ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId)
+                                    || JdbcCsiFilesRetirementGuard.hasCsiRuntimeMarker(
+                                            target, tenantId, sessionId);
+                        });
+        if (!Boolean.TRUE.equals(pinned)) {
+            return null;
+        }
+        // A pinned Session takes the tenant guards behind its root, bounded
+        // and named like every other per-turn lane: on renew, commit and
+        // recovery state these are the first tenant-wide waits (#13800).
+        // Every other lane takes the guards before the root, so a guard-first
+        // operation on this same Session meanwhile resolves as an InnoDB
+        // deadlock. Either side may be rolled back: this side's waits are
+        // named by lockBounded, the other side's root wait by
+        // namedRootDeadlock (#13800 R1-1).
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        return jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<CsiContinuation>)
+                        connection -> {
+                            var target =
+                                    org.springframework.jdbc.datasource.DataSourceUtils
+                                            .getTargetConnection(connection);
                             var original =
                                     JdbcCsiFilesRetirementGuard.lockManagedSession(
                                             target, tenantId, sessionId);
@@ -2454,7 +2692,10 @@ public class ManagedSessionStore {
                         && (resource.byteLength() > 0 && resource.byteLength() <= toolResultLimit(resource.kind())
                             || "managed-agent-instructions".equals(resource.kind())
                                 && resource.byteLength() >= 0
-                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES))
+                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES
+                            || "managed-agent-skills".equals(resource.kind())
+                                && resource.byteLength() > 0
+                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES))
                 || resource.bytes() == null
                 || resource.objectKey() != null
                 || resource.objectVersionId() != null
@@ -2642,36 +2883,12 @@ public class ManagedSessionStore {
         return sha256(writerToken.getBytes(StandardCharsets.UTF_8));
     }
 
-    private boolean insertSessionRoot(String tenantId, String sessionId) {
-        long now = epochMillis(databaseNow());
-        String tenantKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
-        String sessionKey = com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
-        int inserted = jdbc.update(
-                "INSERT IGNORE INTO ma_session (tenant_id, session_id, session_kind, tenant_key,"
-                    + " session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?,"
-                    + " 'CONTROL', ?, ?, ?, ?, ?)",
-                tenantId,
-                sessionId,
-                tenantKey,
-                sessionKey,
-                sessionScopeKey(tenantId, sessionId),
-                now,
-                now);
-        return inserted == 1;
-    }
-
     private void ensureSessionRoot(String tenantId, String sessionId) {
-        insertSessionRoot(tenantId, sessionId);
-        materializeSessionRoot(tenantId, sessionId);
-    }
-
-    private void materializeSessionRoot(String tenantId, String sessionId) {
+        // Take the root row exclusively first: ordinary writers lock it
+        // without a tenant guard (#13800); keep that order before
+        // initializing the session event stream.
+        ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         long now = epochMillis(databaseNow());
-        String tenantKey = JdbcRuntimeBindingRepository.harnessDrainKey(tenantId);
-        String sessionKey = JdbcRuntimeBindingRepository.harnessDrainKey(sessionId);
-        jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?"
-                        + " WHERE tenant_id = ? AND session_id = ? AND session_scope_key IS NULL",
-                tenantKey, sessionKey, sessionScopeKey(tenantId, sessionId), tenantId, sessionId);
         jdbc.update(
                 "INSERT IGNORE INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
                         + " gmt_modified) VALUES (?, ?, 'SESSION', X'', ?)",
@@ -2688,7 +2905,7 @@ public class ManagedSessionStore {
         return com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(scopeKey, resourceId);
     }
 
-    private static String commandKeyHash(String operation,
+    static String commandKeyHash(String operation,
             String commandId) {
         return sha256((operation + "\u0000" + commandId)
                 .getBytes(StandardCharsets.UTF_8));

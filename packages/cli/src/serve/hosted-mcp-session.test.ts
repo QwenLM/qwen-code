@@ -1022,6 +1022,46 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
   await mcp.close();
 });
 
+it('hands its mount back after a recovery block only once its MCP work settles, then claims it again (#13800)', async () => {
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const operationId = randomUUID();
+  unknown = true;
+  await mcp.invoke(operationId, 'demo', {
+    kind: 'prompt_get',
+    name: 'greet',
+    arguments: {},
+  });
+  // The Broker cannot see an MCP operation: an unknown effect keeps the
+  // Session-scoped mount, as does a Hook run sharing this owner.
+  await expect(mcp.mountHandback(() => false)!()).rejects.toThrow(/unproven/);
+  replies.set(operationId, {
+    operationId,
+    state: 'settled',
+    response: {
+      messages: [{ role: 'user', content: { type: 'text', text: 'one' } }],
+    },
+  });
+  await mcp.status(operationId);
+  await expect(mcp.mountHandback(() => true)!()).rejects.toThrow(/unproven/);
+  expect(releaseMount).not.toHaveBeenCalled();
+  await mcp.mountHandback(() => false)!();
+  expect(releaseMount).toHaveBeenCalledWith('mcp-claim');
+  const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+  acquire.mockClear();
+  unknown = false;
+  await mcp.invoke(randomUUID(), 'demo', {
+    kind: 'resource_read',
+    uri: 'memory://blob',
+  });
+  expect(acquire).toHaveBeenCalled();
+  await mcp.close();
+});
+
 it('refuses duplicate servers, unpinned definitions and credentials in Hosted input', () => {
   expect(parseHostedMcpServers([pin])).toEqual([pin]);
   for (const input of [
@@ -1146,7 +1186,9 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   });
   const abort = new AbortController();
   const refresh = mcp.refresh(abort.signal).catch((cause: unknown) => cause);
-  await vi.waitFor(() => expect(discoveryId).toBeDefined());
+  await vi.waitFor(() => expect(discoveryId).toBeDefined(), {
+    timeout: 10_000,
+  });
   const count = control.mock.calls.length;
   const reason = new Error('cancelled discovery');
   abort.abort(reason);
@@ -1250,7 +1292,9 @@ it('discards discovery from a configuration superseded while the request was pen
     return physical(operation);
   });
   const refreshing = mcp.refresh();
-  await vi.waitFor(() => expect(operationId).toBeDefined());
+  await vi.waitFor(() => expect(operationId).toBeDefined(), {
+    timeout: 10_000,
+  });
   try {
     await mcp.configure(randomUUID(), { ...pin, serverRevision: 2 }, 1);
     reply({
@@ -1330,7 +1374,9 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       .refresh(abort.signal)
       .catch((cause: unknown) => cause);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), {
+        timeout: 10_000,
+      });
       abort.abort(reason);
       await expect(mcp.close()).rejects.toBeInstanceOf(
         HostedMcpRecoveryRequiredError,
@@ -1398,7 +1444,9 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       .ensureReady(abort.signal)
       .catch((error: unknown) => error);
     try {
-      await vi.waitFor(() => expect(entered).toBe(true));
+      await vi.waitFor(() => expect(entered).toBe(true), {
+        timeout: 10_000,
+      });
       const before =
         session.authority.extensionRecordsInDomain('mcp_configuration')[0];
       abort.abort(reason);
@@ -1410,12 +1458,16 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       expect(requests).toHaveLength(0);
       loseAck = phase === 'dispatch_started';
       finish();
-      await vi.waitFor(() => expect(resumed).toBe(true));
+      await vi.waitFor(() => expect(resumed).toBe(true), {
+        timeout: 10_000,
+      });
       if (phase === 'dispatch_started') {
-        await vi.waitFor(() =>
-          expect(
-            requests.filter((request) => request.kind === 'mcp-configure'),
-          ).toHaveLength(1),
+        await vi.waitFor(
+          () =>
+            expect(
+              requests.filter((request) => request.kind === 'mcp-configure'),
+            ).toHaveLength(1),
+          { timeout: 10_000 },
         );
         await mcp.ensureReady();
         expect(

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -26,13 +27,22 @@ public class WorkspaceExecutionStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final WorkspaceStorageGuard storageGuard;
+    private final ResidentWorkspaces residents;
 
     @Autowired
     public WorkspaceExecutionStore(JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard) {
+            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
+            com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
         this.storageGuard = storageGuard;
+        this.residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
+    }
+
+    public WorkspaceExecutionStore(JdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard) {
+        this(jdbc, transactionManager, storageGuard,
+                new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties());
     }
 
     public WorkspaceExecutionStore(JdbcTemplate jdbc,
@@ -41,15 +51,49 @@ public class WorkspaceExecutionStore {
         this.transaction = new TransactionTemplate(transactionManager);
         // Offline saved-owner cleanup must not require the current mount.
         this.storageGuard = null;
+        this.residents = new ResidentWorkspaces(List.of());
+    }
+
+    public java.nio.file.Path createdStorageRoot(String tenantId, String storageId) {
+        return storageGuard == null ? null : storageGuard.createdStorageRoot(tenantId, storageId);
     }
 
     public boolean verifiedRecoveryEnabled() {
         return storageGuard != null && storageGuard.enabled();
     }
 
+    private void requireResidentHeld(ContextBinding binding, RuntimeSessionRecord session, boolean releasing) {
+        var selected = residents.find(binding);
+        if (selected == null || !com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.selects(session.getSession().getScope())
+                || !ResidentWorkspaces.scope(selected).equals(session.getSession().getScope())) {
+            throw unavailable();
+        }
+        ResidentWorkspaces.requireRegistration(jdbc, selected);
+        var rows = jdbc.queryForList("SELECT rs.runtime_session_id FROM ma_runtime_session rs"
+                + " JOIN ma_runtime_binding b ON b.binding_id = rs.binding_id AND b.runtime_generation = rs.runtime_generation"
+                + " JOIN ma_runtime_slot slot ON slot.active_binding_id = b.binding_id AND slot.request_key = b.request_key"
+                + " JOIN ma_storage_owner o ON o.binding_id = b.binding_id AND o.runtime_generation = b.runtime_generation"
+                + " WHERE rs.binding_id = ? AND rs.runtime_generation = ? AND rs.runtime_session_id = ?"
+                + " AND rs.harness_session_id = ? AND rs.session_state IN (" + (releasing
+                        ? "'ACQUIRING', 'READY', 'RELEASING', 'RELEASED'" : "'ACQUIRING', 'READY'") + ")"
+                + " AND b.request_key = ? AND b.binding_state = 'READY' AND b.drain_requested = FALSE"
+                + " AND o.storage_key = ? AND o.storage_kind = 'CSI' AND o.csi_phase = 'RESERVED'"
+                + " AND o.csi_revision = 1 AND o.csi_registration_key = ? AND o.csi_registration_revision = ?"
+                + " AND o.csi_provision_request_id = b.provision_request_id AND o.holder_key IS NULL"
+                + " AND o.runtime_session_id IS NULL", String.class, session.getBindingId(), session.getRuntimeGeneration(),
+                session.getRuntimeSessionId(), session.getSession().getHarnessSessionId(), residents.request(binding).requestKey(),
+                selected.registration().physicalKey(), selected.registration().aliasKey(), selected.registration().revision());
+        if (rows.size() != 1 || !session.getRuntimeSessionId().equals(rows.getFirst())
+                || !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE binding_id = ?"
+                + " AND runtime_generation = ? AND runtime_session_id <> ? AND session_state <> 'RELEASED'",
+                String.class, session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId()).isEmpty()) {
+            throw busy();
+        }
+    }
+
     public void authorize(SessionRecord session) {
         authorizePassiveAttachment(session);
-        if (storageGuard != null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -61,7 +105,7 @@ public class WorkspaceExecutionStore {
             throw new RuntimeBrokerException(error.getStatus().value(), error.getCode(), error.getMessage(), false, error);
         }
         authorizePassiveAttachment(session, authority);
-        if (storageGuard != null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -71,7 +115,7 @@ public class WorkspaceExecutionStore {
             throw unavailable();
         }
         authorizePassiveAttachment(session, null, true);
-        if (storageGuard != null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -103,6 +147,19 @@ public class WorkspaceExecutionStore {
 
     public void authorizeCancellation(SessionRecord session) {
         authorizeAttachment(session, true, false, null, false);
+    }
+
+    public void authorizeRecoveryCancellation(SessionRecord session,
+            String turnId, String dispatchOwner) {
+        if (turnId == null || dispatchOwner == null
+                || jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ? AND status = 'RUNNING'"
+                        + " AND submission_attempted = TRUE AND harness_event_epoch IS NOT NULL"
+                        + " AND dispatch_owner = ? AND dispatch_lease_until >= " + ManagedSchemaTime.SQL_NOW,
+                        Long.class, session.tenantId(), session.sessionId(), turnId, dispatchOwner) != 1) {
+            throw unavailable();
+        }
+        authorizeAttachment(session, false, false, null, false, true);
     }
 
     /**
@@ -144,7 +201,17 @@ public class WorkspaceExecutionStore {
                         binding.getContextConfigRef())) {
             throw unavailable();
         }
-        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        var resident = residents.find(binding);
+        if (resident == null) {
+            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        } else {
+            if (!WorkspaceToolProfiles.FILES.equals(session.toolProfile())
+                    || jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
+                            + " AND parent_session_id IS NULL", Long.class, session.tenantId(), session.sessionId()) != 1) {
+                throw unavailable();
+            }
+            ResidentWorkspaces.requireRegistration(jdbc, resident);
+        }
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.
         byte[] executionActor = cancellation || committedStop ? null
@@ -269,10 +336,17 @@ public class WorkspaceExecutionStore {
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
+        if (residents.find(binding) != null) {
+            transaction.executeWithoutResult(status -> {
+                WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+                requireResidentHeld(binding, session, false);
+            });
+            return;
+        }
         String holder = holderKey(session);
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
-            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             String key = storageKey(binding);
             WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state, drain_requested,"
@@ -302,10 +376,10 @@ public class WorkspaceExecutionStore {
                 throw unavailable();
             }
             jdbc.update("INSERT INTO ma_storage_owner"
-                    + " (storage_key, storage_kind) VALUES (?, 'LOCAL') ON DUPLICATE KEY UPDATE"
-                    + " storage_key = storage_key", key);
+                    + " (storage_key, storage_kind) VALUES (?, ?) ON DUPLICATE KEY UPDATE"
+                    + " storage_key = storage_key", key, SshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId()) == null ? "LOCAL" : "SSH_LOCAL");
             String current = jdbc.queryForObject("SELECT holder_key FROM"
-                    + " ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
+                    + " ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE",
                     String.class, key);
             if (storageGuard != null) {
                 storageGuard.verifyLocked(binding);
@@ -315,12 +389,16 @@ public class WorkspaceExecutionStore {
             }
             jdbc.update("UPDATE ma_storage_owner SET holder_key = ?,"
                     + " binding_id = ?, runtime_generation = ?, runtime_session_id = ?"
-                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL'", holder, session.getBindingId(),
+                    + " WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')", holder, session.getBindingId(),
                     session.getRuntimeGeneration(), session.getRuntimeSessionId(), key);
         });
     }
 
     public void assertHeld(ContextBinding binding, RuntimeSessionRecord session) {
+        if (residents.find(binding) != null) {
+            requireResidentHeld(binding, session, false);
+            return;
+        }
         if (storageGuard != null) {
             storageGuard.verify(binding);
         }
@@ -330,17 +408,32 @@ public class WorkspaceExecutionStore {
     }
 
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session) {
-        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        if (residents.find(binding) != null) {
+            requireResidentHeld(binding, session, true);
+            return session.getState() != RuntimeSessionRecord.State.RELEASED;
+        }
+        WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
-                + " ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'",
+                + " ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')",
                 String.class, storageKey(binding));
         return holders.size() == 1 && holderKey(session).equals(holders.getFirst());
     }
 
     public void release(ContextBinding binding, RuntimeSessionRecord session) {
+        if (residents.find(binding) != null) {
+            transaction.executeWithoutResult(status -> {
+                WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+                requireResidentHeld(binding, session, true);
+                if (session.getState() != RuntimeSessionRecord.State.RELEASING
+                        && session.getState() != RuntimeSessionRecord.State.RELEASED) {
+                    throw unavailable();
+                }
+            });
+            return;
+        }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
-            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state"
                     + " FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE",
                     (row, index) -> session.getBindingId().equals(row.getString("binding_id"))
@@ -353,7 +446,7 @@ public class WorkspaceExecutionStore {
             }
             jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ?",
+                    + " WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND holder_key = ?",
                     storageKey(binding), holderKey(session));
         });
     }
@@ -371,6 +464,7 @@ public class WorkspaceExecutionStore {
      */
     public String holdForMaintenance(ContextBinding binding, String maintenanceId,
             long claimGeneration) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         WorkspaceStorageKindGuard.requireFreshTransaction();
         String holder = maintenanceHolderKey(maintenanceId, claimGeneration);
         return transaction.execute(status -> {
@@ -441,8 +535,9 @@ public class WorkspaceExecutionStore {
     public boolean canStopDrained(RuntimeBindingRecord saved) {
         if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
                 || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
-                || !LocalProcessRuntimeProvisioner.KIND.equals(saved.getRequest().getProvisionerKind())
-                || !WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())) {
+                || !java.util.Set.of(LocalProcessRuntimeProvisioner.KIND, com.alibaba.qwen.code.runtimebroker.SshRuntimeProvisioner.KIND).contains(saved.getRequest().getProvisionerKind())
+                || !(WorkspaceExecutionProfile.admitsIsolationClass(saved.getRequest().getScope().getIsolationClass())
+                        || HarnessOwnership.sharesRuntimeSessions(saved.getRequest()))) {
             return false;
         }
         var claims = jdbc.query("SELECT binding_state, drain_requested, operation_owner, operation_generation,"
@@ -465,7 +560,7 @@ public class WorkspaceExecutionStore {
             return false;
         }
         var holders = jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
-                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'", (row, index) -> {
+                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')", (row, index) -> {
                     String holder = row.getString("holder_key");
                     String binding = row.getString("binding_id");
                     String session = row.getString("runtime_session_id");
@@ -475,10 +570,14 @@ public class WorkspaceExecutionStore {
                     }
                     return saved.getBindingId().equals(binding) && saved.getGeneration() == generation && session != null
                             && holder.equals(digest(binding + "\u0000" + generation + "\u0000" + session))
-                            && jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
-                                    + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
-                                    Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1;
-                }, LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId()));
+                            && (HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
+                                    ? jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
+                                            + " AND runtime_generation = ? AND runtime_session_id = ?",
+                                            Long.class, binding, generation, session) == 1
+                                    : jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
+                                            + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
+                                            Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1);
+                }, storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId()));
         return holders.isEmpty() || holders.size() == 1 && holders.getFirst();
     }
 
@@ -517,9 +616,9 @@ public class WorkspaceExecutionStore {
             if (jdbc.queryForList(ORIGINAL_HOLDER_SQL, String.class, saved.getBindingId(), saved.getGeneration()).isEmpty()) {
                 return;
             }
-            String key = LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId());
+            String key = storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId());
             jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id, maintenance_id"
-                    + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", row -> {
+                    + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", row -> {
                         String holder = row.getString("holder_key");
                         String bindingId = row.getString("binding_id");
                         String sessionId = row.getString("runtime_session_id");
@@ -550,7 +649,7 @@ public class WorkspaceExecutionStore {
                             }
                             int changed = jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL,"
                                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ? AND binding_id = ?"
+                                    + " WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND holder_key = ? AND binding_id = ?"
                                     + " AND runtime_generation = ? AND runtime_session_id = ?",
                                     key, holder, bindingId, generation, sessionId);
                             if (changed != 1) {
@@ -600,7 +699,7 @@ public class WorkspaceExecutionStore {
                 "Workspace access grant or registry state is changing.", true);
     }
 
-    private static RuntimeBrokerException busy() {
+    static RuntimeBrokerException busy() {
         return new RuntimeBrokerException(409, "workspace_busy",
                 "Workspace storage is held by another tool turn.", true);
     }
@@ -609,8 +708,14 @@ public class WorkspaceExecutionStore {
         return storageKey(jdbc, binding);
     }
 
+    private String storageKey(String tenant, String storage) {
+        String ssh = SshWorkspaceStore.physicalKey(jdbc, tenant, storage);
+        return ssh == null ? LocalStorageOwners.key(jdbc, tenant, storage) : ssh;
+    }
+
     static String storageKey(JdbcTemplate jdbc, ContextBinding binding) {
-        return LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId());
+        String ssh = SshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId());
+        return ssh == null ? LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId()) : ssh;
     }
 
     private static String maintenanceHolderKey(String maintenanceId, long claimGeneration) {

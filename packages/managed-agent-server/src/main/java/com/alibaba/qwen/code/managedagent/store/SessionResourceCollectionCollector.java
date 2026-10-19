@@ -185,12 +185,14 @@ public final class SessionResourceCollectionCollector {
                 (row, index) -> ManagedSchemaRows.read(row), time, owner, time);
         for (var candidate : candidates) {
             Claim claim =
-                    transactions.execute(
+                    ManagedSessionStore.skipContended(
+                            transactions,
                             status -> {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
                                 String scope = (String) candidate.get("scope_key");
-                                ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
+                                ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                                        jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
                                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                     return null;
                                 }
@@ -319,10 +321,13 @@ public final class SessionResourceCollectionCollector {
                 (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
             return "put_unresolved";
         }
+        // The relay's classifications are all terminal (its discovery page and claim exclude
+        // them): an `unknown` walk is never rewritten, so holding for it would hold forever. A
+        // close still owed rides its own CHILD_SESSION_CLOSE row and reads no parent resource.
         if (!jdbc.query(
                         "SELECT operation_key FROM ma_operation WHERE session_scope_key = ? AND"
                             + " operation_kind = 'CHILD_SESSION_START' AND state NOT IN ('done',"
-                            + " 'orphaned') LIMIT 1",
+                            + " 'orphaned', 'unknown') LIMIT 1",
                 (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
             return "child_start_unresolved";
         }
@@ -344,7 +349,8 @@ public final class SessionResourceCollectionCollector {
 
     private Boolean page(Claim claim) {
         // Session locks precede the ledger row lock, matching claim()'s order.
-        ToolPublicationRetentionStore.lockTenant(jdbc, claim.tenant());
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                jdbc, claim.tenant(), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, claim.tenant(), claim.session());
         var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, claim.tenant(), claim.session());
         var row =

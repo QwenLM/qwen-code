@@ -59,7 +59,7 @@ public final class ManagedExtensionProjection {
                     body -> body.get("routeId").textValue(),
                     ManagedChannelRecords::isRouteStart,
                     ManagedChannelRecords::isRouteSuccessor)),
-            entry("channel_delivery", new Body(record -> null,
+            entry("channel_delivery", new Body(record -> "channel_delivery",
                     ManagedChannelRecords::requireDelivery,
                     body -> body.get("deliveryId").textValue(),
                     ManagedChannelRecords::isDeliveryStart,
@@ -113,22 +113,27 @@ public final class ManagedExtensionProjection {
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
     public static final List<String> TASK_KINDS = List.of("child_agent",
-            "workflow", "background_shell", "monitor", "automation_run");
+            "workflow", "background_shell", "monitor", "automation_run",
+            "channel_delivery");
     public static final List<String> RUNTIME_STATES = List.of("unbound",
             "provisioning", "ready", "draining", "lost");
     /**
-     * H4f: the task kinds whose cancel reaches a durable stop request on
-     * their own record. Both child Session kinds ride the child_run stop
-     * request — set once on the record and honored by the relay's
-     * kind-blind stop arm; workflow joined in the H4f-b slice once its
-     * runtime (#13803) made the close cascade's stop of a workflow row a
-     * shipped path. Every other kind has no public cancel path yet: H3's
-     * Shell settles exited rather than stop_requested after a stop and
-     * Monitor carries no stop request, and an automation run has none
-     * either.
+     * H4f: the task kinds whose cancel reaches a stop their own record
+     * proves. Both child Session kinds ride the child_run stop request —
+     * set once on the record and honored by the relay's kind-blind stop
+     * arm; workflow joined in the H4f-b slice once its runtime (#13803)
+     * made the close cascade's stop of a workflow row a shipped path. The
+     * H3 kinds joined once their gates lifted (#13856): their cancel stops
+     * the process through the Broker, and the worker's stop-marked end
+     * settles the record {@code stop_requested} (A8). A channel delivery
+     * (#13746 F3) cancels only while no adapter has claimed it: its
+     * cancelRequested flag is its stop request. An automation run stops
+     * its own wake Turn and proves cancellation through its cancelled
+     * terminal record.
      */
     public static final Set<String> CANCELLABLE_TASK_KINDS = Set.of(
-            "child_agent", "workflow");
+            "child_agent", "workflow", "background_shell", "monitor",
+            "channel_delivery", "automation_run");
     /** Task states a cancel may still act on: the run has not ended and
      * is not waiting on recovery reconciliation. */
     private static final Set<String> CANCELLABLE_TASK_STATES = Set.of(
@@ -231,13 +236,16 @@ public final class ManagedExtensionProjection {
 
     /**
      * The actions a task supports now, the same for every caller:
-     * {@code cancel} while a cancellable kind's run has not ended. The
+     * {@code cancel} while a cancellable kind's run has not ended, and for
+     * a channel delivery only while it is planned (pending): a claimed
+     * delivery is already on its way to the provider. The
      * task view advertises this list and a new cancel admission rechecks
      * it under the Session lock.
      */
     public static List<String> taskActions(String kind, String state) {
         return CANCELLABLE_TASK_KINDS.contains(kind)
-                && CANCELLABLE_TASK_STATES.contains(state)
+                && ("channel_delivery".equals(kind) ? "pending".equals(state)
+                        : CANCELLABLE_TASK_STATES.contains(state))
                 ? List.of("cancel") : List.of();
     }
 

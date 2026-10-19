@@ -99,8 +99,8 @@ final class AgentDefinitionCompiler {
                         || !toolProfiles.contains(profile)) {
                     throw unsupported("tools");
                 }
-                // A Shell profile always asks (#13271); it may never pair
-                // with yolo once the deployment allowlist opens it.
+                // Shell definitions must start with an asking policy (#13271).
+                // An eligible Session owner may select Full Access later.
                 if (profile.startsWith("hosted-workspace-shell/")
                         && "yolo".equals(approvalMode)) {
                     throw unsupported("tools");
@@ -108,19 +108,13 @@ final class AgentDefinitionCompiler {
                 toolProfile = profile;
             }
         }
-        refuseNonEmptyList(definition.get("skills"), "skills");
-        refuseNonEmptyList(definition.get("mcp_servers"), "mcp_servers");
+        AgentDefinitionExtensions.skills(definition.get("skills"), toolProfile != null);
+        AgentDefinitionExtensions.mcpServers(definition.get("mcp_servers"), toolProfile);
+        AgentDefinitionExtensions.hookCatalog(definition.get("hook_catalog"), toolProfile != null);
         if (definition.get("environment_template_id") != null) {
             throw unsupported("environment_template_id");
         }
         return new Compiled(approvalMode, toolProfile);
-    }
-
-    private static void refuseNonEmptyList(Object value, String field) {
-        if (value != null && (!(value instanceof List<?> list)
-                || !list.isEmpty())) {
-            throw unsupported(field);
-        }
     }
 
     private static ApiException unsupported(String field) {

@@ -53,6 +53,11 @@ class WorkspaceRecoveryMySqlIT {
     }
 
     @Test
+    void capturesAndVerifiesSessionsThatPinStoredDefinitions() throws Exception {
+        fixture.capturesAndVerifiesSessionsThatPinStoredDefinitions();
+    }
+
+    @Test
     void recoveryAdmissionIgnoresOtherOperationKindsButBlocksUnresolvedSessionEffects() {
         fixture.recoveryAdmissionIgnoresOtherOperationKindsButBlocksUnresolvedSessionEffects();
     }

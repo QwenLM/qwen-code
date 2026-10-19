@@ -277,6 +277,62 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/workspaces/get",
             Surface.WEBSHELL, RuleClass.WORKSPACE_DISCOVERY,
             EnumSet.of(Capability.WORKSPACE_GET)),
+    WEBSHELL_RUNTIME_NODE_LIST(Method.POST,
+            "/api/agent/web-shell/v1/runtime-nodes/query",
+            Surface.WEBSHELL, RuleClass.RUNTIME_NODE_ACCESS,
+            EnumSet.of(Capability.RUNTIME_NODE_LIST)),
+    WEBSHELL_WORKSPACE_DIRECTORY_CHECK(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/check-directory",
+            Surface.WEBSHELL, RuleClass.RUNTIME_NODE_ACCESS,
+            EnumSet.of(Capability.WORKSPACE_DIRECTORY_CHECK)),
+    WEBSHELL_WORKSPACE_REGISTER(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/register",
+            Surface.WEBSHELL, RuleClass.RUNTIME_NODE_ACCESS,
+            EnumSet.of(Capability.WORKSPACE_REGISTER)),
+    WEBSHELL_WORKSPACE_REGISTRATION_GET(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/operations/get",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_REGISTRATION_OWNER,
+            EnumSet.of(Capability.WORKSPACE_REGISTRATION_GET)),
+    WEBSHELL_WORKSPACE_CREATE(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/create",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_ALLOCATION,
+            EnumSet.of(Capability.WORKSPACE_CREATE)),
+    WEBSHELL_WORKSPACE_DIRECTORIES(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/directories/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_ALLOCATION,
+            EnumSet.of(Capability.WORKSPACE_DIRECTORIES)),
+    WEBSHELL_WORKSPACE_FILES_QUERY(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/files/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_FILES,
+            EnumSet.of(Capability.WORKSPACE_FILES_QUERY)),
+    WEBSHELL_WORKSPACE_FILES_READ(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/files/read",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_FILES,
+            EnumSet.of(Capability.WORKSPACE_FILES_READ)),
+    WEBSHELL_SESSION_OPTIONS(Method.POST,
+            "/api/agent/web-shell/v1/session-options/query",
+            Surface.WEBSHELL, RuleClass.SESSION_OPTIONS,
+            EnumSet.of(Capability.SESSION_OPTIONS)),
+    WEBSHELL_SESSION_MODELS(Method.POST,
+            "/api/agent/web-shell/v1/session-models/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR,
+            EnumSet.of(Capability.SESSION_MODELS)),
+    WEBSHELL_SESSION_SKILLS(Method.POST,
+            "/api/agent/web-shell/v1/session-skills/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR,
+            EnumSet.of(Capability.SESSION_SKILLS)),
+    WEBSHELL_SESSION_MODEL_CHANGE(Method.POST,
+            "/api/agent/web-shell/v1/session-models/change",
+            Surface.WEBSHELL, RuleClass.OPERATOR,
+            EnumSet.of(Capability.SESSION_MODEL_CHANGE)),
+    WEBSHELL_SESSION_APPROVAL(Method.POST,
+            "/api/agent/web-shell/v1/session-approval/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR,
+            EnumSet.of(Capability.SESSION_APPROVAL)),
+    WEBSHELL_SESSION_APPROVAL_CHANGE(Method.POST,
+            "/api/agent/web-shell/v1/session-approval/change",
+            Surface.WEBSHELL, RuleClass.OWNER,
+            EnumSet.of(Capability.SESSION_APPROVAL_CHANGE)),
     // ManagedSessionStoreController: internal writer routes.
     INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
@@ -517,8 +573,22 @@ public enum SurfaceRegistry {
         ARTIFACT_LIST,
         ARTIFACT_GET,
         ARTIFACT_CONTENT,
+        WORKSPACE_CREATE,
+        WORKSPACE_DIRECTORIES,
+        WORKSPACE_FILES_QUERY,
+        WORKSPACE_FILES_READ,
+        SESSION_OPTIONS,
+        SESSION_APPROVAL,
+        SESSION_APPROVAL_CHANGE,
+        SESSION_MODELS,
+        SESSION_SKILLS,
+        SESSION_MODEL_CHANGE,
         WORKSPACE_LIST,
         WORKSPACE_GET,
+        RUNTIME_NODE_LIST,
+        WORKSPACE_DIRECTORY_CHECK,
+        WORKSPACE_REGISTER,
+        WORKSPACE_REGISTRATION_GET,
         CHANNEL_LIST,
         CHANNEL_DELIVERY_LIST,
         CHANNEL_DELIVERY_GET,
@@ -662,6 +732,33 @@ public enum SurfaceRegistry {
          * Workspace is invisible.
          */
         WORKSPACE_DISCOVERY,
+        /** A trusted actor allocates an empty root, or selects an existing directory with source ROOT ownership. */
+        WORKSPACE_ALLOCATION,
+        WORKSPACE_FILES,
+        /** A trusted tenant actor may inspect effective creation policy for a tenant Agent. */
+        SESSION_OPTIONS,
+        /**
+         * SSH node discovery and fresh directory registration require a
+         * trusted actor ({@code 401 actor_required} without one). The
+         * catalog filters administrator-configured nodes by exact tenant
+         * and actor grants; checks and fresh registration answer {@code
+         * 403 runtime_node_forbidden} without a node grant. Disabled
+         * registration returns an empty unsupported catalog and {@code
+         * 404 ssh_runtime_disabled} for checks and fresh creates. A
+         * retained create key replays only for its original actor before
+         * checking current node admission. No Workspace role substitutes
+         * for the node grant.
+         */
+        RUNTIME_NODE_ACCESS,
+        /**
+         * Workspace registration operations belong to the exact tenant
+         * and actor that admitted them: {@code 401 actor_required}
+         * without an actor and {@code 404 operation_not_found} for an
+         * unknown operation or another actor, regardless of Workspace
+         * role. The original actor may query while new registration is
+         * disabled, including terminal blocked registrations.
+         */
+        WORKSPACE_REGISTRATION_OWNER,
         /**
          * Tenant-scoped agent definitions: any caller of the tenant may
          * create, read and revise; no actor and no Workspace grant is

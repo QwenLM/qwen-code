@@ -69,8 +69,17 @@ import {
 } from './hosted-tool-approval.js';
 import * as stdio from '../utils/stdioHelpers.js';
 import { monitorUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import {
+  HOSTED_SKILL_APPROVAL_REFUSAL,
+  HOSTED_SKILL_BATCH_REFUSAL,
+  HostedSkillCatalog,
+} from './hosted-skill-catalog.js';
+import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import * as hostedPlan from './hosted-plan-mode.js';
 
 const broker = vi.hoisted(() => ({
+  capabilityDigest:
+    'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91',
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
@@ -83,9 +92,11 @@ const broker = vi.hoisted(() => ({
   acknowledgeV3: vi.fn(),
   cancel: vi.fn(),
   release: vi.fn(),
+  releaseMount: vi.fn(),
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
   backgroundProcessStatus: vi.fn(),
+  status: vi.fn(),
   monitorControl: vi.fn(),
 }));
 // child_run's shell kind and monitor_run are enabled by the H3 enablement
@@ -99,11 +110,19 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    readonly capabilityDigest = broker.capabilityDigest;
+    // Like the real client: the claim is recorded before the acquire
+    // request leaves, so a lost reply still names it.
+    private claim?: string;
+    mountClaim = () => this.claim;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
-    acquire = broker.acquire;
+    acquire = (...args: unknown[]) => {
+      this.claim = `claim-${broker.acquire.mock.calls.length + 1}`;
+      return broker.acquire(...args);
+    };
     prepare = broker.prepare;
     prepareV3 = broker.prepareV3;
     execute = broker.execute;
@@ -111,9 +130,11 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
     release = broker.release;
+    releaseMount = broker.releaseMount;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
     backgroundProcessStatus = broker.backgroundProcessStatus;
+    status = broker.status;
     monitorControl = broker.monitorControl;
   },
 }));
@@ -166,6 +187,8 @@ function createTurn(
   shell = false,
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
   hooks?: HostedHookSession,
+  skills?: HostedSkillCatalog,
+  planMode: 'none' | 'public' | 'member' = 'none',
 ) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -185,7 +208,13 @@ function createTurn(
       },
       waiters,
     },
-    { hooks },
+    {
+      hooks,
+      skills,
+      publicPlanMode: planMode === 'public',
+      memberPlanMode: planMode === 'member',
+      ...(planMode === 'public' ? { profile: 'hosted-workspace-files/1' } : {}),
+    },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -212,6 +241,7 @@ beforeEach(async () => {
     broker.acquire,
     broker.cancel,
     broker.release,
+    broker.releaseMount,
   ])
     method.mockResolvedValue(undefined);
   root = await mkdtemp(path.join(tmpdir(), 'hosted-tool-turn-'));
@@ -292,6 +322,311 @@ afterEach(async () => {
     await expect(session.close()).rejects.toThrow(/writes stopped/);
   else await session?.close();
   await rm(root, { recursive: true, force: true });
+});
+
+const publishedSkills = () =>
+  new HostedSkillCatalog([
+    {
+      name: 'review',
+      description: 'Review code changes.',
+      body: 'Consult scripts/review.js before reviewing.',
+      base_directory: '.qwen/skills/review',
+    },
+  ]);
+
+it.each(['none', 'public', 'member'] as const)(
+  'loads a published static Skill durably without Runtime execution or approval (Plan: %s)',
+  async (planMode) => {
+    if (planMode === 'public')
+      vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+    const skills = publishedSkills();
+    turn = createTurn(false, { mode: 'default' }, undefined, skills, planMode);
+    const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+    const original: Part[] = [
+      { functionCall: { id: call.callId, name: call.name, args: call.args } },
+    ];
+    expect(
+      await turn.declarations(new AbortController().signal),
+    ).toContainEqual(skills.declaration());
+    if (planMode === 'public')
+      expect(await turn.declarations(new AbortController().signal)).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'write_file' }),
+        ]),
+      );
+    const responses = await turn.execute(
+      [call],
+      original,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['output']).toBe(
+      skills.response(call.args),
+    );
+    const history = await session.sink.project();
+    expect(history.map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[1].message?.parts).toEqual(responses);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .some((event) => event.kind === 'action.changed'),
+    ).toBe(false);
+    await turn.finish();
+    const reloaded = createTurn(false, undefined, undefined, skills);
+    await reloaded.resumeCommittedResults(new AbortController().signal);
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
+  const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);
+  turn = createTurn(
+    false,
+    { mode: 'default' },
+    hookSession(fire),
+    publishedSkills(),
+  );
+  const batch = [
+    { ...calls[0], name: 'skill', args: { skill: 'review' } },
+    {
+      ...calls[1],
+      name: 'write_file',
+      args: { file_path: 'output.txt', content: 'must not write' },
+    },
+  ];
+  const responses = await turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBe(
+    HOSTED_SKILL_BATCH_REFUSAL,
+  );
+  expect(responses[1].functionResponse?.response?.['error']).toContain(
+    'not executed',
+  );
+  expect(actionIds()).toEqual([]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(fire.mock.calls.map(([event]) => event)).toEqual([
+    HookEventName.PostToolBatch,
+  ]);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .some((event) => event.kind === 'hosted.batch.planned'),
+  ).toBe(false);
+});
+
+it.each([{ skill: 'unknown' }, { skill: 'review', args: '--post' }])(
+  'persists a correctable Skill refusal without executing anything: %j',
+  async (args) => {
+    turn = createTurn(false, undefined, undefined, publishedSkills());
+    const call = { ...calls[0], name: 'skill', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBeTypeOf(
+      'string',
+    );
+    expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('recovers the original Skill body after the assistant commits but its result does not', async () => {
+  const skills = publishedSkills();
+  const originalCommit = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('Store response lost');
+    return originalCommit(...args);
+  };
+  turn = createTurn(false, undefined, undefined, skills);
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+    'assistant',
+  ]);
+  const recovery = {
+    session,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    skills,
+  };
+  expect(await answerResumedTurnCalls(recovery)).toBe(1);
+  expect(await answerResumedTurnCalls(recovery)).toBe(0);
+  const history = await session.sink.project();
+  expect(history).toHaveLength(2);
+  expect(history[1].message?.parts?.[0].functionResponse).toMatchObject({
+    id: call.callId,
+    name: 'skill',
+    response: { output: skills.response(call.args) },
+  });
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('preserves a mixed-batch Skill refusal when its result was not committed', async () => {
+  const skills = publishedSkills();
+  const originalCommit = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('Store refusal lost');
+    return originalCommit(...args);
+  };
+  turn = createTurn(false, { mode: 'default' }, undefined, skills);
+  const batch = [
+    { ...calls[0], name: 'skill', args: { skill: 'review' } },
+    calls[1],
+  ];
+  await expect(
+    turn.execute(
+      batch,
+      batch.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect((await session.sink.project()).map((entry) => entry.type)).toEqual([
+    'assistant',
+  ]);
+  const recovery = {
+    session,
+    sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    skills,
+  };
+  expect(await answerResumedTurnCalls(recovery)).toBe(1);
+  expect(await answerResumedTurnCalls(recovery)).toBe(0);
+  const history = await session.sink.project();
+  expect(history).toHaveLength(2);
+  expect(history[1].message?.parts?.[0].functionResponse).toMatchObject({
+    id: batch[0].callId,
+    name: 'skill',
+    response: { error: HOSTED_SKILL_BATCH_REFUSAL },
+  });
+  expect(JSON.stringify(history[1])).not.toContain(
+    'Consult scripts/review.js before reviewing.',
+  );
+  expect(actionIds()).toEqual([]);
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it.each(['deny', 'ask'] as const)(
+  'preserves a PreToolUse %s for a static Skill without creating an Action',
+  async (permissionDecision) => {
+    const fire = vi.fn<HostedHookSession['fire']>(async (event) =>
+      event === HookEventName.PreToolUse
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              permissionDecision,
+              permissionDecisionReason: 'Skill policy refused the load.',
+            },
+          }
+        : undefined,
+    );
+    turn = createTurn(
+      false,
+      { mode: 'default' },
+      hookSession(fire),
+      publishedSkills(),
+    );
+    const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toBe(
+      permissionDecision === 'ask'
+        ? HOSTED_SKILL_APPROVAL_REFUSAL
+        : 'Skill policy refused the load.',
+    );
+    expect(fire.mock.calls.map(([event]) => event)).toEqual([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolBatch,
+    ]);
+    expect(actionIds()).toEqual([]);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('loads the Skill selected by PreToolUse updatedInput without a new approval', async () => {
+  const skills = new HostedSkillCatalog([
+    {
+      name: 'review',
+      description: 'Review code.',
+      body: 'Original review body.',
+    },
+    {
+      name: 'testing',
+      description: 'Test code.',
+      body: 'Replacement test body.',
+    },
+  ]);
+  const fire = vi.fn<HostedHookSession['fire']>(async (event) =>
+    event === HookEventName.PreToolUse
+      ? {
+          hookSpecificOutput: {
+            hookEventName: event,
+            updatedInput: { skill: 'testing' },
+          },
+        }
+      : undefined,
+  );
+  turn = createTurn(false, { mode: 'default' }, hookSession(fire), skills);
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['output']).toBe(
+    skills.response({ skill: 'testing' }),
+  );
+  expect(fire.mock.calls.map(([event]) => event)).toEqual([
+    HookEventName.PreToolUse,
+    HookEventName.PostToolUse,
+    HookEventName.PostToolBatch,
+  ]);
+  expect(actionIds()).toEqual([]);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
 });
 
 it('commits the whole batch before the first dispatch and each receipt before resolving it', async () => {
@@ -377,6 +712,8 @@ async function shellReceiptScenario(
     | 'sentinel'
     | 'lost-admission'
     | 'lost-reserve',
+  foregroundOnly = false,
+  approval?: { mode: HostedApprovalMode },
 ) {
   const shellCall = {
     ...calls[0],
@@ -546,6 +883,11 @@ async function shellReceiptScenario(
       mode !== 'large' ||
       Buffer.byteLength(JSON.stringify(messageParts)) <= 64 * 1024,
     { owner, captureBytes: 1024 * 1024 },
+    undefined,
+    approval
+      ? { settings: { mode: approval.mode, timeoutMs: 1000 }, waiters }
+      : undefined,
+    { foregroundOnly },
   );
   const execution = shellTurn.execute(
     [shellCall],
@@ -646,6 +988,14 @@ async function shellReceiptScenario(
   ).toHaveLength(1);
 }
 
+it.each([false, true])(
+  'runs Full Access Shell without ordinary Actions through durable result and replay acceptance (foreground-only: %s)',
+  async (foregroundOnly) => {
+    await shellReceiptScenario('normal', foregroundOnly, { mode: 'yolo' });
+    expect(actionIds()).toEqual([]);
+  },
+);
+
 it.each([
   'normal',
   'abandoned',
@@ -657,8 +1007,12 @@ it.each([
   'lost-reserve',
 ] as const)(
   'uses only the original Shell publication after Broker %s',
-  shellReceiptScenario,
+  (mode) => shellReceiptScenario(mode),
 );
+
+it('publishes foreground SSH Shell output through its original capture and ACK', async () => {
+  await shellReceiptScenario('normal', true);
+});
 
 it('records a durable receipt for a proven unstarted Shell', async () => {
   const call = {
@@ -1003,7 +1357,7 @@ it('preserves trimmed and normalized valid file paths', async () => {
   await turn.finish();
 });
 
-it('offers glob only under the /2 Workspace profiles', async () => {
+it('offers glob only under the /2 and the read Workspace profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
     (
@@ -1037,6 +1391,185 @@ it('offers glob only under the /2 Workspace profiles', async () => {
     ...shellTools,
     'glob',
   ]);
+  // #13753 I3: the read profile declares its two read tools, whatever
+  // lane the Session has.
+  await expect(advertised('hosted-workspace-read/1')).resolves.toEqual([
+    'read_file',
+    'glob',
+  ]);
+  await expect(advertised('hosted-workspace-read/1', true)).resolves.toEqual([
+    'read_file',
+    'glob',
+  ]);
+});
+
+// #13753 I3: the read profile's two tools dispatch like any profile's.
+it('dispatches read_file and glob on the read profile', async () => {
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-read/1' },
+  );
+  const reads = [
+    { ...calls[0], name: 'read_file', args: { file_path: 'a.txt' } },
+    {
+      ...calls[0],
+      callId: 'call-glob',
+      name: 'glob',
+      args: { pattern: '**/*.ts' },
+    },
+  ];
+  await turn.execute(
+    reads,
+    reads.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(
+    broker.execute.mock.calls.map(
+      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+    ),
+  ).toEqual(['read_file', 'glob']);
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+// #13753 I3: every tool that writes, and every other tool, is refused on
+// the read profile before the Broker is acquired.
+it.each([
+  ['write_file', { file_path: 'a.txt', content: 'x' }],
+  ['edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }],
+  ['run_shell_command', { command: 'touch a.txt' }],
+  ['monitor', { command: 'tail -f a.txt' }],
+  ['agent', { description: 'd', prompt: 'p' }],
+  ['send_message', { to: 'parent', message: 'm' }],
+])('refuses %s on the read profile before the Broker', async (name, args) => {
+  const reader = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { resources: session.resources, assertWritable: async () => {} },
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-read/1' },
+  );
+  await reader.declarations(new AbortController().signal);
+  const call = { ...calls[0], name, args };
+  await expect(
+    reader.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+// #13905 (item 41): the approval wiring keys on the Session's own profile,
+// not the call's name — a read-profile glob asks nothing under `default`,
+// while an MCP-declared glob on files/1 still asks.
+it('pre-approves glob only where the profile declares it', async () => {
+  const globCall = {
+    ...calls[0],
+    callId: 'call-glob',
+    name: 'glob',
+    args: { pattern: '**/*.ts' },
+  };
+  const globParts: Part[] = [
+    {
+      functionCall: {
+        id: globCall.callId,
+        name: globCall.name,
+        args: globCall.args,
+      },
+    },
+  ];
+  const read = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+    { profile: 'hosted-workspace-read/1' },
+  );
+  const responses = await read.execute(
+    [globCall],
+    globParts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+  expect(actionIds()).toEqual([]);
+  expect(
+    broker.execute.mock.calls.map(
+      (args: unknown[]) => JSON.parse(args[1] as string).toolName,
+    ),
+  ).toEqual(['glob']);
+  await read.consumeResults();
+  await read.finish();
+
+  const mcp = {
+    broker,
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
+    toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
+  };
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
+  );
+  const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
+  const running = turn.execute(
+    [mcpGlobCall],
+    [
+      {
+        functionCall: {
+          id: mcpGlobCall.callId,
+          name: mcpGlobCall.name,
+          args: mcpGlobCall.args,
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  // The files/1 Session must ask before dispatching even this name.
+  const requestId = await requested();
+  expect(actionIds()).toEqual([requestId]);
+  expect(broker.execute).toHaveBeenCalledOnce();
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  await running;
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+  await turn.consumeResults();
+  await turn.finish();
 });
 
 function createSearchTurn() {
@@ -1629,6 +2162,225 @@ it('keeps release failures recovery blocked', async () => {
   await expect(turn.finish()).rejects.toBeInstanceOf(
     HostedToolRecoveryRequiredError,
   );
+});
+
+it('hands back only the Workspace mount on the recovery-block path', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  expect(broker.acquire).toHaveBeenCalledOnce();
+  await turn.releaseForRecoveryBlock();
+  // #13800: the mount lease goes back so later Sessions on the same
+  // storage are never wedged by this turn's block; the Runtime Session
+  // itself never sees the RELEASED-forever full release, and the handback
+  // names the claim of the acquire that owes it.
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  expect(broker.releaseMount).toHaveBeenCalledWith('claim-1');
+  expect(broker.release).not.toHaveBeenCalled();
+  // A repeated block-side handback is a no-op.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('keeps the block verdict deliverable when the mount handback fails, and keeps the handback owed until it lands', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  vi.useFakeTimers();
+  try {
+    // The failure is logged, never thrown: the recovery-block verdict must
+    // still reach the Session.
+    await expect(turn.releaseForRecoveryBlock()).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    // Owed until it lands: the cadence keeps asking on a widening backoff
+    // and then a steady one-minute tail instead of dropping the debt after
+    // two gaps — the freeze stays honest while the turn's work is unproven.
+    for (const [gap, calls] of [
+      [1000, 2],
+      [3000, 3],
+      [5000, 4],
+      [10000, 5],
+      [30000, 6],
+      [60000, 7],
+      [60000, 8],
+    ] as const) {
+      await vi.advanceTimersByTimeAsync(gap);
+      expect(broker.releaseMount).toHaveBeenCalledTimes(calls);
+    }
+    // One line for the repeated refusal, not one per minute.
+    expect(log).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('hands the mount back once a busy refusal settles', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+    )
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  [503, 'runtime_reconciliation_required'],
+  [409, 'runtime_session_conflict'],
+  [409, 'runtime_admission_closed'],
+  [409, 'workspace_writer_unproven'],
+])(
+  'makes one attempt for a final %s %s refusal without retrying',
+  async (status, code) => {
+    await turn.execute(calls, parts, 'model', new AbortController().signal);
+    // A Session the Broker no longer holds, a claim a re-drive superseded,
+    // a lifecycle drain that frees the mount itself, or a writer that never
+    // proved it stopped: waiting settles none of them.
+    broker.releaseMount.mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(status, code),
+    );
+    await turn.releaseForRecoveryBlock();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    await turn.blockMountRetry;
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([
+  ['a lost reply', () => new TypeError('fetch failed')],
+  [
+    "the Broker's internal error",
+    () =>
+      new HostedWorkspaceBrokerRejection(500, 'runtime_broker_internal_error'),
+  ],
+])('re-sends the handback after %s', async (_label, failure) => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(failure())
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  // Neither decided anything, and the holder-conditioned clear is
+  // idempotent, so the chain re-sends on the cadence until it lands.
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it('delivers the block verdict without waiting out a hung handback', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  let rejectFirst!: (cause: unknown) => void;
+  broker.releaseMount
+    .mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectFirst = reject;
+        }),
+    )
+    .mockResolvedValue(undefined);
+  vi.useFakeTimers();
+  try {
+    const verdict = turn.releaseForRecoveryBlock();
+    await vi.advanceTimersByTimeAsync(2000);
+    // The verdict proceeded on its own short bound, not on the Broker's
+    // 30s fetch timeout; the attempt itself is still alive in the chain.
+    await expect(verdict).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    rejectFirst(new TypeError('fetch failed'));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+    await turn.blockMountRetry;
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('hands nothing back when the turn never sent an acquire', async () => {
+  // Only an acquire's claim can name a mount: a turn blocked before its
+  // first acquire holds nothing.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).not.toHaveBeenCalled();
+  expect(turn.blockMountRetry).toBeUndefined();
+});
+
+it('stops the owed handback when the daemon shuts down', async () => {
+  const mountHandbacks = new Set<() => void>();
+  const owned = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test', mountHandbacks },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+  );
+  await owned.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+  await owned.releaseForRecoveryBlock();
+  expect(mountHandbacks.size).toBe(1);
+  for (const stop of mountHandbacks) stop();
+  await owned.blockMountRetry;
+  expect(mountHandbacks.size).toBe(0);
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('hands the mount back even when the acquire answer was lost after the grant', async () => {
+  broker.acquire.mockRejectedValue(new TypeError('fetch failed'));
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  // The reply loss means no acquired flag — but the Broker may have
+  // committed the claim, so the handback still runs under the claim the
+  // request carried; the holder-conditioned clear is a no-op when nothing
+  // was granted.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  expect(broker.releaseMount).toHaveBeenCalledWith('claim-1');
+});
+
+it("hands the Hook and MCP lanes' Session-scoped mounts back through their own discipline", async () => {
+  const mcpAttempt = vi.fn(async () => undefined);
+  const mcpHandback = vi.fn(() => mcpAttempt);
+  const mcpTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    {
+      mcp: {
+        broker: { ...broker, runtimeSessionId: 'mcp:session' },
+        ensureReady: async () => undefined,
+        refresh: async () => undefined,
+        tools: () => [],
+        toolInput: () => undefined,
+        mountHandback: mcpHandback,
+      } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
+  );
+  await mcpTurn.releaseForRecoveryBlock();
+  expect(mcpHandback).toHaveBeenCalledOnce();
+  expect(mcpAttempt).toHaveBeenCalledOnce();
+  const hookAttempt = vi.fn(async () => undefined);
+  const hooksTurn = createTurn(false, undefined, {
+    acquire: vi.fn(async () => undefined),
+    mountHandback: () => hookAttempt,
+  } as unknown as HostedHookSession);
+  await hooksTurn.releaseForRecoveryBlock();
+  expect(hookAttempt).toHaveBeenCalledOnce();
+  // The lanes' Session-scoped mounts never go back through the turn's
+  // own per-turn broker.
+  expect(broker.releaseMount).not.toHaveBeenCalled();
 });
 
 it('keeps an empty Runtime error visible to the model instead of reporting success', async () => {
@@ -4944,11 +5696,21 @@ function backgroundTurnRig(
     lane?: HostedShellTurnOptions;
     notStartedProven?: boolean;
     reserveRefused?: boolean;
+    /** The store's answer to one execution's reservation, if it refuses. */
+    refuse?: (executionCallId: string | undefined) => Error | undefined;
+    fitsInline?: (type: string) => boolean;
     publicationMissing?: boolean;
+    foregroundOnly?: boolean;
+    closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
+    executionCallIds?: readonly string[];
   } = {},
 ) {
   enablement.childRun = true;
   const order: string[] = [];
+  const closed: string[] = [];
+  // executionCallId -> publicationId, and the publications the store refused.
+  const publications = new Map<string, string>();
+  const refused = new Set<string>();
   const orchestrator = {
     calls: [] as Array<readonly [string, unknown]>,
     record(id: string) {
@@ -4991,6 +5753,18 @@ function backgroundTurnRig(
             'store_unavailable',
             'reserve refused',
           );
+        const binding = (
+          body as {
+            binding?: { executionCallId?: string; publicationId?: string };
+          }
+        ).binding;
+        if (binding?.executionCallId && binding.publicationId)
+          publications.set(binding.executionCallId, binding.publicationId);
+        const refusal = options.refuse?.(binding?.executionCallId);
+        if (refusal) {
+          if (binding?.publicationId) refused.add(binding.publicationId);
+          throw refusal;
+        }
         return { state: 'OPEN' };
       }
       if (route === '/grants' && operation === 'renew') {
@@ -4999,23 +5773,43 @@ function backgroundTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
-        if (options.publicationMissing)
+        const publicationId = String(
+          (body as { publicationId?: string }).publicationId,
+        );
+        closed.push(publicationId);
+        // The store never wrote a row for a refused reservation.
+        if (refused.has(publicationId))
+          throw new ManagedSessionStoreHttpError(
+            400,
+            'invalid_request',
+            'The request is invalid.',
+          );
+        const closeResult =
+          options.closeResults?.[
+            order.filter((item) => item === 'close_not_started').length - 1
+          ];
+        if (options.publicationMissing || closeResult === 'MISSING')
           throw new ManagedSessionStoreHttpError(
             404,
             'publication_not_found',
             'Publication does not exist',
           );
         return {
-          state: options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
+          state:
+            closeResult ??
+            (options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED'),
         };
       }
       throw new Error('Unexpected publication route ' + route);
     }),
   } as unknown as HttpToolPublicationOwner;
-  broker.prepareV3.mockResolvedValue({
-    executionCallId: 'shell-execution',
-    runtimeBindingId: 'binding-1',
-    bindingGeneration: '1',
+  broker.prepareV3.mockImplementation(async () => {
+    const index = broker.prepareV3.mock.calls.length - 1;
+    return {
+      executionCallId: options.executionCallIds?.[index] ?? 'shell-execution',
+      runtimeBindingId: `binding-${index + 1}`,
+      bindingGeneration: '1',
+    };
   });
   broker.executeV3.mockImplementation(async () => {
     order.push('execute');
@@ -5051,16 +5845,24 @@ function backgroundTurnRig(
       });
       return uuid;
     },
-    () => true,
+    (type: string) => options.fitsInline?.(type) ?? true,
     { owner, captureBytes: 1024 * 1024 },
     undefined,
     undefined,
     {
       childRuns: orchestrator as never,
       backgroundLane: options.lane,
+      foregroundOnly: options.foregroundOnly,
     },
   );
-  return { order, orchestrator, turn, lane: options.lane };
+  return {
+    order,
+    closed,
+    publications,
+    orchestrator,
+    turn,
+    lane: options.lane,
+  };
 }
 
 function monitorTurnRig(
@@ -5069,6 +5871,8 @@ function monitorTurnRig(
     notStartedProven?: boolean;
     lane?: HostedShellTurnOptions;
     reserveRefused?: boolean;
+    capacityRefused?: boolean;
+    foregroundOnly?: boolean;
   } = {},
 ) {
   enablement.childRun = true;
@@ -5152,6 +5956,7 @@ function monitorTurnRig(
             'store_unavailable',
             'reserve refused',
           );
+        if (opts.capacityRefused === true) throw capacityExhausted();
         return { state: 'OPEN' };
       }
       if (route === '/grants' && operation === 'renew') {
@@ -5160,6 +5965,12 @@ function monitorTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
+        if (opts.capacityRefused === true)
+          throw new ManagedSessionStoreHttpError(
+            400,
+            'invalid_request',
+            'The request is invalid.',
+          );
         return {
           state: opts.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
         };
@@ -5221,6 +6032,7 @@ function monitorTurnRig(
       } as never,
       monitors: monitors as never,
       backgroundLane: opts.lane,
+      foregroundOnly: opts.foregroundOnly,
     },
   );
   return { order, monitors, options: opts.lane ?? options, turn };
@@ -5771,6 +6583,60 @@ function backgroundCall() {
   return { call, parts };
 }
 
+it('keeps the SSH foreground-only declaration and admission free of detached tools', async () => {
+  const outcome: ToolResultEnvelope = {
+    executionStatus: 'not_started',
+    responseParts: [],
+    capture: null,
+  };
+  const rig = backgroundTurnRig(outcome, { foregroundOnly: true });
+  turn = rig.turn;
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'run_shell_command',
+  ]);
+  const shell = declarations.find((tool) => tool.name === 'run_shell_command');
+  expect(shell?.parametersJsonSchema).not.toHaveProperty(
+    'properties.is_background',
+  );
+  expect(shell?.description).not.toContain('detached');
+  const background = backgroundCall();
+  const result = await turn.execute(
+    [background.call],
+    background.parts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0]?.functionResponse?.response).toHaveProperty('error');
+  expect(rig.orchestrator.calls).toEqual([]);
+  expect(broker.prepareV3).not.toHaveBeenCalled();
+  expect(broker.executeV3).not.toHaveBeenCalled();
+});
+
+it('refuses SSH foreground-only Monitor before any Runtime or publication admission', async () => {
+  const rig = monitorTurnRig(
+    { executionStatus: 'not_started', responseParts: [], capture: null },
+    { foregroundOnly: true },
+  );
+  turn = rig.turn;
+  const monitor = monitorCall();
+  await expect(
+    turn.execute(
+      [monitor.call],
+      monitor.parts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(rig.monitors.calls).toEqual([]);
+  expect(rig.order).toEqual([]);
+  expect(broker.prepareV3).not.toHaveBeenCalled();
+  expect(broker.executeV3).not.toHaveBeenCalled();
+});
+
 it('admits a background Shell through its child_run orchestrator and lands the detached receipt family', async () => {
   const { call, parts } = backgroundCall();
   const detached: ToolResultEnvelope = {
@@ -6175,6 +7041,9 @@ it('settles the admitted child run when grant reservation exhausts its retries',
 });
 
 it('settles an in-turn dispatch with no publication and no durable process row', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
   const { call, parts } = backgroundCall();
   const rig = backgroundTurnRig(
     { executionStatus: 'success', responseParts: [], capture: null },
@@ -6198,6 +7067,1062 @@ it('settles an in-turn dispatch with no publication and no durable process row',
   expect(broker.backgroundProcessStatus).toHaveBeenCalledWith(
     'shell-execution',
   );
+  expect(stderr).toHaveBeenCalledWith(
+    'qwen serve: Settled never-started background child run shell-execution from durable process-ledger absence.',
+  );
+  stderr.mockRestore();
+});
+
+// #14434: a limit refusal reaches the batch before any call ran. Every
+// execution reads `prepared` until its cancel lands, then settles: a Shell
+// or Monitor (`shell-…`, `monitor-…`, v3) with the Broker's not-started
+// result, any other call with `cancelled`, as the Broker answers.
+function capacityExhausted() {
+  return new ManagedSessionStoreHttpError(
+    429,
+    'managed_tool_publication_capacity_exhausted',
+    'Tool publication reservation refused at the active_captures limit',
+  );
+}
+
+function retentionExhausted() {
+  return new ManagedSessionStoreHttpError(
+    409,
+    'managed_tool_publication_retention_exhausted',
+    'Tool publication reservation refused at the session_bytes limit',
+  );
+}
+
+const CAPACITY_ANSWER =
+  'This call was not started: Tool publication reservation refused at the active_captures limit. Retry after the running tools finish.';
+// #14518: a call that reserves nothing is told it can go without the rest.
+const BYSTANDER_ANSWER =
+  'This call was not started: another call in its batch was refused before any call ran (Tool publication reservation refused at the active_captures limit). This call needs no tool output capacity, so it can be retried in a batch without the refused calls.';
+
+function brokerStatusThroughCancel(
+  override?: (id: string, cancelled: boolean) => unknown,
+) {
+  broker.status.mockImplementation(async (id: string) => {
+    const cancelled = broker.cancel.mock.calls.some(
+      ([cancelledId]) => cancelledId === id,
+    );
+    if (override) {
+      const state = override(id, cancelled);
+      if (state !== null) return state;
+    }
+    if (!cancelled) return { state: 'prepared' };
+    return {
+      state: 'settled',
+      executionStatus: /^(shell|monitor)-/.test(id)
+        ? 'not_started'
+        : 'cancelled',
+    };
+  });
+}
+
+function answerText(responses: Part[]): string[] {
+  return responses.map((part) =>
+    String(
+      (
+        part.functionResponse?.response as Record<string, unknown> | undefined
+      )?.['error'],
+    ),
+  );
+}
+
+async function runtimeItemStates(): Promise<string[]> {
+  const authorization = await session.authority.harnessRunAuthorization();
+  if (authorization.status !== 'runnable') return [authorization.status];
+  return (authorization.checkpoint.tools?.items ?? []).map(
+    (item) => item.state,
+  );
+}
+
+async function toolResultCount(): Promise<number> {
+  return (await session.sink.project()).filter(
+    (record) => record.type === 'tool_result',
+  ).length;
+}
+
+const foregroundShell = {
+  ...calls[0],
+  name: 'run_shell_command',
+  callId: 'foreground-call',
+  args: { command: 'echo hi' },
+};
+const foregroundParts: Part[] = [
+  {
+    functionCall: {
+      id: foregroundShell.callId,
+      name: foregroundShell.name,
+      args: foregroundShell.args,
+    },
+  },
+];
+const unreachedOutcome: ToolResultEnvelope = {
+  executionStatus: 'success',
+  responseParts: [{ text: 'unreached' }],
+  capture: null,
+};
+
+it('answers a capacity-refused foreground Shell as not started and lets the turn go on', async () => {
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const resolve = harness.resolveAwaitRuntime.bind(harness);
+  vi.spyOn(harness, 'resolveAwaitRuntime').mockImplementation(
+    async (...args) => {
+      rig.order.push('resolve');
+      return resolve(...args);
+    },
+  );
+  const responses = await turn.execute(
+    [foregroundShell],
+    foregroundParts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(broker.cancel).toHaveBeenCalledWith('shell-execution');
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    'foreground-call',
+  ]);
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER]);
+  expect(
+    (responses[0]?.functionResponse?.response as Record<string, unknown>)[
+      'executionStatus'
+    ],
+  ).toBe('not_started');
+  // The 429 is retried, the close finds no row, and the answer journals
+  // before its await_runtime item resolves.
+  expect(rig.order).toEqual([
+    'assistant',
+    'reserve',
+    'reserve',
+    'reserve',
+    'close_not_started',
+    'tool_result',
+    'resolve',
+  ]);
+  expect(await runtimeItemStates()).toEqual(['settled']);
+  expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+  await expect(turn.finish()).resolves.toBeUndefined();
+});
+
+it('answers a retention-refused Shell at once and says a retry will not help', async () => {
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: retentionExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    [foregroundShell],
+    foregroundParts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([
+    'This call was not started: Tool publication reservation refused at the session_bytes limit. Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.',
+  ]);
+  expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(1);
+  expect(await runtimeItemStates()).toEqual(['settled']);
+});
+
+it.each([
+  [
+    'a 429 that is not a limit refusal',
+    () =>
+      new ManagedSessionStoreHttpError(
+        429,
+        'managed_tool_publication_busy',
+        'Tool publication entry capacity is exhausted',
+      ),
+  ],
+  [
+    'a limit code under another status',
+    () =>
+      new ManagedSessionStoreHttpError(
+        400,
+        'managed_tool_publication_capacity_exhausted',
+        'Tool publication reservation refused at the active_captures limit',
+      ),
+  ],
+  [
+    'the retention code under another status',
+    () =>
+      new ManagedSessionStoreHttpError(
+        429,
+        'managed_tool_publication_retention_exhausted',
+        'Tool publication reservation refused at the session_bytes limit',
+      ),
+  ],
+  [
+    'a 409 that is not a limit refusal',
+    () =>
+      new ManagedSessionStoreHttpError(
+        409,
+        'managed_session_writer_conflict',
+        'The Session writer changed',
+      ),
+  ],
+])('keeps a batch recovery-blocked for %s', async (_label, refusal) => {
+  const rig = backgroundTurnRig(unreachedOutcome, { refuse: refusal });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  await expect(
+    turn.execute(
+      [foregroundShell],
+      foregroundParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('answers a capacity-refused background Shell once its process ledger proves it never started', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  broker.backgroundProcessStatus.mockResolvedValue(undefined);
+  const responses = await turn.execute(
+    [call],
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER]);
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'settleFailed',
+  ]);
+  expect(rig.orchestrator.calls.at(-1)?.[1]).toEqual({
+    id: 'shell-execution',
+    params: { stopReason: 'start_failed', started: false },
+  });
+  expect(await runtimeItemStates()).toEqual(['settled']);
+  stderr.mockRestore();
+});
+
+it('keeps a capacity-refused background Shell recovery-blocked while its process proof is ambiguous', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+  ]);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  stderr.mockRestore();
+});
+
+it('keeps a capacity-refused background Shell recovery-blocked when its record does not settle', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  rig.orchestrator.settleFailed = async () => {
+    throw new Error('record write refused');
+  };
+  brokerStatusThroughCancel();
+  broker.backgroundProcessStatus.mockResolvedValue(undefined);
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  stderr.mockRestore();
+});
+
+it('answers a capacity-refused Monitor on the Broker record that it never started', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = monitorCall();
+  const rig = monitorTurnRig(unreachedOutcome, { capacityRefused: true });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    [call],
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER]);
+  expect(rig.monitors.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'settleFailed',
+  ]);
+  expect(rig.monitors.calls.at(-1)?.[1]).toEqual({
+    id: 'monitor-execution',
+    params: { stopReason: 'start_failed', started: false },
+  });
+  expect(await runtimeItemStates()).toEqual(['settled']);
+  stderr.mockRestore();
+});
+
+it.each([
+  [
+    'an execution already past prepared',
+    (_id: string, cancelled: boolean) =>
+      cancelled ? null : { state: 'executing' },
+    1,
+  ],
+  [
+    'an unreadable execution',
+    (_id: string, cancelled: boolean) => {
+      if (!cancelled) throw new Error('status unavailable');
+      return null;
+    },
+    1,
+  ],
+  [
+    'a cancelled execution that cannot be read',
+    (_id: string, cancelled: boolean) => {
+      if (cancelled) throw new Error('status unavailable');
+      return null;
+    },
+    2,
+  ],
+  [
+    'a cancelled execution the Broker no longer knows',
+    (_id: string, cancelled: boolean) => (cancelled ? undefined : null),
+    2,
+  ],
+  [
+    'a cancelled execution whose outcome is unknown',
+    (_id: string, cancelled: boolean) =>
+      cancelled ? { state: 'unknown' } : null,
+    2,
+  ],
+  [
+    'a cancelled execution the Broker abandoned',
+    (_id: string, cancelled: boolean) =>
+      cancelled ? { state: 'abandoned' } : null,
+    2,
+  ],
+  [
+    'a Shell execution that settled with a result other than not started',
+    (_id: string, cancelled: boolean) =>
+      cancelled ? { state: 'settled', executionStatus: 'cancelled' } : null,
+    2,
+  ],
+])(
+  'keeps a capacity-refused batch recovery-blocked for %s',
+  async (_label, override, statusReads) => {
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: capacityExhausted,
+    });
+    turn = rig.turn;
+    brokerStatusThroughCancel(override);
+    await expect(
+      turn.execute(
+        [foregroundShell],
+        foregroundParts,
+        'model',
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    // Each verdict is final: nothing waits out the window on it.
+    expect(broker.status).toHaveBeenCalledTimes(statusReads);
+    expect(await runtimeItemStates()).toEqual(['in_progress']);
+    expect(await toolResultCount()).toBe(0);
+  },
+);
+
+it('waits for each cancelled execution to settle before answering', async () => {
+  const batch = [foregroundShell, calls[0]];
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  // Each execution's first read after its cancel is still pending.
+  const pending = new Set<string>();
+  brokerStatusThroughCancel((id, cancelled) => {
+    if (!cancelled || pending.has(id)) return null;
+    pending.add(id);
+    return { state: 'cancel_requested' };
+  });
+  const responses = await turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  expect(answerText(responses)).toEqual([CAPACITY_ANSWER, BYSTANDER_ANSWER]);
+  // Two reads before the cancels, then two after each.
+  expect(broker.status).toHaveBeenCalledTimes(6);
+});
+
+it('keeps the batch recovery-blocked when a later execution does not settle', async () => {
+  const shells = ['shell-a', 'shell-b'].map((id) => ({
+    ...foregroundShell,
+    callId: `${id}-call`,
+  }));
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) => (id === 'shell-b' ? capacityExhausted() : undefined),
+    executionCallIds: ['shell-a', 'shell-b'],
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel((id, cancelled) =>
+    id === 'shell-b' && cancelled ? { state: 'unknown' } : null,
+  );
+  await expect(
+    turn.execute(
+      shells,
+      shells.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.status).toHaveBeenCalledTimes(4);
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('keeps a capacity-refused Monitor recovery-blocked when its record does not settle', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const { call, parts } = monitorCall();
+  const rig = monitorTurnRig(unreachedOutcome, { capacityRefused: true });
+  turn = rig.turn;
+  rig.monitors.settleFailed = async () => {
+    throw new Error('record write refused');
+  };
+  brokerStatusThroughCancel();
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  stderr.mockRestore();
+});
+
+it('gives up at once when an execution could not be cancelled', async () => {
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: capacityExhausted,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  broker.cancel.mockRejectedValue(new Error('cancel lost'));
+  await expect(
+    turn.execute(
+      [foregroundShell],
+      foregroundParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  // Only the read before the cancel: nothing waits on a cancel that failed.
+  expect(broker.status).toHaveBeenCalledTimes(1);
+});
+
+it.each(['cancel_requested', 'prepared'])(
+  'gives up when a cancelled execution stays %s past its window',
+  async (state) => {
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: capacityExhausted,
+    });
+    turn = rig.turn;
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    const now = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => realNow() + skew);
+    brokerStatusThroughCancel((_id, cancelled) => {
+      if (!cancelled) return null;
+      skew += 31_000;
+      return { state };
+    });
+    try {
+      await expect(
+        turn.execute(
+          [foregroundShell],
+          foregroundParts,
+          'model',
+          new AbortController().signal,
+        ),
+      ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+      expect(broker.status).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  },
+);
+
+it('keeps the batch recovery-blocked when a later execution lacks its proof', async () => {
+  const shells = ['shell-a', 'shell-b'].map((id) => ({
+    ...foregroundShell,
+    callId: `${id}-call`,
+  }));
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) => (id === 'shell-b' ? capacityExhausted() : undefined),
+    executionCallIds: ['shell-a', 'shell-b'],
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel((id, cancelled) =>
+    id === 'shell-b' && !cancelled ? { state: 'executing' } : null,
+  );
+  await expect(
+    turn.execute(
+      shells,
+      shells.map((call) => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      })),
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress', 'in_progress']);
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('keeps a limit refusal raised after the batch started running recovery-blocked', async () => {
+  // Only a reservation answers this code in production; one arriving once
+  // calls may run proves nothing about which of them started.
+  const rig = backgroundTurnRig(unreachedOutcome, {});
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  broker.executeV3.mockRejectedValue(capacityExhausted());
+  await expect(
+    turn.execute(
+      [foregroundShell],
+      foregroundParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.status).not.toHaveBeenCalled();
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('wraps a failed answer in the recovery error', async () => {
+  // Only the answer, written after the refusal, cannot be stored inline.
+  let refused = false;
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: () => {
+      refused = true;
+      return capacityExhausted();
+    },
+    fitsInline: (type) => !(refused && type === 'tool_result'),
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  await expect(
+    turn.execute(
+      [foregroundShell],
+      foregroundParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await runtimeItemStates()).toEqual(['in_progress']);
+  expect(await toolResultCount()).toBe(0);
+});
+
+it('answers every call of a mixed batch and closes every reservation', async () => {
+  const shells = ['shell-a', 'shell-b'].map((id) => ({
+    ...foregroundShell,
+    callId: `${id}-call`,
+  }));
+  const batch = [shells[0]!, calls[0], calls[1], shells[1]!];
+  const batchParts: Part[] = batch.map((call) => ({
+    functionCall: { id: call.callId, name: call.name, args: call.args },
+  }));
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) => (id === 'shell-b' ? capacityExhausted() : undefined),
+    executionCallIds: ['shell-a', 'shell-b'],
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  // The read_file is refused before dispatch and keeps that answer.
+  broker.prepare.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(
+      409,
+      'runtime_execution_conflict',
+      undefined,
+      'conflicting execution',
+    ),
+  );
+  const responses = await turn.execute(
+    batch,
+    batchParts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    'shell-a-call',
+    'call-0',
+    'call-1',
+    'shell-b-call',
+  ]);
+  const answers = answerText(responses);
+  expect(answers[1]).toContain(
+    'Runtime refused this execution reservation before dispatch',
+  );
+  // Both Shells reserve, so fewer of them may fit; the Edit reserves
+  // nothing and can go without them.
+  const shellAnswer =
+    'This call was not started: Tool publication reservation refused at the active_captures limit. Retry after the running tools finish, or send fewer run_shell_command calls in one batch.';
+  expect([answers[0], answers[2], answers[3]]).toEqual([
+    shellAnswer,
+    BYSTANDER_ANSWER,
+    shellAnswer,
+  ]);
+  expect(rig.closed).toEqual([
+    rig.publications.get('shell-a'),
+    rig.publications.get('shell-b'),
+  ]);
+  // The Edit's prepared file history is settled like a finished batch's.
+  expect(broker.fileHistory).toHaveBeenLastCalledWith({
+    kind: 'raw-file-history',
+    action: 'snapshot',
+  });
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
+  expect(await runtimeItemStates()).toEqual(['settled', 'settled', 'settled']);
+});
+
+// #14518: the store says how many reservations of this size the Session
+// could ever hold at once, so a batch needing more is told to send fewer
+// calls instead of to wait.
+function limitRefusal(
+  limit: string,
+  admits: number | string,
+  status: 429 | 409 = 429,
+) {
+  return new ManagedSessionStoreHttpError(
+    status,
+    status === 429
+      ? 'managed_tool_publication_capacity_exhausted'
+      : 'managed_tool_publication_retention_exhausted',
+    `Tool publication reservation refused at the ${limit} limit`,
+    undefined,
+    { request_id: 'request-1', limit, admits },
+  );
+}
+
+function shellBatch(count: number) {
+  const shells = Array.from({ length: count }, (_, index) => ({
+    ...foregroundShell,
+    callId: `shell-${index}-call`,
+  }));
+  return {
+    shells,
+    parts: shells.map(
+      (call): Part => ({
+        functionCall: { id: call.callId, name: call.name, args: call.args },
+      }),
+    ),
+    ids: shells.map((_, index) => `shell-${index}`),
+  };
+}
+
+it.each(['active_captures', 'tenant_bytes', 'session_bytes'])(
+  'tells a batch of more Shells than its Session could ever hold at the %s limit to send fewer, without retrying',
+  async (limit) => {
+    const batch = shellBatch(3);
+    const cause = limitRefusal(limit, 2);
+    // The last of the three reservations is the one the limit refuses.
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: (id) => (id === 'shell-2' ? cause : undefined),
+      executionCallIds: batch.ids,
+    });
+    turn = rig.turn;
+    brokerStatusThroughCancel();
+    const responses = await turn.execute(
+      batch.shells,
+      batch.parts,
+      'model',
+      new AbortController().signal,
+    );
+
+    expect(answerText(responses)).toEqual(
+      Array(3).fill(
+        `This call was not started: Tool publication reservation refused at the ${limit} limit. This batch has 3 run_shell_command calls, but this Session can run at most 2 of them at a time, so retrying the same batch will not succeed. Send at most 2 of them in one batch.`,
+      ),
+    );
+    // Waiting cannot make the batch fit, so its refusal is not retried.
+    expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(3);
+    expect(rig.closed).toEqual(batch.ids.map((id) => rig.publications.get(id)));
+    expect(await runtimeItemStates()).toEqual([
+      'settled',
+      'settled',
+      'settled',
+    ]);
+  },
+);
+
+it('does not retry the first reservation of a batch its Session could never hold', async () => {
+  const batch = shellBatch(3);
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: (id) =>
+      id === 'shell-0' ? limitRefusal('session_bytes', 2) : undefined,
+    executionCallIds: batch.ids,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    batch.shells,
+    batch.parts,
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual(
+    Array(3).fill(
+      'This call was not started: Tool publication reservation refused at the session_bytes limit. This batch has 3 run_shell_command calls, but this Session can run at most 2 of them at a time, so retrying the same batch will not succeed. Send at most 2 of them in one batch.',
+    ),
+  );
+  expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(1);
+});
+
+it.each([
+  ['admits the whole batch at once', limitRefusal('active_captures', 2)],
+  ['does not say', capacityExhausted()],
+  ['says it as text', limitRefusal('active_captures', '1')],
+  ['says a fraction', limitRefusal('tenant_bytes', 1.5)],
+  // A 429 always admits one; a smaller count is not acted on.
+  ['admits none', limitRefusal('session_bytes', 0)],
+])(
+  'retries a batch whose refusal %s and says fewer calls may fit sooner',
+  async (_label, cause) => {
+    const batch = shellBatch(2);
+    const rig = backgroundTurnRig(unreachedOutcome, {
+      refuse: (id) => (id === 'shell-1' ? cause : undefined),
+      executionCallIds: batch.ids,
+    });
+    turn = rig.turn;
+    brokerStatusThroughCancel();
+    const responses = await turn.execute(
+      batch.shells,
+      batch.parts,
+      'model',
+      new AbortController().signal,
+    );
+
+    expect(answerText(responses)).toEqual(
+      Array(2).fill(
+        `This call was not started: ${cause.message}. Retry after the running tools finish, or send fewer run_shell_command calls in one batch.`,
+      ),
+    );
+    // One grant, then the refused reservation's three attempts.
+    expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(4);
+  },
+);
+
+it('keeps the retention answer for a batch its Session could never hold, and frees the call that reserves nothing', async () => {
+  const batch = shellBatch(3);
+  const all = [...batch.shells, calls[0]];
+  // Another Session's used bytes fill the tenant: the Session could hold
+  // two later, but none fits now, so the retention answer wins.
+  const rig = backgroundTurnRig(unreachedOutcome, {
+    refuse: () => limitRefusal('tenant_bytes', 2, 409),
+    executionCallIds: batch.ids,
+  });
+  turn = rig.turn;
+  brokerStatusThroughCancel();
+  const responses = await turn.execute(
+    all,
+    all.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+
+  expect(answerText(responses)).toEqual([
+    ...Array(3).fill(
+      'This call was not started: Tool publication reservation refused at the tenant_bytes limit. Tool output already retained fills that limit and stays charged until the Session that produced it is deleted, so retrying now will not succeed.',
+    ),
+    'This call was not started: another call in its batch was refused before any call ran (Tool publication reservation refused at the tenant_bytes limit). This call needs no tool output capacity, so it can be retried in a batch without the refused calls.',
+  ]);
+  expect(rig.order.filter((item) => item === 'reserve')).toHaveLength(1);
+});
+
+it('probes every inconclusive background binding within one timeout window', async () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  vi.useFakeTimers();
+  let guard: ReturnType<typeof realSetTimeout> | undefined;
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        publicationMissing: true,
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    let resolveBothProbes!: () => void;
+    const bothProbesStarted = new Promise<void>((resolve) => {
+      resolveBothProbes = resolve;
+    });
+    broker.backgroundProcessStatus.mockImplementation(
+      () =>
+        new Promise<undefined>((_resolve, reject) => {
+          if (broker.backgroundProcessStatus.mock.calls.length === 2)
+            resolveBothProbes();
+          setTimeout(
+            () => reject(new DOMException('timed out', 'TimeoutError')),
+            30_000,
+          );
+        }),
+    );
+    let completed = false;
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      )
+      .finally(() => {
+        completed = true;
+      });
+    // A deadlock guard, not a latency assertion: the probes are mock calls
+    // that only need to be in flight together, and a shared runner under load
+    // can spend more than a second scheduling them (release run 39192115354
+    // failed this guard on all three attempts while every other test passed).
+    const guardedStart = new Promise<never>((_resolve, reject) => {
+      guard = realSetTimeout(
+        () => reject(new Error('both probes did not start concurrently')),
+        10_000,
+      );
+    });
+
+    await Promise.race([bothProbesStarted, guardedStart]);
+    if (guard !== undefined) realClearTimeout(guard);
+    guard = undefined;
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledTimes(2);
+    expect(completed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(completed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const { rejection } = await outcome;
+    expect(completed).toBe(true);
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      rig.order.filter((item) => item === 'close_not_started'),
+    ).toHaveLength(2);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toHaveLength(0);
+  } finally {
+    if (guard !== undefined) realClearTimeout(guard);
+    vi.useRealTimers();
+    turn = createTurn();
+  }
+});
+
+it('settles grant-proven bindings before waiting for process probes', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  vi.useFakeTimers();
+  let guard: ReturnType<typeof realSetTimeout> | undefined;
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        closeResults: ['NOT_STARTED', 'MISSING'],
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    let resolveProbeStarted!: () => void;
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve;
+    });
+    broker.backgroundProcessStatus.mockImplementation(() => {
+      resolveProbeStarted();
+      return new Promise<undefined>((_resolve, reject) => {
+        setTimeout(
+          () => reject(new DOMException('timed out', 'TimeoutError')),
+          30_000,
+        );
+      });
+    });
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      );
+    const guardedStart = new Promise<never>((_resolve, reject) => {
+      guard = realSetTimeout(
+        () => reject(new Error('process probe did not start')),
+        10_000,
+      );
+    });
+
+    await Promise.race([probeStarted, guardedStart]);
+    if (guard !== undefined) realClearTimeout(guard);
+    guard = undefined;
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledOnce();
+    expect(rig.orchestrator.calls.at(-1)).toEqual([
+      'settleFailed',
+      {
+        id: 'shell-execution-1',
+        params: { stopReason: 'start_failed', started: false },
+      },
+    ]);
+    // Grant-owner proof is not process-ledger proof.
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('from durable process-ledger absence'),
+    );
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    const { rejection } = await outcome;
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toHaveLength(1);
+  } finally {
+    if (guard !== undefined) realClearTimeout(guard);
+    vi.useRealTimers();
+    turn = createTurn();
+  }
+});
+
+it('settles only the binding whose own probe proves absence in a mixed fan-out', async () => {
+  const stderr = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  try {
+    const template = backgroundCall().call;
+    const backgroundCalls = [1, 2].map((index) => ({
+      ...template,
+      callId: `background-call-${index}`,
+    }));
+    const backgroundParts: Part[] = backgroundCalls.map((call) => ({
+      functionCall: {
+        id: call.callId,
+        name: call.name,
+        args: call.args,
+      },
+    }));
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      {
+        publicationMissing: true,
+        executionCallIds: ['shell-execution-1', 'shell-execution-2'],
+      },
+    );
+    turn = rig.turn;
+    broker.executeV3.mockRejectedValue(new Error('trigger recovery'));
+    broker.backgroundProcessStatus.mockImplementation(async () =>
+      broker.backgroundProcessStatus.mock.calls.length === 1
+        ? { state: 'executing' }
+        : undefined,
+    );
+    const outcome = turn
+      .execute(
+        backgroundCalls,
+        backgroundParts,
+        'model',
+        new AbortController().signal,
+      )
+      .then(
+        () => ({ rejection: undefined }),
+        (rejection: unknown) => ({ rejection }),
+      );
+
+    const { rejection } = await outcome;
+    expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(broker.backgroundProcessStatus).toHaveBeenCalledTimes(2);
+    expect(
+      rig.orchestrator.calls.filter(([name]) => name === 'settleFailed'),
+    ).toEqual([
+      [
+        'settleFailed',
+        {
+          id: 'shell-execution-2',
+          params: { stopReason: 'start_failed', started: false },
+        },
+      ],
+    ]);
+    expect(stderr).toHaveBeenCalledWith(
+      'qwen serve: Background process absence could not be confirmed for shell-execution-1 (ambiguous_state (executing)).',
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      'qwen serve: Settled never-started background child run shell-execution-2 from durable process-ledger absence.',
+    );
+  } finally {
+    stderr.mockRestore();
+  }
 });
 
 it('keeps an in-flight dispatch blocked when cancellation fails before process admission', async () => {
@@ -6252,10 +8177,12 @@ it.each(['present', 'unavailable'] as const)(
       'admit',
       'dispatchStarted',
     ]);
-    if (proof === 'unavailable')
-      expect(stderr).toHaveBeenCalledWith(
-        'qwen serve: Background process absence could not be confirmed for shell-execution (status 503, code store_unavailable).',
-      );
+    expect(stderr).toHaveBeenCalledWith(
+      proof === 'present'
+        ? 'qwen serve: Background process absence could not be confirmed for shell-execution (ambiguous_state (executing)).'
+        : 'qwen serve: Background process absence could not be confirmed for shell-execution (probe_rejected (status 503, code store_unavailable)).',
+    );
+    stderr.mockRestore();
   },
 );
 

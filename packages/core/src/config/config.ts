@@ -1107,6 +1107,11 @@ export interface SessionWorkflowPlanRevision {
 /** `goals.modelProposed`: whether the model may propose a Goal for approval. */
 export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 
+export type WorkflowAncestorTrustProvider = (
+  ancestorDirs: readonly string[],
+  canonicalTargetDir: string,
+) => Promise<readonly boolean[]>;
+
 export interface ConfigParameters {
   agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
@@ -1257,6 +1262,7 @@ export interface ConfigParameters {
    * before execution. A configured guard fails closed.
    */
   toolInvocationGuard?: ToolInvocationGuard;
+  workflowAncestorTrustProvider?: WorkflowAncestorTrustProvider;
   /** Internal trusted-host integration; never loaded from workspace settings. */
   shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
   toolDiscoveryCommand?: string;
@@ -2852,6 +2858,9 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
   private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
+  private readonly workflowAncestorTrustProvider:
+    | WorkflowAncestorTrustProvider
+    | undefined;
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
@@ -3426,6 +3435,7 @@ export class Config {
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
+    this.workflowAncestorTrustProvider = params.workflowAncestorTrustProvider;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -12324,6 +12334,12 @@ export class Config {
     return (
       this.isAgentCollaborationEnabled() && this.sessionSourceType === 'agent'
     );
+  }
+
+  getWorkflowAncestorTrustProvider():
+    | WorkflowAncestorTrustProvider
+    | undefined {
+    return this.workflowAncestorTrustProvider;
   }
 
   getToolInvocationGuard(): ToolInvocationGuard | undefined {

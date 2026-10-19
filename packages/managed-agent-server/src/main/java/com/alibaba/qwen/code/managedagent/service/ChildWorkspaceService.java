@@ -132,16 +132,19 @@ public class ChildWorkspaceService {
             throw new ApiException(HttpStatus.CONFLICT, "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
         }
-        return drive(store.admit(tenantId, parentSessionId, childRunId, parent.workspace(), clock.get()));
+        return drive(store.admit(tenantId, parentSessionId, childRunId, parent.workspace(),
+                ChildWorkspaceStore.WORKTREE, clock.get()));
     }
 
     /**
      * Admits the preparation of one child run's Workspace without running
      * any of it: the scan drives the Git steps (#13753 I2), so a caller on
      * a shared worker thread never waits on Git. Answers the row as it
-     * stands.
+     * stands. The mode is the run's: a `worktree` merges back, a
+     * `snapshot` is a read-only copy that is always discarded (#13753 I3).
      */
-    public Row request(String tenantId, String parentSessionId, String childRunId) {
+    public Row request(String tenantId, String parentSessionId, String childRunId,
+            String workspaceMode) {
         if (warmer.childWorkspaces() == null) {
             throw new ApiException(HttpStatus.CONFLICT, "child_workspace_unsupported",
                     "This host cannot create a child Workspace.");
@@ -151,7 +154,8 @@ public class ChildWorkspaceService {
             throw new ApiException(HttpStatus.CONFLICT, "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
         }
-        return store.admit(tenantId, parentSessionId, childRunId, parent.workspace(), clock.get());
+        return store.admit(tenantId, parentSessionId, childRunId, parent.workspace(), workspaceMode,
+                clock.get());
     }
 
     /**
@@ -291,8 +295,12 @@ public class ChildWorkspaceService {
         }
         // A discard that replaced the merge since the claim, or a claim
         // that moved on, fails the compare-and-set: the row is read again.
+        // A snapshot never merges (#13753 I3): this store records a merge
+        // asked of one as a discard, but a relay from before snapshots
+        // records the merge itself, so a snapshot's merge runs as a discard.
         String finish = claimed.finishRequest();
-        store.startFinish(claimed, owner, MERGE.equals(finish) ? MERGING : DISCARDING, finish, clock.get());
+        store.startFinish(claimed, owner, MERGE.equals(finish) && !claimed.snapshot() ? MERGING : DISCARDING,
+                finish, clock.get());
     }
 
     private void prepareStep(ChildWorkspaceProvider provider, Row claimed) {
