@@ -425,7 +425,13 @@ func (s *nodeSource) volume(volume string) *originalSource {
 	if s.active != nil && s.active.scope.VolumeID == volume {
 		return s.active
 	}
-	return nil
+	var latest *originalSource
+	for _, original := range s.originals {
+		if original.scope.VolumeID == volume && (latest == nil || original.arm.Sequence > latest.arm.Sequence) {
+			latest = original
+		}
+	}
+	return latest
 }
 
 func (s *nodeSource) publication(volume, target string) *originalSource {

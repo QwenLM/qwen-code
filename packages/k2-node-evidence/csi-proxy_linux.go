@@ -196,7 +196,9 @@ func (p *csiProxy) NodeExpandVolume(ctx context.Context, request *csi.NodeExpand
 	p.source.mu.Lock()
 	defer p.source.mu.Unlock()
 	if original := p.source.volume(request.GetVolumeId()); original != nil {
-		_ = p.source.block(original)
+		if original.unpublish == nil {
+			_ = p.source.block(original)
+		}
 		return nil, status.Error(codes.FailedPrecondition, "original volume expansion is unsupported")
 	}
 	ctx, cancel := backendContext(ctx)
