@@ -589,7 +589,7 @@ final class ManagedSnapshotStore {
             throw new IllegalStateException("Snapshot manifest digest differs");
         }
         try {
-            Manifest result = mapper.readValue(bytes, Manifest.class);
+            Manifest result = decodeManifest(mapper, bytes);
             if (result.version() != 1
                     || !result.snapshot().equals(root.id())
                     || result.sequence() != root.sequence()
@@ -608,13 +608,12 @@ final class ManagedSnapshotStore {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         try {
             List<SnapshotItem> frozen =
-                    mapper.readValue(
+                    decodePage(mapper,
                             resource(
                                     ManagedSessionStore.resourceKey(scope, pageId(snapshot, page)),
                                     tenant,
                                     session,
-                                    "managed-snapshot-page"),
-                            ITEMS);
+                                    "managed-snapshot-page"));
             List<ItemRecord> result = new ArrayList<>(frozen.size());
             for (SnapshotItem entry : frozen) {
                 ItemRecord item = entry.item();
@@ -834,9 +833,17 @@ final class ManagedSnapshotStore {
     private record PageLocation(
             String snapshot, int ordinal, long firstSequence, long lastSequence) {}
 
-    private record SnapshotItem(ItemRecord item, String body) {}
+    static Manifest decodeManifest(ObjectMapper mapper, byte[] bytes) throws java.io.IOException {
+        return mapper.readValue(bytes, Manifest.class);
+    }
 
-    private record Manifest(
+    static List<SnapshotItem> decodePage(ObjectMapper mapper, byte[] bytes) throws java.io.IOException {
+        return mapper.readValue(bytes, ITEMS);
+    }
+
+    record SnapshotItem(ItemRecord item, String body) {}
+
+    record Manifest(
             int version,
             String snapshot,
             long sequence,
