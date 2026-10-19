@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceCsiNodeSourceMySqlIT {
     @Test
-    void refusesEvidenceRetirementBeforeChangingTheReadyOwner() throws Exception {
+    void refusesIncompleteEvidenceRetirementBeforeChangingTheReadyOwner() throws Exception {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             var fixture = fixture(database);
             fixture.store().saveArm(fixture.binding(), fixture.registration(), fixture.reservation(),
@@ -42,7 +42,7 @@ class WorkspaceCsiNodeSourceMySqlIT {
             var storage = new WorkspaceCsiReservationStore(fixture.jdbc(), fixture.manager(), new ObjectMapper());
             var before = fixture.jdbc().queryForMap("SELECT * FROM ma_runtime_binding");
             assertThatThrownBy(() -> storage.beginRetirement(fixture.registration(), fixture.bindings(), ready,
-                    fixture.reservation(), UUID.randomUUID().toString())).hasMessageContaining("Workspace CSI admission");
+                    fixture.reservation(), UUID.randomUUID().toString())).hasMessageContaining("original CSI node source association");
             assertThat(fixture.jdbc().queryForMap("SELECT * FROM ma_runtime_binding")).isEqualTo(before);
             assertThat(storage.inspect(fixture.registration())).isEqualTo(fixture.reservation());
             assertThat(fixture.store().inspect(ready.getBindingId()).arm().bytes()).isEqualTo(fixture.protocol().arm().bytes());
@@ -77,13 +77,36 @@ class WorkspaceCsiNodeSourceMySqlIT {
             assertThatThrownBy(() -> ManagedSchema.initialize(source)).hasCauseInstanceOf(java.sql.SQLException.class);
             Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
             ManagedSchema.validate(source);
-            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(13);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(14);
             var after = new HashSet<>(jdbc.queryForList(tables, String.class));
             assertThat(after.remove("ma_csi_source")).isTrue();
+            assertThat(after.remove("ma_csi_physical")).isTrue();
             assertThat(after).isEqualTo(before);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_source", Integer.class)).isZero();
             assertThat(jdbc.queryForMap("SELECT session_id,gmt_create,gmt_modified FROM ma_session"))
                     .containsEntry("session_id", "original").containsEntry("gmt_create", 1L).containsEntry("gmt_modified", 2L);
+        }
+    }
+
+    @Test
+    void migratesPublishedV13WithoutChangingSourceBytes() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            var source = database.source();
+            Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
+                    .target("13").load().migrate();
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(13);
+            var jdbc = new ManagedSchemaJdbcTemplate(source);
+            byte[] bytes = new byte[] {0, 1, (byte) 255};
+            jdbc.update("INSERT INTO ma_csi_source (binding_id,runtime_generation,physical_key,reservation_id,"
+                    + "reservation_revision,configuration_json,phase,record_version,arm_bytes,arm_sequence,arm_hash)"
+                    + " VALUES (?,1,?, ?,1,'{}','ARMED',1,?,1,?)", "schema-witness".getBytes(StandardCharsets.UTF_8),
+                    "a".repeat(64), "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", bytes, "b".repeat(64));
+            var before = jdbc.queryForMap("SELECT * FROM ma_csi_source");
+            Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
+            ManagedSchema.validate(source);
+            assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(14);
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_csi_source")).usingRecursiveComparison().isEqualTo(before);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_physical", Integer.class)).isZero();
         }
     }
 

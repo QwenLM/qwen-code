@@ -57,7 +57,7 @@ class WorkspaceCsiRetirementStoreTest {
     }
 
     @Test
-    void refusesNodeEvidenceBeforeSealingOrCreatingRetirementProgress() {
+    void refusesIncompleteNodeEvidenceBeforeSealingOrCreatingRetirementProgress() {
         ready();
         for (boolean sameBinding : new boolean[] {true, false}) {
             jdbc.update("INSERT INTO ma_csi_source (binding_id,runtime_generation,physical_key,reservation_id,"
@@ -65,7 +65,9 @@ class WorkspaceCsiRetirementStoreTest {
                     + " VALUES (?,1,?, ?,1,'{}','ARMED',1,?,1,?)", sameBinding ? original.getBindingId() : UUID.randomUUID().toString(),
                     sameBinding ? "f".repeat(64) : registration.physicalKey(), reservation.reservationId(), new byte[] {1}, "a".repeat(64));
             var before = jdbc.queryForMap("SELECT * FROM ma_runtime_binding");
-            assertUnavailable(() -> store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString()));
+            assertThatThrownBy(() -> store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString()))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("csi_node_source_association_unavailable"));
             assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_binding")).isEqualTo(before);
             assertThat(store.inspect(registration)).isEqualTo(reservation);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();

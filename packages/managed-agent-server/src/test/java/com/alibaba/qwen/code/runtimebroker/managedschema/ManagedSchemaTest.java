@@ -35,7 +35,7 @@ class ManagedSchemaTest {
                     + "'prompt','[]','digest','COMPLETED',1,1)");
         }
         ManagedSchema.initialize(source);
-        assertEquals(13, ManagedSchema.schemaVersion(source));
+        assertEquals(14, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_session")) {
                 assertTrue(row.next());
@@ -58,16 +58,16 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void initializesExactly33TablesAndValidatesWithoutRewriting() throws Exception {
+    void initializesExactly34TablesAndValidatesWithoutRewriting() throws Exception {
         DataSource source = source();
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(13, ManagedSchema.schemaVersion(source));
+        assertEquals(14, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
-            assertEquals(33, ManagedSchemaCatalog.tables(connection).size());
+            assertEquals(34, ManagedSchemaCatalog.tables(connection).size());
         }
     }
 
@@ -87,7 +87,7 @@ class ManagedSchemaTest {
                         () -> receipt(connection, "unsupported", "WORKSPACE_CREATE"));
             }
             ManagedSchema.initialize(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(14, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(connection, "new", "WORKSPACE_CREATE");
@@ -103,7 +103,7 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void upgradesPublishedV12WithOnlyTheSourceTableAndPreservesOriginalRows() throws Exception {
+    void upgradesPublishedV12WithCompanionTablesAndPreservesOriginalRows() throws Exception {
         DataSource source = source();
         Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
                 .target("12").load().migrate();
@@ -115,7 +115,7 @@ class ManagedSchemaTest {
         }
         Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
         ManagedSchema.validate(source);
-        assertEquals(13, ManagedSchema.schemaVersion(source));
+        assertEquals(14, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             assertEquals(ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
             try (var row = statement.executeQuery("SELECT session_id,gmt_create,gmt_modified FROM ma_session")) {
@@ -129,6 +129,27 @@ class ManagedSchemaTest {
                 assertEquals(0, row.getLong(1));
             }
         }
+    }
+
+    @Test
+    void upgradesPublishedV13WithOnlyPhysicalProgressAndPreservesSourceBytes() throws Exception {
+        DataSource source = source();
+        Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
+                .target("13").load().migrate();
+        assertEquals(13, ManagedSchema.schemaVersion(source));
+        var jdbc = new org.springframework.jdbc.core.JdbcTemplate(source);
+        byte[] bytes = new byte[] {0, 1, (byte) 255};
+        jdbc.update("INSERT INTO ma_csi_source (binding_id,runtime_generation,physical_key,reservation_id,"
+                + "reservation_revision,configuration_json,phase,record_version,arm_bytes,arm_sequence,arm_hash)"
+                + " VALUES (?,1,?, ?,1,'{}','ARMED',1,?,1,?)", "schema-witness".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "a".repeat(64), "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", bytes, "b".repeat(64));
+        Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
+        ManagedSchema.validate(source);
+        assertEquals(14, ManagedSchema.schemaVersion(source));
+        org.junit.jupiter.api.Assertions.assertArrayEquals(bytes, jdbc.queryForObject("SELECT arm_bytes FROM ma_csi_source", byte[].class));
+        assertEquals("{}", jdbc.queryForObject("SELECT configuration_json FROM ma_csi_source", String.class));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_source", Integer.class));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_physical", Integer.class));
     }
 
     @Test
@@ -630,6 +651,7 @@ class ManagedSchemaTest {
                                                         tables)));
         var originalDestinations = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
         originalDestinations.remove("ma_csi_source");
+        originalDestinations.remove("ma_csi_physical");
         assertEquals(
                 originalDestinations,
                 inventory.values().stream()

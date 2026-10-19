@@ -72,11 +72,11 @@ class WorkspaceMigrationMySqlIT {
     }
 
     @Test
-    void freshBaselineContainsOneGcAuthorityAndExactly33Tables() {
+    void freshBaselineContainsOneGcAuthorityAndExactly34Tables() {
         ManagedSchema.initialize(data);
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema"
-                                        + " = ?", Integer.class, schema)).isEqualTo(33);
+                                        + " = ?", Integer.class, schema)).isEqualTo(34);
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_operation WHERE operation_kind ="
                                         + " 'SESSION_RESOURCE_GC'", Integer.class)).isZero();

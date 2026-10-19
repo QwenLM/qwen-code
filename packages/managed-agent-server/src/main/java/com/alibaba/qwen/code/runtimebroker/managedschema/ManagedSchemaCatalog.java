@@ -103,8 +103,11 @@ final class ManagedSchemaCatalog {
     }
 
     static void validateBaseline(Connection connection, String ddl) throws SQLException {
-        var baseline = new HashSet<>(ManagedSchemaContract.TABLES);
-        baseline.remove("ma_csi_source");
+        Set<String> baseline = new HashSet<>();
+        var declared = TABLE.matcher(ddl);
+        while (declared.find()) {
+            baseline.add(declared.group(1));
+        }
         validate(connection, ddl, baseline);
     }
 

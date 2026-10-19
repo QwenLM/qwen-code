@@ -105,6 +105,34 @@ public final class WorkspaceCsiNodeSourceStore {
         this.transaction.setTimeout(10);
     }
 
+    static Association lockedPublication(Connection connection, String bindingId) throws SQLException {
+        require(connection != null && !connection.getAutoCommit());
+        var result = read(connection, bindingId, true);
+        require(result != null && "PUBLISHED".equals(result.phase()));
+        return result;
+    }
+
+    static void requireOriginalPublication(Connection connection, RuntimeBindingRecord binding,
+            WorkspaceCsiRegistration registration, WorkspaceCsiReservationStore.Reservation holder) throws SQLException {
+        var source = lockedPublication(connection, binding.getBindingId());
+        var observed = validateEvidence(source.configuration(), source.publication(), "PUBLISHED", source.podUid());
+        var placement = com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map(binding.getResourceHandle().getValue().get("placement"));
+        require(holder != null && binding.getGeneration() == source.generation() && registration.physicalKey().equals(source.physicalKey())
+                && holder.reservationId().equals(source.reservationId()) && holder.revision() == source.reservationRevision()
+                && source.podUid().equals(placement.get("podUid"))
+                && source.configuration().node().name().equals(placement.get("nodeName"))
+                && source.configuration().node().identity().nodeUid().equals(placement.get("nodeUid"))
+                && ("containerd://" + observed.scope().containerId()).equals(placement.get("containerId"))
+                && source.configuration().scope().namespace().equals(placement.get("namespace"))
+                && source.configuration().scope().podName().equals(placement.get("podName"))
+                && placement.get("image") instanceof String image && image.endsWith("@sha256:" + source.configuration().imageDigest())
+                && registration.namespace().equals(observed.scope().namespace()) && registration.driver().equals(observed.scope().driver())
+                && registration.volumeHandle().equals(observed.scope().volumeId()) && registration.pvUid().equals(observed.scope().pvUid())
+                && registration.pvcUid().equals(observed.scope().pvcUid())
+                && ("/var/lib/kubelet/pods/" + source.podUid() + "/volumes/kubernetes.io~csi/" + registration.pvName() + "/mount")
+                        .equals(observed.scope().target()));
+    }
+
     public Association inspect(String bindingId) {
         return jdbc.execute((ConnectionCallback<Association>) connection -> read(connection, bindingId, false));
     }
@@ -326,14 +354,14 @@ public final class WorkspaceCsiNodeSourceStore {
             if ("PUBLISHED".equals(phase)) {
                 require(observation.custody() != null && observation.publish() != null && scope.containerId().matches("[0-9a-f]{64}"));
                 require(configuration.imageDigest().equals(evidence.record(observation.custody()).path("runtime").path("imageDigest").textValue()));
-                validateBirths(configuration, evidence, observation);
+                validateBirths(configuration, evidence, observation, true);
             }
         }
         return observation;
     }
 
-    private static void validateBirths(Configuration configuration, CsiNodeSourceJournal.Evidence evidence,
-            CsiNodeSourceJournal.Observation observation) {
+    static void validateBirths(Configuration configuration, CsiNodeSourceJournal.Evidence evidence,
+            CsiNodeSourceJournal.Observation observation, boolean published) {
         require(observation.births().size() == 2);
         var sandboxes = observation.births().stream().filter(value -> "sandbox".equals(value.role())).toList();
         var workers = observation.births().stream().filter(value -> "container".equals(value.role())).toList();
@@ -347,7 +375,7 @@ public final class WorkspaceCsiNodeSourceStore {
                 && inputs.sandboxImageSha256().equals(sandbox.imageDigest()));
         for (var born : observation.births()) {
             require(born.prepared() != null && born.created() != null && born.startBegin() != null && born.started() != null
-                    && born.deleted() == null);
+                    && (!published || born.deleted() == null));
             var birth = evidence.record(born.prepared()).path("birth");
             var policy = birth.path("policy");
             require(inputs.shimSha256().equals(birth.path("peer").path("executable").path("sha256").textValue())

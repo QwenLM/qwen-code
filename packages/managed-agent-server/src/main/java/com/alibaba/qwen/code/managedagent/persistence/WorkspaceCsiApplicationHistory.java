@@ -403,6 +403,7 @@ final class WorkspaceCsiApplicationHistory {
         require(intent != null && intent.operationId().equals(retirement.text("operation_id"))
                 && intent.physicalKey().equals(retirement.text("physical_key")));
         require(!WorkspaceCsiNodeSourceStore.hasAssociation(target, binding.getBindingId(), intent.physicalKey(), false));
+        WorkspaceCsiPhysicalStore.requireHistoryEmpty(target, intent.operationId(), binding.getBindingId(), intent.physicalKey());
         byte[] frozen = payload(retirement, "frozen_request");
         byte[] cut = stagePayload(retirement, "cut", stage == Stage.CUT || stage == Stage.DRAINED);
         byte[] receipt = stagePayload(retirement, "finalize_receipt", stage == Stage.DRAINED);

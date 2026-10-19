@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
+import com.alibaba.qwen.code.runtimebroker.provisioning.CsiPodDeletion;
 import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
@@ -76,6 +77,9 @@ class WorkspaceCsiNodeSourceStoreTest {
     private CsiNodeSourceJournal.Evidence arm;
     private CsiNodeSourceJournal.Evidence bound;
     private CsiNodeSourceJournal.Evidence publication;
+    private CsiNodeSourceJournal.Evidence stopIntent;
+    private CsiNodeSourceJournal.Evidence stopped;
+    private CsiNodeSourceJournal.Evidence unpublished;
     private final String podUid = "aa36d481-0995-4060-8ce7-f3d42c3e408f";
 
     @BeforeEach
@@ -113,6 +117,9 @@ class WorkspaceCsiNodeSourceStoreTest {
         bound = protocol.bound();
         publication = protocol.publication();
         configuration = protocol.configuration();
+        stopIntent = protocol.stopIntent();
+        stopped = protocol.stopped();
+        unpublished = protocol.unpublished();
     }
 
     @Test
@@ -369,9 +376,53 @@ class WorkspaceCsiNodeSourceStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_source", Long.class)).isZero();
     }
 
+    @Test
+    void physicalSourceUsesEveryOriginalPublicationCursorWithoutChangingTheAssociation() {
+        store.saveArm(binding, registration, reservation, configuration, arm);
+        store.saveBound(binding, registration, reservation, store.inspect(binding.getBindingId()), podUid, "a".repeat(64), "opaque:1", bound);
+        store.savePublication(binding, registration, reservation, store.inspect(binding.getBindingId()), publication);
+        var original = store.inspect(binding.getBindingId());
+        String retirement = stopIntent.stream().observations().getFirst().scope().retirementId();
+        String planHash = stopIntent.record(stopIntent.stream().observations().getFirst().intent()).path("intentHash").textValue();
+        for (var evidence : List.of(stopIntent, stopped, unpublished)) {
+            var result = WorkspaceCsiPhysicalSource.validate(original, retirement, planHash, evidence);
+            assertThat(result.state()).isEqualTo(evidence.stream().observations().getFirst().state());
+            assertThat(result.publish()).isEqualTo(publication.stream().observations().getFirst().publish());
+            assertThat(result.custody()).isEqualTo(publication.stream().observations().getFirst().custody());
+        }
+        assertThat(store.inspect(binding.getBindingId()).phase()).isEqualTo("PUBLISHED");
+        assertThat(store.inspect(binding.getBindingId()).version()).isEqualTo(3);
+        assertThat(store.inspect(binding.getBindingId()).publication().bytes()).isEqualTo(publication.bytes());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"retirement", "plan", "publication", "foreign-binding"})
+    void physicalSourceRefusesWrongOriginalLineage(String boundary) {
+        store.saveArm(binding, registration, reservation, configuration, arm);
+        store.saveBound(binding, registration, reservation, store.inspect(binding.getBindingId()), podUid, "a".repeat(64), "opaque:1", bound);
+        store.savePublication(binding, registration, reservation, store.inspect(binding.getBindingId()), publication);
+        var original = store.inspect(binding.getBindingId());
+        String retirement = unpublished.stream().observations().getFirst().scope().retirementId();
+        String planHash = unpublished.record(unpublished.stream().observations().getFirst().intent()).path("intentHash").textValue();
+        if ("foreign-binding".equals(boundary)) {
+            original = new WorkspaceCsiNodeSourceStore.Association("foreign", original.generation(), original.physicalKey(),
+                    original.reservationId(), original.reservationRevision(), original.configuration(), original.phase(), original.version(),
+                    original.arm(), original.podUid(), original.gatedSpecSha256(), original.bound(), original.publication());
+        }
+        var selected = original;
+        String selectedRetirement = "retirement".equals(boundary) ? UUID.randomUUID().toString() : retirement;
+        String selectedHash = "plan".equals(boundary) ? "0".repeat(64) : planHash;
+        var evidence = "publication".equals(boundary) ? publication : unpublished;
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalSource.validate(selected, selectedRetirement, selectedHash, evidence))
+                .isInstanceOf(RuntimeBrokerException.class);
+        assertThat(store.inspect(binding.getBindingId()).phase()).isEqualTo("PUBLISHED");
+        assertThat(store.inspect(binding.getBindingId()).publication().bytes()).isEqualTo(publication.bytes());
+    }
+
     record Protocol(CsiNodeSourceJournal.Evidence initial, CsiNodeSourceJournal.Evidence arm,
             CsiNodeSourceJournal.Evidence bound, CsiNodeSourceJournal.Evidence publication,
-            WorkspaceCsiNodeSourceStore.Configuration configuration) { }
+            WorkspaceCsiNodeSourceStore.Configuration configuration, CsiNodeSourceJournal.Evidence stopIntent,
+            CsiNodeSourceJournal.Evidence stopped, CsiNodeSourceJournal.Evidence unpublished) { }
 
     static Protocol protocol(RuntimeBindingRecord binding, WorkspaceCsiRegistration registration,
             WorkspaceCsiReservationStore.Reservation reservation) throws Exception {
@@ -385,10 +436,13 @@ class WorkspaceCsiNodeSourceStoreTest {
         var frames = new ArrayList<ObjectNode>();
         var hashes = new HashMap<Long, String>();
         String previous = "0".repeat(64);
-        while (input.hasRemaining() && frames.size() < 14) {
+        while (input.hasRemaining()) {
             byte[] frame = new byte[input.getInt()];
             input.get(frame);
             var record = (ObjectNode) json.readTree(frame);
+            if ("SOURCE_START".equals(record.path("kind").textValue())) {
+                ((ObjectNode) record.path("source")).put("nodeUid", "92d3bdd2-ac4c-4564-9dca-976be8f06979");
+            }
             if (record.has("scope")) {
                 var scope = (ObjectNode) record.path("scope");
                 scope.put("armId", UUID.nameUUIDFromBytes(("qwen-csi-source-arm/1\0" + binding.getBindingId() + "\0"
@@ -400,6 +454,9 @@ class WorkspaceCsiNodeSourceStoreTest {
                 scope.put("volumeId", registration.volumeHandle());
                 scope.put("pvUid", registration.pvUid());
                 scope.put("pvcUid", registration.pvcUid());
+                if (!scope.path("retirementId").textValue().isEmpty()) {
+                    scope.put("retirementId", "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08");
+                }
                 if (!scope.path("podUid").textValue().isEmpty()) {
                     scope.put("podUid", podUid);
                     scope.put("target", "/var/lib/kubelet/pods/" + podUid + "/volumes/kubernetes.io~csi/pv/mount");
@@ -425,13 +482,135 @@ class WorkspaceCsiNodeSourceStoreTest {
         var arm = prefix(frames, 2);
         var bound = prefix(frames, 3);
         var publication = prefix(frames, 14);
+        var stopIntent = prefix(frames, 15);
+        var stopped = prefix(frames, 16);
+        var unpublished = prefix(frames, 18);
         var identity = arm.stream().source();
         var node = new WorkspaceCsiNodeSourceStore.Node("node", arm.stream().incarnation(), identity,
                 URI.create("https://source.invalid"), "spiffe://test/source", URI.create("https://gateway.invalid"), "spiffe://test/gateway", arm.record(arm.stream().observations().getFirst().arm()).path("policy").path("rawSha256").textValue(), WorkspaceCsiBirthTestInputs.reviewed(), WorkspaceCsiInstalledByteTestInputs.reviewed());
         var observed = publication.stream().observations().getFirst();
         String imageDigest = publication.record(observed.custody()).path("runtime").path("imageDigest").textValue();
-        return new Protocol(initial, arm, bound, publication,
-                new WorkspaceCsiNodeSourceStore.Configuration(node, imageDigest, arm.stream().observations().getFirst().scope()));
+        var configuration = new WorkspaceCsiNodeSourceStore.Configuration(node, imageDigest, arm.stream().observations().getFirst().scope());
+        return new Protocol(initial, arm, bound, publication, configuration, stopIntent, stopped, unpublished);
+    }
+
+    @Test
+    void physicalCoordinatorPersistsPlanBeforeRequestingIntent() throws Exception {
+        var original = publishedAssociation();
+        var physical = mock(WorkspaceCsiPhysicalStore.class);
+        var source = mock(CsiNodeSourceClient.class);
+        var api = mock(KubernetesRuntimeClient.class);
+        var guard = mock(WorkspaceCsiResourceGuard.class);
+        byte[] plan = coordinatorPlan();
+        var state = new WorkspaceCsiPhysicalStore.Status("d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", "PLANNED", 1, CsiNativeActivationProof.sha256(plan), 0);
+        var selected = new WorkspaceCsiPhysicalStore.Original("tenant", binding.getRequest().getIsolationKey(), "workspace", state.retirementId());
+        when(physical.plan(selected, "token", configuration.node())).thenReturn(new WorkspaceCsiPhysicalStore.Work(state, original, plan, null));
+        var evidence = physicalEvidence(plan, 15);
+        when(source.requestStop(configuration.scope().armId(), state.retirementId(), state.planSha256()))
+                .thenAnswer(invocation -> {
+                    assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                    return new CsiNodeSourceClient.Control(evidence, evidence.stream().head());
+                });
+        var saved = new WorkspaceCsiPhysicalStore.Status(state.retirementId(), "INTENT", 2, state.planSha256(), 0);
+        when(physical.saveIntent(selected, "token", evidence)).thenReturn(saved);
+        configureCoordinatorPeers(api, guard);
+        var coordinator = new WorkspaceCsiPhysicalCoordinator(physical, configuration.node(), source, api, guard);
+        assertThat(coordinator.intent(selected, "token")).isEqualTo(saved);
+        var ordered = org.mockito.Mockito.inOrder(physical, guard, api, source);
+        ordered.verify(physical).plan(selected, "token", configuration.node());
+        ordered.verify(guard).verify();
+        ordered.verify(api).getCluster("nodes", configuration.node().name());
+        ordered.verify(source).requestStop(configuration.scope().armId(), state.retirementId(), state.planSha256());
+        ordered.verify(physical).saveIntent(selected, "token", evidence);
+        verify(api, never()).deleteCsiPod(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"accepted", "lost", "pending", "replacement"})
+    void physicalCoordinatorSavesRequestBeforeSendAndCannotInventALostReply(String window) throws Exception {
+        var original = publishedAssociation();
+        var physical = mock(WorkspaceCsiPhysicalStore.class);
+        var source = mock(CsiNodeSourceClient.class);
+        var api = mock(KubernetesRuntimeClient.class);
+        var guard = mock(WorkspaceCsiResourceGuard.class);
+        byte[] plan = coordinatorPlan();
+        var evidence = physicalEvidence(plan, 15);
+        var state = new WorkspaceCsiPhysicalStore.Status("d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", "INTENT", 2, CsiNativeActivationProof.sha256(plan), 0);
+        var selected = new WorkspaceCsiPhysicalStore.Original("tenant", binding.getRequest().getIsolationKey(), "workspace", state.retirementId());
+        when(physical.plan(selected, "token", configuration.node())).thenReturn(new WorkspaceCsiPhysicalStore.Work(state, original, plan, evidence));
+        when(source.observeEvidence()).thenReturn(evidence);
+        configureCoordinatorPeers(api, guard);
+        var spec = Map.of("restartPolicy", "Never", "nodeName", configuration.node().name());
+        when(api.get("pods", registration.namespace(), configuration.scope().podName())).thenReturn(CompletableFuture.completedFuture(
+                Map.of("apiVersion", "v1", "kind", "Pod", "metadata", Map.of("name", configuration.scope().podName(),
+                        "namespace", registration.namespace(), "uid", window.equals("replacement") ? UUID.randomUUID().toString() : podUid,
+                        "resourceVersion", "opaque:315"), "spec", spec)));
+        var prepared = new AtomicBoolean();
+        var request = CsiPodDeletion.prepare(registration.namespace(), configuration.scope().podName(), podUid, "opaque:315");
+        var pending = new WorkspaceCsiPhysicalStore.Status(state.retirementId(), "INTENT", 3, state.planSha256(), 1);
+        when(physical.prepareDeletion(org.mockito.ArgumentMatchers.eq(selected), org.mockito.ArgumentMatchers.eq("token"), any()))
+                .thenAnswer(invocation -> {
+                    var actual = invocation.getArgument(2, CsiPodDeletion.Request.class);
+                    assertThat(actual.bytes()).isEqualTo(request.bytes());
+                    prepared.set(true);
+                    return new WorkspaceCsiPhysicalStore.Attempt(pending, 1, request, !window.equals("pending"));
+                });
+        var reply = mock(CsiPodDeletion.Result.class);
+        when(reply.request()).thenReturn(request);
+        when(reply.statusCode()).thenReturn(202);
+        when(reply.responseBytes()).thenReturn(new byte[0]);
+        when(api.deleteCsiPod(request)).thenAnswer(invocation -> {
+            assertThat(prepared.get()).isTrue();
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            return window.equals("lost") ? CompletableFuture.failedFuture(new java.io.IOException("explicit lost-reply fixture"))
+                    : CompletableFuture.completedFuture(reply);
+        });
+        var saved = new WorkspaceCsiPhysicalStore.Status(state.retirementId(), "INTENT", 4, state.planSha256(), 1);
+        when(physical.saveReply(selected, "token", 1, reply)).thenReturn(saved);
+        var coordinator = new WorkspaceCsiPhysicalCoordinator(physical, configuration.node(), source, api, guard);
+        if (window.equals("lost") || window.equals("replacement")) {
+            assertThatThrownBy(() -> coordinator.delete(selected, "token")).isInstanceOf(RuntimeException.class);
+        } else {
+            assertThat(coordinator.delete(selected, "token")).isEqualTo(window.equals("pending") ? pending : saved);
+        }
+        if (window.equals("replacement")) {
+            verify(physical, never()).prepareDeletion(any(), any(), any());
+        }
+        if (window.equals("pending") || window.equals("replacement")) {
+            verify(api, never()).deleteCsiPod(any());
+        }
+        if (!window.equals("accepted")) {
+            verify(physical, never()).saveReply(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any());
+        } else {
+            var ordered = org.mockito.Mockito.inOrder(physical, api);
+            ordered.verify(physical).plan(selected, "token", configuration.node());
+            ordered.verify(api).getCluster("nodes", configuration.node().name());
+            ordered.verify(api).get("pods", registration.namespace(), configuration.scope().podName());
+            ordered.verify(physical).prepareDeletion(org.mockito.ArgumentMatchers.eq(selected), org.mockito.ArgumentMatchers.eq("token"), any());
+            ordered.verify(api).getCluster("nodes", configuration.node().name());
+            ordered.verify(api).deleteCsiPod(request);
+            ordered.verify(physical).saveReply(selected, "token", 1, reply);
+        }
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("RESERVED");
+    }
+
+    private byte[] coordinatorPlan() throws Exception {
+        var plan = (ObjectNode) json.readTree(physicalPlan());
+        plan.put("registrationRevision", Long.toString(registration.revision()));
+        plan.put("podSpecDigest", WorkspaceCsiRuntimeIdentity.digest(Map.of("restartPolicy", "Never", "nodeName", configuration.node().name())));
+        plan.set("protection", json.valueToTree(Map.of("namespaceUid", podUid, "policyName", "protect", "policyUid", podUid,
+                "policyGeneration", "1", "bindingName", "protect-binding", "bindingUid", podUid, "bindingGeneration", "1")));
+        return json.writeValueAsBytes(plan);
+    }
+
+    private void configureCoordinatorPeers(KubernetesRuntimeClient api, WorkspaceCsiResourceGuard guard) {
+        var protection = new WorkspaceCsiResourceGuard.ProtectionIdentity(podUid, "protect", podUid, 1, "protect-binding", podUid, 1);
+        when(guard.verify()).thenReturn(CompletableFuture.completedFuture(new WorkspaceCsiResourceGuard.Receipt(
+                registration.physicalKey(), registration.revision(), podUid, "pvc-rv", "pv-rv", protection)));
+        when(api.getCluster("nodes", configuration.node().name())).thenReturn(CompletableFuture.completedFuture(Map.of(
+                "apiVersion", "v1", "kind", "Node", "metadata", Map.of("name", configuration.node().name(), "uid", configuration.node().identity().nodeUid()),
+                "status", Map.of("nodeInfo", Map.of("bootID", configuration.node().identity().bootId()),
+                        "conditions", List.of(Map.of("type", "Ready", "status", "True"))))));
     }
 
     private Map<String, Object> configureNodeEvidencePeers(KubernetesRuntimeClient api) {
@@ -443,6 +622,21 @@ class WorkspaceCsiNodeSourceStoreTest {
                 "apiVersion", "node.k8s.io/v1", "kind", "RuntimeClass", "handler", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS,
                 "metadata", Map.of("name", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS, "uid", podUid))));
         return node;
+    }
+
+    @Test
+    void physicalProgressCanDeleteAnExistingPodAfterObservedStop() throws Exception {
+        var original = publishedAssociation();
+        byte[] plan = physicalPlan();
+        var stoppedEvidence = physicalEvidence(plan, 16);
+        var current = WorkspaceCsiPhysicalProgress.planned(plan).withIntent(stoppedEvidence, original)
+                .withObservation(stoppedEvidence, original);
+        assertThat(current.stage()).isEqualTo("STOPPED");
+        current = current.withAttempt(CsiPodDeletion.prepare(registration.namespace(), configuration.scope().podName(), podUid, "315"));
+        assertThat(current.stage()).isEqualTo("STOPPED");
+        assertThat(current.attempts()).isEqualTo(1);
+        assertThat(WorkspaceCsiPhysicalProgress.restore(current.version(), current.bytes(), current.sha256(),
+                WorkspaceCsiApplicationJson.object(plan, 64 * 1024), original).bytes()).isEqualTo(current.bytes());
     }
 
     @Test
@@ -463,7 +657,34 @@ class WorkspaceCsiNodeSourceStoreTest {
     }
 
     @Test
+    void physicalPlanPreservesUnsignedSourceConfigurationWithoutSignedOrFloatingPointConversion() throws Exception {
+        var original = publishedAssociation();
+        var before = configuration.node();
+        var identity = before.identity();
+        var max = new java.math.BigInteger("18446744073709551615");
+        var unsigned = new CsiNodeSourceJournal.SourceIdentity(identity.nodeUid(), identity.bootId(), identity.runtimeDigest(),
+                max, identity.runtimePid(), identity.gatewayIncarnation(), identity.pluginDigest(), max, identity.pluginPid(), identity.sourceArtifacts(), identity.gatewayArtifacts());
+        var node = new WorkspaceCsiNodeSourceStore.Node(before.name(), before.incarnation(), unsigned, before.sourceOrigin(),
+                before.sourcePrincipal(), before.gatewayOrigin(), before.gatewayPrincipal(), before.workerPolicySha256(), before.birthInputs(), before.installedBytes());
+        var encoded = new WorkspaceCsiNodeSourceStore.Configuration(node, configuration.imageDigest(), configuration.scope());
+        byte[] configBytes = WorkspaceCsiApplicationJson.encode(encoded);
+        var plan = (ObjectNode) json.readTree(physicalPlan());
+        plan.put("sourceConfigurationBase64", Base64.getEncoder().encodeToString(configBytes));
+        byte[] planBytes = json.writeValueAsBytes(plan);
+        var current = WorkspaceCsiPhysicalProgress.planned(planBytes);
+        var restored = WorkspaceCsiPhysicalProgress.restore(1, current.bytes(), current.sha256(),
+                WorkspaceCsiApplicationJson.object(planBytes, 64 * 1024), original);
+        byte[] saved = Base64.getDecoder().decode(json.readTree(restored.planBytes()).path("sourceConfigurationBase64").textValue());
+        assertThat(saved).isEqualTo(configBytes);
+        var decoded = WorkspaceCsiNodeSourceStore.decode(new String(saved, StandardCharsets.UTF_8), WorkspaceCsiNodeSourceStore.Configuration.class);
+        assertThat(decoded.node().identity().runtimeStart()).isEqualTo(max);
+        assertThat(decoded.node().identity().pluginStart()).isEqualTo(max);
+        assertThat(store.inspect(binding.getBindingId()).configuration()).isEqualTo(configuration);
+    }
+
+    @Test
     void sourceConfigurationRejectsMissingNullFloatingAndStringIdentityNumbers() throws Exception {
+        publishedAssociation();
         var encoded = (ObjectNode) json.readTree(json.writeValueAsString(configuration));
         for (String fault : java.util.List.of("missing", "null", "float", "string")) {
             var altered = encoded.deepCopy();
@@ -481,6 +702,246 @@ class WorkspaceCsiNodeSourceStoreTest {
         }
         assertThat(WorkspaceCsiNodeSourceStore.decode(encoded.toString(), WorkspaceCsiNodeSourceStore.Configuration.class)).isEqualTo(configuration);
     }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"200", "202", "404", "409", "302", "500"})
+    void observedApiReplyNeverAdvancesThePhysicalStage(int code) throws Exception {
+        var original = publishedAssociation();
+        byte[] plan = physicalPlan();
+        var request = CsiPodDeletion.prepare(registration.namespace(), configuration.scope().podName(), podUid, "315");
+        var current = WorkspaceCsiPhysicalProgress.planned(plan).withIntent(physicalEvidence(plan), original).withAttempt(request);
+        var reply = mock(CsiPodDeletion.Result.class);
+        when(reply.request()).thenReturn(request);
+        when(reply.statusCode()).thenReturn(code);
+        when(reply.responseBytes()).thenReturn(new byte[0]);
+        var next = current.withReply(1, reply);
+        assertThat(next.stage()).isEqualTo("INTENT");
+        assertThat(WorkspaceCsiPhysicalProgress.restore(next.version(), next.bytes(), next.sha256(),
+                WorkspaceCsiApplicationJson.object(plan, 64 * 1024), original).stage()).isEqualTo("INTENT");
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("RESERVED");
+    }
+
+    @Test
+    void physicalProgressRetainsOriginalPlanUnknownRequestsAndObservedReplies() throws Exception {
+        var original = publishedAssociation();
+        byte[] plan = physicalPlan();
+        var expectedPlan = WorkspaceCsiApplicationJson.object(plan, 64 * 1024);
+        var evidence = physicalEvidence(plan);
+        var current = WorkspaceCsiPhysicalProgress.planned(plan);
+        current = current.withIntent(evidence, original);
+        assertThat(current.stage()).isEqualTo("INTENT");
+        assertThat(current.version()).isEqualTo(2);
+        assertThat(current.latestEvidence().stream().head().sequence()).isEqualTo(15);
+        var request = CsiPodDeletion.prepare(registration.namespace(), configuration.scope().podName(), podUid, "opaque:315");
+        current = current.withAttempt(request);
+        byte[] unknown = current.bytes();
+        assertThat(current.withAttempt(request)).isSameAs(current);
+        current = current.withAttempt(CsiPodDeletion.prepare(request.namespace(), request.name(), request.uid(), "opaque:316"));
+        var second = WorkspaceCsiApplicationJson.object(current.bytes(), WorkspaceCsiPhysicalProgress.LIMIT);
+        assertThat(second.path("attempts").get(0).path("statusCode").isNull()).isTrue();
+        assertThat(current.attempt(1).bytes()).isEqualTo(request.bytes());
+        assertThat(current.attempts()).isEqualTo(2);
+        var result = mock(CsiPodDeletion.Result.class);
+        when(result.request()).thenReturn(request);
+        when(result.statusCode()).thenReturn(409);
+        byte[] raw = "{\"kind\":\"Status\",\"reason\":\"Conflict\"}".getBytes(StandardCharsets.UTF_8);
+        when(result.responseBytes()).thenReturn(raw);
+        current = current.withReply(1, result);
+        assertThat(current.withReply(1, result)).isSameAs(current);
+        assertThat(current.stage()).isEqualTo("INTENT");
+        var restored = WorkspaceCsiPhysicalProgress.restore(current.version(), current.bytes(), current.sha256(), expectedPlan, original);
+        assertThat(restored.bytes()).isEqualTo(current.bytes());
+        assertThat(restored.planBytes()).isEqualTo(plan);
+        assertThat(restored.attempt(1).bytes()).isEqualTo(request.bytes());
+        assertThat(WorkspaceCsiApplicationJson.object(restored.bytes(), WorkspaceCsiPhysicalProgress.LIMIT)
+                .path("attempts").get(1).path("statusCode").isNull()).isTrue();
+        restored = restored.withObservation(evidence, original);
+        assertThat(restored.stage()).isEqualTo("UNPUBLISHED");
+        assertThat(restored.version()).isEqualTo(6);
+        assertThat(WorkspaceCsiPhysicalProgress.restore(restored.version(), restored.bytes(), restored.sha256(), expectedPlan, original).bytes())
+                .isEqualTo(restored.bytes());
+        assertThat(WorkspaceCsiPhysicalProgress.restore(3, unknown, CsiNativeActivationProof.sha256(unknown), expectedPlan, original).stage())
+                .isEqualTo("INTENT");
+        assertThat(store.inspect(binding.getBindingId()).publication().bytes()).isEqualTo(publication.bytes());
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("RESERVED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_physical", Integer.class)).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"extra", "version", "stage", "request", "ordinal", "reply", "trailing"})
+    void physicalProgressRefusesChangedOrAmbiguousSavedImage(String fault) throws Exception {
+        var original = publishedAssociation();
+        byte[] plan = physicalPlan();
+        var current = WorkspaceCsiPhysicalProgress.planned(plan).withIntent(physicalEvidence(plan), original)
+                .withAttempt(CsiPodDeletion.prepare(registration.namespace(), configuration.scope().podName(), podUid, "315"));
+        var altered = (ObjectNode) json.readTree(current.bytes());
+        long version = current.version();
+        switch (fault) {
+            case "extra" -> altered.put("qualified", true);
+            case "version" -> version++;
+            case "stage" -> altered.put("stage", "RELEASED");
+            case "request" -> ((ObjectNode) altered.path("attempts").get(0)).put("resourceVersion", "316");
+            case "ordinal" -> ((ObjectNode) altered.path("attempts").get(0)).put("ordinal", 2);
+            case "reply" -> ((ObjectNode) altered.path("attempts").get(0)).put("responseBase64", "");
+            case "trailing" -> { /* Trailing bytes are appended after encoding. */ }
+            default -> throw new AssertionError(fault);
+        }
+        byte[] bytes = fault.equals("trailing") ? (json.writeValueAsString(altered) + " {}").getBytes(StandardCharsets.UTF_8)
+                : json.writeValueAsBytes(altered);
+        long savedVersion = version;
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(savedVersion, bytes, CsiNativeActivationProof.sha256(bytes),
+                WorkspaceCsiApplicationJson.object(plan, 64 * 1024), original)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(store.inspect(binding.getBindingId()).publication().bytes()).isEqualTo(publication.bytes());
+    }
+
+    @Test
+    void physicalProgressBoundsAttemptsAndNeverResendsAnUnknownResourceVersion() throws Exception {
+        var original = publishedAssociation();
+        byte[] plan = physicalPlan();
+        var current = WorkspaceCsiPhysicalProgress.planned(plan).withIntent(physicalEvidence(plan), original);
+        for (int index = 1; index <= 8; index++) {
+            current = current.withAttempt(CsiPodDeletion.prepare(registration.namespace(), configuration.scope().podName(), podUid, Integer.toString(index)));
+        }
+        var full = current;
+        assertThat(full.withAttempt(full.attempt(1))).isSameAs(full);
+        assertThatThrownBy(() -> full.withAttempt(CsiPodDeletion.prepare(registration.namespace(), configuration.scope().podName(), podUid, "9")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(full.attempts()).isEqualTo(8);
+        assertThat(WorkspaceCsiPhysicalProgress.restore(full.version(), full.bytes(), full.sha256(),
+                WorkspaceCsiApplicationJson.object(plan, 64 * 1024), original).bytes()).isEqualTo(full.bytes());
+    }
+
+    @Test
+    void physicalPlanReplayPinsEveryFieldAndNeverUpgradesAnOldPlan() throws Exception {
+        var original = publishedAssociation();
+        byte[] plan = physicalPlan();
+        var expected = WorkspaceCsiApplicationJson.object(plan, 64 * 1024);
+        var saved = WorkspaceCsiPhysicalProgress.planned(plan);
+        assertThat(WorkspaceCsiPhysicalProgress.restore(saved.version(), saved.bytes(), saved.sha256(), expected, original).bytes())
+                .isEqualTo(saved.bytes());
+        var changed = ((ObjectNode) expected).deepCopy();
+        changed.put("drainedInventorySha256", "b".repeat(64));
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(saved.version(), saved.bytes(), saved.sha256(), changed, original))
+                .isInstanceOf(IllegalArgumentException.class);
+        var changedHistory = ((ObjectNode) expected).deepCopy();
+        changedHistory.put("sourceRowSha256", "c".repeat(64));
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(saved.version(), saved.bytes(), saved.sha256(), changedHistory, original))
+                .isInstanceOf(IllegalArgumentException.class);
+        var oldPlan = ((ObjectNode) expected).deepCopy();
+        oldPlan.put("format", "qwen-csi-physical-plan/1");
+        oldPlan.remove("drainedInventorySha256");
+        oldPlan.remove("sourceRowSha256");
+        var old = WorkspaceCsiPhysicalProgress.planned(WorkspaceCsiApplicationJson.encode(oldPlan));
+        byte[] retained = old.bytes();
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(old.version(), old.bytes(), old.sha256(), expected, original))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(old.bytes()).isEqualTo(retained);
+        assertThat(old.version()).isEqualTo(1);
+        var previousPlan = ((ObjectNode) expected).deepCopy();
+        previousPlan.put("format", "qwen-csi-physical-plan/2");
+        previousPlan.remove("sourceRowSha256");
+        var previous = WorkspaceCsiPhysicalProgress.planned(WorkspaceCsiApplicationJson.encode(previousPlan));
+        var previousBytes = previous.bytes();
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(previous.version(), previous.bytes(), previous.sha256(), expected, original))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(previous.bytes()).isEqualTo(previousBytes);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_csi_physical", Integer.class)).isZero();
+    }
+
+    @Test
+    void physicalPlanRefusesChangedBytesEvenWhenTheJsonValuesMatch() {
+        byte[] plan = physicalPlan();
+        var expected = WorkspaceCsiApplicationJson.object(plan, 64 * 1024);
+        var canonical = WorkspaceCsiPhysicalProgress.planned(plan);
+        assertThat(WorkspaceCsiPhysicalProgress.restore(1, canonical.bytes(), canonical.sha256(), expected, null).bytes())
+                .isEqualTo(canonical.bytes());
+        byte[] padded = (new String(plan, StandardCharsets.UTF_8) + "\n").getBytes(StandardCharsets.UTF_8);
+        assertThat(WorkspaceCsiApplicationJson.object(padded, 64 * 1024)).isEqualTo(expected);
+        var changed = WorkspaceCsiPhysicalProgress.planned(padded);
+        assertThat(changed.planSha256()).isNotEqualTo(canonical.planSha256());
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(1, changed.bytes(), changed.sha256(), expected, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void companionCatalogueRefusesAnyEarlyOrForeignPhysicalRowAndSchemaDrift() {
+        new TransactionTemplate(manager).executeWithoutResult(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            WorkspaceCsiPhysicalStore.requireEmpty(connection, "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", binding.getBindingId(), registration.physicalKey());
+            return null;
+        }));
+        jdbc.update("INSERT INTO ma_csi_physical VALUES (?,?,?,?,?,?)", "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08",
+                "foreign-binding", registration.physicalKey(), 1, new byte[] {1}, "a".repeat(64));
+        assertThatThrownBy(() -> new TransactionTemplate(manager).executeWithoutResult(status -> jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                    WorkspaceCsiPhysicalStore.requireEmpty(connection, "other", binding.getBindingId(), registration.physicalKey());
+                    return null;
+                }))).isInstanceOf(IllegalArgumentException.class);
+        jdbc.update("DELETE FROM ma_csi_physical");
+        jdbc.execute("ALTER TABLE ma_csi_physical ADD COLUMN undeclared BIGINT");
+        assertThatThrownBy(() -> new TransactionTemplate(manager).executeWithoutResult(status -> jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                    WorkspaceCsiPhysicalStore.requireEmpty(connection, "other", binding.getBindingId(), registration.physicalKey());
+                    return null;
+                }))).isInstanceOf(IllegalArgumentException.class);
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("RESERVED");
+    }
+
+    private WorkspaceCsiNodeSourceStore.Association publishedAssociation() {
+        store.saveArm(binding, registration, reservation, configuration, arm);
+        store.saveBound(binding, registration, reservation, store.inspect(binding.getBindingId()), podUid, "a".repeat(64), "opaque:1", bound);
+        store.savePublication(binding, registration, reservation, store.inspect(binding.getBindingId()), publication);
+        return store.inspect(binding.getBindingId());
+    }
+
+    private byte[] physicalPlan() {
+        return WorkspaceCsiApplicationJson.encode(Map.of("format", "qwen-csi-physical-coordination-plan/1", "drainedInventorySha256", "a".repeat(64),
+                "sourceRowSha256", "d".repeat(64),
+                "retirementId", "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", "bindingId", binding.getBindingId(),
+                "physicalKey", registration.physicalKey(), "namespace", registration.namespace(),
+                "podName", configuration.scope().podName(), "podUid", podUid));
+    }
+
+    private CsiNodeSourceJournal.Evidence physicalEvidence(byte[] plan) throws Exception {
+        return physicalEvidence(plan, 18);
+    }
+
+    private CsiNodeSourceJournal.Evidence physicalEvidence(byte[] plan, int count) throws Exception {
+        return physicalEvidence(unpublished, "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", plan, count);
+    }
+
+    static CsiNodeSourceJournal.Evidence physicalEvidence(CsiNodeSourceJournal.Evidence unpublished,
+            String retirement, byte[] plan, int count) throws Exception {
+        var json = new ObjectMapper();
+        var input = ByteBuffer.wrap(unpublished.bytes());
+        var frames = new ArrayList<ObjectNode>();
+        var hashes = new HashMap<Long, String>();
+        String previous = "0".repeat(64);
+        while (input.hasRemaining()) {
+            byte[] bytes = new byte[input.getInt()];
+            input.get(bytes);
+            var record = (ObjectNode) json.readTree(bytes);
+            if (record.has("scope") && !record.path("scope").path("retirementId").textValue().isEmpty()) {
+                ((ObjectNode) record.path("scope")).put("retirementId", retirement);
+            }
+            if (record.has("intentHash")) {
+                record.put("intentHash", CsiNativeActivationProof.sha256(plan));
+            }
+            WorkspaceCsiBirthTestInputs.mapOriginalScope(record, hashes);
+            record.put("previous", previous);
+            for (String field : List.of("begin", "publish", "stop")) {
+                if (record.has(field)) {
+                    ((ObjectNode) record.path(field)).put("hash", hashes.get(record.path(field).path("sequence").longValue()));
+                }
+            }
+            record.remove("hash");
+            previous = CsiNativeActivationProof.sha256(json.writeValueAsBytes(record));
+            record.put("hash", previous);
+            hashes.put(record.path("sequence").longValue(), previous);
+            frames.add(record);
+        }
+        return prefix(frames, count);
+    }
+
     private CsiNodeSourceJournal.Evidence admittedBound(String specHash, String resourceVersion) throws Exception {
         var input = ByteBuffer.wrap(bound.bytes());
         var frames = new ArrayList<ObjectNode>();

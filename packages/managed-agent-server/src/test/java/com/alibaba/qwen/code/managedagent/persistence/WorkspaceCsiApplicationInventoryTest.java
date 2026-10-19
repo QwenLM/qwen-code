@@ -93,24 +93,111 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
-    void refusesAssociatedNodeEvidenceWithoutChangingThePublishedInventoryCodec() throws Exception {
-        var before = inspect();
+    void preservesPublishedInventoryBytesAndVersionWhenNoSourceIsAssociated() throws Exception {
+        var before = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
+        assertThat(before.evidenceOwned()).isFalse();
+        assertThat(before.tables()).hasSize(32);
+        assertThat(WorkspaceCsiApplicationInventory.restoreCanonical(before.bytes()).bytes()).isEqualTo(before.bytes());
+        var empty = WorkspaceCsiApplicationInventory.expectedImage(before.tables().stream()
+                .map(table -> new WorkspaceCsiApplicationInventory.Table(table.name(), table.columns(), table.primaryKey(), List.of())).toList());
+        assertThat(sha(empty.bytes())).isEqualTo("205d20278944b1e01b32d702961433517558ee0a0adc8274731b7fe8fd854f47");
         for (boolean sameBinding : new boolean[] {true, false}) {
             jdbc.update("INSERT INTO ma_csi_source (binding_id,runtime_generation,physical_key,reservation_id,"
                     + "reservation_revision,configuration_json,phase,record_version,arm_bytes,arm_sequence,arm_hash)"
                     + " VALUES (?,1,?, ?,1,'{}','ARMED',1,?,1,?)", sameBinding ? binding.getBindingId() : UUID.randomUUID().toString(),
                     sameBinding ? "f".repeat(64) : intent.physicalKey(), intent.reservation().reservationId(), new byte[] {1}, "a".repeat(64));
             var refused = inspect();
-            assertThat(refused.blockers()).singleElement().satisfies(blocker -> {
-                assertThat(blocker.table()).isEqualTo("ma_csi_source");
-                assertThat(blocker.code()).isEqualTo("node_evidence_retirement_unsupported");
-            });
-            assertThat(refused.tables()).hasSize(32);
+            assertThat(refused.evidenceOwned()).isTrue();
+            assertThat(refused.tables()).hasSize(33);
+            assertThat(refused.blockers()).anyMatch(blocker -> blocker.table().equals("ma_csi_source"));
             jdbc.update("DELETE FROM ma_csi_source");
         }
-        assertThat(inspect().bytes()).isEqualTo(before.bytes());
-        var canonical = WorkspaceCsiApplicationInventory.expectedImage(before.tables());
+        assertThat(WorkspaceCsiApplicationInventory.expectedImage(inspect().tables()).bytes()).isEqualTo(before.bytes());
+    }
+
+    @Test
+    void sourceInventoryPinsCompleteOriginalPublicationAndKeepsHistoricalReadsClosed() throws Exception {
+        installPublishedSource();
+        var actual = inspect();
+        assertThat(actual.blockers()).noneMatch(blocker -> blocker.table().equals("ma_csi_source"));
+        var canonical = WorkspaceCsiApplicationInventory.expectedImage(actual.tables());
+        assertThat(canonical.evidenceOwned()).isTrue();
+        assertThat(canonical.tables()).hasSize(33);
         assertThat(WorkspaceCsiApplicationInventory.restoreCanonical(canonical.bytes()).bytes()).isEqualTo(canonical.bytes());
+        var sourceRow = canonical.table("ma_csi_source").rows().getFirst();
+        assertThat(sourceRow.membership()).isEqualTo(WorkspaceCsiApplicationInventory.Membership.ORIGINAL);
+        assertThat(sourceRow.binary("publication_bytes")).isNotEmpty();
+        var legacy = WorkspaceCsiApplicationInventory.expectedImage(canonical.tables().stream()
+                .filter(table -> !table.name().equals("ma_csi_source")).toList());
+        assertThat(legacy.evidenceOwned()).isFalse();
+        assertThat(legacy.bytes()).isNotEqualTo(canonical.bytes());
+        assertThatThrownBy(() -> readKeys(canonical, new java.util.ArrayList<>())).isInstanceOf(IllegalArgumentException.class);
+        jdbc.update("UPDATE ma_csi_source SET configuration_json = REPLACE(configuration_json, 'https://source.invalid', 'https://replacement.invalid')");
+        var changed = inspect();
+        assertThat(changed.blockers()).noneMatch(blocker -> blocker.table().equals("ma_csi_source"));
+        assertThat(changed.table("ma_csi_source").rows().getFirst().bytes()).isNotEqualTo(sourceRow.bytes());
+        assertThatThrownBy(() -> WorkspaceCsiApplicationImage.verify(WorkspaceCsiApplicationInventory.expectedImage(changed.tables()), canonical))
+                .isInstanceOf(IllegalArgumentException.class);
+        jdbc.update("DELETE FROM ma_csi_source");
+        assertThat(inspect().evidenceOwned()).isFalse();
+        assertThatThrownBy(() -> WorkspaceCsiApplicationImage.verify(WorkspaceCsiApplicationInventory.expectedImage(inspect().tables()), canonical))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void sourceInventoryRefusesWrongPhysicalOwnerAndPartialPublication() throws Exception {
+        installPublishedSource();
+        for (String delta : List.of("physical_key = '" + "f".repeat(64) + "'", "phase = 'BOUND'", "publication_hash = '" + "b".repeat(64) + "'",
+                "pod_uid = '7496359c-709c-4073-999b-d9132445ae65'")) {
+            try (var connection = source.getConnection()) {
+                connection.setAutoCommit(false);
+                try {
+                    try (var mutation = connection.createStatement()) {
+                        mutation.executeUpdate("UPDATE ma_csi_source SET " + delta);
+                    }
+                    var original = JdbcCsiFilesRetirementGuard.lockBindingControl(connection, binding.getBindingId());
+                    var result = WorkspaceCsiApplicationInventory.inspect(connection, original, intent);
+                    assertThat(result.evidenceOwned()).isTrue();
+                    assertThat(result.blockers()).anyMatch(blocker -> blocker.table().equals("ma_csi_source"));
+                } finally {
+                    connection.rollback();
+                }
+            }
+        }
+        jdbc.update("UPDATE ma_csi_source SET binding_id = ?", UUID.randomUUID().toString());
+        var missing = inspect();
+        assertThat(missing.evidenceOwned()).isTrue();
+        assertThat(missing.blockers()).anyMatch(blocker -> blocker.table().equals("ma_csi_source")
+                && blocker.code().equals("foreign_original_reference"));
+    }
+
+    private void installPublishedSource() throws Exception {
+        var json = new ObjectMapper();
+        var previous = json.readValue(jdbc.queryForObject("SELECT registration_json FROM ma_storage WHERE alias_key = ?", String.class,
+                intent.reservation().registrationKey()), WorkspaceCsiRegistration.class);
+        var registration = new WorkspaceCsiRegistration(previous.tenantId(), previous.storageId(), previous.clusterDomain(), previous.namespace(),
+                previous.pvcName(), "0c39f52b-120c-47fb-99bc-df907924af71", previous.pvName(), "3cfe8df0-ec94-465b-9e93-53c2491946a7",
+                previous.driver(), previous.volumeHandle(), previous.backendDomain(), previous.diskSerial(), previous.mountRoot(), previous.revision());
+        var protocol = WorkspaceCsiNodeSourceStoreTest.protocol(binding, registration, intent.reservation());
+        var observation = protocol.publication().stream().observations().getFirst();
+        var node = protocol.configuration().node();
+        var handle = Map.of("placement", Map.of("namespace", registration.namespace(), "podName", protocol.configuration().scope().podName(),
+                "podUid", observation.scope().podUid(), "nodeName", node.name(), "nodeUid", node.identity().nodeUid(),
+                "containerId", "containerd://" + observation.scope().containerId(), "image", "worker@sha256:" + protocol.configuration().imageDigest()));
+        intent = new WorkspaceCsiReservationStore.Retirement(intent.operationId(), intent.physicalKey(), intent.phase(), intent.reservation(),
+                intent.sealedBindingVersion(), intent.resourceHandleKind(), intent.resourceHandleVersion(), json.writeValueAsString(handle),
+                intent.runtimeInstanceId(), intent.leaseId(), intent.epoch(), intent.leaseDigest(), intent.attestationGeneration(), intent.startedAt());
+        jdbc.update("UPDATE ma_storage SET registration_json = ? WHERE alias_key = ?", json.writeValueAsString(registration), registration.aliasKey());
+        jdbc.update("UPDATE ma_runtime_binding SET resource_handle_json = ? WHERE binding_id = ?", intent.resourceHandleJson(), binding.getBindingId());
+        jdbc.update("UPDATE ma_operation SET request_json = ? WHERE operation_id = ?", json.writeValueAsString(intent), intent.operationId());
+        jdbc.update("INSERT INTO ma_csi_source (binding_id,runtime_generation,physical_key,reservation_id,reservation_revision,configuration_json,"
+                + "phase,record_version,arm_bytes,arm_sequence,arm_hash,pod_uid,gated_spec_sha256,bound_bytes,bound_sequence,bound_hash,"
+                + "publication_bytes,publication_sequence,publication_hash) VALUES (?,1,?,?,1,?,'PUBLISHED',3,?,?,?,?,?,?,?,?,?,?,?)",
+                binding.getBindingId(), intent.physicalKey(), intent.reservation().reservationId(), json.writeValueAsString(protocol.configuration()),
+                protocol.arm().bytes(), protocol.arm().stream().head().sequence(), protocol.arm().stream().head().hash(), observation.scope().podUid(),
+                protocol.bound().record(observation.bound()).path("gatedSpecSha256").textValue(), protocol.bound().bytes(),
+                protocol.bound().stream().head().sequence(), protocol.bound().stream().head().hash(), protocol.publication().bytes(),
+                protocol.publication().stream().head().sequence(), protocol.publication().stream().head().hash());
     }
 
     @Test

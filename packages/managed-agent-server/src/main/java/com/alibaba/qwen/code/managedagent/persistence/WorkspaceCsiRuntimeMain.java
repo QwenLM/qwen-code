@@ -71,6 +71,10 @@ public final class WorkspaceCsiRuntimeMain {
     }
 
     static void run(String[] args) throws Exception {
+        if (args.length > 0 && "physical".equals(args[0])) {
+            WorkspaceCsiPhysicalMain.run(args);
+            return;
+        }
         if (args.length == 2 && java.util.Set.of("source-status", "node-config").contains(args[0])) {
             WorkspaceCsiNodeSourceMain.run(args);
             return;

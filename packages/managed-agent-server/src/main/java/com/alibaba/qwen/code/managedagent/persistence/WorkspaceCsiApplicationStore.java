@@ -105,16 +105,49 @@ public final class WorkspaceCsiApplicationStore {
     }
 
     public Status status(String tenant, String session, String workspace, String retirement, String token) {
-        Status result = tx(target -> {
+        var result = tx(target -> {
             var locked = lock(target, tenant, session, workspace, retirement);
             nativeStore.requireCsiApplicationCredential(target, locked.authority(), token);
             verifySaved(locked);
-            return status(locked.authority());
+            return new StatusInspection(status(locked.authority()), locked.inventory().evidenceOwned());
         });
-        if ("DRAINED".equals(result.stage())) {
+        if ("DRAINED".equals(result.status().stage()) && !result.sourceAssociated()) {
             history.readApplication(tenant, workspace, session, retirement, token);
         }
-        return result;
+        return result.status();
+    }
+
+    private record StatusInspection(Status status, boolean sourceAssociated) { }
+
+    boolean usesDataSource(javax.sql.DataSource source) {
+        return source != null && jdbc.getDataSource() == source;
+    }
+
+    Drained lockDrained(Connection target, String tenant, String session, String workspace, String retirement,
+            String token) throws SQLException {
+        var locked = lock(target, tenant, session, workspace, retirement);
+        nativeStore.requireCsiApplicationCredential(target, locked.authority(), token);
+        require(locked.authority().stage() == Stage.DRAINED);
+        verifySaved(locked);
+        return new Drained(locked);
+    }
+
+    static final class Drained {
+        private final Locked locked;
+
+        private Drained(Locked locked) {
+            this.locked = locked;
+        }
+
+        void requireConnection(Connection target) throws SQLException {
+            locked.authority().requireConnection(target);
+            require(locked.connection() == target && locked.authority().stage() == Stage.DRAINED);
+        }
+
+        Authority authority() { return locked.authority(); }
+        RuntimeBindingRecord binding() { return locked.binding(); }
+        WorkspaceCsiReservationStore.Retirement intent() { return locked.intent(); }
+        Snapshot inventory() { return locked.inventory(); }
     }
 
     public Status freeze(String tenant, String session, String workspace, String retirement, String token, byte[] body) {
@@ -308,7 +341,10 @@ public final class WorkspaceCsiApplicationStore {
         var parent = WorkspaceCsiApplicationImage.sole(inventory, "ma_session");
         var context = new ContextBinding(tenant, workspace, parent.number("workspace_generation"), parent.text("workspace_storage_id"),
                 parent.text("cwd_relative"), parent.text("context_config_ref"), parent.number("context_revision"));
-        return new Locked(authority, binding, intent, inventory, context);
+        if (authority.stage() != Stage.DRAINED) {
+            WorkspaceCsiPhysicalStore.requireEmpty(target, authority.retirementId(), binding.getBindingId(), intent.physicalKey());
+        }
+        return new Locked(target, authority, binding, intent, inventory, context);
     }
 
     private void verifySaved(Locked locked) throws SQLException {
@@ -324,6 +360,7 @@ public final class WorkspaceCsiApplicationStore {
             var response = CsiFileFinalizeProtocol.response(authority.receiptBytes(), workerRequest(locked, "finalize",
                     hash(savedBody(authority)), hash(authority.frozenBytes()), hash(authority.cutBytes())));
             require(envelope(locked).path("preCutObservationSha256").textValue().equals(response.get("preCutObservationSha256")));
+            WorkspaceCsiPhysicalStore.read(locked.connection(), new Drained(locked));
         }
     }
 
@@ -480,7 +517,7 @@ public final class WorkspaceCsiApplicationStore {
         return new RuntimeBrokerException(409, "csi_application_retirement_unavailable", "Original CSI application retirement is unavailable.", false);
     }
     private interface Sql<T> { T run(Connection target) throws SQLException; }
-    private record Locked(Authority authority, RuntimeBindingRecord binding, WorkspaceCsiReservationStore.Retirement intent,
+    private record Locked(Connection connection, Authority authority, RuntimeBindingRecord binding, WorkspaceCsiReservationStore.Retirement intent,
             Snapshot inventory, ContextBinding context) { }
     private record Plan(Status status, RuntimeBindingRecord binding, ContextBinding context, Snapshot baseline, Map<String, Object> request) { }
 }

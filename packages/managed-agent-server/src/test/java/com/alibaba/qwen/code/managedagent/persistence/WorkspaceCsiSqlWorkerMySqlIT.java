@@ -51,6 +51,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -120,6 +121,13 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         }
     }
 
+    @Test
+    void originalSourceRetirementRetainsPhysicalProgressAcrossRestartWithoutReleasingOwnership() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, false, "receipt_complete", 0, true, true);
+        }
+    }
+
     static void acceptance(DataSource source, Path directory, boolean hostedProducer) throws Exception {
         acceptance(source, directory, hostedProducer, false);
     }
@@ -144,6 +152,11 @@ class WorkspaceCsiSqlWorkerMySqlIT {
 
     private static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
             String recoveryCut, int isolation, boolean retirement) throws Exception {
+        acceptance(source, directory, hostedProducer, coldRecovery, recoveryCut, isolation, retirement, false);
+    }
+
+    private static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
+            String recoveryCut, int isolation, boolean retirement, boolean physical) throws Exception {
         Path root = Path.of("../..").toRealPath();
         assertThat(Files.isRegularFile(root.resolve("packages/cli/dist/src/serve/managed-csi-file-worker.js")))
                 .as("Run npm run build before this explicitly invoked integration gate").isTrue();
@@ -169,6 +182,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var initial = bindings.findOrCreate(request);
         var binding = bindings.claimOperation(initial.getBindingId(), "owned-test", Duration.ofMinutes(5));
         var reserved = storage.reserve(registration, bindings, binding, UUID.randomUUID().toString());
+        var protocol = physical ? WorkspaceCsiNodeSourceStoreTest.protocol(binding, registration, reserved) : null;
         bindings.releaseOperation(binding.getBindingId(), "owned-test", binding.getOperationGeneration());
         var journal = new ManagedSessionStore(jdbc);
         journal.setCsiBindings(bindings);
@@ -233,7 +247,16 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         Object response = switch (route) {
                             case "/fixture:setup" -> {
                                 var handle = identity(binding, registration, reserved, broker.getBaseUri(),
-                                        WorkspaceCsiRuntimeIdentity.map(body.get("mount")), retirement);
+                                        WorkspaceCsiRuntimeIdentity.map(body.get("mount")), retirement, protocol);
+                                if (protocol != null) {
+                                    var claimed = bindings.claimOperation(binding.getBindingId(), "owned-source", Duration.ofMinutes(5));
+                                    var sources = new WorkspaceCsiNodeSourceStore(jdbc, manager, bindings);
+                                    sources.saveArm(claimed, registration, reserved, protocol.configuration(), protocol.arm());
+                                    sources.saveBound(claimed, registration, reserved, sources.inspect(binding.getBindingId()),
+                                            protocol.bound().stream().observations().getFirst().scope().podUid(), "a".repeat(64), "opaque:1", protocol.bound());
+                                    sources.savePublication(claimed, registration, reserved, sources.inspect(binding.getBindingId()), protocol.publication());
+                                    bindings.releaseOperation(binding.getBindingId(), "owned-source", claimed.getOperationGeneration());
+                                }
                                 assertThat(placement.compareAndSet(null, handle)).isTrue();
                                 yield Map.of("boot", WorkspaceCsiRuntimeIdentity.boot(request, binding.getProvisionSeed(), handle),
                                         "pod", WorkspaceCsiRuntimeIdentity.pod(WorkspaceCsiRuntimeIdentity.map(handle.getValue().get("placement"))));
@@ -255,6 +278,11 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                 var claimed = bindings.claimOperation(initial.getBindingId(), "owned-retire", Duration.ofMinutes(5));
                                 var intent = storage.beginRetirement(registration, bindings, claimed, storage.inspect(registration), UUID.randomUUID().toString());
                                 yield Map.of("retirementId", intent.operationId());
+                            }
+                            case "/fixture:physical" -> {
+                                assertThat(protocol).isNotNull();
+                                yield physicalProgress(jdbc, manager, application, protocol, bindings.findById(binding.getBindingId()),
+                                        sessionId, (String) body.get("retirementId"), (String) body.get("writerToken"));
                             }
                             case "/fixture:leases" -> jdbc.queryForObject("SELECT writer_lease_until, activation_expires_at, "
                                     + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW
@@ -379,6 +407,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         "runtime", Map.of("bindingId", binding.getBindingId(), "generation", Long.toString(binding.getGeneration()))));
                 inputBody.put("isolation", isolation);
                 inputBody.put("retirement", retirement);
+                inputBody.put("physical", physical);
                 JSON.writeValue(input.toFile(), inputBody);
                 Path producer = directory.resolve("producer.mjs");
                 try (var script = WorkspaceCsiSqlWorkerMySqlIT.class.getResourceAsStream("/csi-sql-worker-acceptance.mjs");
@@ -442,6 +471,10 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     assertThat(jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class)).isEqualTo(binding.getBindingId());
                     assertThat(jdbc.queryForObject("SELECT progress_stage FROM ma_operation WHERE operation_kind='CSI_RETIREMENT'", String.class)).isEqualTo("DRAINED");
                 }
+                if (physical) {
+                    assertThat(result.path("physical").path("stage").textValue()).isEqualTo("UNPUBLISHED");
+                    assertThat(result.path("physical").path("deletionAttempts").asInt()).isEqualTo(1);
+                }
                 assertThat(jdbc.queryForObject("SELECT first_activation_journal_revision FROM ma_runtime_binding", Long.class)).isEqualTo(2);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ'"
                         + " AND state = 'RETURNED'", Integer.class)).isPositive();
@@ -456,7 +489,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     }
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(34);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(35);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");
@@ -669,8 +702,57 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         exchange.getResponseBody().write(bytes);
     }
 
+    private static WorkspaceCsiPhysicalStore.Status physicalProgress(ManagedSchemaJdbcTemplate jdbc, DataSourceTransactionManager manager,
+            WorkspaceCsiApplicationStore application, WorkspaceCsiNodeSourceStoreTest.Protocol protocol,
+            RuntimeBindingRecord binding, String session, String retirement, String token) throws Exception {
+        var original = new WorkspaceCsiPhysicalStore.Original("tenant", session, "workspace", retirement);
+        var store = new WorkspaceCsiPhysicalStore(jdbc, manager, application);
+        var work = store.plan(original, token, protocol.configuration().node());
+        assertThat(work.status().stage()).isEqualTo("PLANNED");
+        assertThat(store.plan(original, token, protocol.configuration().node()).plan()).isEqualTo(work.plan());
+        var source = WorkspaceCsiNodeSourceStoreTest.physicalEvidence(protocol.unpublished(), retirement, work.plan(), 18);
+        var intent = WorkspaceCsiNodeSourceStoreTest.physicalEvidence(protocol.unpublished(), retirement, work.plan(), 15);
+        assertThat(store.saveIntent(original, token, intent).stage()).isEqualTo("INTENT");
+        var placement = WorkspaceCsiRuntimeIdentity.map(binding.getResourceHandle().getValue().get("placement"));
+        var request = com.alibaba.qwen.code.runtimebroker.provisioning.CsiPodDeletion.prepare(
+                (String) placement.get("namespace"), (String) placement.get("podName"), (String) placement.get("podUid"), "opaque:315");
+        var pending = store.prepareDeletion(original, token, request);
+        assertThat(pending.send()).isTrue();
+        var restarted = new WorkspaceCsiPhysicalStore(jdbc, manager, application);
+        assertThat(restarted.status(original, token)).isEqualTo(pending.status());
+        assertThat(restarted.prepareDeletion(original, token, request).send()).isFalse();
+        var reply = mock(com.alibaba.qwen.code.runtimebroker.provisioning.CsiPodDeletion.Result.class);
+        when(reply.request()).thenReturn(request);
+        when(reply.statusCode()).thenReturn(202);
+        when(reply.responseBytes()).thenReturn("accepted".getBytes(StandardCharsets.UTF_8));
+        var accepted = restarted.saveReply(original, token, pending.ordinal(), reply);
+        assertThat(accepted.stage()).isEqualTo("INTENT");
+        assertThat(restarted.saveReply(original, token, pending.ordinal(), reply)).isEqualTo(accepted);
+        var stopped = WorkspaceCsiNodeSourceStoreTest.physicalEvidence(protocol.unpublished(), retirement, work.plan(), 16);
+        assertThat(restarted.observe(original, token, stopped).stage()).isEqualTo("STOPPED");
+        var complete = restarted.observe(original, token, source);
+        assertThat(complete.stage()).isEqualTo("UNPUBLISHED");
+        assertThat(restarted.observe(original, token, source)).isEqualTo(complete);
+        assertThat(restarted.status(original, token)).isEqualTo(complete);
+        assertThat(application.status("tenant", session, "workspace", retirement, token).stage()).isEqualTo("DRAINED");
+        assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding", String.class)).isEqualTo("DRAINING");
+        assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("DRAINING");
+        assertThat(jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class)).isEqualTo(binding.getBindingId());
+        byte[] frozen = jdbc.queryForObject("SELECT frozen_request_bytes FROM ma_operation WHERE operation_kind='CSI_RETIREMENT'", byte[].class);
+        assertThat(WorkspaceCsiApplicationImage.baseline(frozen).evidenceOwned()).isTrue();
+        var before = databaseImage(jdbc.getDataSource(), jdbc);
+        assertThatThrownBy(() -> restarted.status(original, "x".repeat(48)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, refusal -> {
+                    assertThat(refusal.getStatus().value()).isEqualTo(409);
+                    assertThat(refusal.getCode()).isEqualTo("csi_resource_read_conflict");
+                });
+        assertThat(databaseImage(jdbc.getDataSource(), jdbc)).isEqualTo(before);
+        return complete;
+    }
+
     private static RuntimeResourceHandle identity(RuntimeBindingRecord binding, WorkspaceCsiRegistration registration,
-            WorkspaceCsiReservationStore.Reservation reservation, URI broker, Map<String, Object> mount, boolean retirement) {
+            WorkspaceCsiReservationStore.Reservation reservation, URI broker, Map<String, Object> mount, boolean retirement,
+            WorkspaceCsiNodeSourceStoreTest.Protocol protocol) {
         var seed = binding.getProvisionSeed();
         var storage = new LinkedHashMap<String, Object>(Map.of("clusterDomain", registration.clusterDomain(),
                 "namespace", registration.namespace(), "pvcUid", registration.pvcUid(), "pvUid", registration.pvUid(),
@@ -687,6 +769,13 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 "containerName", "runtime", "containerId", "containerd://" + "a".repeat(64)));
         placement.putAll(Map.of("image", "registry.example/worker@sha256:" + "b".repeat(64), "imageId", "sha256:" + "b".repeat(64),
                 "podIp", "10.4.0.8", "secretName", WorkspaceCsiRuntimeIdentity.name(seed), "secretUid", uid));
+        if (protocol != null) {
+            var configuration = protocol.configuration();
+            var observed = protocol.publication().stream().observations().getFirst().scope();
+            placement.putAll(Map.of("podUid", observed.podUid(), "nodeName", configuration.node().name(),
+                    "nodeUid", configuration.node().identity().nodeUid(), "containerId", "containerd://" + observed.containerId(),
+                    "image", "registry.example/worker@sha256:" + configuration.imageDigest(), "imageId", "sha256:" + configuration.imageDigest()));
+        }
         var value = new LinkedHashMap<String, Object>();
         value.put("bindingId", binding.getBindingId());
         value.put("runtimeGeneration", Long.toString(binding.getGeneration()));

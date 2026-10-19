@@ -170,7 +170,10 @@ public final class WorkspaceCsiReservationStore {
             boolean hasSource = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
                     WorkspaceCsiNodeSourceStore.hasAssociation(connection, current.getBindingId(), registration.physicalKey(), true)));
             if (hasSource) {
-                throw unavailable();
+                jdbc.execute((ConnectionCallback<Void>) connection -> {
+                    WorkspaceCsiNodeSourceStore.requireOriginalPublication(connection, current, registration, holder);
+                    return null;
+                });
             }
             Retirement prior = readRetirement(current);
             if (prior != null) {

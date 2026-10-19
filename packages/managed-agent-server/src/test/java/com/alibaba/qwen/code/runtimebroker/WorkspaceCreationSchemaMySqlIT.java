@@ -59,7 +59,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(14, ManagedSchema.schemaVersion(source));
             var upgradedSession = jdbc.queryForMap("SELECT * FROM ma_session");
             assertThat(upgradedSession.remove("plan_enabled")).isEqualTo(false);
             var upgradedTurn = jdbc.queryForMap("SELECT * FROM ma_turn");
@@ -97,7 +97,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     .migrate();
 
             ManagedSchema.validate(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(14, ManagedSchema.schemaVersion(source));
             var upgraded = jdbc.queryForMap("SELECT * FROM ma_operation");
             for (String column : RETIREMENT_COLUMNS) {
                 assertThat(upgraded).containsKey(column);
@@ -136,11 +136,12 @@ class WorkspaceCreationSchemaMySqlIT {
             }
             assertEquals(1, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(14, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement();
                     var input = ManagedSchema.class.getResourceAsStream(ManagedSchema.RESOURCE)) {
                 String baseline = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+                statement.execute("DROP TABLE ma_csi_physical");
                 statement.execute("DROP TABLE ma_csi_source");
                 statement.execute("DROP INDEX uq_ma_csi_retirement_target ON ma_operation");
                 for (String column : RETIREMENT_COLUMNS) {
@@ -192,7 +193,7 @@ class WorkspaceCreationSchemaMySqlIT {
             assertEquals(4, ManagedSchema.schemaVersion(source));
             ManagedSchema.initialize(source);
             ManagedSchema.validate(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(14, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(

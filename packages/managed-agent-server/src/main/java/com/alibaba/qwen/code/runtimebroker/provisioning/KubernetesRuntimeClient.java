@@ -23,6 +23,12 @@ public interface KubernetesRuntimeClient {
                 new UnsupportedOperationException("Original CSI scheduling gate updates are unavailable"));
     }
 
+    /** Requests normal termination of an exact Pod; acceptance does not prove it stopped. */
+    default CompletionStage<CsiPodDeletion.Result> deleteCsiPod(CsiPodDeletion.Request request) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+                new UnsupportedOperationException("Original CSI Pod termination is unavailable"));
+    }
+
     /** Bounded current log segment; rotation and kubelet container selection are not proven here. */
     default CompletionStage<String> readCsiPodLog(String podName) {
         return java.util.concurrent.CompletableFuture.failedFuture(

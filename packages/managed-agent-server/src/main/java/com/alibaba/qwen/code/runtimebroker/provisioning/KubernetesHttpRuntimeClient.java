@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
@@ -120,6 +121,20 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
                 Set.of(200), false, RESPONSE_LIMIT);
     }
 
+    @Override
+    public CompletionStage<CsiPodDeletion.Result> deleteCsiPod(CsiPodDeletion.Request request) {
+        if (request == null) {
+            throw new IllegalArgumentException("The prepared original Pod deletion is required");
+        }
+        return exchangeResponse(podPath(request.namespace(), request.name()), "DELETE", "application/json",
+                request.bytes(), RESPONSE_LIMIT).thenApply(response -> {
+                    if (response.body().overflow()) {
+                        throw failure(502, false);
+                    }
+                    return new CsiPodDeletion.Result(request, response.statusCode(), response.body().bytes());
+                });
+    }
+
     private static void originalPod(String namespace, String name, String uid, String version) {
         dnsLabel(namespace);
         dnsSubdomain(name);
@@ -184,6 +199,24 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
 
     private CompletionStage<byte[]> exchangeBytes(String path, String method, String contentType,
             Object body, Set<Integer> expectedStatus, boolean allowNotFound, int responseLimit) {
+        return exchangeResponse(path, method, contentType, body == null ? null : JsonCodec.encode(body), responseLimit)
+                .thenApply(response -> {
+                    int status = response.statusCode();
+                    if (allowNotFound && status == 404) {
+                        return null;
+                    }
+                    if (!expectedStatus.contains(status)) {
+                        throw failure(status, status == 429 || status >= 500);
+                    }
+                    if (response.body().overflow()) {
+                        throw failure(502, false);
+                    }
+                    return response.body().bytes();
+                });
+    }
+
+    private CompletionStage<HttpResponse<HttpRuntimeTransport.BoundedBody>> exchangeResponse(String path,
+            String method, String contentType, byte[] body, int responseLimit) {
         HttpRequest request;
         try {
             byte[] tokenBytes;
@@ -197,11 +230,10 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
             var builder = HttpRequest.newBuilder(origin.resolve(path)).timeout(timeout)
                     .header("Authorization", "Bearer " + token).header("Accept", "application/json");
             if (body != null) {
-                byte[] bytes = JsonCodec.encode(body);
-                if (bytes.length > RESPONSE_LIMIT) {
+                if (body.length > RESPONSE_LIMIT) {
                     throw new IllegalArgumentException("Kubernetes object exceeds its size limit");
                 }
-                builder.header("Content-Type", contentType).method(method, HttpRequest.BodyPublishers.ofByteArray(bytes));
+                builder.header("Content-Type", contentType).method(method, HttpRequest.BodyPublishers.ofByteArray(body));
             }
             request = builder.build();
         } catch (IOException error) {
@@ -209,19 +241,7 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
         }
         var exchange = client.sendAsync(request,
                 ignored -> new HttpRuntimeTransport.BoundedBodySubscriber(responseLimit));
-        var result = exchange.thenApply(response -> {
-            int status = response.statusCode();
-            if (allowNotFound && status == 404) {
-                return (byte[]) null;
-            }
-            if (!expectedStatus.contains(status)) {
-                throw failure(status, status == 429 || status >= 500);
-            }
-            if (response.body().overflow()) {
-                throw failure(502, false);
-            }
-            return response.body().bytes();
-        }).orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        var result = exchange.thenApply(response -> response).orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
         result.whenComplete((ignored, error) -> {
             if (error != null) {
                 exchange.cancel(true);

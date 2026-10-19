@@ -1194,6 +1194,7 @@ try {
   const finalWriterGeneration = (await stores.publication.owner())
     .writerGeneration;
   let retirementResult;
+  let physicalResult;
   if (input.retirement) {
     await stores.csiRetirement.joinWriter();
     const records = await session.authority.prepareOriginalCsiRelease();
@@ -1208,6 +1209,12 @@ try {
     const retirementDescriptors = [...opened];
     assert.ok(retirementDescriptors.length > 0);
     retirementResult = await stores.csiRetirement.complete(intent.retirementId);
+    if (input.physical) {
+      physicalResult = await fixture('/fixture:physical', {
+        retirementId: intent.retirementId,
+        writerToken,
+      });
+    }
     assert.equal(retirementResult.stage, 'DRAINED');
     assert.equal(retirementResult.progressVersion, 4);
     assert.equal(opened.size, 0);
@@ -1242,6 +1249,7 @@ try {
         refusalChecks: checks.length,
         writerGeneration: finalWriterGeneration,
         ...(retirementResult ? { retirement: retirementResult } : {}),
+        ...(physicalResult ? { physical: physicalResult } : {}),
         coldRecovery: input.coldRecovery === true,
         coldRefusalChecks,
         recoveryCut: input.recoveryCut,

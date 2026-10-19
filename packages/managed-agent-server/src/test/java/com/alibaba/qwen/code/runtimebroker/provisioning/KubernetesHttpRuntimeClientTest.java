@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -185,6 +186,90 @@ class KubernetesHttpRuntimeClientTest {
         assertThrows(IllegalArgumentException.class,
                 () -> client.releaseCsiSchedulingGate("runtimes", "original", uid, "314", invalid));
         assertEquals(2, calls.get());
+    }
+
+    @Test
+    void sendsPreparedNormalDeletionAndPreservesEveryObservedReply() {
+        String uid = "aa36d481-0995-4060-8ce7-f3d42c3e408f";
+        var request = CsiPodDeletion.prepare("runtimes", "original", uid, "opaque:315");
+        byte[] originalBytes = ("{\"apiVersion\":\"v1\",\"kind\":\"DeleteOptions\",\"gracePeriodSeconds\":30,"
+                + "\"propagationPolicy\":\"Background\",\"preconditions\":{\"uid\":\"" + uid + "\",\"resourceVersion\":\"opaque:315\"}}")
+                .getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(originalBytes, request.bytes());
+        byte[] callerCopy = request.bytes();
+        callerCopy[0] = 0;
+        assertArrayEquals(originalBytes, request.bytes());
+        assertEquals("runtimes", request.namespace());
+        assertEquals("original", request.name());
+        assertEquals(uid, request.uid());
+        assertEquals("opaque:315", request.resourceVersion());
+        byte[] reply = "{\n \"kind\": \"Status\", \"status\": \"Success\"\n}".getBytes(StandardCharsets.UTF_8);
+        response.set(reply);
+        for (int code : new int[] {200, 202}) {
+            status.set(code);
+            var result = client.deleteCsiPod(request).toCompletableFuture().join();
+            assertTrue(result.accepted());
+            assertEquals(code, result.statusCode());
+            assertEquals(request, result.request());
+            assertArrayEquals(reply, result.responseBytes());
+            byte[] copy = result.responseBytes();
+            copy[0] = 0;
+            assertArrayEquals(reply, result.responseBytes());
+            assertEquals("DELETE", method.get());
+            assertEquals("application/json", contentType.get());
+            assertArrayEquals(originalBytes, requestBody.get().getBytes(StandardCharsets.UTF_8));
+            assertEquals("/api/v1/namespaces/runtimes/pods/original", path.get());
+            var options = JsonCodec.parseObject(requestBody.get().getBytes(StandardCharsets.UTF_8), "delete options");
+            assertEquals(Map.of("uid", uid, "resourceVersion", "opaque:315"), options.get("preconditions"));
+            assertEquals(30, options.get("gracePeriodSeconds"));
+            assertEquals("Background", options.get("propagationPolicy"));
+            assertEquals(5, options.size());
+        }
+        for (int code : new int[] {404, 409, 302, 429, 500}) {
+            status.set(code);
+            var result = client.deleteCsiPod(request).toCompletableFuture().join();
+            assertFalse(result.accepted());
+            assertEquals(code, result.statusCode());
+            assertArrayEquals(reply, result.responseBytes());
+            assertArrayEquals(originalBytes, requestBody.get().getBytes(StandardCharsets.UTF_8));
+        }
+        assertEquals(7, calls.get());
+        assertThrows(IllegalArgumentException.class, () -> client.deleteCsiPod(null));
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.prepare("runtimes", "original", uid, ""));
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.prepare("runtimes", "../original", uid, "315"));
+        assertEquals(7, calls.get());
+    }
+
+    @Test
+    void restoresOnlyTheExactSavedDeletionRequest() {
+        String uid = "aa36d481-0995-4060-8ce7-f3d42c3e408f";
+        var prepared = CsiPodDeletion.prepare("runtimes", "original", uid, "opaque:315");
+        byte[] saved = prepared.bytes();
+        var restored = CsiPodDeletion.restore("runtimes", "original", uid, "opaque:315", saved);
+        saved[0] = 0;
+        assertArrayEquals(prepared.bytes(), restored.bytes());
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.restore("runtimes", "original", uid, "316", prepared.bytes()));
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.restore("runtimes", "original", uid, "opaque:315", saved));
+        assertThrows(IllegalArgumentException.class, () -> CsiPodDeletion.restore("runtimes", "original", uid, "opaque:315", null));
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    void oversizedDeleteReplyNeverCreatesAnAcceptedResult() {
+        response.set(new byte[1024 * 1024 + 1]);
+        var request = CsiPodDeletion.prepare("runtimes", "original", "aa36d481-0995-4060-8ce7-f3d42c3e408f", "315");
+        assertEquals(502, failure(client.deleteCsiPod(request).toCompletableFuture()).getStatusCode());
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void stalledDeleteBodyRemainsUnknownDespiteAnAcceptedHeader() {
+        stallBody = true;
+        var request = CsiPodDeletion.prepare("runtimes", "original", "aa36d481-0995-4060-8ce7-f3d42c3e408f", "315");
+        try (var bounded = new KubernetesHttpRuntimeClient(origin, token, HttpClient.newHttpClient(), Duration.ofMillis(500))) {
+            assertEquals(503, failure(bounded.deleteCsiPod(request).toCompletableFuture()).getStatusCode());
+        }
+        assertEquals(1, calls.get());
     }
 
     private static Object parseArray(String value) {

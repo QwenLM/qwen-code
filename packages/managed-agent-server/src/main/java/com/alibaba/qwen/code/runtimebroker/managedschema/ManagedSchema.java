@@ -33,13 +33,14 @@ public final class ManagedSchema {
             "/db/managed-schema/V7__ssh_workspace_registration.sql";
     public static final String TURN_COMMAND_OPERATIONS =
             "/db/managed-schema/V8__turn_command_operations.sql";
+    public static final String CSI_PHYSICAL_PROGRESS = "/db/managed-schema/V14__csi_physical_progress.sql";
     private static final List<Migration> EXTENSIONS = List.of(new Migration(2, PRIVATE_AUTHORITY),
             new Migration(3, SESSION_LIST), new Migration(4, WORKSPACE_CREATION),
             new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
             new Migration(7, SSH_WORKSPACE), new Migration(8, TURN_COMMAND_OPERATIONS),
             new Migration(9, RUNTIME_SESSION_HARNESS), new Migration(10, PLAN_MODE),
             new Migration(11, WAKE_RECOVERY), new Migration(12, CSI_APPLICATION_RETIREMENT),
-            new Migration(13, CSI_NODE_SOURCE));
+            new Migration(13, CSI_NODE_SOURCE), new Migration(14, CSI_PHYSICAL_PROGRESS));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {
