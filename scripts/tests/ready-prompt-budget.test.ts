@@ -20,6 +20,24 @@ describe('readyPromptBudgetMs', () => {
     );
   });
 
+  it('widens the self-hosted docker boot budget past the #14191 stall', () => {
+    expect(
+      readyPromptBudgetMs({
+        RUNNER_ENVIRONMENT: 'self-hosted',
+        QWEN_SANDBOX: 'docker',
+      }),
+    ).toBe(180_000);
+    // The self-hosted no-sandbox legs (e2e.yml's sandbox:none matrix and the
+    // release sandbox:none legs) export QWEN_SANDBOX=false, not an unset
+    // variable: a truthiness check instead of === 'docker' would widen them.
+    expect(
+      readyPromptBudgetMs({
+        RUNNER_ENVIRONMENT: 'self-hosted',
+        QWEN_SANDBOX: 'false',
+      }),
+    ).toBe(90_000);
+  });
+
   it('keeps the tight 30s budget in every other runner state', () => {
     expect(readyPromptBudgetMs({ RUNNER_ENVIRONMENT: 'github-hosted' })).toBe(
       30_000,
@@ -28,5 +46,13 @@ describe('readyPromptBudgetMs', () => {
     expect(readyPromptBudgetMs({ RUNNER_ENVIRONMENT: 'unmapped-value' })).toBe(
       30_000,
     );
+    // The docker-boot stall class has only been observed on the shared
+    // self-hosted ECS pool; hosted VMs keep the tight fail-fast budget.
+    expect(
+      readyPromptBudgetMs({
+        RUNNER_ENVIRONMENT: 'github-hosted',
+        QWEN_SANDBOX: 'docker',
+      }),
+    ).toBe(30_000);
   });
 });
