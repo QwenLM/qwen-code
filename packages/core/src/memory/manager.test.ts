@@ -2573,13 +2573,15 @@ describe('MemoryManager', () => {
       // Back in A the in-flight run settles. Carrying B's snapshot would
       // re-key the entry to A while keeping B's parked turns (and B's spent
       // skip budget), and the supplement gate — comparing the entry's root
-      // alone — would splice them into A's extraction.
+      // alone — would splice them into A's extraction. 45 is measured from
+      // the snapshot's own base (skippedFrom 4): 45 − 4 > 40 fires the gate
+      // whenever a foreign snapshot survives the settle.
       liveRoot = tmp.projectRoot;
       release();
       await inFlight;
       await mgr.drain();
 
-      const supplemented = await turnAt(tmp.projectRoot, 43);
+      const supplemented = await turnAt(tmp.projectRoot, 45);
       expect(supplemented.skippedReason).toBeUndefined();
       const last = vi.mocked(runAutoMemoryExtract).mock.calls.at(-1)![0];
       expect(last.projectRoot).toBe(tmp.projectRoot);
