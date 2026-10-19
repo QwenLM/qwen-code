@@ -165,12 +165,15 @@ Design and client migration contract:
 ## Experimental reference distribution
 
 The independent Hosted Java reference distribution packages the runnable
-server, operator-recovery entry point, embedded Broker component, provenance
-manifest, checksums, and deployment/upgrade instructions. Pull requests and
-manual dry runs build and boot the same Linux archive; only a protected-main
-production dispatch publishes an immutable prerelease. See
+server, operator-recovery entry point, embedded Broker component, a
+configuration template, provenance manifest, checksums, and deployment/upgrade
+instructions. Pull requests and manual dry runs build and boot the same Linux
+archive; only a protected-main production dispatch publishes an immutable
+prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
+The bundled launcher also supports `--check`, a read-only preflight for
+configuration, Harness reachability, ports and database grants.
 
 ## Prerequisites
 
@@ -419,7 +422,8 @@ lease, durably records the replacement attachment watermark before invoking
 checkpoint-bound continuation with the original public prompt identity, and
 advances the cursor after the response. Unit, contract, and H2 coordinator/store
 tests verify that this path does not resubmit the Prompt or replay the tool. Do
-not advertise general automatic cross-Pod recovery yet: multi-tool recovery,
+not advertise general automatic cross-Pod recovery yet. The SQL scan below
+discovers eligible committed wake inputs after writer loss; multi-tool recovery,
 recovered cancellation, event/checkpoint reconstruction after a
 mid-continuation Harness crash, the full multi-process in-flight failure matrix,
 OSS-backed resources, and scheduler recovery are still pending. Resources
@@ -429,6 +433,40 @@ Production deployments must add mTLS or equivalent service authentication;
 the tenant and writer headers are scope and fencing inputs, not a substitute
 for transport identity. Responses under the private prefix use
 `Cache-Control: no-store`.
+
+### Wake recovery after Harness loss
+
+With the Session Store enabled, an independent control-plane scan discovers
+committed Monitor/background Shell, channel, child-result, workflow, Automation and Session
+message inputs after their writer lease expires. It runs every two seconds on a
+dedicated scheduler, handles up to eight candidate Sessions per pass, and leaves
+a durable 30-second retry delay after a claim. EventTransport is optional; an
+acknowledged or already-claimed MQ wake cannot suppress this scan.
+
+Only a matching committed `turn.settled` consumes an input. Recovery reattaches
+the Session and lets its existing wake pump run unattempted inputs or settle
+interrupted attempts honestly. It does not replay tool effects or turn unknown
+results into success. Old inputs retain this policy regardless of age. Closing,
+retired, private CSI and stopped or terminal child runs are excluded; Workspace grants
+and mount checks still apply. A failed recovery logs the tenant and Session and
+remains retryable without a permanent attempt limit. Backlog or unavailable
+execution/restore evidence can delay recovery beyond the lease and retry time.
+
+Schema V11 adds a revision-stamped wake hint and retry timestamp to the existing
+Session head. Unknown or stale hints rebuild from committed journal events;
+compacted heads are excluded without marking their inputs consumed, while missing
+or corrupt proof is refused. Each proof invocation reads at most 32 transactions
+and yields with its complete continuation for a later claim; partial proof never
+clears the hint or triggers a load. At most 128 exact-prefix continuations or
+positive memos are retained. Live partials keep their slots; new long proofs wait
+for completed or ineligible holders to free capacity. A new revision or process
+restart begins proof at zero with the durable hint intact.
+Upgrade the Server and Broker together; rollback binaries must understand V11.
+This scan is locally verified on macOS/MySQL 8.4. Linux/Windows, real MQ-on and
+deployed provider acceptance remain unverified; see also [Hosted recovery scope](#hosted-recovery-scope).
+The [English design](../../docs/design/2026-10-18-hosted-wake-recovery.md) and
+[Chinese design](../../docs/design/2026-10-18-hosted-wake-recovery.zh-CN.md) describe
+the recovery boundary and acceptance criteria.
 
 ## Managed automation (H6)
 
@@ -896,8 +934,8 @@ and what it would have bound before (milliseconds); a suffixed value never
 warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
-`dispatch.scan-delay`, `events.replay-floor-interval` and
-`message-relay.scan-delay` — also read a bare number as milliseconds,
+`dispatch.scan-delay`, `events.replay-floor-interval`,
+`message-relay.scan-delay` and `wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.
 
@@ -1419,6 +1457,10 @@ itself, so a failing test in the Hosted MySQL job does not skip the arms, and
 each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
+
+The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
+macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
+provider acceptance. The scope below does not extend those claims.
 
 The first Hosted release supports recovery for one Java control-plane instance
 on one trusted Linux host. That control plane replaces reachable Hosted Harness
