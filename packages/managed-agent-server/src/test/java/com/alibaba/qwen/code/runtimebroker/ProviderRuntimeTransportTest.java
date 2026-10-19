@@ -1,19 +1,19 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
+import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedRuntimeAttestationConformanceTest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -27,9 +27,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ProviderRuntimeTransportTest {
     private static final String HARNESS = "550e8400-e29b-41d4-a716-446655440301";
@@ -135,17 +139,18 @@ class ProviderRuntimeTransportTest {
 
     @Test
     void preservesRecognizedProviderErrorReasonsAndStatusWithoutTreatingRefusalAsNotStarted() {
-        for (Map.Entry<String, Integer> failure : Map.of(
-                "managed_runtime_tool_invalid", 400,
-                "managed_runtime_provider_invalid", 400,
-                "managed_runtime_identity_conflict", 409,
-                "managed_context_unavailable", 409,
-                "managed_context_conflict", 409,
-                "managed_runtime_provider_operation_failed", 409,
-                "managed_runtime_provider_incompatible", 409,
-                "managed_runtime_owner_hold_pending", 409,
-                "managed_runtime_provider_too_large", 413,
-                "managed_runtime_provider_unsupported", 501).entrySet()) {
+        for (Map.Entry<String, Integer> failure : Map.ofEntries(
+                Map.entry("managed_runtime_tool_invalid", 400),
+                Map.entry("managed_runtime_provider_invalid", 400),
+                Map.entry("managed_runtime_identity_conflict", 409),
+                Map.entry("managed_context_unavailable", 409),
+                Map.entry("managed_context_conflict", 409),
+                Map.entry("managed_runtime_provider_operation_failed", 409),
+                Map.entry("managed_runtime_provider_incompatible", 409),
+                Map.entry("managed_runtime_owner_hold_pending", 409),
+                Map.entry("managed_runtime_release_timeout", 409),
+                Map.entry("managed_runtime_provider_too_large", 413),
+                Map.entry("managed_runtime_provider_unsupported", 501)).entrySet()) {
             status = failure.getValue();
             response = body -> Map.of("code", failure.getKey(), "error", "Specific provider reason.");
             CompletionException exception = assertThrows(CompletionException.class,
@@ -154,7 +159,10 @@ class ProviderRuntimeTransportTest {
             assertEquals(status, error.getStatusCode());
             assertEquals(failure.getKey(), error.getCode());
             assertEquals("Specific provider reason.", error.getMessage());
-            assertEquals(false, error.isRetryable());
+            assertEquals(
+                    "managed_runtime_owner_hold_pending".equals(failure.getKey())
+                            || "managed_runtime_release_timeout".equals(failure.getKey()),
+                    error.isRetryable());
         }
     }
 
