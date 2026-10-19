@@ -1139,6 +1139,56 @@ it('cancels a saved marker by its external id and never dispatches its cancelled
   });
 });
 
+it('cancels a Hook while the dispatch acquisition is held, before dispatch_started', async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const executionBroker = vi
+    .spyOn(
+      HostedHookSession.prototype as unknown as {
+        executionBroker: (record: unknown) => Promise<unknown>;
+      },
+      'executionBroker',
+    )
+    .mockImplementation(async () => {
+      entered();
+      await held;
+      return undefined as never;
+    });
+  const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  await enteredPromise;
+  // The acquisition has not returned, so the Hook execution record is still
+  // at intent and dispatch_started has never been committed. The status
+  // marker itself is the plan record, not the Hook execution.
+  const marker = await hooks.status('call-1');
+  const childExecution = () =>
+    session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .find((entry) => entry.recordId !== marker.hookExecutionId)!;
+  expect(childExecution().run.execution).toBe('intent');
+  const cancelled = await hooks.status('call-1', true);
+  expect(cancelled.cancelRequested).toBe(true);
+  // The in-flight perform is still held at the acquisition, so the child
+  // record cannot settle until it resumes.
+  expect(childExecution().run.execution).toBe('intent');
+  release();
+  expect((await firing)?.decision).toBe('block');
+  expect(childExecution().run).toMatchObject({
+    state: 'cancelled',
+    execution: 'not_started_proven',
+  });
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(0);
+  expect(hooks.hasPendingOperations).toBe(false);
+  executionBroker.mockRestore();
+});
+
 it('applies failClosed when a lost reply is settled through status after reconstruction', async () => {
   execute = async () => {
     throw new Error('lost reply');
