@@ -96,6 +96,10 @@ class HostedMcpRestartFaultGatesIT {
             Executors.newVirtualThreadPerTaskExecutor();
     private volatile CountDownLatch controlHold;
     private volatile String controlHoldKind;
+    private volatile CountDownLatch replyHold;
+    private volatile String replyHoldKind;
+    private volatile String replyHoldTarget;
+    private volatile CountDownLatch replyParked;
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
     private Path cli;
@@ -112,6 +116,7 @@ class HostedMcpRestartFaultGatesIT {
     private HttpServer model;
     private ExecutorService modelExecutor;
     private HttpServer brokerProxy;
+    private ExecutorService brokerExecutor;
     private ServletWebServerApplicationContext spring;
     private JdbcTemplate jdbc;
     private ManagedAgentStore store;
@@ -386,15 +391,42 @@ class HostedMcpRestartFaultGatesIT {
         settle.cancel(true);
 
         SessionRef reloaded = reload(session, closeId, claimGeneration);
+        // The conclusive answer is the settled `mcp-status`, not the release
+        // dispatch, which legally answers `running`. Park that reply inside
+        // the proxy: the record must stay `releasing` and the close route
+        // must stay unanswered until the Harness receives it.
+        holdSettledReply("mcp-status", releaseId);
         HttpResponse<String> settled = null;
-        for (int attempt = 0; attempt < 60; attempt++) {
-            settled = rawLifecycle(reloaded, closeId, claimGeneration,
-                    "settle_resources");
-            if (settled.statusCode() == 200) {
+        for (int attempt = 0; attempt < 60 && settled == null; attempt++) {
+            Future<HttpResponse<String>> pending = caseExecutor.submit(
+                    () -> rawLifecycle(reloaded, closeId, claimGeneration,
+                            "settle_resources"));
+            await().atMost(Duration.ofSeconds(60)).until(() ->
+                    replyParked.getCount() == 0 || pending.isDone());
+            if (replyParked.getCount() == 0) {
+                try {
+                    assertThat(pending.isDone())
+                            .as("settle must wait for the held status reply")
+                            .isFalse();
+                    assertThat(configuration(session.id()).path("releaseState")
+                            .asText())
+                            .as("released must not be committed before the "
+                                    + "settled answer reaches the Harness")
+                            .isEqualTo("releasing");
+                } finally {
+                    releaseReply();
+                }
+                settled = pending.get(30, TimeUnit.SECONDS);
                 break;
             }
-            if (settled.statusCode() == 409) {
-                JsonNode refusal = json.readTree(settled.body());
+            HttpResponse<String> response = pending.get(30,
+                    TimeUnit.SECONDS);
+            if (response.statusCode() == 200) {
+                settled = response;
+                break;
+            }
+            if (response.statusCode() == 409) {
+                JsonNode refusal = json.readTree(response.body());
                 String code = refusal.path("error").asText(
                         refusal.path("code").asText());
                 if ("hosted_turn_active".equals(code)) {
@@ -402,12 +434,17 @@ class HostedMcpRestartFaultGatesIT {
                     continue;
                 }
             }
-            assertThat(settled.statusCode()).as("settle: %s", settled.body())
-                    .isEqualTo(503);
+            assertThat(response.statusCode()).as("settle: %s",
+                    response.body()).isEqualTo(503);
             Thread.sleep(1_000);
         }
+        assertThat(settled).as("settle must complete").isNotNull();
         assertThat(settled.statusCode()).as("settle: %s", settled.body())
                 .isEqualTo(200);
+        assertThat(replyParked.getCount())
+                .as("the settled status reply must be parked, or the ordering "
+                        + "witness never ran")
+                .isZero();
 
         JsonNode released = configuration(session.id());
         assertThat(released.path("releaseState").asText())
@@ -640,6 +677,27 @@ class HostedMcpRestartFaultGatesIT {
         CountDownLatch latch = controlHold;
         controlHold = null;
         controlHoldKind = null;
+        if (latch != null) {
+            latch.countDown();
+        }
+    }
+
+    // A release dispatch answers `running`; only the later `mcp-status`
+    // lookup is conclusive. Parking that answer inside the proxy separates
+    // "the Broker settled it" from "the Harness received it", which is what
+    // proves `released` cannot be committed before it.
+    private void holdSettledReply(String kind, String targetOperationId) {
+        replyHoldKind = kind;
+        replyHoldTarget = targetOperationId;
+        replyParked = new CountDownLatch(1);
+        replyHold = new CountDownLatch(1);
+    }
+
+    private void releaseReply() {
+        CountDownLatch latch = replyHold;
+        replyHold = null;
+        replyHoldKind = null;
+        replyHoldTarget = null;
         if (latch != null) {
             latch.countDown();
         }
@@ -1166,6 +1224,8 @@ class HostedMcpRestartFaultGatesIT {
     private void startBrokerProxy() throws IOException {
         brokerProxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0),
                 0);
+        brokerExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        brokerProxy.setExecutor(brokerExecutor);
         brokerProxy.createContext("/", this::relay);
         brokerProxy.start();
     }
@@ -1238,13 +1298,34 @@ class HostedMcpRestartFaultGatesIT {
                     HttpResponse.BodyHandlers.ofByteArray());
             proxyCalls.set(index, call.complete(response.statusCode()));
             entry.put("status", response.statusCode());
+            JsonNode answer;
             try {
-                entry.put("answer", json.readTree(response.body()));
+                answer = json.readTree(response.body());
             } catch (IOException unparsable) {
-                entry.put("answer", new String(response.body(),
-                        StandardCharsets.UTF_8));
+                answer = null;
             }
+            entry.put("answer", answer != null ? answer
+                    : new String(response.body(), StandardCharsets.UTF_8));
             wire.add(entry);
+            CountDownLatch reply = replyHold;
+            if (reply != null && parsed != null && replyHoldKind != null
+                    && replyHoldKind.equals(kind)
+                    && replyHoldTarget != null
+                    && replyHoldTarget.equals(parsed.at(
+                            "/operation/targetOperationId").asText())
+                    && answer != null
+                    && "settled".equals(answer.path("result").path("state")
+                            .asText())) {
+                CountDownLatch parked = replyParked;
+                if (parked != null) {
+                    parked.countDown();
+                }
+                try {
+                    reply.await(120, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             exchange.getResponseHeaders().set("Content-Type",
                     "application/json");
             exchange.sendResponseHeaders(response.statusCode(),
@@ -1343,6 +1424,9 @@ class HostedMcpRestartFaultGatesIT {
                 spring.close();
             }
         } finally {
+            if (brokerExecutor != null) {
+                brokerExecutor.shutdownNow();
+            }
             if (brokerProxy != null) {
                 brokerProxy.stop(0);
             }
