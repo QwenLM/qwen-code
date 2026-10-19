@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
+import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 
 import type { Content, Part } from '@google/genai';
 import { createHash, randomUUID } from 'node:crypto';
@@ -633,7 +634,7 @@ export async function runHostedHarnessTextTurn(input: {
         finished = false;
         usage.length = 0;
       };
-      prepare.maxSnapshotBytes = 64 * 1024;
+      prepare.maxSnapshotBytes = HOSTED_MODEL_REQUEST_BYTES;
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {

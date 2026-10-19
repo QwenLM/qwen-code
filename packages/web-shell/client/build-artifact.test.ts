@@ -523,9 +523,9 @@ describe('build artifact — transcript entry (#11031)', () => {
     // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
     // increase is shared i18n copy; substituting main's table restores the
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
-    // ReadFile empty/unavailable hints and the shared tool-card loader state
-    // bring the remainder to 1,340,018 at #14604. The detail HTTP transport
-    // stays in the interactive entry. A 1,341,000 ceiling retains 982 units.
+    // ReadFile hints, the shared detail loader and attachment recovery copy
+    // stay in this entry; interactive detail HTTP transport stays excluded.
+    // Keep the measured remainder below 1,341,000 UTF-16 units.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,

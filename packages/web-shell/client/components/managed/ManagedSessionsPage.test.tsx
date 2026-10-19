@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { getManagedClientId } from './managed-session-storage';
+import * as pendingStorage from './managed-pending-storage';
 import { I18nProvider } from '../../i18n';
 import type {
   ManagedAgentProvider,
@@ -655,6 +656,102 @@ describe('ManagedSessionsPage', () => {
       expect(provider.approvalChange.submit).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
+    '{',
+  ])(
+    'requires explicit discard before sending after a pending record cannot be restored (%s)',
+    async (stored) => {
+      const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+      sessionStorage.setItem(key, stored);
+      await render('s1');
+      expect(container.textContent).toContain(
+        'may already have been submitted',
+      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      vi.spyOn(pendingStorage, 'saveManagedPending').mockResolvedValueOnce(
+        false,
+      );
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(container.textContent).toContain(
+        'Could not discard this request.',
+      );
+      expect(sessionStorage.getItem(key)).toBe(stored);
+      await act(async () => {
+        mocks.editorProps!.onSubmit(
+          'blocked request',
+          undefined,
+          undefined,
+          vi.fn(),
+        );
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(sessionStorage.getItem(key)).toBeNull();
+      expect(container.textContent).not.toContain(
+        'Could not discard this request.',
+      );
+      expect(container.textContent).not.toContain(
+        'may already have been submitted',
+      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        mocks.editorProps!.onSubmit(
+          'new explicit request',
+          undefined,
+          undefined,
+          vi.fn(),
+        );
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps submissions serialized while the frozen request is being persisted', async () => {
+    await render('s1');
+    let acknowledge!: (saved: boolean) => void;
+    const save = vi
+      .spyOn(pendingStorage, 'saveManagedPending')
+      .mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            acknowledge = resolve;
+          }),
+      );
+    const send = mocks.editorProps!.onSubmit;
+    await act(async () => {
+      send('first draft', undefined, undefined, vi.fn());
+      await flush();
+      send('second draft', undefined, undefined, vi.fn());
+      await flush();
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      acknowledge(true);
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt.mock.calls[0]?.[1]).toMatchObject({
+      text: 'first draft',
+    });
+    save.mockRestore();
+  });
 
   it('switches only after admission and readback, preserves the draft and blocks a same-frame send', async () => {
     let session = switchableSession();

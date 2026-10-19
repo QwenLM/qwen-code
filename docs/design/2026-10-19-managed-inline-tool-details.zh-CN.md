@@ -10,7 +10,7 @@ ReadFile 和 Shell 详情应仅在用户展开已结束的卡片时加载。为�
 
 ## 读取策略与归属
 
-契约版本 `1.68.0` 新增 `POST /api/agent/web-shell/v1/tool-details/get`，复用已有 Session/Item 请求结构。这是以持久化 Workspace 为作用域的读取：要求可信 actor、当前 Session 可见性及 Workspace 读取授权，并在返回前重新校验。响应使用 `Cache-Control: private, no-store`。路由不启动 Harness、不获取 Runtime、不执行命令，也不回退到其他 Workspace。
+契约版本 `1.69.0` 新增 `POST /api/agent/web-shell/v1/tool-details/get`，复用已有 Session/Item 请求结构。这是以持久化 Workspace 为作用域的读取：要求可信 actor、当前 Session 可见性及 Workspace 读取授权，并在返回前重新校验。响应使用 `Cache-Control: private, no-store`。路由不启动 Harness、不获取 Runtime、不执行命令，也不回退到其他 Workspace。
 
 所有获准读取 Session/Workspace 的用户均可直接读取这些有界工具详情，无需功能开关。Artifact 发布与原始下载权限保持独立，不需要额外发布开关或对象存储。保存的文本可能包含敏感内容，不会自动脱敏。
 

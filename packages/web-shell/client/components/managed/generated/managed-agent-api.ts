@@ -734,7 +734,7 @@ export interface components {
             environmentId?: string | null;
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
-            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1. */
+            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             workspace?: components["schemas"]["WebShellWorkspaceSelection"];
@@ -752,7 +752,7 @@ export interface components {
             idempotencyKey: string;
             /** Format: uuid */
             sessionId: string;
-            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1. */
+            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             /**
@@ -1583,7 +1583,7 @@ export interface components {
             type: "input_text" | "text";
             text: string;
         };
-        /** @description Inline UTF-8 text file. No host paths, URLs, binary or NUL. Conservative text MIME/extension validation; the complete canonical input containing attachments is limited to 48 KiB. */
+        /** @description Inline UTF-8 text file. No host paths, URLs, binary or NUL. Conservative text MIME/extension validation; the complete canonical input containing attachments is limited to 8 MiB. */
         InputFileBlock: {
             /** @enum {string} */
             type: "input_file";
@@ -1591,7 +1591,7 @@ export interface components {
             mime_type: string;
             text: string;
         };
-        /** @description Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 48 KiB. */
+        /** @description Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 8 MiB. */
         InputImageBlock: {
             /** @enum {string} */
             type: "input_image";

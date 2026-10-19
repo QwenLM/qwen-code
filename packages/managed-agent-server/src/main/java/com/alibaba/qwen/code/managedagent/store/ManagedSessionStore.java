@@ -2045,19 +2045,18 @@ public class ManagedSessionStore {
             if (resource.schemaVersion() < 1 || resource.byteLength() < 0) {
                 throw invalid("Resource version or length is invalid.");
             }
-            if (resource.byteLength()
-                    > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
+            int maxResourceBytes = ManagedSessionStoreModels.inlineResourceBytes(resource.kind());
+            if (resource.byteLength() > maxResourceBytes
                     && !("managed-tool-outcome".equals(resource.kind())
                     && resource.bytesBase64() == null)) {
                 throw new ApiException(HttpStatus.NOT_IMPLEMENTED,
                         ManagedSessionStoreModels.ERROR_OSS_DISABLED,
-                        "Resources larger than 64 KiB require the disabled"
+                        "Resources larger than " + (maxResourceBytes / 1024) + " KiB require the disabled"
                                 + " OSS storage path.");
             }
             byte[] bytes = resource.bytesBase64() == null ? null
                     : decodeBase64(resource.bytesBase64(),
-                            ManagedSessionStoreModels
-                                    .MAX_INLINE_RESOURCE_BYTES,
+                            maxResourceBytes,
                             "resource bytesBase64");
             if (bytes != null && (bytes.length != resource.byteLength()
                     || !sha256(bytes).equals(resource.digest()))) {
@@ -2067,7 +2066,7 @@ public class ManagedSessionStore {
             if (bytes != null) {
                 inlineBytes += bytes.length;
                 if (inlineBytes
-                        > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
+                        > ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES) {
                     throw payloadTooLarge("Inline resources exceed their"
                             + " transaction byte limit.");
                 }
