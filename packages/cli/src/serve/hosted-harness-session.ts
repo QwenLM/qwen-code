@@ -116,6 +116,7 @@ import type {
 import {
   CHILD_NOTIFICATION_SOURCES,
   ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionModeGateError,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
@@ -371,6 +372,7 @@ function settledTurnOutcome(abort: AbortController): {
 function namedStoreFailure(cause: unknown): string | undefined {
   if (
     cause instanceof ManagedSessionAppendUnsettledError ||
+    cause instanceof ManagedSessionJournalFencedError ||
     cause instanceof ManagedSessionStoreTransportError ||
     (cause instanceof ManagedSessionStoreHttpError &&
       cause.status >= 500 &&
@@ -7668,7 +7670,10 @@ export function registerHostedHarnessSessionRoutes(
         if (cause instanceof ChildMessagesPendingError) {
           return error(res, 409, 'child_messages_pending', undefined, message);
         }
-        if (cause instanceof ManagedSessionAppendUnsettledError) {
+        if (
+          cause instanceof ManagedSessionAppendUnsettledError ||
+          cause instanceof ManagedSessionJournalFencedError
+        ) {
           writeStderrLineSafe(
             `qwen serve: Hosted child operation ${kind} of session ${req.params['id']} has an unknown store outcome: ${message}`,
           );
@@ -7877,7 +7882,8 @@ export function registerHostedHarnessSessionRoutes(
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
         cause instanceof ManagedSessionWritesStoppedError ||
-        cause instanceof ManagedSessionAppendUnsettledError
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted message operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
@@ -8050,7 +8056,8 @@ export function registerHostedHarnessSessionRoutes(
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
         cause instanceof ManagedSessionWritesStoppedError ||
-        cause instanceof ManagedSessionAppendUnsettledError
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted command operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
@@ -8273,7 +8280,10 @@ export function registerHostedHarnessSessionRoutes(
         !(cause instanceof ManagedSessionConflictError) &&
         !(cause instanceof ManagedSessionStoreHttpError) &&
         !(cause instanceof ManagedSessionStoreTransportError) &&
-        !(cause instanceof ManagedSessionAppendUnsettledError)
+        !(
+          cause instanceof ManagedSessionAppendUnsettledError ||
+          cause instanceof ManagedSessionJournalFencedError
+        )
       )
         return error(res, 400, 'invalid_channel_operation', undefined, message);
       if (
@@ -10477,7 +10487,8 @@ export function registerHostedHarnessSessionRoutes(
       if (
         cause instanceof ManagedSessionStoreHttpError ||
         cause instanceof ManagedSessionStoreTransportError ||
-        cause instanceof ManagedSessionAppendUnsettledError
+        cause instanceof ManagedSessionAppendUnsettledError ||
+        cause instanceof ManagedSessionJournalFencedError
       ) {
         writeStderrLineSafe(
           `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} lost its store: ${message}`,

@@ -14,6 +14,7 @@ import {
   MANAGED_SESSION_HEADER_SUBTYPE,
   MANAGED_SESSION_LIMITS,
   ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionRecordError,
   assertManagedSessionKey,
   assertManagedSessionDurableRef,
@@ -460,8 +461,12 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
       // malformed head) fences the log exactly like a failed append, so the
       // keepalive must stop instead of extending a lease this writer can no
       // longer use. An unsettled answer stays recoverable.
-      if (!(error instanceof ManagedSessionAppendUnsettledError))
+      if (!(error instanceof ManagedSessionAppendUnsettledError)) {
         this.client.stopWriterRenewal();
+        // A settlement may have acquired a fresh lease just before proving
+        // the fence. Seal it so the takeover it asks for can start.
+        await this.client.seal().catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -662,6 +667,12 @@ class ManagedSessionStoreHttpClient {
   private readonly fetchFn: typeof fetch;
   private grant: WriterGrant | undefined;
   private renewPromise: Promise<void> | undefined;
+  /**
+   * The re-acquisition a lapsed lease started. Seal and local stop await it
+   * so they never read the grant-less window as "never held a writer", and a
+   * late grant is sealed instead of adopted by a closed client.
+   */
+  private acquirePromise: Promise<void> | undefined;
   private renewingAuthority?: ManagedSessionLifecycleAuthority;
   private renewTimer: NodeJS.Timeout | undefined;
   private renewalStopped = false;
@@ -1031,10 +1042,15 @@ class ManagedSessionStoreHttpClient {
         // Activation can retry beyond the usual attempt cap. A guard refusal
         // must still stop that lane once the shared budget cannot fit another
         // guard retry, even when the inner call never retried the guard.
+        // A contended refusal is a definite non-commit the store rolled back.
+        // Once the shared budget cannot fit another guard retry it is
+        // terminal for every operation, not only for activation renewal:
+        // treating it as an unknown outcome would keep a phantom append
+        // pending and name a bounded contention as a store outage.
         const contentionSpent =
           error instanceof ManagedSessionStoreHttpError &&
           (error.contentionExhausted === true ||
-            (descriptor.operation === 'renewActivation' &&
+            (publicationId === undefined &&
               error.status === 503 &&
               error.remoteCode === 'tenant_guard_contended' &&
               contentionDeadline - Date.now() <= 250));
@@ -1168,7 +1184,7 @@ class ManagedSessionStoreHttpClient {
           pending.descriptor === undefined ||
           head.journalRevision !== pending.baseRevision + 1
         ) {
-          throw new ManagedSessionRecordError(
+          throw new ManagedSessionJournalFencedError(
             `the journal advanced to revision ${head.journalRevision} past this writer's ${pending.baseRevision} while its append outcome was unknown; the Session needs a takeover.`,
           );
         }
@@ -1185,7 +1201,7 @@ class ManagedSessionStoreHttpClient {
           stored.journalRevision !== head.journalRevision ||
           stored.recordDigest !== pending.recordDigest
         ) {
-          throw new ManagedSessionRecordError(
+          throw new ManagedSessionJournalFencedError(
             'the journal holds a different transaction at this append position; the Session needs a takeover.',
           );
         }
@@ -1463,6 +1479,11 @@ class ManagedSessionStoreHttpClient {
   }
 
   async seal(): Promise<void> {
+    await this.acquirePromise?.catch(() => undefined);
+    return this.sealGrant();
+  }
+
+  private async sealGrant(): Promise<void> {
     if (this.sealed) return;
     const grant = this.grant;
     this.stopWriterRenewal();
@@ -1495,6 +1516,7 @@ class ManagedSessionStoreHttpClient {
     this.locallyStopped = true;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    await this.acquirePromise?.catch(() => undefined);
   }
 
   stopWriterRenewal(): void {
@@ -1503,6 +1525,10 @@ class ManagedSessionStoreHttpClient {
   }
 
   private async ensureWriter(): Promise<void> {
+    // A concurrent re-acquisition owns the grant-less window; wait for it
+    // instead of reading it as a writer that was never acquired.
+    if (this.acquirePromise !== undefined)
+      await this.acquirePromise.catch(() => undefined);
     const grant = this.requireGrant();
     if (grant.leaseUntil - Date.now() <= this.leaseDurationMs / 3) {
       await this.renewWriter();
@@ -1519,11 +1545,20 @@ class ManagedSessionStoreHttpClient {
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
     this.grant = undefined;
-    try {
+    const acquire = (async () => {
       await this.acquireWriter();
+      // A seal or local stop that started while the POST was in flight must
+      // not leave the newly acquired lease live on a closed client.
+      if (this.sealed || this.locallyStopped) await this.sealGrant();
+    })();
+    this.acquirePromise = acquire;
+    try {
+      await acquire;
     } catch (error) {
       this.grant = expired;
       throw error;
+    } finally {
+      if (this.acquirePromise === acquire) this.acquirePromise = undefined;
     }
   }
 

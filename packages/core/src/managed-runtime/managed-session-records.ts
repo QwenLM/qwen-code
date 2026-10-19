@@ -449,6 +449,21 @@ export class ManagedSessionAppendUnsettledError extends ManagedSessionRecordErro
   }
 }
 
+/**
+ * Settlement proved another writer owns this append position. Unlike an
+ * unknown outcome, this fence is permanent: the Session needs a takeover.
+ * It is typed so the Hosted routes classify it as a store-side fence rather
+ * than as a request-shape refusal.
+ */
+export class ManagedSessionJournalFencedError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_journal_fenced';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagedSessionJournalFencedError';
+  }
+}
+
 /** A target mode the mode gate has not enabled for submission. */
 export class ManagedSessionModeGateError extends ManagedSessionRecordError {
   override readonly code: string = 'managed_session_mode_disabled';

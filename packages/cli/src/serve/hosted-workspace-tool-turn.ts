@@ -72,6 +72,7 @@ import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionWritesStoppedError,
   type ManagedSessionDomain,
   type ManagedSessionDurableRef,
@@ -323,7 +324,8 @@ function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
     !(cause instanceof ManagedSessionStoreHttpError) &&
     !(cause instanceof ManagedSessionStoreTransportError) &&
     !(cause instanceof ManagedSessionWritesStoppedError) &&
-    !(cause instanceof ManagedSessionAppendUnsettledError)
+    !(cause instanceof ManagedSessionAppendUnsettledError) &&
+    !(cause instanceof ManagedSessionJournalFencedError)
   );
 }
 
