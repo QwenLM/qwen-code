@@ -3003,17 +3003,19 @@ try {
         ),
       );
       // B1: the replacement reissues the model request but must not admit
-      // the prompt again. One journal transaction under the Turn's own
-      // command id proves one admission and one user record; the admission
-      // resource is published once by that same original command.
-      const firstTurnId = runMysql(
+      // the prompt again. One journal transaction under the Harness prompt
+      // id proves one admission and one user record; the admission resource
+      // is published once by that same original command. The Turn's public
+      // id and the prompt id are generated independently, so the journal is
+      // keyed by the latter.
+      const firstPromptId = runMysql(
         mysqlPort,
-        `SELECT turn_id FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create LIMIT 1`,
+        `SELECT prompt_id FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create LIMIT 1`,
       );
       const admissionCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(firstTurnId)}`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(firstPromptId)}`,
         ),
       );
       const admissionResources = Number(
