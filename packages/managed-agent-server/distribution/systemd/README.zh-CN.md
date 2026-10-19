@@ -29,6 +29,8 @@ install -m 0640 -o root -g qwen-managed-agent \
 
 `harness.env` 与 `server.env` 中的 Harness token 和 capability digest 必须一致。
 
+也可以运行 `../bin/qwen-managed-agent-bootstrap --directory /etc/qwen-managed-agent` 生成这三个文件，随后调整属主与权限。
+
 4. 安装并启动：
 
 ```bash

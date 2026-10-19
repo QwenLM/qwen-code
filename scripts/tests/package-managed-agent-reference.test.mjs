@@ -12,12 +12,20 @@ import {
   mkdir,
   readFile,
   rm,
+  stat,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
+import {
+  generateSecrets,
+  renderApplicationYml,
+  renderHarnessEnv,
+  renderServerEnv,
+} from '../../packages/managed-agent-server/distribution/bin/qwen-managed-agent-bootstrap.mjs';
 import { createReferenceDistribution } from '../package-managed-agent-reference.mjs';
 
 async function fixture(root) {
@@ -51,6 +59,10 @@ async function fixture(root) {
     'packages/managed-agent-server/distribution/systemd/README.md': 'systemd\n',
     'packages/managed-agent-server/distribution/systemd/README.zh-CN.md':
       'systemd zh\n',
+    'packages/managed-agent-server/distribution/bin/qwen-managed-agent-bootstrap':
+      '#!/usr/bin/env sh\n',
+    'packages/managed-agent-server/distribution/bin/qwen-managed-agent-bootstrap.mjs':
+      'export {};\n',
     'packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json':
       JSON.stringify({ info: { version: '1.46.0' } }),
     'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__baseline.sql':
@@ -150,6 +162,13 @@ test('packages an independently verifiable reference distribution', async () => 
         'utf8',
       ),
       /--profile hosted-harness/,
+    );
+    assert.equal(
+      await readFile(
+        path.join(bundle, 'bin/qwen-managed-agent-bootstrap'),
+        'utf8',
+      ),
+      '#!/usr/bin/env sh\n',
     );
     execFileSync('sha256sum', ['--check', 'SHA256SUMS.txt'], {
       cwd: output,
@@ -258,6 +277,69 @@ test('ships systemd units with the documented kill modes', async () => {
   assert.ok(harness.endsWith('\n'));
   assert.doesNotMatch(server, /\t/);
   assert.doesNotMatch(harness, /\t/);
+});
+
+test('bootstrap renders matching credentials and a 32-byte key', () => {
+  const secrets = generateSecrets('reference-test');
+  assert.match(secrets.digest, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(Buffer.from(secrets.credentialKey, 'base64').length, 32);
+  assert.ok(renderHarnessEnv(secrets).includes(secrets.token));
+  const server = renderServerEnv(secrets, '/tmp/application.yml');
+  assert.ok(server.includes(secrets.token));
+  assert.ok(server.includes(secrets.digest));
+  assert.match(
+    renderApplicationYml(secrets),
+    /credential-key-id: 'reference-test'/,
+  );
+});
+
+test('bootstrap writes private files without printing secrets', async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'qwen-bootstrap-'));
+  try {
+    const directory = path.join(temporary, 'config');
+    const script = fileURLToPath(
+      new URL(
+        '../../packages/managed-agent-server/distribution/bin/' +
+          'qwen-managed-agent-bootstrap.mjs',
+        import.meta.url,
+      ),
+    );
+    const output = execFileSync(
+      process.execPath,
+      [script, '--directory', directory],
+      { encoding: 'utf8' },
+    );
+    const harness = await readFile(path.join(directory, 'harness.env'), 'utf8');
+    const server = await readFile(path.join(directory, 'server.env'), 'utf8');
+    const application = await readFile(
+      path.join(directory, 'application.yml'),
+      'utf8',
+    );
+    const token = harness.match(/^QWEN_SERVER_TOKEN=([0-9a-f]{64})$/m)[1];
+    assert.ok(server.includes(`QWEN_MANAGED_AGENT_HARNESS_TOKEN=${token}`));
+    assert.match(application, /credential-key: '[A-Za-z0-9+/=]{44}'/);
+    for (const name of ['harness.env', 'server.env', 'application.yml']) {
+      assert.equal(
+        (await stat(path.join(directory, name))).mode & 0o777,
+        0o600,
+      );
+    }
+    assert.ok(!output.includes(token));
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [script, '--directory', directory], {
+          stdio: 'pipe',
+        }),
+      (error) => error.status === 1,
+    );
+    execFileSync(
+      process.execPath,
+      [script, '--directory', directory, '--force'],
+      { encoding: 'utf8' },
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test('rejects a stable distribution version', async () => {
