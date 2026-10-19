@@ -163,7 +163,8 @@ set -eu
 base="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 config="$base/config/application.yml"
 if [ -f "$config" ] && [ -z "\${SPRING_CONFIG_ADDITIONAL_LOCATION:-}" ]; then
-  set -- "--spring.config.additional-location=file:\${config}" "$@"
+  SPRING_CONFIG_ADDITIONAL_LOCATION="file:\${config}"
+  export SPRING_CONFIG_ADDITIONAL_LOCATION
 fi
 exec java -jar "$base/lib/${jar}" "$@"
 `;

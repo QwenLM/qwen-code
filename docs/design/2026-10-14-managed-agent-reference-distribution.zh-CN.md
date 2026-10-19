@@ -49,7 +49,7 @@ SHA256SUMS
 LICENSE
 ```
 
-启动脚本只使用 bundle 内的相对 JAR 路径。运维人员在 bundle 根目录创建 `config/application.yml` 后，启动脚本会在操作者参数之前传入指向该文件的 `--spring.config.additional-location`；若已设置 `SPRING_CONFIG_ADDITIONAL_LOCATION`，则不再注入。模板本身不包含生效配置，复制后在编辑前不改变任何行为。Server JAR 包含 Broker 类和资源，不另行提供 Broker 产物或进程。`systemd/` 模板落实了文档要求的 kill mode：控制面使用 `process`，使 Runtime worker 在 Broker 重启后继续存活；Harness 使用 `mixed`，使其工具进程随 Harness 终止。
+启动脚本只使用 bundle 内的相对 JAR 路径。运维人员在 bundle 根目录创建 `config/application.yml` 后，启动脚本会在该变量未设置时导出 `SPRING_CONFIG_ADDITIONAL_LOCATION`，位置参数原样传给 Java。模板本身不包含生效配置，复制后在编辑前不改变任何行为。Server JAR 包含 Broker 类和资源，不另行提供 Broker 产物或进程。`systemd/` 模板落实了文档要求的 kill mode：控制面使用 `process`，使 Runtime worker 在 Broker 重启后继续存活；Harness 使用 `mixed`，使其工具进程随 Harness 终止。
 
 发布页同时提供独立的 `manifest.json` 副本与 `SHA256SUMS.txt`。外层校验和覆盖压缩包和独立 manifest；bundle 内的校验和覆盖全部载荷文件以及 `manifest.json`。
 
