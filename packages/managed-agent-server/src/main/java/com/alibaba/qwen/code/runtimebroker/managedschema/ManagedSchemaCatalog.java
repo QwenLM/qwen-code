@@ -414,8 +414,9 @@ final class ManagedSchemaCatalog {
             String expression =
                     column.group(4).substring(generated + "GENERATED ALWAYS AS".length());
             String stored = actual.get(column.group(1));
-            List<String> expectedTokens = expressionTokens(expression);
-            List<String> actualTokens = stored == null ? List.of() : expressionTokens(stored);
+            List<String> expectedTokens = numericBooleans(expressionTokens(expression));
+            List<String> actualTokens =
+                    stored == null ? List.of() : numericBooleans(expressionTokens(stored));
             boolean same = expectedTokens.equals(actualTokens);
             if (!same && "projection_pending".equals(column.group(1))) {
                 int split = expectedTokens.indexOf("or");
@@ -491,9 +492,10 @@ final class ManagedSchemaCatalog {
                         .matcher(portable);
         List<String> tokens = new ArrayList<>();
         while (matcher.find()) {
-            tokens.add(normalizeExpressionToken(matcher.group()));
+            String token = matcher.group();
+            tokens.add(token.startsWith("'") ? token : lower(token));
         }
-        return booleanShape(tokens);
+        return booleanShape(numericBooleans(tokens));
     }
 
     private static List<String> booleanShape(List<String> tokens) {
@@ -573,20 +575,27 @@ final class ManagedSchemaCatalog {
                         .matcher(portable);
         List<String> result = new ArrayList<>();
         while (tokens.find()) {
-            result.add(normalizeExpressionToken(tokens.group()));
+            String token = tokens.group();
+            String normalized = token.startsWith("'") ? token : lower(token);
+            result.add(
+                    switch (normalized) {
+                        case "false" -> "0";
+                        case "true" -> "1";
+                        default -> normalized;
+                    });
         }
         return result;
     }
 
-    // MariaDB stores a bare FALSE/TRUE in a generation expression as 0/1,
-    // while MySQL keeps the keyword, so boolean literals compare numerically.
-    private static String normalizeExpressionToken(String token) {
-        String normalized = token.startsWith("'") ? token : lower(token);
-        return switch (normalized) {
+    // MariaDB stores a bare FALSE/TRUE in a generation expression or check
+    // clause as 0/1, while MySQL keeps the keyword, so boolean literals
+    // compare numerically.
+    private static List<String> numericBooleans(List<String> tokens) {
+        return tokens.stream().map(token -> switch (token) {
             case "false" -> "0";
             case "true" -> "1";
-            default -> normalized;
-        };
+            default -> token;
+        }).toList();
     }
 
     private static List<String> columns(String value) {
