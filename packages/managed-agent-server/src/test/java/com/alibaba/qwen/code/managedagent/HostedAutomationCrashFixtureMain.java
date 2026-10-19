@@ -29,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -164,11 +165,14 @@ public final class HostedAutomationCrashFixtureMain {
         });
         control.start();
         Path ready = root.resolve("ready.tmp");
-        mapper.writeValue(ready.toFile(), Map.of(
-                "internalUrl", "http://127.0.0.1:" + internalPort,
-                "publicUrl", "http://127.0.0.1:" + publicPort,
-                "controlUrl", "http://127.0.0.1:"
-                        + control.getAddress().getPort()));
+        Map<String, Object> advertised = new LinkedHashMap<>();
+        advertised.put("publicUrl", "http://127.0.0.1:" + publicPort);
+        advertised.put("controlUrl", "http://127.0.0.1:"
+                + control.getAddress().getPort());
+        if (internalPort > 0) {
+            advertised.put("internalUrl", "http://127.0.0.1:" + internalPort);
+        }
+        mapper.writeValue(ready.toFile(), advertised);
         Files.move(ready, root.resolve("ready.json"),
                 StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING);

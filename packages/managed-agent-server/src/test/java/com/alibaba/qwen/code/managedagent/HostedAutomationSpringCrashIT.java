@@ -623,12 +623,17 @@ class HostedAutomationSpringCrashIT {
     }
 
     private String runIdOf(String schedule) {
-        return jdbc.queryForObject(
+        List<String> runIds = jdbc.queryForList(
                 "SELECT run_id FROM ma_schedule_occurrence WHERE tenant_id = ?"
                         + " AND schedule_id = ?"
                         + " AND outcome IN ('firing', 'fired')"
                         + " ORDER BY slot DESC LIMIT 1", String.class, tenant,
                 schedule);
+        assertThat(runIds)
+                .as("a firing or fired occurrence for %s carries a run id",
+                        schedule)
+                .isNotEmpty();
+        return runIds.get(0);
     }
 
     private int committedRuns(String sessionId) {
@@ -664,12 +669,15 @@ class HostedAutomationSpringCrashIT {
     }
 
     private String occurrenceOutcome(String schedule) {
-        return jdbc.queryForObject(
+        List<String> outcomes = jdbc.queryForList(
                 "SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
                         + " AND schedule_id = ?"
                         + " AND outcome IN ('firing', 'fired')"
                         + " ORDER BY slot DESC LIMIT 1", String.class,
                 tenant, schedule);
+        // The waiters poll this helper before the slot row exists, so an
+        // absent row must read as a value they can compare, not a throw.
+        return outcomes.isEmpty() ? "absent" : outcomes.get(0);
     }
 
     @Test
