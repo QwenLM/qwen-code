@@ -982,8 +982,13 @@ export class NativeLspService {
     const owned = this.declaredDiagnosticExtensions(handle);
     // Only explicit mappings and recognized languages contribute ownership;
     // an unrecognized server-name key still proves nothing about this file.
-    const hasAttributableOwnership = [...owned].some((ownedExtension) =>
-      this.isAttributableDiagnosticExtension(ownedExtension, serverName),
+    const mapping = handle.config.extensionToLanguage;
+    const hasAttributableOwnership = [...owned].some(
+      (ownedExtension) =>
+        ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(ownedExtension) ||
+        (mapping !== undefined &&
+          (Object.hasOwn(mapping, ownedExtension) ||
+            Object.hasOwn(mapping, `.${ownedExtension}`))),
     );
     return hasAttributableOwnership && !owned.has(extension);
   }

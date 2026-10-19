@@ -345,6 +345,97 @@ describe('diagnostic ownership from explicit declarations', () => {
   });
 
   it.each([
+    {
+      failedName: 'bicep-langserver',
+      failedLanguage: 'bicep',
+      mappingKey: '.bicep',
+      mappingLanguage: 'bicep',
+      ownerLanguage: 'typescript',
+      fileName: 'main.ts',
+    },
+    {
+      failedName: 'pyright-langserver',
+      failedLanguage: 'pyright',
+      mappingKey: 'pyright',
+      mappingLanguage: 'python',
+      ownerLanguage: 'python',
+      fileName: 'main.py',
+    },
+  ])(
+    'does not let a sibling mapping certify $failedName ownership',
+    async ({
+      failedName,
+      failedLanguage,
+      mappingKey,
+      mappingLanguage,
+      ownerLanguage,
+      fileName,
+    }) => {
+      await start([
+        {
+          name: failedName,
+          language: failedLanguage,
+          connection: connection(),
+          failed: true,
+        },
+        {
+          language: 'remote-lsp',
+          mapping: { [mappingKey]: mappingLanguage },
+          connection: connection(),
+        },
+        { language: ownerLanguage, connection: connection() },
+      ]);
+      const result = await document(fileName);
+      expect(result.error?.message).toContain(failedName);
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    },
+  );
+
+  it('does not let a sibling mapping excuse a loader-shaped server that fails mid-query', async () => {
+    const failed = connection();
+    failed.request.mockRejectedValue(new Error('connection reset by peer'));
+    await start([
+      {
+        name: 'bicep-langserver',
+        language: 'bicep',
+        connection: failed,
+      },
+      {
+        language: 'remote-lsp',
+        mapping: { '.bicep': 'bicep' },
+        connection: connection(),
+      },
+      { language: 'typescript', connection: connection() },
+    ]);
+    const result = await document('main.ts');
+    expect(result.error?.message).toContain(
+      'bicep-langserver: connection reset by peer',
+    );
+    expect(result.llmContent).not.toContain('No diagnostics found');
+  });
+
+  it('names a loader-shaped failed server when every server is down', async () => {
+    await start([
+      {
+        name: 'bicep-langserver',
+        language: 'bicep',
+        connection: connection(),
+        failed: true,
+      },
+      {
+        name: 'bicep-mapper',
+        language: 'remote-lsp',
+        mapping: { '.bicep': 'bicep' },
+        connection: connection(),
+        failed: true,
+      },
+    ]);
+    const result = await document('main.ts');
+    expect(result.error?.message).toContain('bicep-langserver');
+    expect(result.error?.message).not.toContain('no configured server covers');
+  });
+
+  it.each([
     ['typescript', 'main.mts'],
     ['typescript', 'main.cts'],
     ['javascript', 'main.mjs'],
@@ -467,18 +558,21 @@ describe('diagnostic ownership from explicit declarations', () => {
     },
   );
 
-  it('does not let a failed explicitly mapped server veto the TypeScript owner', async () => {
-    await start([
-      { language: 'typescript', connection: connection() },
-      {
-        language: 'remote-lsp',
-        mapping: { '.custom': 'custom' },
-        connection: connection(),
-        failed: true,
-      },
-    ]);
-    expect((await document('main.ts')).error).toBeUndefined();
-  });
+  it.each(['.custom', 'custom'])(
+    'does not let a failed server with mapping key %s veto the TypeScript owner',
+    async (mappingKey) => {
+      await start([
+        { language: 'typescript', connection: connection() },
+        {
+          language: 'remote-lsp',
+          mapping: { [mappingKey]: 'custom' },
+          connection: connection(),
+          failed: true,
+        },
+      ]);
+      expect((await document('main.ts')).error).toBeUndefined();
+    },
+  );
 
   it('does not normalize mapping keys or values beyond document synchronization', async () => {
     await start([
