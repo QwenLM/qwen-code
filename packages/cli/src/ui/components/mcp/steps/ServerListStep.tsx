@@ -52,7 +52,10 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
       } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex((prev) => Math.min(flatServers.length - 1, prev + 1));
       } else if (key.name === 'return') {
-        onSelect(selectedIndex);
+        // Grouping reorders rows relative to `servers`, so the cursor's
+        // display position is not an index into the caller's array. Report
+        // the row's own position so selecting a server opens that server.
+        onSelect(servers.indexOf(flatServers[selectedIndex]));
       }
     },
     { isActive: true },
