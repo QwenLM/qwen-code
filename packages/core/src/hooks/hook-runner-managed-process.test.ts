@@ -65,6 +65,7 @@ describe('managed command admission', () => {
         env: { PATH: '', LANG: 'C.UTF-8', QWEN_HOOK_COMMAND_ENV: '{}' },
       }),
       empty: () => true,
+      covers: () => true,
       waitForEmpty,
       kill: vi.fn(),
       terminate,

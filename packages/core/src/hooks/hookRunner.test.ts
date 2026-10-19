@@ -260,6 +260,64 @@ describe('HookRunner', () => {
       expect(launch.mock.calls[0][3]).toEqual({ reapOnParentExit: true });
     });
 
+    const cancelWithUnit = async (covered: boolean) => {
+      const events: string[] = [];
+      const unit = {
+        launch: vi.fn().mockReturnValue({
+          executable: process.execPath,
+          args: ['--eval', 'process.exit(0)'],
+          env: {},
+        }),
+        covers: vi.fn().mockReturnValue(covered),
+        terminate: vi.fn(async () => {
+          events.push('terminate');
+        }),
+        waitForEmpty: vi.fn().mockResolvedValue(true),
+        remove: vi.fn(),
+      } as unknown as HookCommandCgroup;
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      const mockProcess = spawnControllable(4321);
+      mockProcess.kill.mockImplementation(() => {
+        events.push('kill');
+        return true;
+      });
+      (mockProcess as unknown as { stdio: unknown[] }).stdio = [
+        null,
+        null,
+        null,
+        { on: vi.fn() },
+      ];
+      const controller = new AbortController();
+      const resultPromise = hookRunner.executeHook(
+        cmd('echo hi'),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        controller.signal,
+        { waitForProcessTree: true, cgroupRoot: '/fake-root' },
+      );
+      await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled(), {
+        timeout: 5_000,
+      });
+      controller.abort();
+      mockProcess.emit('close', null);
+      await resultPromise;
+      return events;
+    };
+
+    it('drains a covered launcher before the final kill on cancellation', async () => {
+      const events = await cancelWithUnit(true);
+
+      expect(events[0]).toBe('terminate');
+      expect(events.at(-1)).toBe('kill');
+    });
+
+    it('stops an uncovered launcher before terminating the unit', async () => {
+      const events = await cancelWithUnit(false);
+
+      expect(events[0]).toBe('kill');
+      expect(events.indexOf('terminate')).toBeGreaterThan(0);
+    });
+
     it('should return error when hook command is missing', async () => {
       const result = await execute('');
 

@@ -45,6 +45,13 @@ const LAUNCHER = String.raw`
 const { mkdirSync, readFileSync, writeFileSync, writeSync } = require('node:fs');
 const { spawn } = require('node:child_process');
 const [group, executable, args] = process.argv.slice(1);
+// Cancellation SIGTERMs the unit before escalating to cgroup.kill. An
+// opted-in launcher must survive that sweep: if the worker dies before the
+// escalation, this process is the only reaper left. exitLikeChild removes
+// this handler before re-raising a SIGTERM that ended the command.
+if (process.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT === '1') {
+  process.on('SIGTERM', () => {});
+}
 try {
   writeFileSync(group + '/cgroup.procs', String(process.pid));
 } catch {
@@ -102,6 +109,8 @@ let exitCode = 0;
 let exitSignal = null;
 function exitLikeChild() {
   if (exitSignal !== null && !KEPT.includes(exitSignal)) {
+    // The SIGTERM handler above must not swallow the command's own signal.
+    if (exitSignal === 'SIGTERM') process.removeAllListeners('SIGTERM');
     process.kill(process.pid, exitSignal);
     setTimeout(() => process.exit(1), 1000);
     return;
@@ -281,6 +290,28 @@ export class HookCommandCgroup {
     } catch {
       return false;
     }
+  }
+
+  covers(pid: number): boolean {
+    // A launcher that outlived its foreground waits in the reaper sibling
+    // unit, so the original listing alone would misread it as unjoined.
+    for (const file of [
+      join(this.directory, 'cgroup.procs'),
+      join(`${this.directory}-reaper-${pid}`, 'cgroup.procs'),
+    ]) {
+      try {
+        if (
+          readFileSync(file, 'utf8')
+            .split('\n')
+            .some((line) => Number(line) === pid)
+        ) {
+          return true;
+        }
+      } catch {
+        // A missing unit holds no members.
+      }
+    }
+    return false;
   }
 
   async waitForEmpty(

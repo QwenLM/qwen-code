@@ -127,6 +127,20 @@ describe('unit creation and attachment', () => {
     ).toThrow(HookCommandIsolationUnavailableError);
     expect(await readdir(directory)).toEqual(['qwen-bg-owner']);
   });
+
+  it('covers a launcher that moved into its reaper sibling unit', async () => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    await writeFile(join(directory, 'cgroup.procs'), '1\n');
+    const sibling = `${directory}-reaper-4321`;
+    await mkdir(sibling);
+    await writeFile(join(sibling, 'cgroup.procs'), '4321\n');
+
+    expect(unit.covers(1)).toBe(true);
+    expect(unit.covers(4321)).toBe(true);
+    expect(unit.covers(9999)).toBe(false);
+  });
 });
 
 describe('managed command launcher environment', () => {
@@ -241,11 +255,16 @@ fs.appendFileSync(${JSON.stringify(marker)}, fs.readFileSync(${JSON.stringify(jo
 });
 
 describe('exit evidence', () => {
-  const run = (script: string) => {
+  const run = (script: string, options?: { reapOnParentExit?: boolean }) => {
     const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
       directory,
     ]);
-    const launch = unit.launch(process.execPath, ['--eval', script], {});
+    const launch = unit.launch(
+      process.execPath,
+      ['--eval', script],
+      {},
+      options,
+    );
     return spawnSync(launch.executable, launch.args, {
       env: launch.env,
       stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
@@ -272,6 +291,20 @@ describe('exit evidence', () => {
       expect(result.error).toBeUndefined();
       expect(result.status).toBeNull();
       expect(result.signal).toBe(signal);
+    },
+  );
+
+  // The opted-in launcher handles SIGTERM to survive the cancellation sweep.
+  // That handler must not swallow the SIGTERM that ended the command itself.
+  it.skipIf(process.platform === 'win32')(
+    'ends by the SIGTERM that ended its command while opted into reaping',
+    () => {
+      const result = run(`process.kill(process.pid, 'SIGTERM')`, {
+        reapOnParentExit: true,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBeNull();
+      expect(result.signal).toBe('SIGTERM');
     },
   );
 });
@@ -486,6 +519,112 @@ setInterval(() => {}, 1000);`,
       process.kill(descendantPid, 'SIGKILL');
     } catch {
       // The descendant already exited.
+    }
+  });
+
+  it('survives the cancellation SIGTERM sweep until the worker dies', async () => {
+    const launcherPidFile = join(directory, 'launcher.pid');
+    const foregroundPidFile = join(directory, 'foreground.pid');
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      [
+        '--eval',
+        `const { writeFileSync } = require('node:fs');
+process.on('SIGTERM', () => {});
+writeFileSync(process.env.FOREGROUND_PID, String(process.pid));
+setInterval(() => {}, 1000);`,
+      ],
+      { FOREGROUND_PID: foregroundPidFile },
+      { reapOnParentExit: true },
+    );
+    const worker = spawn(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const spec = JSON.parse(process.env.SPEC);
+const child = spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+writeFileSync(process.env.LAUNCHER_PID, String(child.pid));
+setInterval(() => {}, 1000);`,
+      ],
+      {
+        env: {
+          PATH: process.env['PATH'] ?? '',
+          SPEC: JSON.stringify(launch),
+          LAUNCHER_PID: launcherPidFile,
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    let foregroundPid: number | undefined;
+    try {
+      await waitFor(async () => {
+        try {
+          return (await readFile(launcherPidFile, 'utf8')).length > 0;
+        } catch {
+          return false;
+        }
+      });
+      const launcherPid = Number(await readFile(launcherPidFile, 'utf8'));
+
+      // Cancellation SIGTERMs every unit member before escalating.
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.procs'), 'utf8')) ===
+            String(launcherPid)
+          );
+        } catch {
+          return false;
+        }
+      });
+      foregroundPid = Number(
+        await waitFor(async () => {
+          try {
+            return (await readFile(foregroundPidFile, 'utf8')).length > 0;
+          } catch {
+            return false;
+          }
+        }).then(() => readFile(foregroundPidFile, 'utf8')),
+      );
+      process.kill(launcherPid, 'SIGTERM');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // The launcher is the reaper: the SIGTERM must not end it, and the
+      // kill escalation still belongs to the worker.
+      expect(alive(launcherPid)).toBe(true);
+      await expect(
+        readFile(join(directory, 'cgroup.kill'), 'utf8'),
+      ).rejects.toThrow();
+
+      // The worker dies inside the grace period; the launcher must escalate.
+      worker.kill('SIGKILL');
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.kill'), 'utf8')) === '1'
+          );
+        } catch {
+          return false;
+        }
+      });
+      await waitFor(() => !alive(launcherPid));
+    } finally {
+      worker.kill('SIGKILL');
+      if (foregroundPid) {
+        try {
+          process.kill(foregroundPid, 'SIGKILL');
+        } catch {
+          // The foreground already exited.
+        }
+      }
     }
   });
 });
