@@ -40,6 +40,17 @@ async function fixture(root) {
       "workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\n",
     'packages/managed-agent-server/distribution/config/application.example.yml':
       'template\n',
+    'packages/managed-agent-server/distribution/systemd/qwen-managed-agent-server.service':
+      '[Service]\nKillMode=process\n',
+    'packages/managed-agent-server/distribution/systemd/qwen-hosted-harness.service':
+      'ExecStart=qwen serve --profile hosted-harness --no-web\n',
+    'packages/managed-agent-server/distribution/systemd/harness.env.example':
+      'QWEN_SERVER_TOKEN=\n',
+    'packages/managed-agent-server/distribution/systemd/server.env.example':
+      'SPRING_DATASOURCE_URL=\n',
+    'packages/managed-agent-server/distribution/systemd/README.md': 'systemd\n',
+    'packages/managed-agent-server/distribution/systemd/README.zh-CN.md':
+      'systemd zh\n',
     'packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json':
       JSON.stringify({ info: { version: '1.46.0' } }),
     'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__baseline.sql':
@@ -126,6 +137,20 @@ test('packages an independently verifiable reference distribution', async () => 
         'utf8',
       ),
       'template\n',
+    );
+    assert.equal(
+      await readFile(
+        path.join(bundle, 'systemd/qwen-managed-agent-server.service'),
+        'utf8',
+      ),
+      '[Service]\nKillMode=process\n',
+    );
+    assert.match(
+      await readFile(
+        path.join(bundle, 'systemd/qwen-hosted-harness.service'),
+        'utf8',
+      ),
+      /--profile hosted-harness/,
     );
     execFileSync('sha256sum', ['--check', 'SHA256SUMS.txt'], {
       cwd: output,
@@ -219,6 +244,55 @@ test('launchers load the distribution config only when it exists', async () => {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+test('ships systemd units with the documented kill modes', async () => {
+  const directory = new URL(
+    '../../packages/managed-agent-server/distribution/systemd/',
+    import.meta.url,
+  );
+  const server = await readFile(
+    new URL('qwen-managed-agent-server.service', directory),
+    'utf8',
+  );
+  const harness = await readFile(
+    new URL('qwen-hosted-harness.service', directory),
+    'utf8',
+  );
+
+  assert.match(server, /^KillMode=process$/m);
+  assert.match(server, /^StateDirectory=qwen-managed-agent$/m);
+  assert.match(
+    server,
+    /^EnvironmentFile=\/etc\/qwen-managed-agent\/server\.env$/m,
+  );
+  assert.match(
+    server,
+    /^ExecStart=\/opt\/qwen-managed-agent\/bin\/qwen-managed-agent-server$/m,
+  );
+  assert.match(harness, /^KillMode=mixed$/m);
+  assert.match(harness, /^StateDirectory=qwen-managed-agent$/m);
+  assert.match(harness, /--profile hosted-harness/);
+  assert.match(harness, /--no-web/);
+  assert.match(harness, /QWEN_HOSTED_HARNESS_BROKER_ARGS/);
+  assert.ok(server.endsWith('\n'));
+  assert.ok(harness.endsWith('\n'));
+  assert.doesNotMatch(server, /\t/);
+  assert.doesNotMatch(harness, /\t/);
+});
+
+test('enables the Session Store wherever the env template enables the Harness', async () => {
+  const template = await readFile(
+    new URL(
+      '../../packages/managed-agent-server/distribution/systemd/server.env.example',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  assert.match(template, /^QWEN_MANAGED_AGENT_HARNESS_ENABLED=true$/m);
+  assert.match(template, /^QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=true$/m);
+  assert.match(template, /^QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL=\S+$/m);
+  assert.match(template, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=\S+$/m);
 });
 
 test('rejects a stable distribution version', async () => {
