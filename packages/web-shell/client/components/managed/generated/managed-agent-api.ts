@@ -1591,12 +1591,12 @@ export interface components {
             mime_type: string;
             text: string;
         };
-        /** @description Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 8 MiB. */
+        /** @description Canonical base64 PNG, JPEG, GIF or WebP image with a matching signature. The image/jpg alias is normalized to image/jpeg. The complete canonical input containing attachments is limited to 8 MiB. */
         InputImageBlock: {
             /** @enum {string} */
             type: "input_image";
             /** @enum {string} */
-            mime_type: "image/png" | "image/jpeg" | "image/webp";
+            mime_type: "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp";
             data: string;
         };
         WebShellSkill: {
