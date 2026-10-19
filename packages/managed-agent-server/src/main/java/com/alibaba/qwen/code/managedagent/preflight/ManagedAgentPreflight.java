@@ -81,6 +81,7 @@ public final class ManagedAgentPreflight {
         ManagedAgentProperties properties = bind(environment, checks);
         checks.add(javaCheck());
         checks.add(configFileCheck(locations));
+        checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
         checks.add(harnessCheck(properties));
@@ -198,7 +199,18 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    private static Check javaCheck() {
+    static Check startupValidationCheck(ManagedAgentProperties properties) {
+        try {
+            properties.validateForPreflight();
+            return new Check("validation", Status.PASS,
+                    "startup properties accepted", null);
+        } catch (RuntimeException error) {
+            return new Check("validation", Status.FAIL, rootMessage(error),
+                    "correct the startup configuration");
+        }
+    }
+
+    static Check javaCheck() {
         Runtime.Version version = Runtime.version();
         return version.feature() >= MIN_JAVA_FEATURE
                 ? new Check("java", Status.PASS, version.toString(), null)
