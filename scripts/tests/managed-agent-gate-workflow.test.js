@@ -446,6 +446,7 @@ describe('Managed Agent gate tier selection', () => {
         HEAD_SHA: 'h1',
         BASE_REF: 'main',
         PR_NUMBER: '7',
+        PR_STATE: 'open',
         REVIEW_AUTHOR_ASSOCIATION: 'MEMBER',
         TOUCHED: 'true',
         FAKE_URLS: '',
@@ -499,6 +500,17 @@ describe('Managed Agent gate tier selection', () => {
         JSON.stringify(association),
       ).toBe('tier=none');
     }
+  });
+
+  it('skips a review of a closed pull request', () => {
+    const approve = {
+      EVENT_NAME: 'pull_request_review',
+      REVIEW_STATE: 'approved',
+    };
+    // An automated reviewer can approve after merge. The check no longer
+    // gates anything, and a full run only starves live lanes on the host lock.
+    expect(tier({ ...approve, PR_STATE: 'closed' })).toBe('tier=none');
+    expect(tier({ ...approve, PR_STATE: 'open' })).toBe('tier=full');
   });
 
   it('skips an approval only when an earlier approval run covers the head', () => {

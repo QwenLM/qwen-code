@@ -48,13 +48,13 @@ machine hours per day.
 
 ### Tiers
 
-| Trigger                    | Condition                                                        | Tier | Lanes                                        |
-| -------------------------- | ---------------------------------------------------------------- | ---- | -------------------------------------------- |
-| `pull_request` push        | touches Managed Agent paths                                      | fast | flyway guard, real-daemon E2E, Linux Java 21 |
-| `pull_request_review`      | first maintainer approval of the current head, touches the paths | full | all 11 lanes                                 |
-| `push` to main             | touches the paths                                                | fast | as above                                     |
-| `merge_group`              | touches the paths                                                | fast | as above                                     |
-| nightly, dispatch, release | unchanged (`sdk-java.yml` called directly)                       | full | all 11 lanes                                 |
+| Trigger                    | Condition                                                                      | Tier | Lanes                                        |
+| -------------------------- | ------------------------------------------------------------------------------ | ---- | -------------------------------------------- |
+| `pull_request` push        | touches Managed Agent paths                                                    | fast | flyway guard, real-daemon E2E, Linux Java 21 |
+| `pull_request_review`      | first maintainer approval of the current head on an open PR, touches the paths | full | all 11 lanes                                 |
+| `push` to main             | touches the paths                                                              | fast | as above                                     |
+| `merge_group`              | touches the paths                                                              | fast | as above                                     |
+| nightly, dispatch, release | unchanged (`sdk-java.yml` called directly)                                     | full | all 11 lanes                                 |
 
 `managed-agent-gate.yml` selects the tier and calls `sdk-java.yml` through
 `workflow_call` with a new `tier` input. `tier: fast` narrows the `test` matrix
@@ -112,7 +112,9 @@ cancels in progress, so it is a timeout or an operator stop.
 `dismiss_stale_reviews` is on for main, so the first approval of a head
 always follows its last push. Only a maintainer's approval starts the full
 tier: the reviewer's `author_association` must be `OWNER`, `MEMBER` or
-`COLLABORATOR`, and an absent association fails closed.
+`COLLABORATOR`, and an absent association fails closed. A review submitted
+after the PR closed is skipped: branch protection no longer reads the check,
+and the push arm already covers the merged tree.
 `qwen-triage-finalize.yml` watches this workflow and posts a deferred
 `APPROVE` once a PR's checks land green, so without that check the gate's own
 fast tier would buy the most expensive run in the repository with no human

@@ -39,13 +39,13 @@
 
 ### 分层
 
-| 触发                  | 条件                                           | 层级 | 检查项                                      |
-| --------------------- | ---------------------------------------------- | ---- | ------------------------------------------- |
-| `pull_request` push   | 改到 Managed Agent 路径                        | fast | flyway 检查、真实 daemon E2E、Linux Java 21 |
-| `pull_request_review` | 当前 head 的首个维护者 approve，且改到这些路径 | full | 全部 11 项                                  |
-| `push` 到 main        | 改到这些路径                                   | fast | 同上                                        |
-| `merge_group`         | 改到这些路径                                   | fast | 同上                                        |
-| 夜间、手动、发布      | 不变（直接调用 `sdk-java.yml`）                | full | 全部 11 项                                  |
+| 触发                  | 条件                                                        | 层级 | 检查项                                      |
+| --------------------- | ----------------------------------------------------------- | ---- | ------------------------------------------- |
+| `pull_request` push   | 改到 Managed Agent 路径                                     | fast | flyway 检查、真实 daemon E2E、Linux Java 21 |
+| `pull_request_review` | 当前 head 的首个维护者 approve（PR 仍打开），且改到这些路径 | full | 全部 11 项                                  |
+| `push` 到 main        | 改到这些路径                                                | fast | 同上                                        |
+| `merge_group`         | 改到这些路径                                                | fast | 同上                                        |
+| 夜间、手动、发布      | 不变（直接调用 `sdk-java.yml`）                             | full | 全部 11 项                                  |
 
 `managed-agent-gate.yml` 选择层级，并通过 `workflow_call` 调用 `sdk-java.yml`，
 传入新增的 `tier` 输入。`tier: fast` 把 `test` 矩阵收窄到 Linux Java 21 一条，并跳过
@@ -96,7 +96,8 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 
 main 开启了 `dismiss_stale_reviews`，所以一个 head 的首个 approve 必然在它最后一次
 push 之后。只有维护者的 approve 才会启动全量层级：reviewer 的 `author_association`
-必须是 `OWNER`、`MEMBER` 或 `COLLABORATOR`，缺失该字段时同样按不放行处理。
+必须是 `OWNER`、`MEMBER` 或 `COLLABORATOR`，缺失该字段时同样按不放行处理。PR 关闭后
+才提交的 review 会被跳过：分支保护不再读取该检查，且 push 臂已经覆盖了合并后的树。
 `qwen-triage-finalize.yml` 监听本工作流，并在一个 PR 的检查全绿后自动发 deferred
 `APPROVE`；少了这道限制，门禁自己的 fast 层级就会在无人参与的情况下买下仓库里最贵的
 一次运行。

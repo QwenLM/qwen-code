@@ -202,6 +202,7 @@ jobs:
           TOUCHED: '${{ steps.paths.outputs.touched }}'
           REVIEW_STATE: '${{ github.event.review.state }}'
           REVIEW_AUTHOR_ASSOCIATION: '${{ github.event.review.author_association }}'
+          PR_STATE: '${{ github.event.pull_request.state }}'
           BASE_REF: '${{ github.event.pull_request.base.ref }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
@@ -220,7 +221,13 @@ jobs:
                 # land green, so an ungated check lets the gate's own fast tier
                 # buy the most expensive run in the repository with no human
                 # involved. An empty association fails closed the same way.
-                if [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' &&
+                # A review submitted after the PR closed cannot affect branch
+                # protection: its head already merged or was abandoned. The
+                # push arm covers the merged tree, so skip the suite instead of
+                # contending for the per-host Java lock.
+                if [[ "${PR_STATE}" == 'closed' ]]; then
+                  echo 'PR is closed; skipping the review run.'
+                elif [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' &&
                   ' OWNER MEMBER COLLABORATOR ' == *" ${REVIEW_AUTHOR_ASSOCIATION} "* ]]; then
                   tier=full
                   urls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?check_name=Managed%20Agent%20gate&per_page=100" \
