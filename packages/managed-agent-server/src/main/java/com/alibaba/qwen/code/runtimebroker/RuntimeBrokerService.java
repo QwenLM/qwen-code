@@ -1608,23 +1608,31 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Set<String> candidates = new LinkedHashSet<>();
         String after = null;
         for (;;) {
-            List<ToolExecutionRecord> batch = executionRepository
+            List<ToolHoldRow> batch = executionRepository
                     .findHoldRowsByHarnessSession(harnessSessionId, after, 100);
-            for (ToolExecutionRecord row : batch) {
-                candidates.add(row.getRuntimeSessionId());
+            for (ToolHoldRow row : batch) {
+                candidates.add(row.runtimeSessionId());
             }
             if (batch.size() < 100) {
                 break;
             }
-            after = batch.get(batch.size() - 1).getExecutionCallId();
+            after = batch.get(batch.size() - 1).executionCallId();
+        }
+        Set<String> released = new LinkedHashSet<>();
+        List<String> ids = List.copyOf(candidates);
+        for (int from = 0; from < ids.size(); from += 100) {
+            for (RuntimeSessionRecord session : sessionRepository.findHistoricalByIds(
+                    tenantId, harnessSessionId,
+                    ids.subList(from, Math.min(from + 100, ids.size())))) {
+                if (session.getState() == RuntimeSessionRecord.State.RELEASED) {
+                    released.add(session.getRuntimeSessionId());
+                }
+            }
         }
         List<String> held = new ArrayList<>();
         for (String runtimeSessionId : candidates) {
-            RuntimeSessionRecord session = sessionRepository.findHistorical(
-                    tenantId, harnessSessionId, runtimeSessionId);
             // A missing record is not a durably recorded release either.
-            if (session == null
-                    || session.getState() != RuntimeSessionRecord.State.RELEASED) {
+            if (!released.contains(runtimeSessionId)) {
                 held.add(runtimeSessionId);
             }
         }
