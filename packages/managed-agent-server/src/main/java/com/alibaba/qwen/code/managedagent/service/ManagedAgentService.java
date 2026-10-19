@@ -382,6 +382,10 @@ public class ManagedAgentService {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
         }
+        // A creation with input warms through its first Turn's dispatch.
+        if (admission.turnId() == null) {
+            coordinator.warmSession(tenantId, admission.sessionId());
+        }
         dispatch(tenantId, admission, true);
         return response(admission);
     }
