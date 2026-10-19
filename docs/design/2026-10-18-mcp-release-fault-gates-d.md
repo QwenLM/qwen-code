@@ -27,7 +27,7 @@ The whole-Spring/Broker restart cells stay out. A whole-Spring restart replaces 
 3. **Hold the release dispatch, kill after `releasing`.** The proxy parks `mcp-release` before forwarding, the test asserts the database record is `releasing` and the dispatch is in flight, then SIGKILLs the Harness. Releasing the hold lets the original dispatch reach the Runtime and register the operation, so the replacement's lookup has something to settle.
 4. **Reload with the original claim.** The load carries `lifecycleProtocolVersion: 2` and `lifecycleAuthority` = the original `{operationId, claimGeneration}`. The replacement retries `settle_resources` (bounded) while the release is `running`; a settled lookup commits `drained`/`released`.
 5. **The gate asserts the wire, then the state.** One `mcp-release` for `${configurationId}:release`, a settled `mcp-status` lookup for the same id (the bounded retry may issue more than one), no `mcp-configure`/`mcp-invoke` after the baseline, one `mcp.start`, and `runtimeSessionId` unchanged. `releaseState: released` is asserted only after that sequence. If the release never settles the route answers 503 and the record stays `releasing`/`drained`; the bounded retry fails rather than accepting a fabricated `released`.
-6. **The conclusive reply is held, not reconstructed.** A settled lookup in the wire only shows that the answer existed, not that the state waited for it. The proxy therefore parks the settled `mcp-status` answer after the Broker produced it; while it is parked the case asserts the record is still `releasing` and the close route has not answered, then releases the answer and expects `drained`/`released`. The release dispatch itself is not a witness: it legally answers `running`.
+6. **The conclusive reply is held, not reconstructed.** A settled lookup in the wire only shows that the answer existed, not that the state waited for it. The proxy therefore parks the settled `mcp-status` answer after the Broker produced it; while it is parked the case asserts the record is still `releasing` and the close route has not answered, then releases the answer and expects the close to complete with `released`. The release dispatch itself is not a witness: it legally answers `running`.
 
 ## Fixture design
 
@@ -40,12 +40,12 @@ The whole-Spring/Broker restart cells stay out. A whole-Spring restart replaces 
 
 No new class, so the six fork accounts stay unchanged: the class `@Timeout` 600 s, the shared healthy sum and CI fork (current values in `hosted-process-ci.test.js`) and its literal pin, the local `hosted-mcp-gates` profile (`**/HostedMcp*IT.java`), the workflow comments, and the artifact root `target/fg12-cases/`.
 
-Measured on JDK 21 + MariaDB 10.11: the new case 6.7–9.1 s; the six-case class 33.0–50.5 s (latest 33.9 s). FG12c's 49 s allowance was already budgeted at 2× (~98 s), so the +9 s case stays inside that allowance; the shared healthy sum and the CI fork do not move. The artifact root already covers `fg12d`, so no upload or meta-test edit is needed.
+Measured on JDK 21 + MySQL 8.0.46 after the held reply was added: the six-case class 32–37 s across two runs (latest 36.8 s), the release case 6.0–6.5 s. FG12c's 49 s allowance was already budgeted at 2× (~98 s), so the class stays inside that allowance; the shared healthy sum and the CI fork do not move. MariaDB 10.11 cannot run this class on current `main`: it fails managed-schema validation before Spring starts. The artifact root already covers `fg12d`, so no upload or meta-test edit is needed.
 
 ## Acceptance
 
 - `mvn -q -DskipTests test-compile checkstyle:check` clean.
-- `HostedMcpRestartFaultGatesIT` 6/6 green on JDK 21 + MariaDB; the new case proves its injection (`releasing` in the database and a held `mcp-release`) before the kill.
+- `HostedMcpRestartFaultGatesIT` 6/6 green on JDK 21 + MySQL 8.0.46 (MariaDB 10.11 cannot validate the current managed schema); the new case proves its injection (`releasing` in the database and a held `mcp-release`) before the kill.
 - The `fg12d` evidence shows one `mcp-release`, at least one settled `mcp-status` for the same id, one `mcp.start` and one `mcp.exit`, `released`, and no second configure or invoke.
 - While the settled `mcp-status` reply is parked, the record is still `releasing` and `settle_resources` has not answered; both advance only after the reply is delivered.
 - No TS mutation witness in this slice (per the FG12d brief). Remaining risk: the green depends on the release settling within the 60×1 s retry window; a slower Runtime fails the gate rather than passing it with an unsettled record.

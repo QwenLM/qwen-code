@@ -116,6 +116,7 @@ class HostedMcpRestartFaultGatesIT {
     private HttpServer model;
     private ExecutorService modelExecutor;
     private HttpServer brokerProxy;
+    private ExecutorService brokerExecutor;
     private ServletWebServerApplicationContext spring;
     private JdbcTemplate jdbc;
     private ManagedAgentStore store;
@@ -403,15 +404,18 @@ class HostedMcpRestartFaultGatesIT {
             await().atMost(Duration.ofSeconds(60)).until(() ->
                     replyParked.getCount() == 0 || pending.isDone());
             if (replyParked.getCount() == 0) {
-                assertThat(pending.isDone())
-                        .as("settle must wait for the held status reply")
-                        .isFalse();
-                assertThat(configuration(session.id()).path("releaseState")
-                        .asText())
-                        .as("released must not be committed before the "
-                                + "settled answer reaches the Harness")
-                        .isEqualTo("releasing");
-                releaseReply();
+                try {
+                    assertThat(pending.isDone())
+                            .as("settle must wait for the held status reply")
+                            .isFalse();
+                    assertThat(configuration(session.id()).path("releaseState")
+                            .asText())
+                            .as("released must not be committed before the "
+                                    + "settled answer reaches the Harness")
+                            .isEqualTo("releasing");
+                } finally {
+                    releaseReply();
+                }
                 settled = pending.get(30, TimeUnit.SECONDS);
                 break;
             }
@@ -1220,6 +1224,8 @@ class HostedMcpRestartFaultGatesIT {
     private void startBrokerProxy() throws IOException {
         brokerProxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0),
                 0);
+        brokerExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        brokerProxy.setExecutor(brokerExecutor);
         brokerProxy.createContext("/", this::relay);
         brokerProxy.start();
     }
@@ -1418,6 +1424,9 @@ class HostedMcpRestartFaultGatesIT {
                 spring.close();
             }
         } finally {
+            if (brokerExecutor != null) {
+                brokerExecutor.shutdownNow();
+            }
             if (brokerProxy != null) {
                 brokerProxy.stop(0);
             }
