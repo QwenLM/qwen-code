@@ -1316,7 +1316,13 @@ describe('Hosted Harness no-tool session', () => {
       ),
     );
     vi.restoreAllMocks();
-    await rm(state.root, { recursive: true, force: true });
+    await rm(state.root, {
+      recursive: true,
+      force: true,
+      // A wake pump's final writes can still be in flight at teardown.
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   it('persists model selection and refuses changed resident and cold prompt replays', async () => {
@@ -22424,7 +22430,13 @@ describe('Hosted Harness refusal reasons', () => {
   });
   afterEach(async () => {
     vi.restoreAllMocks();
-    await rm(state.root, { recursive: true, force: true });
+    await rm(state.root, {
+      recursive: true,
+      force: true,
+      // A wake pump's final writes can still be in flight at teardown.
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   async function createAndDetach() {
@@ -34884,7 +34896,13 @@ describe('Hosted Harness stored definitions', () => {
       ),
     );
     vi.restoreAllMocks();
-    await rm(state.root, { recursive: true, force: true });
+    await rm(state.root, {
+      recursive: true,
+      force: true,
+      // A wake pump's final writes can still be in flight at teardown.
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
