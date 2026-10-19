@@ -1071,20 +1071,8 @@ class AutomationScannerTest {
         assertThat(claim.attempts()).isEqualTo(1);
         assertThat(claim.lastError()).isEqualTo("connection lost");
         assertThat(claim.trigger()).isEqualTo(AutomationScanner.TRIGGER_MANUAL);
-        // A retry inside the defer window answers the retryable 503 without
-        // spending an attempt: the scanner owns the next fire.
-        assertThatThrownBy(() -> service.run(tenant, ACTOR, id, "lost-1"))
-                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                    assertThat(error.getStatus())
-                            .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
-                    assertThat(error.getCode())
-                            .isEqualTo("automation_operation_unknown");
-                });
-        assertThat(fake.fires()).isEqualTo(1);
-        assertThat(ledger.findOccurrence(tenant, id, "manual:lost-1")
-                .orElseThrow().attempts()).isEqualTo(1);
-        clock.addAndGet(11_000);
-        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        // The first same-key retry after a lost answer re-drives the claim:
+        // the caller is answered what the Harness now says.
         var asked = service.run(tenant, ACTOR, id, "lost-1");
         assertThat(asked.replayed()).isTrue();
         assertThat(asked.body().outcome()).isEqualTo("fired");

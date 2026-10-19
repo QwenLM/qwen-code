@@ -98,6 +98,11 @@ attempt was the same commit and that at least three were made.
   channel routes answer them. Every other 409 keeps its class. The gate
   pins the answer: it accepts only `202` or `503`.
 
+  A same-key manual-run retry inside the occurrence's defer window answers
+  the retryable 503 without spending an attempt once the first re-drive
+  has been spent; the scanner owns the next fire. The first retry after a
+  lost answer still re-drives, so the gate's second send reaches `202`.
+
 ## Mutation witnesses
 
 Each witness was run against its own case alone and restored byte for

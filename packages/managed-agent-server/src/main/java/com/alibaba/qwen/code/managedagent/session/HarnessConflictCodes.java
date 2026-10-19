@@ -10,8 +10,9 @@ import java.util.Set;
  *
  * <p>{@code hosted_session_blocked} is deliberately excluded: a recovery
  * block can lift, but the cleanup-blocked paths may never do so, so a
- * retry cannot be promised. Every other 409 stays a conflict for the same
- * reason.
+ * retry cannot be promised. The scanner still re-drives this code after a
+ * refused fire; the public route does not promise the same. Every other
+ * 409 stays a conflict for the same reason.
  */
 public final class HarnessConflictCodes {
     private static final Set<String> TRANSIENT = Set.of(

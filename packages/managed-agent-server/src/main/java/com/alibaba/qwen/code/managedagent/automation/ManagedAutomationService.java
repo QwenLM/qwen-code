@@ -350,13 +350,15 @@ public class ManagedAutomationService {
                             "The automation is being scanned; retry."));
             if (AutomationLedgerStore.OUTCOME_FIRING.equals(
                     occurrence.outcome())) {
-                if (occurrence.nextRetryAt() > now) {
-                    // The last attempt deferred the claim. A client retry
-                    // inside that window must not spend another attempt or
-                    // move the scanner's schedule; the scanner owns the
-                    // next fire once the delay lapses.
+                if (occurrence.nextRetryAt() > now
+                        && occurrence.attempts() > 1) {
+                    // The first same-key retry after a failure re-drives,
+                    // so a lost answer still recovers. Once that attempt
+                    // is spent, a retry inside the window must not spend
+                    // another one or move the scanner's schedule; the
+                    // scanner owns the next fire when the delay lapses.
                     throw new ManagedAgentException(HttpStatus.SERVICE_UNAVAILABLE,
-                            "automation_operation_unknown",
+                            deferredCode(occurrence),
                             "The Hosted Harness answer is pending; retry"
                                     + " the same key.");
                 }
@@ -365,7 +367,8 @@ public class ManagedAutomationService {
                 } catch (RuntimeException error) {
                     // The claim is durable and re-driven by the scanner
                     // with backoff; the same key answers it once known.
-                    scanner.defer(held, occurrence, owner, fence, error, now);
+                    scanner.defer(held, occurrence, owner, fence, error,
+                            clock.get());
                     throw unobtained(error);
                 }
                 // A definitive route refusal settles the decision as
@@ -817,6 +820,20 @@ public class ManagedAutomationService {
         return UUID.nameUUIDFromBytes(("qwen-automation:\0" + tenantId + '\0'
                 + idempotencyKey).getBytes(StandardCharsets.UTF_8))
                 .toString();
+    }
+
+    private static String deferredCode(OccurrenceRow occurrence) {
+        String error = occurrence.lastError();
+        if (error != null) {
+            int at = error.indexOf("\"code\":\"");
+            if (at >= 0) {
+                int end = error.indexOf('"', at + 8);
+                if (end > at) {
+                    return error.substring(at + 8, end);
+                }
+            }
+        }
+        return "automation_operation_unknown";
     }
 
     static ManagedAgentException translate(DaemonHttpException error) {
