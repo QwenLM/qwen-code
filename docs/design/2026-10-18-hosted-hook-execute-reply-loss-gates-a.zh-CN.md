@@ -14,7 +14,8 @@ Issue #14449 跟踪 Hosted Hook 两个域的 Stage F 故障门禁轮次。FG13c 
 ## 决策
 
 1. **复用 FG13d 的装置与 broker 代理。** 新类沿用只含 Hook 的定义、打包 Harness、
-   durable worker 与转发代理；每格只丢弃一条具名控制回复，其余请求直通。
+   durable worker 与转发代理。前三格各丢弃一条具名 broker 控制回复、其余请求直通；
+   HTTP 格改为丢弃端点响应。
 2. **两个命令格的重试走状态轮询，而不是第二次 execute。** 派发回复丢失时，Harness
    会按记录自身的 `runtimeSessionId` 回落到 `hook-status`，这正是物理调用保持一次
    的原因。

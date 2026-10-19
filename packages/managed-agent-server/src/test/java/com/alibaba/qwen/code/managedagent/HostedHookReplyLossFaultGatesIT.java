@@ -56,12 +56,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
 
-// FG13a (issues #14054/#14449): lost replies for the managed command Hook.
+// FG13a (issues #14054/#14449): lost replies for the managed Hook.
 // The dispatch reply is dropped after the worker admitted the operation, so
 // the retry must resolve the same operation through the owner's status, keep
 // exactly one physical call, and apply its single result. The catalog reply
 // is dropped before the registration commits, so the retried admission must
-// register the pinned catalog once instead of appending a second record.
+// register the pinned catalog once instead of appending a second record. The
+// HTTP endpoint consumes the request and drops its reply, so the receipt stays
+// unknown and the endpoint is never called again.
 @EnabledOnOs(OS.LINUX)
 class HostedHookReplyLossFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-files/1";
@@ -401,15 +403,17 @@ class HostedHookReplyLossFaultGatesIT {
         String session = createSession(definition.path("id").asText(), "initial");
         submit(session, "FG13_HTTP_LOSS");
         // The endpoint receives the POST once and drops the reply, so the
-        // worker's receipt stays unknown and failClosed blocks the tool.
+        // worker's receipt stays unknown and the tool is never dispatched.
         waitFor(() -> {
             JsonNode execution = hookExecution(session);
             assertThat(execution.at("/run/state").asText()).isEqualTo("recovery_blocked");
             assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
         });
+        // Give a late retry the chance to land before proving none did.
+        await().pollDelay(Duration.ofSeconds(3)).atMost(Duration.ofSeconds(5))
+                .until(() -> true);
         assertThat(hookRequests.get()).as("HTTP hook requests").isEqualTo(1);
-        // The unknown receipt blocks the turn: the tool never reads the file
-        // and the endpoint is never asked a second time.
+        // The unknown receipt blocks the turn: the tool never reads the file.
         assertThat(modelRequests.toString()).doesNotContain(PROOF);
         assertThat(modelFailure.get()).isNull();
     }

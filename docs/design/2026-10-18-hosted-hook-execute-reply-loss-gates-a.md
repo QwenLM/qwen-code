@@ -19,8 +19,9 @@ second command.
 
 1. **Reuse the FG13d rig and broker proxy.** The class borrows the Hook-only
    definition, the packaged Harness, the durable worker and the forwarding
-   proxy from the FG13d stack base; each cell drops one named control reply,
-   and every other call passes through.
+   proxy from the FG13d stack base. The first three cells drop one named broker
+   control reply and pass every other call through; the HTTP cell drops the
+   endpoint's response instead.
 2. **For the two command cells, the retry is a status poll, not a second
    execute.** The Harness falls back to `hook-status` on the record's own
    `runtimeSessionId` when the dispatch reply is lost, which is what keeps the
