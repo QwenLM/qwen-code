@@ -30,7 +30,7 @@
 | `validation` | 绑定后的配置通过启动期属性校验。                                                                                             |
 | `auth`       | 非 loopback 绑定不使用 `auto`；signed 模式配置了签名密钥；insecure bind 会给出告警。                                         |
 | `harness`    | 启用的 Harness 具备 token、格式正确的 digest，且 `GET /capabilities` 返回 200。                                              |
-| `tool-path`  | Workspace files 与 Shell 的启用组合满足启动期的交叉校验规则。                                                                |
+| `tool-path`  | Workspace files 与 Shell 的启用组合、isolation class，以及 mount、creation root 或 SSH 节点的要求满足启动期规则。            |
 | `broker`     | token、active 与 previous 凭据密钥均可解码为 32 字节；状态目录可写；provisioner 所需的 Node/worker 或 static endpoint 齐备。 |
 | `workspace`  | 配置的 Workspace `cwd` 存在且可写。                                                                                          |
 | `*-port`     | server 端口与已启用的 broker 端口可绑定。                                                                                    |

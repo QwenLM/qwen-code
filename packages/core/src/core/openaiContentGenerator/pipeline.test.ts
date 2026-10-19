@@ -1401,6 +1401,288 @@ describe('ContentGenerationPipeline', () => {
         ),
       );
 
+    async function deepSeekWire(
+      settings: Partial<ContentGeneratorConfig>,
+      capability?: unknown,
+      requestModel?: string,
+    ) {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'deepseek-v4.1-flash-1017',
+        baseUrl: 'https://api.deepseek.com/v1',
+        authType: AuthType.USE_OPENAI,
+        enableCacheControl: false,
+        samplingParams: undefined,
+        extra_body: undefined,
+        reasoning: undefined,
+        ...settings,
+      };
+      mockCliConfig = {
+        ...mockCliConfig,
+        getContentGeneratorConfig: () => mockContentGeneratorConfig,
+        getResolvedModelConfig: vi
+          .fn()
+          .mockReturnValue(
+            capability
+              ? { capabilities: { reasoning: capability } }
+              : undefined,
+          ),
+        getCliVersion: () => 'test',
+      } as unknown as Config;
+      const provider = determineProvider(
+        mockContentGeneratorConfig,
+        mockCliConfig,
+      );
+      vi.spyOn(provider, 'buildClient').mockReturnValue(mockClient);
+      pipeline = new ContentGenerationPipeline({
+        ...mockConfig,
+        provider,
+        cliConfig: mockCliConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      });
+      await executeOk(
+        userRequest(requestModel ?? mockContentGeneratorConfig.model),
+      );
+      return sentBody(-1);
+    }
+
+    it.each([
+      ['https://api.deepseek.com/v1', 'thinking'],
+      [
+        'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        'enable_thinking',
+      ],
+      [TOKEN_PLAN_URL, 'enable_thinking'],
+      [DASHSCOPE_URL, 'enable_thinking'],
+    ])(
+      'sends built-in DeepSeek selection and defaults through %s',
+      async (baseUrl, field) => {
+        for (const [reasoning, effort] of [
+          [undefined, 'high'],
+          [{ effort: 'low' }, 'low'],
+          [{ effort: 'high' }, 'high'],
+          [{ effort: 'max' }, 'max'],
+          [{ effort: 'medium' }, 'high'],
+          [{ effort: 'xhigh' }, 'high'],
+          [false, undefined],
+        ] as const) {
+          const wire = await deepSeekWire({
+            baseUrl,
+            reasoning,
+            samplingParams: { max_tokens: 64 },
+          });
+          expect(wire.model).toBe('deepseek-v4.1-flash-1017');
+          expect(wire.reasoning).toBeUndefined();
+          expect(wire.reasoning_effort).toBe(effort);
+          expect(wire.max_tokens).toBe(64);
+          expect(wire[field]).toEqual(
+            field === 'thinking'
+              ? { type: reasoning === false ? 'disabled' : 'enabled' }
+              : reasoning !== false,
+          );
+          expect(
+            wire[field === 'thinking' ? 'enable_thinking' : 'thinking'],
+          ).toBeUndefined();
+        }
+      },
+    );
+
+    it.each([
+      ['https://api.deepseek.com/v1', 'thinking'],
+      [TOKEN_PLAN_URL, 'enable_thinking'],
+    ])(
+      'preserves static overrides with built-in and legacy capabilities on %s',
+      async (baseUrl, field) => {
+        for (const capability of [
+          undefined,
+          {
+            thinking: true,
+            efforts: ['low', 'high', 'max'],
+            defaultEffort: 'high',
+            disableField: field,
+          },
+        ]) {
+          const nested = await deepSeekWire(
+            {
+              baseUrl,
+              reasoning: { effort: 'low' },
+              extra_body: { reasoning: { effort: 'max', budget_tokens: 8192 } },
+            },
+            capability,
+          );
+          expect(nested.reasoning_effort).toBe('max');
+          expect(nested.reasoning).toEqual({ budget_tokens: 8192 });
+
+          const flat = await deepSeekWire(
+            {
+              baseUrl,
+              reasoning: { effort: 'high' },
+              samplingParams: { reasoning_effort: 'low' },
+              extra_body: { reasoning: { effort: 'max' } },
+            },
+            capability,
+          );
+          expect(flat.reasoning_effort).toBe('low');
+          expect(flat.reasoning).toBeUndefined();
+
+          for (const extra_body of [
+            { reasoning_effort: 'none' },
+            field === 'thinking'
+              ? { thinking: { type: 'disabled' } }
+              : { enable_thinking: false },
+          ]) {
+            const disabled = await deepSeekWire(
+              { baseUrl, extra_body },
+              capability,
+            );
+            expect(disabled.reasoning_effort).toBeUndefined();
+            expect(disabled[field]).toEqual(
+              field === 'thinking' ? { type: 'disabled' } : false,
+            );
+          }
+        }
+      },
+    );
+
+    it('uses the requested wire model for DeepSeek aliases and avoids leaking its knobs', async () => {
+      const legacy = await deepSeekWire(
+        {
+          baseUrl: TOKEN_PLAN_URL,
+          reasoning: { effort: 'xhigh' },
+        },
+        undefined,
+        'deepseek-v4-pro',
+      );
+      expect(legacy.reasoning_effort).toBe('max');
+      expect(legacy.enable_thinking).toBe(true);
+      const other = await deepSeekWire(
+        {
+          baseUrl: TOKEN_PLAN_URL,
+          reasoning: { effort: 'max' },
+        },
+        undefined,
+        'other-model',
+      );
+      expect(other.thinking).toBeUndefined();
+      expect(other.enable_thinking).toBeUndefined();
+      expect(other.reasoning_effort).toBeUndefined();
+      expect(other.reasoning).toEqual({ effort: 'xhigh' });
+    });
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'resolves inferred reasoning after the %s model override',
+      async (source) => {
+        const otherModel = 'qwen2.5-coder-32b-instruct';
+        const other = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: otherModel },
+        });
+        expect(other.model).toBe(otherModel);
+        expect(other.reasoning_effort).toBeUndefined();
+        expect(other.enable_thinking).toBeUndefined();
+        expect(other.thinking).toBeUndefined();
+        expect(other.reasoning).toBeUndefined();
+
+        const deepSeek = await deepSeekWire({
+          model: otherModel,
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: 'deepseek-v4.1-flash-1017' },
+        });
+        expect(deepSeek.model).toBe('deepseek-v4.1-flash-1017');
+        expect(deepSeek.reasoning_effort).toBe('high');
+        expect(deepSeek.enable_thinking).toBe(true);
+        expect(deepSeek.reasoning).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ['deepseek-v4.1-flash-1017', 'qwen2.5-coder-32b-instruct', 'high'],
+      ['qwen2.5-coder-32b-instruct', 'deepseek-v4.1-flash-1017', undefined],
+    ])(
+      'uses extra_body model %s after sampling model %s for reasoning',
+      async (finalModel, samplingModel, effort) => {
+        const wire = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          samplingParams: { model: samplingModel },
+          extra_body: { model: finalModel },
+        });
+        expect(wire.model).toBe(finalModel);
+        expect(wire.reasoning_effort).toBe(effort);
+        expect(wire.enable_thinking).toBe(effort ? true : undefined);
+        expect(wire.reasoning).toBeUndefined();
+      },
+    );
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'respects the final model profile after a %s override',
+      async (source) => {
+        const wire = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: 'company-alias' },
+          reasoningSnapshot: [
+            {
+              id: 'company-alias',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: DASHSCOPE_URL,
+              reasoning: {
+                profile: 'openai-reasoning',
+                efforts: ['low', 'medium', 'high'],
+                defaultEffort: 'medium',
+              },
+            },
+          ],
+        });
+        expect(wire.model).toBe('company-alias');
+        expect(wire.reasoning).toEqual({ effort: 'medium' });
+        expect(wire.reasoning_effort).toBeUndefined();
+        expect(wire.enable_thinking).toBeUndefined();
+        expect(wire.thinking).toBeUndefined();
+      },
+    );
+
+    it('keeps an unspecified legacy DeepSeek default off the wire', async () => {
+      const wire = await deepSeekWire(
+        {},
+        {
+          thinking: true,
+          efforts: ['low', 'max'],
+          disableField: 'thinking',
+        },
+      );
+      expect(wire.reasoning_effort).toBeUndefined();
+      expect(wire.reasoning).toBeUndefined();
+    });
+
+    it('keeps explicit other profiles ahead of the built-in DeepSeek serializer', async () => {
+      const wire = await deepSeekWire(
+        {
+          samplingParams: { reasoning: { effort: 'medium' } },
+        },
+        {
+          profile: 'openai-reasoning',
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+        },
+      );
+      expect(wire.reasoning).toEqual({ effort: 'medium' });
+      expect(wire.reasoning_effort).toBeUndefined();
+      expect(wire.thinking).toBeUndefined();
+    });
+
+    it('honors legacy capability tier subsets after normalizing a DeepSeek alias', async () => {
+      const wire = await deepSeekWire(
+        { reasoning: { effort: 'xhigh' } },
+        {
+          thinking: true,
+          efforts: ['low', 'max'],
+          defaultEffort: 'max',
+          disableField: 'thinking',
+        },
+      );
+      expect(wire.reasoning_effort).toBe('max');
+      expect(wire.reasoning).toBeUndefined();
+    });
+
     it.each([
       [{ effort: 'max' as const }, 'max', undefined],
       [{ effort: 'low' as const }, undefined, undefined],
@@ -1636,9 +1918,17 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it.each(['samplingParams', 'extra_body'] as const)(
-      'keeps native DeepSeek %s reasoning projection with a profile',
-      async (source) => {
+    it.each(
+      [
+        'deepseek-v4-pro',
+        'deepseek-reasoner',
+        'deepseek-v4-flash-vision-exp',
+      ].flatMap((model) =>
+        ['samplingParams', 'extra_body'].map((source) => [model, source]),
+      ),
+    )(
+      'keeps native DeepSeek %s %s reasoning projection with a profile',
+      async (model, source) => {
         routeThrough(DeepSeekOpenAICompatibleProvider);
         const wire = await executeWithCapability(
           {
@@ -1648,12 +1938,36 @@ describe('ContentGenerationPipeline', () => {
           },
           {
             baseUrl: 'https://api.deepseek.com/v1',
-            [source]: { reasoning: { effort: 'max' } },
+            [source]: { reasoning: { effort: 'max', budget_tokens: 8192 } },
           },
+          model,
         );
-        expectFields(wire, { reasoning_effort: 'max', reasoning: undefined });
+        expectFields(wire, {
+          reasoning_effort: 'max',
+          reasoning: { budget_tokens: 8192 },
+        });
       },
     );
+
+    it('preserves another explicit profile for an unlisted official model', async () => {
+      routeThrough(DeepSeekOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        {
+          profile: 'openai-reasoning',
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+        },
+        {
+          baseUrl: 'https://api.deepseek.com/v1',
+          samplingParams: { reasoning: { effort: 'max' } },
+        },
+        'deepseek-reasoner',
+      );
+      expectFields(wire, {
+        reasoning: { effort: 'max' },
+        reasoning_effort: undefined,
+      });
+    });
 
     it.each([
       ['https://api.deepseek.com/v1', 'openai-effort', 'reasoning_content', ''],
