@@ -524,6 +524,8 @@ export interface CancelSubmitInfo {
     id: number;
     text: string;
     submittedPrompt?: string;
+    /** Prompt as sent to the model, when it differed from `text`. */
+    modelText?: string;
   } | null;
   /**
    * Whether removing the Logger's latest USER entry can only target
@@ -829,6 +831,8 @@ export const useLlmStream = (
     id: number;
     text: string;
     submittedPrompt?: string;
+    /** Prompt as sent to the model, when it differed from `text`. */
+    modelText?: string;
   } | null>(null);
   const canUndoLastLoggedUserMessageRef = useRef(false);
   // Set to true the first time a content event lands this turn — even
@@ -1649,13 +1653,17 @@ export const useLlmStream = (
         const isSlash = isSlashCommand(trimmedQuery);
         // One-shot notices the TUI folded into this prompt stay on the model
         // side only: the recall log, the transcript row and the cancel-restore
-        // buffer use the user-authored text (#11553). Slash commands keep
-        // their own text, since a command's arguments may legitimately start
-        // with an envelope-shaped block. Logged here, before the slash and
-        // shell arms below can return, so handled commands stay recallable.
-        const userText = isSlash
-          ? trimmedQuery
-          : stripLeadingSystemReminders(trimmedQuery);
+        // buffer use the user-authored text (#11553). The composer's own
+        // projection wins, because reverse-parsing the rendered prompt cannot
+        // tell an injected envelope from one the user typed; the strip only
+        // covers prompts whose producer is outside this process. Slash
+        // commands keep their own text, since an argument may legitimately
+        // start with an envelope-shaped block. Logged here, before the slash
+        // and shell arms below can return, so handled commands stay
+        // recallable.
+        const userText =
+          submittedPrompt ??
+          (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
         await logger?.logMessage(MessageSenderType.USER, userText);
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
@@ -1778,6 +1786,9 @@ export const useLlmStream = (
               type: MessageType.USER,
               text: userText,
               promptId: prompt_id,
+              // The envelope masked a leading `?` from the lexical fallback in
+              // isRealUserTurn; an un-noticed prompt keeps that fallback.
+              ...(userText === trimmedQuery ? {} : { sentToModel: true }),
             } as HistoryItemWithoutId,
             userMessageTimestamp,
           );
@@ -1791,6 +1802,9 @@ export const useLlmStream = (
               id: insertedId,
               text: userText,
               ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+              // What the model actually read, so a cancel + resubmit does not
+              // drop the one-shot notice this turn consumed.
+              ...(userText === trimmedQuery ? {} : { modelText: trimmedQuery }),
             };
           }
 
