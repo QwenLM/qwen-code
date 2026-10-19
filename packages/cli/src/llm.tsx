@@ -1534,6 +1534,11 @@ export async function main() {
     if (!config.isInteractive()) {
       const yoloWarning = getHeadlessYoloSafetyWarning(config);
       if (yoloWarning) writeStderrLine(yoloWarning);
+      if (config.isProjectHooksPendingApproval()) {
+        writeStderrLine(
+          'Project hooks in .qwen/settings.json were not loaded: they are not approved for this folder. Run qwen interactively here to review them.',
+        );
+      }
     }
 
     // For non-stream-json mode, initialize config here. Stream-json defers

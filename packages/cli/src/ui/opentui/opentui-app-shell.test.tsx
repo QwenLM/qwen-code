@@ -280,6 +280,13 @@ vi.mock('../hooks/useMcpApproval.js', () => ({
     handleMcpApprovalSelect: mocks.state.handleMcpApprovalSelect,
   }),
 }));
+vi.mock('../hooks/use-project-hooks-approval.js', () => ({
+  useProjectHooksApproval: () => ({
+    isProjectHooksApprovalDialogOpen: false,
+    pendingProjectHooks: undefined,
+    handleProjectHooksApprovalSelect: vi.fn(),
+  }),
+}));
 vi.mock('./exit-lifecycle.js', () => ({
   isExitInProgress: () => mocks.state.exitInProgress,
 }));

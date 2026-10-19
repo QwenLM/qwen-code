@@ -36,6 +36,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { isProjectHooksPendingApproval } from './hook-approvals.js';
 import { addCommand } from '../commands/mcp/add.js';
 import * as Mem0Settings from './mem0-settings.js';
 import {
@@ -44,6 +45,10 @@ import {
 } from '../peerMessaging/enabled.js';
 
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
+vi.mock('./hook-approvals.js', () => ({
+  isProjectHooksPendingApproval: vi.fn(() => false),
+}));
+
 vi.mock('../serve/ssh-workspace-store.js', () => ({
   readSshWorkspace: sshWorkspaceProbe,
 }));
@@ -5609,6 +5614,50 @@ describe('loadCliConfig with includeDirectories', () => {
       }),
     );
     expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
+  describe('project hooks approval gate', () => {
+    const projectHooks = { SessionStart: [{ hooks: [] }] };
+
+    it.each([
+      ['default mode', [], true],
+      ['yolo mode', ['--yolo'], false],
+      ['safe mode', ['--safe-mode'], false],
+    ])(
+      'in %s gates unapproved project hooks: %s',
+      async (_label, flags, gated) => {
+        vi.mocked(isProjectHooksPendingApproval).mockReturnValue(true);
+        process.argv = ['node', 'script.js', ...flags];
+        const argv = await parseArguments();
+        const cwd = path.resolve(path.sep, 'home', 'user', 'project');
+
+        await loadCliConfig({}, argv, cwd, undefined, { projectHooks });
+
+        expect(
+          mockConfigConstructorParams.mock.lastCall?.[0]
+            .projectHooksPendingApproval,
+        ).toBe(gated);
+        if (gated) {
+          expect(isProjectHooksPendingApproval).toHaveBeenCalledWith(
+            projectHooks,
+            cwd,
+          );
+        }
+      },
+    );
+
+    it('does not gate approved project hooks', async () => {
+      vi.mocked(isProjectHooksPendingApproval).mockReturnValue(false);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig({}, argv, undefined, undefined, { projectHooks });
+
+      expect(
+        mockConfigConstructorParams.mock.lastCall?.[0]
+          .projectHooksPendingApproval,
+      ).toBe(false);
+    });
   });
 
   it('builds agent-host sessions with a read-only initialization profile', async () => {

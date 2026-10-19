@@ -64,7 +64,7 @@ export function getMcpApprovalsPath(): string {
  * (`d:\project`). Fold case on win32 — same convention as
  * `getProjectHash()`/`sanitizeCwd()`. See issue #9775.
  */
-function normalizeProjectRoot(projectRoot: string): string {
+export function normalizeProjectRoot(projectRoot: string): string {
   const resolved = path.resolve(projectRoot);
   return os.platform() === 'win32' ? resolved.toLowerCase() : resolved;
 }

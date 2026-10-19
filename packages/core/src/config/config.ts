@@ -1506,6 +1506,13 @@ export interface ConfigParameters {
    * discovery layer must not connect them. See issue #4615.
    */
   pendingMcpServers?: string[];
+  /**
+   * The workspace's project hooks have no approval bound to their current
+   * configuration (pending or rejected). `getProjectHooks()` skips them until
+   * `setProjectHooksPendingApproval(false)`; a repository must not run
+   * commands the user never reviewed.
+   */
+  projectHooksPendingApproval?: boolean;
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
@@ -2964,6 +2971,7 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private projectHooksPendingApproval: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
@@ -3442,6 +3450,8 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    this.projectHooksPendingApproval =
+      params.projectHooksPendingApproval ?? false;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
     this.mcpToolIdleTimeoutMs =
@@ -8634,6 +8644,18 @@ export class Config {
     );
   }
 
+  isProjectHooksPendingApproval(): boolean {
+    return this.projectHooksPendingApproval;
+  }
+
+  /**
+   * Set by the CLI when the user decides on the project hooks mid-session
+   * (approval dialog, `/hooks` reload). Takes effect on the next hook reload.
+   */
+  setProjectHooksPendingApproval(pending: boolean): void {
+    this.projectHooksPendingApproval = pending;
+  }
+
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
     if (this.shellExecutionSandbox && Object.keys(servers).length)
       throw new Error('Tool execution sandbox does not support MCP servers.');
@@ -11191,6 +11213,9 @@ export class Config {
     }
     // Only return project hooks if workspace is trusted
     if (!this.isTrustedFolder()) {
+      return undefined;
+    }
+    if (this.projectHooksPendingApproval) {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.

@@ -124,6 +124,7 @@ export { isValidSessionId } from './session-id.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
+import { isProjectHooksPendingApproval } from './hook-approvals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -2508,6 +2509,13 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  // Project hooks are gated like project MCP servers (#4615): a cloned
+  // repository's `.qwen/settings.json` must not run commands unreviewed.
+  const projectHooksPendingApproval =
+    !bareMode &&
+    !safeMode &&
+    approvalMode !== ApprovalMode.YOLO &&
+    isProjectHooksPendingApproval(hooksConfig?.projectHooks, cwd);
   const advisorModel =
     bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
@@ -2644,6 +2652,7 @@ export async function loadCliConfig(
     mcpServers,
     topTierMcpServers,
     pendingMcpServers,
+    projectHooksPendingApproval,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
