@@ -33,6 +33,7 @@ import {
   MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
   type SendMessageOptions,
   type SteerInput,
+  type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
@@ -120,6 +121,7 @@ import {
   buildChangedSkillsReminder,
   buildMcpServerInstructionsReminderFromEntries,
   getInitialChatHistory,
+  wrapSystemReminder,
 } from './environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
@@ -3616,20 +3618,21 @@ describe('Gemini Client (client.ts)', () => {
       ).not.toContain('Host Git snapshot');
     });
 
-    it('records the gitStatus-free base as the static system prefix on Config', () => {
+    it('keeps git status out of the system instruction and its static prefix', () => {
       vi.mocked(getCoreSystemPrompt).mockReturnValueOnce('core base prompt');
       vi.mocked(getRecentGitStatus).mockReturnValueOnce('Git snapshot A');
 
       const instruction = client['getMainSessionSystemInstruction']();
 
-      // The recorded prefix must be exactly the instruction minus the
-      // volatile git tail: the Anthropic converter's startsWith split relies
-      // on that boundary for the early cache breakpoint.
+      // A repository change between sessions must not change the system
+      // prompt: providers that cache only at the end of the system message
+      // would otherwise lose it. The snapshot goes to the startup prelude.
       const recorded = vi
         .mocked(client['config'].setStaticSystemPrefix)
         .mock.calls.at(-1)?.[0];
       expect(recorded).toBeTruthy();
-      expect(instruction).toBe(`${recorded}\n\nGit snapshot A`);
+      expect(instruction).toBe(recorded);
+      expect(instruction).not.toContain('Git snapshot A');
     });
   });
 
@@ -3743,7 +3746,7 @@ describe('Gemini Client (client.ts)', () => {
       return hookSystem;
     };
 
-    it('refreshes the live system instruction after the working directory changes', async () => {
+    it('announces the new git status after the working directory changes', async () => {
       gitSnapshotsAB();
       mockMemoryManager.resetMemoryBodyStateForSession.mockClear();
       const cancelRecall = vi.spyOn(
@@ -3754,8 +3757,10 @@ describe('Gemini Client (client.ts)', () => {
       );
 
       await client.startChat();
-      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
-        'Git snapshot A',
+      expect(getInitialChatHistory).toHaveBeenLastCalledWith(
+        expect.anything(),
+        undefined,
+        { gitStatus: 'Git snapshot A' },
       );
 
       await client.addWorkingDirectoryChangedContext(
@@ -3766,7 +3771,18 @@ describe('Gemini Client (client.ts)', () => {
       const systemInstruction = client.getChat()['generationConfig']
         .systemInstruction as string;
       expect(systemInstruction).not.toContain('Git snapshot A');
-      expect(systemInstruction).toContain('Git snapshot B');
+      expect(systemInstruction).not.toContain('Git snapshot B');
+      const changeMessage = client
+        .getChat()
+        .getHistory()
+        .find((content) =>
+          content.parts?.some((part) =>
+            part.text?.includes('working directory has changed'),
+          ),
+        );
+      expect(changeMessage?.parts?.[1]?.text).toBe(
+        wrapSystemReminder('Git snapshot B'),
+      );
       expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
       expect(cancelRecall).toHaveBeenCalledWith('new_query');
       expect(
@@ -3777,20 +3793,18 @@ describe('Gemini Client (client.ts)', () => {
     it('clears cached git status so it can be recomputed for the next session', async () => {
       gitSnapshotsAB();
 
-      const instructionBeforeReset =
-        client['getMainSessionSystemInstruction']();
-      const instructionBeforeSecondCall =
-        client['getMainSessionSystemInstruction']();
-
-      expect(instructionBeforeReset).toContain('Git snapshot A');
-      expect(instructionBeforeSecondCall).toContain('Git snapshot A');
+      expect(client['getCachedGitStatus']()).toBe('Git snapshot A');
+      expect(client['getCachedGitStatus']()).toBe('Git snapshot A');
       expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
 
       await client.resetChat();
 
-      const instructionAfterReset = client['getMainSessionSystemInstruction']();
-
-      expect(instructionAfterReset).toContain('Git snapshot B');
+      expect(getInitialChatHistory).toHaveBeenLastCalledWith(
+        expect.anything(),
+        undefined,
+        { gitStatus: 'Git snapshot B' },
+      );
+      expect(client['getCachedGitStatus']()).toBe('Git snapshot B');
       expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
     });
 
@@ -12025,6 +12039,238 @@ Other open files:
         });
       });
 
+      describe('admission before expansion', () => {
+        const submitCalls = (bus: { request: Mock }) =>
+          bus.request.mock.calls.filter(
+            ([request]) => request.eventName === 'UserPromptSubmit',
+          );
+        const admittedSend = (
+          admission: UserPromptAdmission,
+          promptId = 'prompt-admitted',
+          type = SendMessageType.UserQuery,
+        ) =>
+          run([{ text: 'expanded body' }], promptId, {
+            type,
+            submittedPrompt: '/deploy prod',
+            promptAdmission: admission,
+          });
+
+        it('runs UserPromptSubmit on the raw prompt and applies that verdict instead of a second run', async () => {
+          const bus = promptSubmitBus(extraHookContext());
+          const recordUserMessage = vi.fn();
+          vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+            recordUserMessage,
+            recordAttributionSnapshot: vi.fn(),
+          } as unknown as ReturnType<Config['getChatRecordingService']>);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-admitted',
+          );
+          await admittedSend(admission);
+
+          expect(admission.blocked).toBe(false);
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(submitCalls(bus)[0][0].input).toEqual({
+            prompt: '/deploy prod',
+            submitted_prompt: '/deploy prod',
+          });
+          const taggedContext =
+            '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+          expect(recordUserMessage).toHaveBeenCalledWith(
+            [{ text: 'expanded body' }, { text: taggedContext }],
+            undefined,
+            { displayText: '/deploy prod', hookContext: 'extra hook context' },
+            'prompt-admitted',
+          );
+          expect(getLastTurnRequestText().split(taggedContext)).toHaveLength(2);
+        });
+
+        it('blocks the send with the admission verdict before any model call', async () => {
+          const bus = promptSubmitBus({
+            output: { decision: 'block', reason: 'not this one' },
+          });
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-refused',
+          );
+          const events = await admittedSend(admission, 'prompt-refused');
+
+          expect(admission.blocked).toBe(true);
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(events).toContainEqual({
+            type: LlmEventType.UserPromptSubmitBlocked,
+            value: { reason: 'not this one', originalPrompt: '/deploy prod' },
+          });
+          expect(
+            mockInteractionTelemetry.endInteractionSpan,
+          ).toHaveBeenCalledWith('cancelled', { promptId: 'prompt-refused' });
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('keeps hooks registered after an admission without hooks off that prompt', async () => {
+          const bus = installMessageBus(
+            vi.fn().mockResolvedValue({ output: undefined }),
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const admission = await client.admitUserPrompt(
+            '/skill-with-hooks',
+            'prompt-no-hooks',
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+          await admittedSend(admission, 'prompt-no-hooks');
+          await run([{ text: 'next prompt' }], 'prompt-next');
+
+          expect(
+            submitCalls(bus).map(([request]) => request.input.prompt),
+          ).toEqual(['next prompt']);
+        });
+
+        it("spends the admission on its UserQuery, not on that turn's continuations", async () => {
+          const bus = promptSubmitBus({ output: undefined });
+          vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(false);
+          vi.mocked(await importedNextSpeaker())
+            .mockResolvedValueOnce({
+              reasoning: 'more to do',
+              next_speaker: 'model',
+            })
+            .mockResolvedValue(null);
+          notDoneChat();
+          mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-continued',
+          );
+          await admittedSend(admission, 'prompt-continued');
+
+          // The continuation re-spreads the send options and keeps its
+          // existing UserPromptSubmit run.
+          expect(
+            submitCalls(bus).map(([request]) => request.input.prompt),
+          ).toEqual(['/deploy prod', 'Please continue.']);
+          expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        });
+
+        it.each([
+          [
+            'a forged object',
+            () => Object.freeze({ blocked: false }),
+            'prompt-a',
+          ],
+          ['another prompt id', undefined, 'prompt-b'],
+        ])('rejects an admission from %s', async (_, forge, promptId) => {
+          promptSubmitBus({ output: undefined });
+          const admission =
+            forge?.() ??
+            (await client.admitUserPrompt('/deploy prod', 'prompt-a'));
+
+          await expect(admittedSend(admission, promptId)).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission that was already spent', async () => {
+          promptSubmitBus({ output: undefined });
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-twice',
+          );
+          await admittedSend(admission, 'prompt-twice');
+
+          await expect(admittedSend(admission, 'prompt-twice')).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        });
+
+        it('rejects an admission on a send that is not a UserQuery', async () => {
+          promptSubmitBus({ output: undefined });
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-tool-result',
+          );
+
+          await expect(
+            admittedSend(
+              admission,
+              'prompt-tool-result',
+              SendMessageType.ToolResult,
+            ),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission issued by another client', async () => {
+          promptSubmitBus({ output: undefined });
+          const other = await initializedClient();
+          const admission = await other.admitUserPrompt(
+            '/deploy prod',
+            'prompt-other-client',
+          );
+
+          await expect(
+            admittedSend(admission, 'prompt-other-client'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission after the session changes', async () => {
+          promptSubmitBus({ output: undefined });
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-session',
+          );
+          vi.mocked(mockConfig.getSessionId).mockReturnValue('next-session');
+
+          await expect(
+            admittedSend(admission, 'prompt-session'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('binds the admission to the hook owner fields, not the owner object', async () => {
+          promptSubmitBus({ output: undefined });
+          vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+            runtimeId: 'runtime-1',
+          } as unknown as ReturnType<Config['getHookSystem']>);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const sameOwner = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-same-owner',
+          );
+          await admittedSend(sameOwner, 'prompt-same-owner');
+
+          const subagentOwner = await runWithHookExecutionOwner(
+            {
+              runtimeId: 'runtime-1',
+              sessionId: 'test-session-id',
+              agentId: 'agent-1',
+            },
+            () => client.admitUserPrompt('/deploy prod', 'prompt-other-owner'),
+          );
+          await expect(
+            admittedSend(subagentOwner, 'prompt-other-owner'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        });
+      });
+
       it('wraps injected additionalContext in the reserved tag and records display provenance', async () => {
         promptSubmitBus(extraHookContext());
         const recordUserMessage = vi.fn();
@@ -13250,7 +13496,7 @@ Other open files:
       );
     });
 
-    it('caches git status across repeated system instruction generation', async () => {
+    it('keeps git status out of the inherited system instruction', async () => {
       vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot cached');
       vi.mocked(getRecentGitStatus).mockClear();
       vi.mocked(getCoreSystemPrompt).mockReturnValue('Core prompt');
@@ -13258,11 +13504,11 @@ Other open files:
       await generate();
       await generate();
 
-      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
+      expect(getRecentGitStatus).not.toHaveBeenCalled();
       for (const nth of [1, 2]) {
         expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
           nth,
-          ...withInstruction('Core prompt\n\nGit snapshot cached'),
+          ...withInstruction('Core prompt'),
         );
       }
     });

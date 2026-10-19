@@ -902,6 +902,9 @@ describe('ContentGenerationPipeline', () => {
 
       expect(apiCall.enable_thinking).toBe(testCase.expectedThinking);
       expect(apiCall.tool_choice).toBe(testCase.expectedToolChoice);
+      expect(apiCall.tools).toEqual([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
       const optOutLogs = mockDebugLogger.debug.mock.calls.filter(([message]) =>
         String(message).includes('supportsForcedToolChoice=false'),
       );

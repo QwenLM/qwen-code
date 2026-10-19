@@ -107,6 +107,31 @@ export function managedEventsToMessages(
           ? [{ data: block['data'], mimeType: block['mimeType'] }]
           : [];
       });
+      const files = prompt.flatMap((value: unknown) => {
+        const block = record(value);
+        const resource = record(block['resource']);
+        if (
+          block['type'] !== 'resource' ||
+          typeof resource['uri'] !== 'string' ||
+          !resource['uri'].startsWith('managed-input:///') ||
+          typeof resource['text'] !== 'string' ||
+          typeof resource['mimeType'] !== 'string'
+        )
+          return [];
+        try {
+          return [
+            {
+              name: decodeURIComponent(
+                resource['uri'].slice('managed-input:///'.length),
+              ),
+              text: resource['text'],
+              mimeType: resource['mimeType'],
+            },
+          ];
+        } catch {
+          return [];
+        }
+      });
       messages.push({
         id,
         role: 'user',
@@ -116,6 +141,7 @@ export function managedEventsToMessages(
           .join('\n'),
         timestamp: event.at,
         ...(images.length ? { images } : {}),
+        ...(files.length ? { files } : {}),
       });
       settle();
     } else if (
@@ -257,7 +283,7 @@ export function managedEventsToMessages(
       }
       if (event.type === 'tool_started') {
         tool.status = 'in_progress';
-        tool.startTime = event.at;
+        tool.startTime ??= event.at;
         // A resumed tool outgrows the diagnostic's floor: the end is open
         // again, while the booking survives so the Turn's terminal event
         // can still re-stamp it.
@@ -284,6 +310,11 @@ export function managedEventsToMessages(
       // the live one.
       (event.type === 'runtime_failed' && event.turnId === currentTurnId)
     ) {
+      if (event.type === 'completed' && textMessage?.role === 'assistant') {
+        // Snapshot text parts share the Item's creation time; the shared
+        // transcript measures a settled Turn through its final assistant.
+        textMessage.timestamp = event.at;
+      }
       // environment.failed is a non-fatal diagnostic and the Turn keeps
       // streaming: dropping the continuation handle would split one answer
       // into two bubbles, so only stop the spinner (and fail pending tools).

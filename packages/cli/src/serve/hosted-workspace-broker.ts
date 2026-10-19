@@ -19,10 +19,14 @@ import type {
   ToolResultCapture,
   ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  WORKSPACE_CAPABILITY_DIGEST,
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
@@ -42,6 +46,8 @@ export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
   token: string;
   lifecycleAuthority?: () => ManagedSessionLifecycleAuthority | undefined;
+  /** Stops for the daemon's owed mount handbacks (#13800). */
+  mountHandbacks?: Set<() => void>;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -73,9 +79,39 @@ export function isHostedFileHistoryRefusal(
   );
 }
 
+/** The execution states the Broker can report: the four live states it
+ * answers for a record it tracks, `unknown` for a still-reconcilable
+ * outcome gap, and `abandoned` for a record it fenced terminally (see
+ * isTerminalUnknownRejection). The hosted recovery wire vocabulary is the
+ * closed subset without `unknown` (see HostedRuntimeRecoveryExecutionState):
+ * a new state here must be folded deliberately, or the client-side
+ * validator rejects the whole report. */
+export type HostedBrokerExecutionState =
+  | 'prepared'
+  | 'executing'
+  | 'cancel_requested'
+  | 'settled'
+  | 'abandoned'
+  | 'unknown';
+
+/** The Broker fences a record ABANDONED on loss evidence alone and marks the
+ * terminal answer with details.terminal; the record proves no stop, it only
+ * proves the outcome can never be observed again. */
+export function isTerminalUnknownRejection(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    cause.code === 'runtime_broker_execution_unknown' &&
+    cause.details?.['terminal'] === true
+  );
+}
+
 export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
   private leaseAcquired = false;
+  private capability?: string;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -92,6 +128,12 @@ export class HostedWorkspaceBroker {
 
   get acquired(): boolean {
     return this.leaseAcquired;
+  }
+
+  get capabilityDigest(): string {
+    if (this.capability === undefined)
+      throw new Error('Runtime capability is unavailable before resolution.');
+    return this.capability;
   }
 
   constructor(
@@ -148,7 +190,7 @@ export class HostedWorkspaceBroker {
   }
 
   async warm(): Promise<void> {
-    const response = await this.request('/runtimes:warm', {});
+    const response = await this.harnessRequest('/runtimes:warm', {});
     if (response['runtime'] !== undefined) this.readRuntime(response);
   }
 
@@ -157,12 +199,23 @@ export class HostedWorkspaceBroker {
       await this.request('/runtimes:authorize-lifecycle', {});
   }
 
+  // The latest acquire's mount claim, recorded before the request leaves
+  // so that a reply lost after the grant still names it: only that claim
+  // may hand the mount back, and any later acquire supersedes it (#13800).
+  private claim?: string;
+
+  mountClaim(): string | undefined {
+    return this.claim;
+  }
+
   async acquire(expected?: {
     runtimeBindingId: string;
     generation: string;
   }): Promise<void> {
+    this.claim = randomUUID();
     const response = await this.request('/tool-sessions:acquire', {
       turnKind: 'bootstrap',
+      mountClaimId: this.claim,
       ...(expected
         ? {
             recoveryBindingId: expected.runtimeBindingId,
@@ -181,11 +234,18 @@ export class HostedWorkspaceBroker {
     if (
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
-      scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST
+      (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
+        !(
+          scope['capabilityDigest'] === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
+          scope['isolationClass'] === 'workspace'
+        )) ||
+      (this.capability !== undefined &&
+        this.capability !== scope['capabilityDigest'])
     )
       throw new Error(
         'Hosted Workspace Broker scope does not match the saved Session.',
       );
+    this.capability = scope['capabilityDigest'] as string;
     const runtime = response['runtime'];
     if (runtime !== undefined) {
       const binding = object(runtime);
@@ -446,7 +506,7 @@ export class HostedWorkspaceBroker {
             (cause instanceof HostedWorkspaceBrokerRejection &&
               cause.status === 409 &&
               cause.code === 'runtime_broker_execution_unknown' &&
-              cause.details?.['terminal'] !== true) ||
+              !isTerminalUnknownRejection(cause)) ||
             transportFailed
           )
         )
@@ -581,9 +641,18 @@ export class HostedWorkspaceBroker {
 
   /**
    * Read-only execution state. Only a definitive not-found resolves to
-   * undefined; an unknown outcome is not proof that execution stopped.
+   * undefined; an unknown outcome is not proof that execution stopped, and a
+   * terminally abandoned record reaches the caller as the distinct
+   * `abandoned` state rather than folding into that sentinel. A settled
+   * record also names its result's execution status.
    */
-  async status(id: string): Promise<{ state: string } | undefined> {
+  async status(id: string): Promise<
+    | {
+        state: HostedBrokerExecutionState;
+        executionStatus?: string;
+      }
+    | undefined
+  > {
     let response: Record<string, unknown>;
     try {
       response = await this.request(`/executions/${encodeURIComponent(id)}`);
@@ -598,7 +667,11 @@ export class HostedWorkspaceBroker {
           cause.status === 409 &&
           cause.code === 'runtime_broker_execution_unknown'
         )
-          return { state: 'unknown' };
+          // The terminal marker distinguishes a fenced ABANDONED record from
+          // a still-reconcilable UNKNOWN; only the latter may yet be running.
+          return {
+            state: isTerminalUnknownRejection(cause) ? 'abandoned' : 'unknown',
+          };
       }
       throw cause;
     }
@@ -611,16 +684,91 @@ export class HostedWorkspaceBroker {
       !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
     )
       throw new Error('Runtime execution outcome is unknown.');
-    return { state };
+    const result = status['result'];
+    const executionStatus =
+      state === 'settled' &&
+      typeof result === 'object' &&
+      result !== null &&
+      typeof (result as Record<string, unknown>)['executionStatus'] === 'string'
+        ? ((result as Record<string, unknown>)['executionStatus'] as string)
+        : undefined;
+    return {
+      state: state as HostedBrokerExecutionState,
+      ...(executionStatus === undefined ? {} : { executionStatus }),
+    };
+  }
+
+  async readSettledShellResult(
+    id: string,
+  ): Promise<
+    { bindingGeneration: string; result: ToolResultEnvelope } | undefined
+  > {
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+    } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 404 &&
+        cause.code === 'runtime_execution_not_found'
+      )
+        return undefined;
+      throw cause;
+    }
+    const generation = response['bindingGeneration'];
+    const bindingId = response['runtimeBindingId'];
+    const status = object(response['status']);
+    if (
+      response['protocolVersion'] !== 1 ||
+      response['harnessSessionId'] !== this.identity.harnessSessionId ||
+      response['runtimeSessionId'] !== this.identity.runtimeSessionId ||
+      response['executionCallId'] !== id ||
+      typeof bindingId !== 'string' ||
+      !bindingId ||
+      typeof generation !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(generation) ||
+      BigInt(generation) > 2n ** 63n - 1n ||
+      status['state'] !== 'settled'
+    ) {
+      throw new Error(
+        'Original Shell result is not settled under its binding.',
+      );
+    }
+    const result = object(status['result']);
+    if (!('capture' in result)) {
+      const error = 'error' in result ? object(result['error']) : undefined;
+      if (
+        Object.keys(result).some(
+          (key) => !['executionStatus', 'responseParts', 'error'].includes(key),
+        ) ||
+        typeof result['executionStatus'] !== 'string' ||
+        !['success', 'error', 'cancelled', 'not_started'].includes(
+          result['executionStatus'],
+        ) ||
+        !Array.isArray(result['responseParts']) ||
+        (error &&
+          (Object.keys(error).some(
+            (key) => !['message', 'type'].includes(key),
+          ) ||
+            typeof error['message'] !== 'string' ||
+            !error['message'] ||
+            ('type' in error &&
+              (typeof error['type'] !== 'string' || !error['type']))))
+      )
+        throw new Error('Legacy Shell result is invalid.');
+      return undefined;
+    }
+    return {
+      bindingGeneration: generation,
+      result: parseToolResultEnvelope(result),
+    };
   }
 
   /**
-   * Read-only never-started proof for one background dispatch: the Broker
-   * admits the `<executionCallId>:process` ledger row only at the
-   * execute-admission of an `is_background` dispatch, so this probe's
-   * definitive not-found is the absence read that proves the dispatch
-   * never began. The ledger-key suffix lives here, with every other
-   * Broker identity, so a key change cannot drift a caller's proof open.
+   * Read-only never-started proof component for one background dispatch. A
+   * definitive not-found is terminal evidence only after the caller has
+   * established that no pending start can still admit the process row, such
+   * as a reload boundary or a successful Broker cancellation barrier.
    */
   async backgroundProcessStatus(
     executionCallId: string,
@@ -662,6 +810,32 @@ export class HostedWorkspaceBroker {
     }
   }
 
+  /**
+   * #13930 R1-2: the read-only inventory of this Harness Session's Runtime
+   * Sessions that a live hold row still pins — the read a reloaded Harness
+   * makes to restore the close's drain obligation after a restart.
+   */
+  async activeHoldRuntimeSessionIds(): Promise<string[]> {
+    const response = await this.harnessRequest(
+      '/tool-sessions:active-holds',
+      {},
+    );
+    const ids = response['heldRuntimeSessionIds'];
+    if (
+      !Array.isArray(ids) ||
+      ids.some(
+        // The close's drain re-maps each entry through
+        // hostedRuntimeSessionId, so the answer must already sit in its
+        // idempotent path-safe shape; anything else would drain wrong. The
+        // fixed-point check asks that mapping directly rather than copying
+        // its predicate, so the two can never drift apart (#13986 R1-6).
+        (id) => typeof id !== 'string' || hostedRuntimeSessionId(id) !== id,
+      )
+    )
+      throw new Error('Runtime Broker active-holds answer is invalid.');
+    return ids;
+  }
+
   async release(
     options?:
       | { bindingId: string; generation: string; readonly drain?: boolean }
@@ -685,15 +859,44 @@ export class HostedWorkspaceBroker {
     this.leaseAcquired = false;
   }
 
+  // Frees only the Workspace execution mount: unlike release(), the
+  // Runtime Session keeps its READY identity for the recovery fleet — a
+  // recovery-blocked turn hands its mount back through here (#13800),
+  // never through a full release, whose RELEASED-forever verdict would
+  // strand the Session's later runtime recovery outright.
+  async releaseMount(mountClaimId: string): Promise<void> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release-mount`,
+      { mountClaimId },
+    );
+    if (response['mountReleased'] !== true)
+      throw new Error('Runtime Session mount release is unconfirmed.');
+  }
+
+  /**
+   * Harness-scoped routes carry and answer no Runtime Session identity:
+   * the request omits the id and the response check skips its echo, so a
+   * new harness-scoped caller cannot forget to exempt itself (#13986 R1-5).
+   */
+  private harnessRequest(
+    path: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request(path, body, true);
+  }
+
   private async request(
     path: string,
     body?: Record<string, unknown>,
+    harnessScoped = false,
   ): Promise<Record<string, unknown>> {
     const url = new URL(`/internal/runtime-broker/v1${path}`, this.baseUrl);
     const fields = {
       protocolVersion: 1,
       requestId: randomUUID(),
-      ...this.identity,
+      ...(harnessScoped
+        ? { harnessSessionId: this.identity.harnessSessionId }
+        : this.identity),
       ...body,
     };
     if (!body)
@@ -751,7 +954,8 @@ export class HostedWorkspaceBroker {
     if (
       parsed['protocolVersion'] !== 1 ||
       parsed['harnessSessionId'] !== this.key.sessionId ||
-      (path !== '/runtimes:warm' &&
+      // Harness-scoped routes answer no Runtime Session identity.
+      (!harnessScoped &&
         parsed['runtimeSessionId'] !== this.identity.runtimeSessionId)
     )
       throw new Error('Runtime Broker response identity changed.');

@@ -314,7 +314,8 @@ convention, package tests ran from the package directory. TDD red baseline
 The manual check is environment-gated (macOS only) and cannot run in this
 Linux workspace.
 
-Review follow-up, 2026-10-18, against PR head `362a00ce1a`:
+Review follow-up, 2026-10-18. The reviewed baseline was `362a00ce1a`;
+the results below were measured on the follow-up delivered in `0dd772e47a`:
 
 - The five hot-switch regressions failed before the fix and now pass. They
   cover `false` to/from `undefined`, `false` to/from `true`, and source

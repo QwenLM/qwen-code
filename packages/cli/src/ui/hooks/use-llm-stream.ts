@@ -86,6 +86,7 @@ import {
   getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
   HistoryItem,
   HistoryItemWithoutId,
@@ -3581,6 +3582,29 @@ export const useLlmStream = (
         toolContinuationOwner?: ToolContinuationOwner;
       },
     ) => {
+      const mods = getInteractiveModSession(config);
+      const dispatchesSlashCommand =
+        (submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron) &&
+        typeof query === 'string' &&
+        isSlashCommand(query.trim());
+      if (mods && !dispatchesSlashCommand) {
+        try {
+          await mods.ready;
+        } catch {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: 'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.',
+            },
+            Date.now(),
+          );
+          await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          metadata?.onAdmissionFailed?.();
+          metadata?.onDeliveryFailed?.();
+          return;
+        }
+      }
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
         streamingState === StreamingState.Responding &&

@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.25.1",
+  "version": "0.25.2",
   "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000",
   "engines": {
     "node": ">=22.0.0"
@@ -33,7 +33,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.25.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.25.2"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -68,6 +68,13 @@
     "test:e2e:managed-harness-restart-inflight-failover": "tsx scripts/run-managed-agent-server-e2e.ts --inflight-failover --harness-only",
     "test:e2e:managed-harness-restart-continuation-failover": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only",
     "test:e2e:managed-continuation-frozen-owner-failover": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --freeze",
+    "test:e2e:managed-harness-restart-approval-allow": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow",
+    "test:e2e:managed-harness-restart-approval-deny": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify deny",
+    "test:e2e:managed-harness-restart-approval-cancel": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify cancel",
+    "test:e2e:managed-harness-restart-approval-expiry": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify expiry",
+    "test:e2e:managed-harness-restart-continuation-closeout": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify continuation",
+    "test:e2e:managed-harness-restart-model-round-failover": "tsx scripts/run-managed-agent-server-e2e.ts --model-round-failover --harness-only",
+    "test:e2e:managed-frozen-control-plane-failover": "tsx scripts/run-managed-agent-server-e2e.ts --model-round-failover --frozen-control-plane",
     "test:chrome-extension:e2e": "npm -w packages/chrome-extension run test:e2e:chrome",
     "test:chrome-extension:release": "npm run build && cross-env DEV=true npm run bundle && npm -w packages/chrome-extension run test:release",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
@@ -75,7 +82,7 @@
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
     "test:integration:hosted:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --config ./vitest.hosted.config.ts",
-    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./skill-hooks-invocation-parity.test.ts ./skill-hooks-resume.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/_prompt-latency-policy.test.ts ./cli/hosted-harness-process.test.ts ./cli/daemon-invocation-context.test.ts ./cli/headless-workflow-skill.test.ts ./cli/list_directory.test.ts ./cli/tool-hook-context.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/qwen-serve-standalone-concurrency.test.ts ./interactive/workflow-completion.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./skill-hooks-invocation-parity.test.ts ./skill-hooks-resume.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/_prompt-latency-policy.test.ts ./cli/hosted-harness-process.test.ts ./cli/daemon-invocation-context.test.ts ./cli/headless-workflow-skill.test.ts ./cli/workflow-ancestor-discovery.test.ts ./cli/list_directory.test.ts ./cli/tool-hook-context.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/qwen-serve-standalone-concurrency.test.ts ./interactive/workflow-completion.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",

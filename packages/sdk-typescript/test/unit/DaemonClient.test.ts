@@ -301,6 +301,14 @@ describe('DaemonClient', () => {
         },
       });
       expect(transportFetch).not.toHaveBeenCalled();
+
+      await client.continueSession('with/slash', {
+        clientId: 'client-1',
+        confirmCancellation: 'legacy-daemon',
+      });
+      expect(calls[1]?.body).toBe(
+        JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
+      );
     });
 
     it('returns clean no-ops and preserves rejection errors without retry', async () => {
@@ -4614,6 +4622,100 @@ describe('DaemonClient', () => {
       expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
     });
 
+    it.each([
+      { reason: 'caller stopped', expected: 'interrupted' },
+      { reason: undefined, expected: 'interrupted' },
+      { reason: new Error('caller stopped'), expected: 'interrupted' },
+    ])(
+      'cancels an accepted turn when SSE rejects the caller reason ($expected)',
+      async ({ reason, expected }) => {
+        const { fetch, calls } = recordingFetch((req) => {
+          if (req.url.endsWith('/prompt'))
+            return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+          if (req.url.endsWith('/events'))
+            return new Promise<Response>((_resolve, reject) => {
+              req.signal!.addEventListener(
+                'abort',
+                () => reject(req.signal!.reason),
+                { once: true },
+              );
+            });
+          if (req.url.endsWith('/cancel'))
+            return new Response(null, { status: 204 });
+          return jsonResponse(500, { error: 'unexpected request' });
+        });
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const controller = new AbortController();
+        const result = client
+          .prompt(
+            's-1',
+            { prompt: [{ type: 'text', text: 'work' }] },
+            controller.signal,
+          )
+          .catch((error: unknown) => error);
+        await vi.waitFor(() =>
+          expect(calls.some((call) => call.url.endsWith('/events'))).toBe(true),
+        );
+        controller.abort(reason);
+        const error = await result;
+        expect(error).toBeInstanceOf(Error);
+        if (!(reason instanceof Error))
+          expect(error).toMatchObject({ name: 'AbortError' });
+        else expect(error).toBe(reason);
+        await vi.waitFor(() =>
+          expect(
+            calls.filter((call) => call.url.endsWith('/cancel')),
+          ).toHaveLength(1),
+        );
+        expect(
+          JSON.parse(calls.find((call) => call.url.endsWith('/cancel'))!.body!),
+        ).toEqual({ _meta: { 'qwen.cancelReason': expected } });
+      },
+    );
+
+    it('cancels an accepted turn when an already connected SSE body is aborted', async () => {
+      let reading = false;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/prompt'))
+          return jsonResponse(202, { promptId: 'p-1', lastEventId: 0 });
+        if (req.url.endsWith('/events'))
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(stream) {
+                stream.enqueue(new TextEncoder().encode(': connected\n\n'));
+              },
+              pull() {
+                reading = true;
+              },
+            }),
+            { headers: { 'content-type': 'text/event-stream' } },
+          );
+        if (req.url.endsWith('/cancel'))
+          return new Response(null, { status: 204 });
+        return jsonResponse(500, { error: 'unexpected request' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const controller = new AbortController();
+      const result = client
+        .prompt(
+          's-1',
+          { prompt: [{ type: 'text', text: 'work' }] },
+          controller.signal,
+        )
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(reading).toBe(true));
+      controller.abort('caller stopped');
+      expect(await result).toMatchObject({ name: 'AbortError' });
+      await vi.waitFor(() =>
+        expect(
+          calls.filter((call) => call.url.endsWith('/cancel')),
+        ).toHaveLength(1),
+      );
+      expect(
+        JSON.parse(calls.find((call) => call.url.endsWith('/cancel'))!.body!),
+      ).toEqual({ _meta: { 'qwen.cancelReason': 'interrupted' } });
+    });
+
     it('releases the local pending prompt slot after caller abort', async () => {
       let nextPromptId = 0;
       const { fetch, calls } = recordingFetch((req) => {
@@ -5393,6 +5495,7 @@ describe('DaemonClient', () => {
       await client.cancel('s-1');
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/cancel');
       expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
     });
 
     it('sends client identity header on cancel', async () => {
@@ -5706,7 +5809,7 @@ describe('DaemonClient', () => {
 
       await client.archiveSessionsData(
         ['s-1'],
-        { resolveConflicts: true },
+        { resolveConflicts: true, requireIdle: true },
         'client-1',
       );
 
@@ -5714,6 +5817,7 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         sessionIds: ['s-1'],
         resolveConflicts: true,
+        requireIdle: true,
       });
     });
   });
@@ -7544,6 +7648,181 @@ describe('DaemonClient', () => {
         status: 400,
         body: expect.objectContaining({ code: 'invalid_skill_names' }),
       });
+    });
+  });
+
+  describe('explicit session refresh', () => {
+    const skillResult = {
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      configsRefreshed: 2,
+      configsFailed: 0,
+      reason: 'all',
+    };
+    const cases = [
+      {
+        name: 'primary Skill',
+        path: '/workspace/skills/refresh',
+        invoke: (client: DaemonClient, sessionIds?: string[]) =>
+          client.refreshWorkspaceSkills({ sessionIds }, 'client-1'),
+        result: skillResult,
+      },
+      {
+        name: 'qualified Skill',
+        path: '/workspaces/%2Ftmp%2Fwork%20space/skills/refresh',
+        invoke: (client: DaemonClient, sessionIds?: string[]) =>
+          client
+            .workspaceByCwd('/tmp/work space')
+            .refreshSkillRuntime({ sessionIds }, 'client-1'),
+        result: skillResult,
+      },
+      {
+        name: 'primary Extension',
+        path: '/workspace/extensions/refresh',
+        invoke: (client: DaemonClient, sessionIds?: string[]) =>
+          client.refreshExtensions('client-1', { sessionIds }),
+        result: { refreshed: 1, failed: 0 },
+      },
+      {
+        name: 'qualified Extension',
+        path: '/workspaces/%2Ftmp%2Fwork%20space/extensions/refresh',
+        invoke: (client: DaemonClient, sessionIds?: string[]) =>
+          client
+            .workspaceByCwd('/tmp/work space')
+            .refreshExtensionRuntime('client-1', { sessionIds }),
+        result: { accepted: true, operationId: 'op-refresh' },
+      },
+    ];
+
+    it.each(cases)(
+      'sends a selected $name refresh over REST',
+      async (target) => {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, target.result),
+        );
+        const transportFetch = vi.fn(async () =>
+          jsonResponse(200, { features: ['workspace_session_refresh'] }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'token-1',
+          fetch,
+          transport: {
+            type: 'acp-http',
+            supportsReplay: true,
+            connected: true,
+            fetch: transportFetch,
+            async *subscribeEvents() {},
+            dispose() {},
+          },
+        });
+        const sessionIds = ['with/slash', 'session-2', 'with/slash'];
+
+        await expect(target.invoke(client, sessionIds)).resolves.toEqual(
+          target.result,
+        );
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          url: `http://daemon${target.path}`,
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer token-1',
+            'x-qwen-client-id': 'client-1',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ sessionIds }),
+        });
+        expect(transportFetch).toHaveBeenCalledOnce();
+        expect(transportFetch).toHaveBeenCalledWith(
+          'http://daemon/capabilities',
+          expect.objectContaining({
+            headers: { Authorization: 'Bearer token-1' },
+          }),
+        );
+      },
+    );
+
+    it.each(cases)('preserves an empty selection for $name', async (target) => {
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: ['workspace_session_refresh'] })
+          : jsonResponse(200, target.result),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await target.invoke(client, []);
+      expect(calls.map((call) => [call.method, call.body])).toEqual([
+        ['GET', null],
+        ['POST', JSON.stringify({ sessionIds: [] })],
+      ]);
+    });
+
+    it.each(cases)(
+      'rejects unsupported selected $name refreshes',
+      async (target) => {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, { features: [] }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        await expect(target.invoke(client, [])).rejects.toMatchObject({
+          name: 'DaemonCapabilityMissingError',
+          capability: 'workspace_session_refresh',
+        });
+        expect(calls.map((call) => [call.method, call.url])).toEqual([
+          ['GET', 'http://daemon/capabilities'],
+        ]);
+      },
+    );
+
+    it.each(cases.slice(0, 2))(
+      'checks the capability for a full $name refresh',
+      async (target) => {
+        const { fetch, calls } = recordingFetch((req) =>
+          req.url.endsWith('/capabilities')
+            ? jsonResponse(200, { features: ['workspace_session_refresh'] })
+            : jsonResponse(200, skillResult),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+        await target.invoke(client);
+        expect(calls.map((call) => [call.method, call.body])).toEqual([
+          ['GET', null],
+          ['POST', '{}'],
+        ]);
+      },
+    );
+
+    it('keeps full Extension refreshes compatible without a capability probe', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { refreshed: 2, failed: 0 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.refreshExtensions('client-1');
+      await client
+        .workspaceById('workspace/id')
+        .refreshExtensionRuntime('client-2', {});
+      await client.refreshExtensions('client-3', { sessionIds: undefined });
+      await client
+        .workspaceById('workspace/id')
+        .refreshExtensionRuntime('client-4', { sessionIds: undefined });
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        ['POST', 'http://daemon/workspace/extensions/refresh', '{}'],
+        [
+          'POST',
+          'http://daemon/workspaces/workspace%2Fid/extensions/refresh',
+          '{}',
+        ],
+        ['POST', 'http://daemon/workspace/extensions/refresh', '{}'],
+        [
+          'POST',
+          'http://daemon/workspaces/workspace%2Fid/extensions/refresh',
+          '{}',
+        ],
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-2');
     });
   });
 
@@ -10623,7 +10902,7 @@ describe('DaemonClient', () => {
       await expect(
         workspace.archiveSessionsData(
           ['s-1'],
-          { resolveConflicts: true },
+          { resolveConflicts: true, requireIdle: true },
           'client-2',
         ),
       ).resolves.toEqual(replies['/sessions/archive']);
@@ -10643,7 +10922,11 @@ describe('DaemonClient', () => {
       ]);
       expect(calls.map((call) => JSON.parse(call.body!))).toEqual([
         { sessionIds: ['s-1'] },
-        { sessionIds: ['s-1'], resolveConflicts: true },
+        {
+          sessionIds: ['s-1'],
+          resolveConflicts: true,
+          requireIdle: true,
+        },
         { sessionIds: ['s-1'] },
       ]);
     });

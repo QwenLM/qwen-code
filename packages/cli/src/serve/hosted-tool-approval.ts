@@ -56,26 +56,26 @@ const PREAPPROVED_TOOLS: Readonly<
   ],
 };
 
-// `glob` ships with the `/2` search profiles, so those pre-approve it and no
-// other profile does. A name-keyed allowance would also pre-approve an
-// MCP-declared tool that happens to be called `glob` — the MCP server picks
-// its own names — and dispatch it without ever asking the operator.
+// `glob` ships with the `/2` search profiles and the read profile (#13753 I3),
+// so those pre-approve it and no other profile does. A name-keyed allowance
+// would also pre-approve an MCP-declared tool that happens to be called
+// `glob` — the MCP server picks its own names — and dispatch it without ever
+// asking the operator.
 const SEARCH_PREAPPROVED_TOOLS: readonly string[] = ['glob'];
 
 /**
  * Reads a tool profile's approval settings. `plan` needs its own planning
  * semantics and `auto` a classifier, which the Hosted path does not have, so
- * both are refused like any unknown mode. `yolo` never waits, so it ignores
- * the timeout.
+ * both are refused like any unknown mode. `yolo` retains a valid timeout for
+ * a later policy selection, while preserving its legacy invalid-timeout fallback.
  */
 export function parseHostedApprovalSettings(
   mode: unknown,
   timeoutMs: unknown,
 ): HostedApprovalSettings | undefined {
   const parsed = mode === undefined ? 'yolo' : mode;
-  if (parsed === 'yolo')
-    return { mode: parsed, timeoutMs: HOSTED_APPROVAL_TIMEOUT_MS };
-  if (parsed !== 'default' && parsed !== 'auto-edit') return undefined;
+  if (parsed !== 'yolo' && parsed !== 'default' && parsed !== 'auto-edit')
+    return undefined;
   if (
     timeoutMs !== undefined &&
     (typeof timeoutMs !== 'number' ||
@@ -83,7 +83,9 @@ export function parseHostedApprovalSettings(
       timeoutMs < MIN_APPROVAL_TIMEOUT_MS ||
       timeoutMs > MAX_APPROVAL_TIMEOUT_MS)
   )
-    return undefined;
+    return parsed === 'yolo'
+      ? { mode: parsed, timeoutMs: HOSTED_APPROVAL_TIMEOUT_MS }
+      : undefined;
   return {
     mode: parsed,
     timeoutMs: (timeoutMs as number | undefined) ?? HOSTED_APPROVAL_TIMEOUT_MS,
@@ -103,28 +105,29 @@ export function readHostedApprovalDefinition(
   return parseHostedApprovalSettings(mode, timeoutMs);
 }
 
-/** Definition fields that pin a mode which asks; `yolo` adds none. */
+/** Legacy fixed `yolo` definitions stay empty; selectable ones retain the timeout. */
 export function hostedApprovalDefinition(
   settings: HostedApprovalSettings,
+  selectable = false,
 ): Record<string, unknown> {
-  return settings.mode === 'yolo'
+  return settings.mode === 'yolo' && !selectable
     ? {}
     : { approvalMode: settings.mode, approvalTimeoutMs: settings.timeoutMs };
 }
 
 /**
- * Whether a call asks the operator. `searchProfile` is the Session's own
- * `/2` search profile, the only place `glob` is pre-approved.
+ * Whether a call asks the operator. `globProfile` is the Session's own
+ * `/2` search or read profile, the only places `glob` is pre-approved.
  */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,
   toolName: string,
-  searchProfile: boolean = false,
+  globProfile: boolean = false,
 ): boolean {
   if (settings.mode === 'yolo') return false;
   return (
     !PREAPPROVED_TOOLS[settings.mode].includes(toolName) &&
-    !(searchProfile && SEARCH_PREAPPROVED_TOOLS.includes(toolName))
+    !(globProfile && SEARCH_PREAPPROVED_TOOLS.includes(toolName))
   );
 }
 
