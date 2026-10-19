@@ -80,6 +80,12 @@ network call. A unit test blocks `executionBroker`, cancels while the Hook
 execution record is still `intent`, and asserts `cancelled` /
 `not_started_proven` with zero `hook-execute` requests.
 
+The assertion that carries the pin is the `commitExtensionRecord` spy. A third
+cancel checkpoint after the `dispatch_started` commit catches the same
+condition, so removing the post-acquisition check leaves the final record and
+the zero-`hook-execute` count green. What changes is the child record's
+`dispatch_started` commit, and the spy catches it.
+
 ## Non-goals
 
 Pre-dispatch cancel is pinned by the unit test above. Also out: FG13a, FG13b,
