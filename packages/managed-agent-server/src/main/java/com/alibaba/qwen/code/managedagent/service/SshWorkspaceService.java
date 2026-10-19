@@ -155,6 +155,32 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence {
         configuredNode(runtimeStorage(binding).nodeId());
     }
 
+    public Map<String, Object> files(ContextBinding binding, Map<String, Object> files) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("SSH file access must run outside SQL transactions");
+        }
+        verifyBinding(binding);
+        var storage = runtimeStorage(binding);
+        var node = configuredNode(storage.nodeId()).runtimeNode();
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("protocolVersion", 1);
+        request.put("operation", "probe");
+        request.put("nodeId", node.nodeId());
+        request.put("stateDirectory", node.stateDirectory());
+        request.put("root", storage.mountRoot());
+        request.put("allowedRoots", node.allowedRoots());
+        request.put("cwdRelative", binding.getCwdRelative());
+        request.put("identity", storage.registration().get("identity"));
+        request.put("marker", storage.registration().get("marker"));
+        request.put("files", files);
+        var result = connections().bootstrap(node, request);
+        if (!storage.registration().get("qwenVersion").equals(result.get("qwenVersion"))) {
+            throw unavailable();
+        }
+        verifyBinding(binding);
+        return result;
+    }
+
     private SshRuntimeSettings.Node admit(String tenant, String actor, String id) {
         if (!properties.getRuntimeBroker().getSsh().isEnabled()) {
             throw new ApiException(HttpStatus.NOT_FOUND, "ssh_runtime_disabled", "SSH Workspace registration is disabled.");
