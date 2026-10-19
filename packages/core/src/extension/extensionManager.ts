@@ -80,6 +80,7 @@ import {
 } from './i18n.js';
 import {
   getEnvContents,
+  ExtensionSettingsReadError,
   getScopedEnvContents,
   ExtensionSettingScope,
   maybePromptForSettings,
@@ -1898,8 +1899,12 @@ export class ExtensionManager {
             }),
           ),
         };
-      } catch {
-        const warning = `Unable to read settings for extension "${config.name}". Its MCP servers are disabled. Check credential storage availability, then restart or reload the extension. If settings are confirmed missing or corrupt, back them up before uninstalling and reinstalling.`;
+      } catch (error) {
+        const code =
+          error instanceof ExtensionSettingsReadError
+            ? error.code
+            : 'unexpected';
+        const warning = `Unable to read settings for extension "${config.name}". Its MCP servers are disabled (settings:${code}). Check credential storage availability, then restart or reload the extension. If settings are confirmed missing or corrupt, back them up before uninstalling and reinstalling.`;
         process.stderr.write(`[warn] ${warning}\n`);
         debugLogger.warn(warning);
         config = { ...config, mcpServers: undefined };

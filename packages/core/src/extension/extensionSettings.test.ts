@@ -315,9 +315,9 @@ describe('extensionSettings', () => {
       storage['API_KEY'] = 'stale-secret';
       delete storage[bundleKey];
 
-      await expect(userContents(config)).rejects.toThrow(
-        'Stored extension settings bundle is missing.',
-      );
+      await expect(userContents(config)).rejects.toMatchObject({
+        code: 'bundle-missing',
+      });
     });
 
     it('defers clearing sensitive settings until commit', async () => {
@@ -585,6 +585,41 @@ describe('extensionSettings', () => {
       setting(2, { envVar: 'SENSITIVE_VAR', sensitive: true }),
     ]);
 
+    it.each([ExtensionSettingScope.USER, ExtensionSettingScope.WORKSPACE])(
+      'returns only declared dotenv variables in %s scope',
+      async (scope) => {
+        const envFile = path.join(
+          scope === ExtensionSettingScope.USER
+            ? extensionDir
+            : tempWorkspaceDir,
+          '.env',
+        );
+        await fsPromises.writeFile(
+          envFile,
+          'VAR1=declared\nPROJECT_ONLY=private\n',
+        );
+        await expect(getScopedEnvContents(config, ID, scope)).resolves.toEqual({
+          VAR1: 'declared',
+        });
+        expect(await readText(envFile)).toContain('PROJECT_ONLY=private');
+      },
+    );
+
+    it('classifies secret read failures without retaining the backend message', async () => {
+      const secretMessage = 'native failure with synthetic-secret';
+      vi.mocked(KeychainTokenStorage).mockImplementation(
+        () =>
+          ({
+            isAvailable: vi.fn().mockResolvedValue(true),
+            getSecret: vi.fn().mockRejectedValue(new Error(secretMessage)),
+          }) as unknown as KeychainTokenStorage,
+      );
+      await expect(userContents(config)).rejects.toMatchObject({
+        code: 'credential-read',
+        message: 'Unable to read extension settings (credential-read).',
+      });
+    });
+
     it('should return combined contents from user .env and keychain for USER scope', async () => {
       await fsPromises.writeFile(
         path.join(extensionDir, EXTENSION_SETTINGS_FILENAME),
@@ -618,6 +653,47 @@ describe('extensionSettings', () => {
         SENSITIVE_VAR: 'workspace-secret',
       });
     });
+  });
+
+  it('writes sensitive and ordinary settings only to the explicit target workspace', async () => {
+    const target = path.join(tempHomeDir, 'target');
+    const other = path.join(tempHomeDir, 'other');
+    fs.mkdirSync(target);
+    fs.mkdirSync(other);
+    const config = extConfig([setting(1), setting(2, { sensitive: true })]);
+    const daemonEnv = path.join(tempWorkspaceDir, '.env');
+    const targetEnv = path.join(target, '.env');
+    await fsPromises.writeFile(daemonEnv, 'DAEMON_ONLY=original\n');
+    await fsPromises.writeFile(targetEnv, 'TARGET_ONLY=original\n');
+    for (const key of ['VAR1', 'VAR2']) {
+      await updateSetting(
+        config,
+        ID,
+        key,
+        async () => `target-${key}`,
+        ExtensionSettingScope.WORKSPACE,
+        target,
+      );
+    }
+    await expect(getEnvContents(config, ID, target)).resolves.toEqual({
+      VAR1: 'target-VAR1',
+      VAR2: 'target-VAR2',
+    });
+    for (const workspace of [tempWorkspaceDir, other]) {
+      await expect(getEnvContents(config, ID, workspace)).resolves.toEqual({});
+    }
+    expect(await readText(daemonEnv)).toBe('DAEMON_ONLY=original\n');
+    expect(await readText(targetEnv)).toContain('TARGET_ONLY=original');
+    expect(await readText(targetEnv)).not.toContain('target-VAR2');
+    expect(
+      mockKeychainData[`${USER_SERVICE} ${fs.realpathSync(target)}`],
+    ).toEqual({
+      VAR2: 'target-VAR2',
+    });
+    expect(
+      mockKeychainData[`${USER_SERVICE} ${fs.realpathSync(tempWorkspaceDir)}`],
+    ).toEqual({});
+    expect(fs.existsSync(path.join(other, '.env'))).toBe(false);
   });
 
   describe('workspace path aliases', () => {

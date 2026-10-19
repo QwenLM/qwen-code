@@ -36,6 +36,21 @@ const ENV_VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SETTINGS_SELECTOR_FILENAME = '.qwen-extension-settings.json';
 const SETTINGS_BUNDLE_PREFIX = '$qwen:extension-settings:v2:';
 
+type ExtensionSettingsReadCode =
+  | 'selector-read'
+  | 'dotenv-read'
+  | 'credential-read'
+  | 'workspace-alias-read'
+  | 'bundle-missing'
+  | 'bundle-parse';
+
+export class ExtensionSettingsReadError extends Error {
+  constructor(readonly code: ExtensionSettingsReadCode) {
+    super(`Unable to read extension settings (${code}).`);
+    this.name = 'ExtensionSettingsReadError';
+  }
+}
+
 interface ExtensionSettingsSelector {
   version: 1;
   backend: TokenStorageType;
@@ -379,64 +394,93 @@ export async function getScopedEnvContents(
   scope: ExtensionSettingScope,
   workspaceDir = process.cwd(),
 ): Promise<Record<string, string>> {
-  const { name: extensionName } = extensionConfig;
-  const keychain = new HybridTokenStorage(
-    getKeychainStorageName(extensionName, extensionId, scope, workspaceDir),
-  );
-  const selector =
-    scope === ExtensionSettingScope.USER
-      ? await readSettingsSelector(extensionName)
-      : undefined;
-  const settingsStorage = selector
-    ? createSelectedStorage(
-        getKeychainStorageName(extensionName, extensionId, scope, workspaceDir),
-        selector.backend,
-      )
-    : keychain;
-  const legacyWorkspaceStorage =
-    scope === ExtensionSettingScope.WORKSPACE &&
-    getKeychainStorageName(extensionName, extensionId, scope, workspaceDir) !==
-      `Qwen Code Extensions ${extensionName} ${extensionId} ${workspaceDir}`
-      ? new HybridTokenStorage(
-          `Qwen Code Extensions ${extensionName} ${extensionId} ${workspaceDir}`,
+  let stage: ExtensionSettingsReadCode = 'selector-read';
+  try {
+    const { name: extensionName } = extensionConfig;
+    const keychain = new HybridTokenStorage(
+      getKeychainStorageName(extensionName, extensionId, scope, workspaceDir),
+    );
+    stage = 'selector-read';
+    const selector =
+      scope === ExtensionSettingScope.USER
+        ? await readSettingsSelector(extensionName)
+        : undefined;
+    const settingsStorage = selector
+      ? createSelectedStorage(
+          getKeychainStorageName(
+            extensionName,
+            extensionId,
+            scope,
+            workspaceDir,
+          ),
+          selector.backend,
         )
-      : undefined;
-  const envFilePath = getEnvFilePath(extensionName, scope, workspaceDir);
-  let customEnv: Record<string, string> = {};
-  if (fsSync.existsSync(envFilePath)) {
-    const envFile = fsSync.readFileSync(envFilePath, 'utf-8');
-    customEnv = dotenv.parse(envFile);
-  }
-
-  if (extensionConfig.settings) {
-    const bundleContent = selector
-      ? await settingsStorage.getSecret(selector.bundleKey)
-      : null;
-    if (selector && bundleContent === null) {
-      throw new Error('Stored extension settings bundle is missing.');
-    }
-    const bundle = bundleContent
-      ? parseSensitiveSettingsBundle(bundleContent)
-      : undefined;
-    for (const setting of extensionConfig.settings) {
-      if (!setting.sensitive) continue;
-      const override = selector
-        ? await settingsStorage.getSecret(
-            `${selector.bundleKey}:override:${setting.envVar}`,
+      : keychain;
+    const legacyWorkspaceStorage =
+      scope === ExtensionSettingScope.WORKSPACE &&
+      getKeychainStorageName(
+        extensionName,
+        extensionId,
+        scope,
+        workspaceDir,
+      ) !==
+        `Qwen Code Extensions ${extensionName} ${extensionId} ${workspaceDir}`
+        ? new HybridTokenStorage(
+            `Qwen Code Extensions ${extensionName} ${extensionId} ${workspaceDir}`,
           )
-        : null;
-      const secret =
-        override ??
-        (selector
-          ? bundle?.[setting.envVar]
-          : ((await settingsStorage.getSecret(setting.envVar)) ??
-            (await legacyWorkspaceStorage?.getSecret(setting.envVar))));
-      if (secret) {
-        customEnv[setting.envVar] = secret;
+        : undefined;
+    const envFilePath = getEnvFilePath(extensionName, scope, workspaceDir);
+    const customEnv: Record<string, string> = {};
+    stage = 'dotenv-read';
+    if (fsSync.existsSync(envFilePath)) {
+      const envFile = fsSync.readFileSync(envFilePath, 'utf-8');
+      const parsedEnv = dotenv.parse(envFile);
+      for (const setting of extensionConfig.settings ?? []) {
+        if (Object.hasOwn(parsedEnv, setting.envVar)) {
+          customEnv[setting.envVar] = parsedEnv[setting.envVar];
+        }
       }
     }
+
+    if (extensionConfig.settings) {
+      stage = 'credential-read';
+      const bundleContent = selector
+        ? await settingsStorage.getSecret(selector.bundleKey)
+        : null;
+      if (selector && bundleContent === null) {
+        stage = 'bundle-missing';
+        throw new Error('Stored extension settings bundle is missing.');
+      }
+      stage = 'bundle-parse';
+      const bundle = bundleContent
+        ? parseSensitiveSettingsBundle(bundleContent)
+        : undefined;
+      for (const setting of extensionConfig.settings) {
+        if (!setting.sensitive) continue;
+        stage = 'credential-read';
+        const override = selector
+          ? await settingsStorage.getSecret(
+              `${selector.bundleKey}:override:${setting.envVar}`,
+            )
+          : null;
+        let secret =
+          override ??
+          (selector
+            ? bundle?.[setting.envVar]
+            : await settingsStorage.getSecret(setting.envVar));
+        if (secret == null && legacyWorkspaceStorage) {
+          stage = 'workspace-alias-read';
+          secret = await legacyWorkspaceStorage.getSecret(setting.envVar);
+        }
+        if (secret) {
+          customEnv[setting.envVar] = secret;
+        }
+      }
+    }
+    return customEnv;
+  } catch {
+    throw new ExtensionSettingsReadError(stage);
   }
-  return customEnv;
 }
 
 export async function getEnvContents(
@@ -470,6 +514,7 @@ export async function updateSetting(
   settingKey: string,
   requestSetting: (setting: ExtensionSetting) => Promise<string>,
   scope: ExtensionSettingScope,
+  workspaceDir = process.cwd(),
 ): Promise<void> {
   const { name: extensionName, settings } = extensionConfig;
   if (!settings || settings.length === 0) {
@@ -492,7 +537,7 @@ export async function updateSetting(
 
   const newValue = await requestSetting(settingToUpdate);
   const keychain = new HybridTokenStorage(
-    getKeychainStorageName(extensionName, extensionId, scope),
+    getKeychainStorageName(extensionName, extensionId, scope, workspaceDir),
   );
 
   if (settingToUpdate.sensitive) {
@@ -502,7 +547,12 @@ export async function updateSetting(
         : undefined;
     const settingsStorage = selector
       ? createSelectedStorage(
-          getKeychainStorageName(extensionName, extensionId, scope),
+          getKeychainStorageName(
+            extensionName,
+            extensionId,
+            scope,
+            workspaceDir,
+          ),
           selector.backend,
         )
       : keychain;
@@ -513,9 +563,9 @@ export async function updateSetting(
       );
       try {
         await keychain.setSecret(settingToUpdate.envVar, newValue);
-      } catch (error) {
+      } catch {
         debugLogger.warn(
-          `Failed to synchronize legacy extension setting "${settingToUpdate.envVar}": ${error instanceof Error ? error.message : String(error)}`,
+          `Failed to synchronize legacy extension setting "${settingToUpdate.envVar}": legacy-sync-failed`,
         );
       }
     } else {
@@ -526,7 +576,7 @@ export async function updateSetting(
 
   // For non-sensitive settings, we need to read the existing .env file,
   // update the value, and write it back, preserving any other values.
-  const envFilePath = getEnvFilePath(extensionName, scope);
+  const envFilePath = getEnvFilePath(extensionName, scope, workspaceDir);
   let envContent = '';
   if (fsSync.existsSync(envFilePath)) {
     envContent = await fs.readFile(envFilePath, 'utf-8');
