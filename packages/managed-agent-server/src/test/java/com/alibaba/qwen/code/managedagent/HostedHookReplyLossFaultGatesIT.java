@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,10 +22,13 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -46,16 +49,21 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
 
-// FG13a (issues #14054/#14449): lost replies for the managed command Hook.
+// FG13a (issues #14054/#14449): lost replies for the managed Hook.
 // The dispatch reply is dropped after the worker admitted the operation, so
 // the retry must resolve the same operation through the owner's status, keep
-// exactly one physical call, and apply its single result.
+// exactly one physical call, and apply its single result. The catalog reply
+// is dropped before the registration commits, so the retried admission must
+// register the pinned catalog once instead of appending a second record. The
+// HTTP endpoint consumes the request and drops its reply, so the receipt stays
+// unknown and the endpoint is never called again.
 @EnabledOnOs(OS.LINUX)
 class HostedHookReplyLossFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-files/1";
@@ -67,6 +75,8 @@ class HostedHookReplyLossFaultGatesIT {
     private final String tenant = "hook-fault-" + UUID.randomUUID();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
+    private final AtomicInteger hookRequests = new AtomicInteger();
+    private final List<String> hookRequestLog = new CopyOnWriteArrayList<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
     private Path cli;
@@ -80,6 +90,7 @@ class HostedHookReplyLossFaultGatesIT {
     private int brokerPort;
     private int boots;
     private HttpServer model;
+    private ServerSocket hookEndpoint;
     private ExecutorService modelExecutor;
     private ServletWebServerApplicationContext spring;
     private JdbcTemplate jdbc;
@@ -122,7 +133,36 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    private String startHookEndpoint() throws IOException {
+        hookEndpoint = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
+        Thread.ofVirtual().name("hook-endpoint").start(() -> {
+            while (!hookEndpoint.isClosed()) {
+                try (Socket client = hookEndpoint.accept()) {
+                    hookRequests.incrementAndGet();
+                    hookRequestLog.add("request " + hookRequests.get() + " accepted");
+                    client.setSoTimeout(2000);
+                    try (InputStream input = client.getInputStream()) {
+                        byte[] buffer = new byte[8192];
+                        while (input.read(buffer) >= 0) {
+                            // Drain the request; the client waits for a reply.
+                        }
+                    } catch (SocketTimeoutException complete) {
+                        // The request is complete once the client stops writing.
+                    }
+                    // Closing without a response drops the reply.
+                } catch (IOException closed) {
+                    return;
+                }
+            }
+        });
+        return "http://127.0.0.1:" + hookEndpoint.getLocalPort() + "/hook";
+    }
+
     private void boot(String timeoutMs, String holdMs, String signalMode) throws Exception {
+        boot(timeoutMs, holdMs, signalMode, null);
+    }
+
+    private void boot(String timeoutMs, String holdMs, String signalMode, String httpUrl) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("Hook fault gates require disposable MySQL 8.4")
                 .startsWith("jdbc:mysql:");
         node = System.getProperty("node.executable");
@@ -146,10 +186,13 @@ class HostedHookReplyLossFaultGatesIT {
             Files.copy(resource, program);
         }
         hookDigest = DigestUtils.sha256Hex("hook:" + Files.readString(program));
-        Map<String, Object> hook = new java.util.LinkedHashMap<>(Map.of("hookId", "pre", "eventName", "PreToolUse",
-                "sequential", false, "failClosed", true, "async", false, "config", Map.of("type", "command", "command",
+        Map<String, Object> config = httpUrl == null
+                ? Map.of("type", "command", "command",
                         quote(node) + " " + quote(program.toString()) + " hook " + quote(evidence.toString())
-                                + " " + quote(holdMs) + " " + quote(signalMode), "timeout", Integer.parseInt(timeoutMs))));
+                                + " " + quote(holdMs) + " " + quote(signalMode), "timeout", Integer.parseInt(timeoutMs))
+                : Map.of("type", "http", "url", httpUrl, "timeout", Integer.parseInt(timeoutMs));
+        Map<String, Object> hook = new java.util.LinkedHashMap<>(Map.of("hookId", "pre", "eventName", "PreToolUse",
+                "sequential", false, "failClosed", true, "async", false, "config", config));
         hook.put("onceKey", null);
         json.writeValue(temporary.resolve("hooks.json").toFile(), Map.of("version", 1, "catalogs", List.of(
                 Map.of("tenantId", tenant, "workspaceId", "workspace", "catalogId", "fg13-hooks",
@@ -297,6 +340,133 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13aCatalogReplyLossRegistersThePinnedCatalogOnceOnMySql()
+            throws Exception {
+        boot("60000", "1000", "hook-solo");
+        // The reply is lost before the registration commits, so the first
+        // admission fails and the coordinator retries the same Turn. The
+        // retry must register the pinned catalog once, at its own revision.
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
+                (method, path, body) -> path.contains("/control")
+                        && body.contains("\"kind\":\"hook-catalog\""),
+                "hook-catalog-reply"));
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        String turn = submit(session, "FG13_CATALOG_LOSS");
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("settled");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("settled");
+        });
+        assertThat(events("hook.allow")).hasSize(1);
+        assertThat(hookResult(session).path("outcome").asText()).isEqualTo("success");
+        // The retry reuses the deterministic registration id, so a lost
+        // reply leaves one settled record at the pin from the definition.
+        List<JsonNode> registrations = HostedGateTestSupport.extensionRecords(
+                jdbc, tenant, session, "hook_registration");
+        assertThat(registrations).as("hook registration records").hasSize(1);
+        JsonNode registration = registrations.getFirst();
+        assertThat(registration.path("registrationId").asText())
+                .startsWith("hook-catalog-");
+        assertThat(registration.path("catalogId").asText()).isEqualTo("fg13-hooks");
+        assertThat(registration.path("catalogRevision").asInt()).isEqualTo(1);
+        assertThat(registration.at("/run/state").asText()).isEqualTo("settled");
+        // The lost reply failed the first admission: the Turn carries the
+        // retry the coordinator scheduled, so a silently tolerated loss
+        // would leave this at zero.
+        assertThat(jdbc.queryForObject("SELECT retry_count FROM ma_turn"
+                + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                Integer.class, tenant, session, turn))
+                .as("retries after the lost catalog reply")
+                .isGreaterThanOrEqualTo(1);
+        assertThat(Files.readString(temporary.resolve("proxy.log")))
+                .contains("PROXY dropped hook-catalog-reply");
+        waitFor(() -> assertThat(modelRequests.toString()).contains(PROOF));
+        long results = 0;
+        for (JsonNode message : modelRequests.getLast().path("messages")) {
+            if ("tool".equals(message.path("role").asText())
+                    && "call_FG13_CATALOG_LOSS".equals(message.path("tool_call_id").asText())) {
+                results++;
+            }
+        }
+        assertThat(results).as("tool results for the emitted call").isEqualTo(1);
+        assertThat(modelFailure.get()).isNull();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13aHttpReplyLossStaysUnknownAndIsNeverResentOnMySql() throws Exception {
+        String url = startHookEndpoint();
+        boot("60000", "1000", "hook-solo", url);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_HTTP_LOSS");
+        // The endpoint receives the POST once and drops the reply, so the
+        // worker's receipt stays unknown and the tool is never dispatched.
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("recovery_blocked");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
+        });
+        // Give a late retry the chance to land before proving none did.
+        await().pollDelay(Duration.ofSeconds(3)).atMost(Duration.ofSeconds(5))
+                .until(() -> true);
+        assertThat(hookRequests.get()).as("HTTP hook requests").isEqualTo(1);
+        // The unknown receipt blocks the turn: the tool never reads the file.
+        assertThat(modelRequests.toString()).doesNotContain(PROOF);
+        assertThat(modelFailure.get()).isNull();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13fDenyReplyLossReplaysTheBlockedDecisionOnMySql() throws Exception {
+        boot("60000", "1000", "hook-deny");
+        // The reply is lost once the worker has already settled the deny:
+        // only a settled reply carrying the deny decision may consume the
+        // drop, so the running receipt cannot stand in for the decision.
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.dropResponse(
+                (method, path, body) -> path.contains("/control")
+                        && body.contains("\"kind\":\"hook-status\""),
+                reply -> reply.contains("\"state\":\"settled\"")
+                        && reply.contains("\"permissionDecision\":\"deny\""),
+                "hook-deny-settled-reply"));
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_DENY_LOSS");
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        // The dropped settled reply leaves the honest unknown first.
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("recovery_blocked");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
+        });
+        assertThat(events("hook.deny")).hasSize(1);
+        assertThat(events("hook.allow")).isEmpty();
+        // A later read of the same operation returns the same decision.
+        String executionId = hookExecution(session).path("hookExecutionId").asText();
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
+        assertThat(events("hook.call")).hasSize(1);
+        JsonNode denied = hookResult(session);
+        assertThat(denied.path("outcome").asText()).isEqualTo("success");
+        assertThat(denied.at("/output/hookSpecificOutput/permissionDecision").asText()).isEqualTo("deny");
+        assertThat(denied.at("/output/hookSpecificOutput/permissionDecisionReason").asText())
+                .isEqualTo("FG13_DENIED");
+        assertThat(modelRequests.toString()).doesNotContain(PROOF);
+        assertThat(Files.readString(temporary.resolve("proxy.log")))
+                .contains("PROXY dropped hook-deny-settled-reply");
+        assertThat(modelFailure.get()).isNull();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
@@ -379,7 +549,9 @@ class HostedHookReplyLossFaultGatesIT {
             request.path("tools").forEach(tool -> names.add(tool.at("/function/name").asText()));
             assertThat(names).contains("read_file");
             boolean call = results.isEmpty()
-                    && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS").contains(prompt);
+                    && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS",
+                            "FG13_CATALOG_LOSS", "FG13_HTTP_LOSS",
+                            "FG13_DENY_LOSS").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
@@ -514,7 +686,9 @@ class HostedHookReplyLossFaultGatesIT {
                     if (proxy != null) {
                         proxy.close();
                     }
-                }, http::close);
+                }, () -> { if (hookEndpoint != null) {
+                    hookEndpoint.close();
+                } }, http::close);
     }
 
     private void saveEvidence() throws Exception {
@@ -529,6 +703,9 @@ class HostedHookReplyLossFaultGatesIT {
             if (Files.exists(source)) {
                 Files.copy(source, destination.resolve(source.getFileName()));
             }
+        }
+        if (!hookRequestLog.isEmpty()) {
+            Files.write(destination.resolve("http-hook.log"), hookRequestLog);
         }
         if (jdbc != null) {
             json.writeValue(destination.resolve("bindings.json").toFile(), jdbc.queryForList(

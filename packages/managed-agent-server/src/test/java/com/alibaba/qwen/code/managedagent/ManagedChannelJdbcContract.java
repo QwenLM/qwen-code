@@ -1,15 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository;
-import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.ChannelDelivery;
-import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.DeliveryCursor;
-import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.DeliveryPage;
-import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository;
-import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.ChannelRoute;
-import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.RouteCursor;
-import com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.RoutePage;
-import com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository;
-import com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.persistence.ChannelDeliveryRepository;
+import com.alibaba.qwen.code.managedagent.persistence.ChannelDeliveryRepository.ChannelDelivery;
+import com.alibaba.qwen.code.managedagent.persistence.ChannelDeliveryRepository.DeliveryCursor;
+import com.alibaba.qwen.code.managedagent.persistence.ChannelDeliveryRepository.DeliveryPage;
+import com.alibaba.qwen.code.managedagent.persistence.ChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.persistence.ChannelRouteRepository.ChannelRoute;
+import com.alibaba.qwen.code.managedagent.persistence.ChannelRouteRepository.RouteCursor;
+import com.alibaba.qwen.code.managedagent.persistence.ChannelRouteRepository.RoutePage;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
