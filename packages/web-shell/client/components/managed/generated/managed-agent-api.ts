@@ -601,15 +601,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-skills/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read only names and descriptions from the Session's pinned static Skill catalog. Requires a trusted actor and Workspace read access. Never resolves the latest AgentDefinition or discovers host Skills. */
+        post: operations["queryWebShellSessionSkills"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        InputBlock: {
-            /** @enum {string} */
-            type: "input_text";
-            text: string;
-        };
+        InputBlock: components["schemas"]["InputTextBlock"] | components["schemas"]["InputFileBlock"] | components["schemas"]["InputImageBlock"];
         PublicArtifact: {
             /** @constant */
             object: "agent.artifact";
@@ -665,15 +678,17 @@ export interface components {
             environmentId?: string | null;
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
-            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
+            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             workspace?: components["schemas"]["WebShellWorkspaceSelection"];
             /**
-             * @description Optional policy for Workspace-bound creation only. Omission preserves the existing default and idempotency digest. Explicit selection is validated against the resolved Agent and tool profile and frozen in the Session; Shell refuses yolo and definitions retain their compiled policy.
+             * @description Optional initial execution policy for Workspace creation, validated against the resolved Agent and profile. Omission preserves its default and idempotency digest. Independent of planMode.
              * @enum {string}
              */
             approvalMode?: "default" | "auto-edit" | "yolo";
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -681,7 +696,7 @@ export interface components {
             idempotencyKey: string;
             /** Format: uuid */
             sessionId: string;
-            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
+            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit and prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 48 KiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             /**
@@ -765,6 +780,10 @@ export interface components {
              * @enum {string}
              */
             initialApprovalMode?: "default" | "auto-edit" | "yolo";
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
+            /** @description Optional deployment capability; missing means false. */
+            planModeSupported?: boolean;
         };
         WebShellSessionCapabilities: {
             /**
@@ -812,6 +831,8 @@ export interface components {
             modelChange?: boolean;
             /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
             approvalModeChange?: boolean;
+            /** @description Optional deployment capability; missing means false. */
+            inputAttachments?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -1166,7 +1187,7 @@ export interface components {
          */
         TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
         /**
-         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent, 1.46 for workflow and 1.54 for background_shell and monitor, tasks of those kinds in pending, running, waiting or degraded, and since 1.57 for channel_delivery, a delivery still pending because no adapter has claimed it, each in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent, 1.46 for workflow and 1.54 for background_shell and monitor, tasks of those kinds in pending, running, waiting or degraded, and since 1.57 for channel_delivery, a delivery still pending because no adapter has claimed it, each in an active Session, and since 1.65 for automation_run in pending, running, waiting or degraded in an active Session; only that occurrence is cancelled and its schedule is preserved); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
          * @enum {string}
          */
         TaskActionCapability: "cancel" | "send_input" | "read_output";
@@ -1336,7 +1357,7 @@ export interface components {
         };
         /** @description Optional preview for requested native read_file, write_file, edit or run_shell_command approvals. Missing or invalid input, and internal MCP inputs, omit the preview. No general secret redaction is performed; visibility follows Session read permissions. Deploy the version 2 Java reader before a Harness producer starts writing version 2 options. */
         WebShellActionInputPreview: {
-            /** @description Exact prefix of the stored payloadJson ({toolName,input}), at most 8192 UTF-8 bytes ending at a complete code point. Truncated text may not be valid JSON. */
+            /** @description Exact UTF-8 prefix of payloadJson ({toolName,input}). Ordinary tools retain the 8192-byte preview. exit_plan_mode includes its complete input within the 64 KiB resource ceiling so a plan can be reviewed after refresh. Truncated ordinary previews may not be valid JSON. */
             text: string;
             /** @description True when text is shorter than the complete UTF-8 input. */
             truncated: boolean;
@@ -1359,8 +1380,12 @@ export interface components {
         WebShellSessionOptions: {
             /** @enum {string} */
             approvalMode: "default" | "auto-edit" | "yolo";
-            /** @description Effective modes for this Agent/profile. Stored definitions offer only their pinned mode; auto and plan are unsupported. */
+            /** @description Execution policies available at creation. Stored definitions retain their initial policy; existing eligible Sessions may select a policy separately. Plan is an independent overlay. */
             availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
+            /** @description Optional deployment capability; missing means false. */
+            planModeSupported?: boolean;
+            /** @description Optional deployment capability; missing means false. */
+            inputAttachments?: boolean;
         };
         /** @description Safe allowlisted observation for a Workspace-bound Session. Unknown counts are omitted, never estimated. */
         WebShellModelContext: {
@@ -1413,6 +1438,10 @@ export interface components {
             approvalRevision: number;
             availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
             supported: boolean;
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
+            /** @description Optional deployment capability; missing means false. */
+            planModeSupported?: boolean;
         };
         WebShellChangeApprovalRequest: {
             sessionId: string;
@@ -1422,6 +1451,8 @@ export interface components {
             requestId?: string;
             /** @enum {string} */
             approvalMode: "default" | "auto-edit" | "yolo";
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
         };
         WebShellApprovalChangeResult: {
             sessionId: string;
@@ -1430,6 +1461,8 @@ export interface components {
             /** Format: int64 */
             approvalRevision: number;
             replayed: boolean;
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
         };
         WebShellRuntimeNode: {
             nodeId: string;
@@ -1488,6 +1521,34 @@ export interface components {
         WebShellWorkspaceDirectoryQueryRequest: {
             workspaceId: string;
             cwdRelative: string;
+        };
+        InputTextBlock: {
+            /** @enum {string} */
+            type: "input_text" | "text";
+            text: string;
+        };
+        /** @description Inline UTF-8 text file. No host paths, URLs, binary or NUL. Conservative text MIME/extension validation; the complete canonical input containing attachments is limited to 48 KiB. */
+        InputFileBlock: {
+            /** @enum {string} */
+            type: "input_file";
+            name: string;
+            mime_type: string;
+            text: string;
+        };
+        /** @description Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 48 KiB. */
+        InputImageBlock: {
+            /** @enum {string} */
+            type: "input_image";
+            /** @enum {string} */
+            mime_type: "image/png" | "image/jpeg" | "image/webp";
+            data: string;
+        };
+        WebShellSkill: {
+            name: string;
+            description: string;
+        };
+        WebShellSessionSkills: {
+            skills: components["schemas"]["WebShellSkill"][];
         };
     };
     responses: {
@@ -2764,6 +2825,36 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    queryWebShellSessionSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session static Skill metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionSkills"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
 }

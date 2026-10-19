@@ -360,6 +360,10 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg10-cases/',
     );
+    // FG11a's automation lost-reply evidence lives in target/fg11-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg11-cases/',
+    );
     // FG12a's MCP reply-loss evidence lives in target/fg12-cases/.
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg12-cases/',
@@ -411,9 +415,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (95 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (134 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 175, 190],
+    ['hosted-harness-mysql', 214, 227],
     // Fifteen failover arms at 10 each.
     ['hosted-failover-e2e', 150, 165],
   ])(
@@ -592,12 +596,30 @@ describe('Hosted real-process gates', () => {
       // reply-loss letter adds ~15 s, so the fork moves to 4499; the FG12c
       // restart matrix (five cases) adds ~49 s and the FG13c Hook
       // owner-restart cells add 300 s, so the fork moves to 4848 and the
-      // Verify step stays at 95 minutes):
+      // Verify step stays at 95 minutes; the FG13d cancel/timeout cells add
+      // two cases budgeted at 200 s, so the fork moves to 5048; the FG11a
+      // automation lost-reply letter adds ~170 s, so the fork moves to 5218
+      // and the Verify step to 100 minutes; the FG13d worker-stop cancel
+      // cell adds 150 s, so the fork moves to 5368; FG11b's store faults add
+      // ~130 s, so the fork moves to 5498 and the Verify step to 105
+      // minutes; FG11b slice 2's Harness-side store faults add ~145 s, so
+      // the fork moves to 5643, still inside those 105 minutes; the
+      // event-stream liveness gates add ~440 s, so the fork moves to 6083;
+      // the FG13d dropped-reply cancel cell adds 150 s, so the fork moves to
+      // 6233; the FG12b store-failure class adds ~120 s (49.6 s measured
+      // locally on JDK 21 + MySQL 8.0.46), so the fork moves to 6353 and the
+      // Verify step to 116 minutes; the FG12f stream-gap class adds ~242 s
+      // (121.1 s measured on the merged base), so the fork moves to 6585;
+      // the FG13a execute lost-reply cell adds 150 s, so the fork moves to
+      // 6735; the FG13a status lost-reply cell adds 150 s, so the fork moves
+      // to 6885 and the Verify step to 125 minutes; the FG11c Harness-crash
+      // method (144.8 s measured, 550 s budgeted) moves the fork to 7435 and
+      // the Verify step to 134 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(4848);
+        expect(forkSeconds).toBe(7435);
       }
     },
   );
@@ -631,10 +653,35 @@ describe('Hosted real-process gates', () => {
   // class's end. FG12c's five-case restart matrix measures ~49s healthy
   // locally (~98s budgeted at 2x); the FG13c Hook owner-restart cells
   // (issue #14449, three cases) are budgeted at 300s until the lane
-  // measures them. The healthy sum becomes 4238s.
-  // A larger ceiling lets failsafe kill the fork mid-run, and the classes
-  // left unrun never report, failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 4238;
+  // measures them. The healthy sum becomes 4238s; the FG13d cancel/timeout
+  // cells (issue #14449, two cases) add 200s, so it becomes 4438s. The FG11a
+  // automation lost-reply letter (HostedAutomationFaultGatesIT, eight cases
+  // sharing one minute boundary) measures 46.3-85.0s locally on JDK 21 +
+  // MySQL 8.4.6 across four acceptance runs (~170s budgeted at 2x), so it
+  // becomes 4608s; the FG13d worker-stop cancel cell adds 150s, so it
+  // becomes 4758s. FG11b's Spring-side store faults, a second method of the
+  // automation class (six cases sharing one minute boundary), measure
+  // 30.8-64.5s across three acceptance runs (~130s budgeted at 2x), so it
+  // becomes 4888s. FG11b slice 2's Harness-side store faults, a third method
+  // of the class (four cases, three cold restarts), measure 62.1-72.4s across
+  // three acceptance runs (~145s budgeted at 2x), so it becomes 5033s. The
+  // event-stream liveness gates (HostedEventStreamLivenessIT, four cases on
+  // the shipped 15s keepalive and 45s bound) measure 214.4–215.0s for the
+  // class locally on JDK 21 and 25 + MySQL 8.4.6 across four acceptance runs
+  // (~440s budgeted at 2x), so it becomes 5473s; the FG13d dropped-reply
+  // cancel cell adds 150s, so it becomes 5623s; the FG12b store-failure
+  // class adds ~120s (49.6s measured on JDK 21 + MySQL 8.0.46), so it
+  // becomes 5743s; the FG12f stream-gap class (HostedMcpStreamGapIT, three
+  // cases, three cold boots) measures 121.1s locally on the merged base
+  // (~242s budgeted), so it becomes 5985s; the FG13a execute lost-reply
+  // cell adds 150s, so it becomes 6135s; the FG13a status lost-reply cell
+  // adds 150s, so it becomes 6285s; the FG11c Harness-crash method (144.8s
+  // measured, ~550s budgeted at 2x) becomes 6835s. The largest ceiling
+  // (600s) plus
+  // that healthy sum still fits the fork. A larger ceiling lets failsafe
+  // kill the fork mid-run, and the classes left unrun never report, failing
+  // the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 6835;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -693,15 +740,21 @@ describe('Hosted real-process gates', () => {
     // diff; pinning the list puts that on a red here, not on a fork kill
     // on main (#14148).
     expect(hostedTestClasses().map(({ name }) => name)).toEqual([
+      'HostedAutomationFaultGatesIT',
       'HostedChannelFaultGatesIT',
       'HostedChannelProcessCrashIT',
       'HostedCommittedEventLineReplayIT',
       'HostedConcurrentTurnBurstMySqlIT',
+      'HostedEventStreamLivenessIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedHookCancelFaultGatesIT',
       'HostedHookFaultGatesIT',
+      'HostedHookReplyLossFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
+      'HostedMcpStoreFaultGatesIT',
+      'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',

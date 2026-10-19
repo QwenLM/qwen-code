@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LlmEventType, Turn } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  LlmEventType,
+  Turn,
+  type ToolCallRequestInfo,
+} from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   llmPreparedProviderPin,
   type LlmPreparedRequest,
@@ -25,6 +29,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import {
   HostedModelRoundLimitError,
+  HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
 } from './hosted-harness-model.js';
 import { HostedModelUnavailableError } from './hosted-agent-definition.js';
@@ -115,6 +120,7 @@ function config(
     getModel: () => 'test-model',
     getMaxSessionTurns: () => -1,
     getContentGeneratorConfig: () => undefined,
+    getEffectiveInputModalities: () => ({ image: false }),
     setUserMemory,
     setPromptToolSnapshot,
     setPromptAgentReachable,
@@ -166,6 +172,66 @@ function nativeInput(event: HookEventName): HookInput {
 
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('passes attachments as real model parts while a prompt Hook only replaces the text', async () => {
+    const model = config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    state.config['getEffectiveInputModalities'] = () => ({ image: true });
+    const hook = hostedHooks([HookEventName.UserPromptSubmit]);
+    hook.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: HookEventName.UserPromptSubmit,
+              updatedPrompt: 'updated text',
+            },
+          }
+        : undefined,
+    );
+    const attachmentParts = [
+      { text: 'Attached file "notes.md": contents' },
+      { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+    ];
+    await runHostedHarnessTextTurn({
+      ...input,
+      attachmentParts,
+      hooks: hook.session,
+    });
+    expect(model.requests[0]).toEqual([
+      { text: 'updated text' },
+      ...attachmentParts,
+    ]);
+  });
+
+  it.each([false, true])(
+    'refuses image input on a text-only selected model, including image history (history=%s)',
+    async (history) => {
+      const model = config([]);
+      const parts = [
+        { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+      ];
+      await expect(
+        runHostedHarnessTextTurn({
+          ...input,
+          ...(history
+            ? {
+                history: [
+                  {
+                    uuid: 'image-user',
+                    type: 'user',
+                    message: { role: 'user', parts },
+                  } as ChatRecord,
+                ],
+              }
+            : { attachmentParts: parts }),
+        }),
+      ).rejects.toBeInstanceOf(HostedImageInputUnsupportedError);
+      expect(model.sendMessageStream).not.toHaveBeenCalled();
+      expect(model.shutdown).toHaveBeenCalled();
+    },
+  );
 
   it.each([-1, 18])(
     'continues beyond sixteen rounds with limit %s',
@@ -1991,4 +2057,88 @@ it('advertises only the published Skill catalog while keeping host Skill discove
     'PROJECT_SECTION',
   );
   expect(mocks.refreshSystemInstruction).toHaveBeenCalled();
+});
+
+it.each([undefined, 3])(
+  'loads explicit Skills before the first model request and preserves the task and attachments (initial round: %s)',
+  async (initialRound) => {
+    const mocks = config([{ type: LlmEventType.Finished }]);
+    const skills = new HostedSkillCatalog([
+      { name: 'review', description: 'Review.', body: 'PINNED_REVIEW_BODY' },
+      { name: 'testing', description: 'Test.', body: 'PINNED_TEST_BODY' },
+    ]);
+    const setModelRound = vi.fn();
+    const execute = vi.fn(async (calls: ToolCallRequestInfo[]) => {
+      expect(setModelRound).toHaveBeenLastCalledWith(initialRound ?? 0);
+      return calls.map((call) => ({
+        functionResponse: {
+          id: call.callId,
+          name: call.name,
+          response: { output: skills.response(call.args) },
+        },
+      }));
+    });
+    const toolTurn = {
+      execute,
+      setModelRound,
+      consumeResults: vi.fn(async () => undefined),
+      declarations: vi.fn(async () => [skills.declaration()!]),
+      setPromptHookRunner: vi.fn(),
+    };
+    const prompt = '/review /testing /review inspect the patch';
+    const attachmentParts = [{ text: 'ATTACHMENT_CONTENT' }];
+    await runHostedHarnessTextTurn({
+      ...input,
+      prompt,
+      initialRound,
+      attachmentParts,
+      skills,
+      toolTurn,
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][0]).toMatchObject([
+      { name: 'skill', args: { skill: 'review' }, isClientInitiated: true },
+      { name: 'skill', args: { skill: 'testing' }, isClientInitiated: true },
+    ]);
+    expect(mocks.setHistory).toHaveBeenLastCalledWith([
+      { role: 'user', parts: [{ text: prompt }, ...attachmentParts] },
+      { role: 'model', parts: expect.any(Array) },
+    ]);
+    expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_REVIEW_BODY');
+    expect(JSON.stringify(mocks.requests[0])).toContain('PINNED_TEST_BODY');
+    expect(mocks.sendOptions[0]).toMatchObject({
+      type: SendMessageType.ToolResult,
+    });
+    expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
+  },
+);
+
+it('uses saved Skill results on continuation without loading the selection again', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  const result: Part[] = [
+    {
+      functionResponse: {
+        id: 'saved',
+        name: 'skill',
+        response: { output: 'SAVED_BODY' },
+      },
+    },
+  ];
+  const toolTurn = {
+    execute: vi.fn(),
+    consumeResults: vi.fn(async () => undefined),
+    declarations: vi.fn(async () => []),
+    setPromptHookRunner: vi.fn(),
+  };
+  await runHostedHarnessTextTurn({
+    ...input,
+    prompt: '/review inspect the patch',
+    skills: new HostedSkillCatalog([
+      { name: 'review', description: 'Review.', body: 'NEW_BODY' },
+    ]),
+    toolTurn,
+    resumeFromToolResults: result,
+  });
+  expect(toolTurn.execute).not.toHaveBeenCalled();
+  expect(mocks.requests[0]).toEqual(result);
 });

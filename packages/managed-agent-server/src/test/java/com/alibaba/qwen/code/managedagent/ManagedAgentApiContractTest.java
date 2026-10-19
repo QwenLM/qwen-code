@@ -263,6 +263,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellApprovalSelection.class, List.of("WebShellApprovalSelection")),
                     entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
                     entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
+                    entry(ApiModels.WebShellSkill.class, List.of("WebShellSkill")),
+                    entry(ApiModels.WebShellSessionSkills.class, List.of("WebShellSessionSkills")),
                     entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
                     entry(ApiModels.WebShellModelChangeResult.class, List.of("WebShellModelChangeResult")),
                     entry(WebShellSessionCapabilities.class,
@@ -1282,6 +1284,12 @@ class ManagedAgentApiContractTest {
         exchange(drift, "queryWebShellSessionModels", 200,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 200,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 401,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
         exchange(drift, "queryWebShellSessionModels", 401,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
@@ -2054,6 +2062,37 @@ class ManagedAgentApiContractTest {
         assertThat(workflowWebShell.get("operationId").asText())
                 .isEqualTo(workflowAdmitted.get("id").asText());
         assertThat(workflowWebShell.get("replayed").asBoolean()).isTrue();
+
+        String automationKey = "1".repeat(64);
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind = 'TASK_CANCEL'"
+                + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                automationKey, tenant, sessionId, "2".repeat(64));
+        childRunResource(tenant, sessionId, "resource-automation-contract",
+                "{\"scheduleId\":\"asch_" + "1".repeat(32)
+                        + "\",\"occurrenceKey\":\"manual:contract\"}");
+        String automationTask = "task_" + automationKey;
+        assertThat(json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        automationTask).header(TENANT, tenant), null))
+                .get("action_capabilities").toString()).isEqualTo("[\"cancel\"]");
+        JsonNode automationAdmitted = json(exchange(drift, "cancelSessionTask", 202,
+                post(cancelPath, sessionId, automationTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-automation-cancel"), null));
+        assertThat(automationAdmitted.get("type").asText()).isEqualTo("task_cancel");
+        assertThat(automationAdmitted.get("task_id").asText()).isEqualTo(automationTask);
+        JsonNode automationWebShell = json(exchange(drift, "cancelWebShellTask", 202,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-automation-cancel\"}")
+                        .formatted(sessionId, automationTask)));
+        assertThat(automationWebShell.get("operationId").asText())
+                .isEqualTo(automationAdmitted.get("id").asText());
+        assertThat(automationWebShell.get("replayed").asBoolean()).isTrue();
     }
 
     /**
@@ -2628,7 +2667,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false}
                                 """);
                 if (javaDurableAdmission != null) {
                     ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)
@@ -2710,7 +2749,7 @@ class ManagedAgentApiContractTest {
         assertThat(publishedKib * 1024)
                 .as("published durable-record limit is the enforced one")
                 .isEqualTo(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
-        assertThat(CONTRACT.node("/components/schemas/InputBlock"
+        assertThat(CONTRACT.node("/components/schemas/InputTextBlock"
                 + "/properties/text/maxLength").asLong())
                 .as("published per-block maxLength is the enforced"
                         + " per-block cap")

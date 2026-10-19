@@ -676,17 +676,29 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (95 + 10 + 20 + 50 = 175 — the FG8 letters
+    # The step ceilings today (120 + 10 + 20 + 50 = 200 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
-    # letter to 4499 s, the FG12c restart matrix to 4548 s and the FG13c
-    # Hook owner-restart cells to 4799 s; with FG12c's 49 s the merged
-    # healthy sum is 4238 s and the fork 4848 s, so Verify wraps it at
-    # its fork + 600 s plus margin, the Broker fault gates keep 10, and
-    # admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 188 + 2. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 190
+    # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
+    # owner-restart cells to 4848 s, the FG13d cancel/timeout cells to
+    # 5048 s, the FG11a automation lost-reply letter to 5218 s, which moved
+    # Verify to 100 minutes, the FG13d worker-stop cell to 5368 s and the
+    # FG11b store faults to 5498 s, which moved Verify to 105 minutes,
+    # FG11b slice 2 to 5643 s, still inside them, the event-stream
+    # liveness gates to 6083 s, which moves Verify to 115 minutes, the
+    # FG13d dropped-reply cancel cell to 6233 s, still inside those 115
+    # minutes, and the FG12b store-failure class to 6353 s; the FG12f
+    # stream-gap class adds 242 s, so the fork moves to 6585 s; the FG13a
+    # execute lost-reply cell adds 150 s and the FG13a status lost-reply
+    # cell another 150 s, moving the fork to 6885 s and Verify to 125
+    # minutes; the FG11c Harness-crash method (144.8 s measured) is budgeted
+    # at 550 s, so the fork moves to 7435 s and Verify to 134 minutes, which
+    # wraps its fork + 600 s plus margin; the Broker fault gates
+    # keep 10, and admission plus O4 keep per-fork ceilings) plus ~13
+    # minutes for the uncapped setup steps (Checkout.. cgroup delegation,
+    # the report checks): 214 + 13. The failover arms run in
+    # hosted-failover-e2e.
+    timeout-minutes: 227
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -775,8 +787,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 4848 s, so the step wraps to fork + 600 s plus margin.
-        timeout-minutes: 95
+        # 7435 s, so the step wraps to fork + 600 s plus margin.
+        timeout-minutes: 134
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -815,6 +827,7 @@ jobs:
             packages/managed-agent-server/target/fg8-cases/
             packages/managed-agent-server/target/fg9-cases/
             packages/managed-agent-server/target/fg10-cases/
+            packages/managed-agent-server/target/fg11-cases/
             packages/managed-agent-server/target/fg12-cases/
             packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7

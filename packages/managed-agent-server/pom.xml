@@ -416,8 +416,67 @@
                                  owner-restart cells (three cases,
                                  issue #14449) are budgeted at 300 s:
                                  the healthy sum becomes 4238 s, so the
-                                 fork moves to 4848 s. -->
-                            <forkedProcessTimeoutInSeconds>4848</forkedProcessTimeoutInSeconds>
+                                 fork moves to 4848 s. The FG13d
+                                 cancel/timeout cells (two cases, issue
+                                 #14449) add 200 s: the healthy sum
+                                 becomes 4438 s, so the fork moves to
+                                 5048 s. The FG11a automation lost-reply
+                                 letter (HostedAutomationFaultGatesIT,
+                                 eight cases on one minute boundary)
+                                 measures 46.3-85.0 s locally on JDK 21
+                                 + MySQL 8.4.6 (~170 s budgeted at 2x):
+                                 the healthy sum becomes 4608 s, so the
+                                 fork moves to 5218 s and the Verify
+                                 step to 100 minutes. The FG13d
+                                 worker-stop cancel cell (issue #14449)
+                                 adds 150 s: the healthy sum becomes
+                                 4758 s, so the fork moves to 5368 s.
+                                 FG11b's Spring-side store faults, a
+                                 second method of the automation class
+                                 (six cases on one minute boundary),
+                                 measure 30.8-64.5 s (~130 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 4888 s, so the fork moves to 5498 s
+                                 and the Verify step to 105 minutes.
+                                 FG11b slice 2's Harness-side store
+                                 faults, a third method of the class
+                                 (four cases, three cold restarts),
+                                 measure 62.1-72.4 s (~145 s budgeted
+                                 at 2x): the healthy sum becomes
+                                 5033 s, so the fork moves to 5643 s,
+                                 which the Verify step's 105 minutes
+                                 still wrap. The event-stream liveness
+                                 gates (HostedEventStreamLivenessIT,
+                                 four cases on the shipped 15 s
+                                 keepalive / 45 s bound, 214.4-215.0 s
+                                 healthy locally on JDK 21 and 25
+                                 across four runs, ~440 s budgeted at
+                                 2x) raise the healthy sum to 5743 s;
+                                 these sums already include the FG13d
+                                 dropped-reply cancel cell (issue
+                                 #14449, 150 s) and the FG12b
+                                 store-failure class
+                                 (HostedMcpStoreFaultGatesIT, eight
+                                 cases, 49.6 s measured locally on
+                                 JDK 21 + MySQL 8.0.46, ~120 s
+                                 budgeted). The FG12f stream-gap class
+                                 (HostedMcpStreamGapIT, three cases,
+                                 three cold boots) measures 121.1 s
+                                 locally on the merged base (~242 s
+                                 budgeted): the healthy sum becomes
+                                 5985 s, so the fork moves to 6585 s
+                                 and the Verify step to 120 minutes.
+                                 The FG13a execute lost-reply cell
+                                 (issue #14449) adds 150 s: the healthy
+                                 sum becomes 6135 s, so the fork moves
+                                 to 6735 s. The FG13a status lost-reply
+                                 cell (issue #14449) adds 150 s: the
+                                 healthy sum becomes 6285 s; the FG11c
+                                 Harness-crash method (three cases, 144.8 s
+                                 measured, 550 s budgeted) moves it to
+                                 6835 s, so the fork moves to 7435 s and
+                                 the Verify step to 134 minutes. -->
+                            <forkedProcessTimeoutInSeconds>7435</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -569,6 +628,24 @@
                 <version>${maven-failsafe-plugin.version}</version>
                 <configuration>
                     <includes><include>**/HostedMcp*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- Mirrors the hosted-harness-mysql lane's
+                         per-class rule for the four MCP classes: the
+                         largest @Timeout ceiling (600 s) plus the
+                         classes' healthy runtime must fit 1200 s. -->
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-automation-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedAutomation*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <!-- Mirrors the hosted-harness-mysql lane's
                          per-ceiling rule for this class: one @Timeout

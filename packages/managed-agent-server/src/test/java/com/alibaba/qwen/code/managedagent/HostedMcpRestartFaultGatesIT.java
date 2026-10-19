@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -13,6 +15,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
@@ -56,8 +59,24 @@ import static org.awaitility.Awaitility.await;
 // control hold at the Broker proxy keeps the record at `dispatch_started`
 // until the kill, so the injection is deterministic rather than a race
 // against a fast Runtime. Real Harness, worker, fixtures and MySQL.
+// FG12d adds the release-state cell deferred by FG12c: the Harness dies
+// after `releaseState: releasing`, and the replacement finishes the
+// original `${configurationId}:release` operation instead of minting one.
 class HostedMcpRestartFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-mcp/1";
+    // Per-case evidence letter: FG12c keeps its directory, FG12d's release
+    // cell lands under its own so the two letters' artefacts never mix.
+    private String caseLetter;
+    private static final Map<String, String> CASE_LETTERS = Map.of(
+            "harnessKillDuringConfigureResolvesThroughStatusOnMySql",
+            "fg12c",
+            "harnessKillDuringOperationLooksUpTheOriginalInvokeOnMySql",
+            "fg12c",
+            "workerKillWhileIdleNeverMintsAFreshOwnerOnMySql", "fg12c",
+            "workerKillDuringOperationSettlesOutcomeUnknownOnMySql", "fg12c",
+            "stdioKillDuringRequestSettlesOutcomeUnknownOnMySql", "fg12c",
+            "harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql",
+            "fg12d");
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
@@ -77,6 +96,10 @@ class HostedMcpRestartFaultGatesIT {
             Executors.newVirtualThreadPerTaskExecutor();
     private volatile CountDownLatch controlHold;
     private volatile String controlHoldKind;
+    private volatile CountDownLatch replyHold;
+    private volatile String replyHoldKind;
+    private volatile String replyHoldTarget;
+    private volatile CountDownLatch replyParked;
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
     private Path cli;
@@ -93,13 +116,17 @@ class HostedMcpRestartFaultGatesIT {
     private HttpServer model;
     private ExecutorService modelExecutor;
     private HttpServer brokerProxy;
+    private ExecutorService brokerExecutor;
     private ServletWebServerApplicationContext spring;
     private JdbcTemplate jdbc;
     private ManagedAgentStore store;
     private Process harness;
 
     @BeforeEach
-    void boot() throws Exception {
+    void boot(TestInfo info) throws Exception {
+        caseLetter = info.getTestMethod()
+                .map(method -> CASE_LETTERS.get(method.getName()))
+                .orElse(null);
         assertThat(System.getProperty("mysql.url"))
                 .as("FG12c requires a disposable MySQL")
                 .startsWith("jdbc:mysql:");
@@ -198,47 +225,19 @@ class HostedMcpRestartFaultGatesIT {
                 .until(() -> control("mcp-configure").status() != 0);
         SessionRef reloaded = reload(session);
         pending.cancel(true);
-        triggerTurn(reloaded);
-        java.util.concurrent.atomic.AtomicReference<Map<String, Object>>
-                statusRef = new java.util.concurrent.atomic.AtomicReference<>();
-        await().atMost(Duration.ofSeconds(60)).ignoreExceptions()
-                .untilAsserted(() -> {
-                    Map<String, Object> found = wire.stream()
-                            .filter(entry -> ((Number) entry.get("seq"))
-                                    .intValue() > wireBaseline)
-                            .filter(entry -> {
-                                JsonNode request =
-                                        (JsonNode) entry.get("request");
-                                return request != null
-                                        && "mcp-status".equals(request.at(
-                                                "/operation/kind").asText())
-                                        && configuration.equals(request.at(
-                                                "/operation/targetOperationId")
-                                                .asText());
-                            })
-                            .filter(entry -> Integer.valueOf(200)
-                                    .equals(entry.get("status")))
-                            .filter(entry -> {
-                                JsonNode answer =
-                                        (JsonNode) entry.get("answer");
-                                String state = answer == null ? ""
-                                        : answer.path("result").path("state")
-                                                .asText();
-                                return "settled".equals(state)
-                                        || "outcome_unknown".equals(state);
-                            })
-                            .findFirst().orElse(null);
-                    assertThat(found)
-                            .as("a successful status lookup for %s",
-                                    configuration)
-                            .isNotNull();
-                    JsonNode answer = (JsonNode) found.get("answer");
-                    assertThat(answer.path("result").path("state").asText())
-                            .as("the status answer must be terminal")
-                            .isIn("settled", "outcome_unknown");
-                    statusRef.set(found);
-                });
-        Map<String, Object> statusEntry = statusRef.get();
+        Map<String, Object> statusEntry = null;
+        for (int attempt = 0; attempt < 10 && statusEntry == null; attempt++) {
+            triggerTurn(reloaded);
+            long deadline = System.nanoTime()
+                    + Duration.ofSeconds(5).toNanos();
+            while (System.nanoTime() < deadline && statusEntry == null) {
+                statusEntry = terminalStatus(configuration);
+                if (statusEntry == null) {
+                    Thread.sleep(100);
+                }
+            }
+        }
+        assertThat(statusEntry).as("a terminal status lookup").isNotNull();
         JsonNode statusAnswer = (JsonNode) statusEntry.get("answer");
         String answerState = statusAnswer.path("result").path("state")
                 .asText();
@@ -319,6 +318,193 @@ class HostedMcpRestartFaultGatesIT {
                 finalRecord.path("resultRef"));
         assertThat(result.path("response").path("contents").get(0)
                 .path("text").asText()).isEqualTo("EXT_HELD");
+    }
+
+    // FG12d (issue #14447): the release-state cell FG12c deferred. The close
+    // sequence commits `releasing` before it dispatches mcp-release, so the
+    // proxy holds that dispatch and the Harness dies with the record on
+    // disk. The replacement loads the same Runtime Session and finishes the
+    // same `${configurationId}:release` operation; it never configures or
+    // invokes again, and it can only reach `released` through the dispatch
+    // that the original generation already issued.
+    @Test
+    @Timeout(600)
+    void harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql()
+            throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        JsonNode configuration = configuration(session.id());
+        String configurationId = configuration.path("configurationId")
+                .asText();
+        String releaseId = configurationId + ":release";
+        JsonNode identity = configuration.path("run").path("runtime");
+        assertThat(identity.isObject()).isTrue();
+        assertThat(configuration.path("releaseState").asText())
+                .isEqualTo("active");
+        // The Harness create route pins the session's MCP profile; this
+        // fixture seeds the row directly, so admit the lifecycle close under
+        // the same profile the Harness actually runs.
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id ="
+                + " ? AND session_id = ?", PROFILE, tenant, session.id());
+
+        OperationRecord close = admitClose(session);
+        String closeId = close.operationId();
+        long claimGeneration = close.claimGeneration();
+        driveLifecycle(session, closeId, claimGeneration, "effects");
+        // The Java lifecycle coordinator moves the fence to DRAINING after
+        // it accepts the Harness effects; driving the route directly plays
+        // that half, exactly as the store's saveEffects does.
+        jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING' WHERE"
+                + " tenant_id = ? AND harness_session_id = ? AND"
+                + " operation_id = ?", tenant, session.id(), closeId);
+        driveLifecycle(session, closeId, claimGeneration,
+                "prepare_resources");
+
+        holdNextControl("mcp-release");
+        Future<HttpResponse<String>> settle = caseExecutor.submit(
+                () -> rawLifecycle(session, closeId, claimGeneration,
+                        "settle_resources"));
+        waitFor(() -> {
+            assertThat(settle.isDone())
+                    .as("settle finished before the hold: %s",
+                            earlyBody(settle))
+                    .isFalse();
+            assertThat(configuration(session.id()).path("releaseState")
+                    .asText())
+                    .as("the release must be committed before its dispatch: %s",
+                            earlyBody(settle))
+                    .isEqualTo("releasing");
+            assertThat(controls("mcp-release")).anyMatch(call ->
+                    releaseId.equals(call.operationId())
+                            && call.status() == 0);
+        });
+        assertThat(configuration(session.id()).path("run").path("execution")
+                .asText()).isEqualTo("settled");
+        killHarness();
+        releaseControl();
+        Map<String, Object> dispatched = awaitWireControl("mcp-release",
+                releaseId, "running");
+        JsonNode dispatchRequest = (JsonNode) dispatched.get("request");
+        String runtimeSessionId = dispatchRequest.path("runtimeSessionId")
+                .asText();
+        assertThat(runtimeSessionId).isNotBlank();
+        settle.cancel(true);
+
+        SessionRef reloaded = reload(session, closeId, claimGeneration);
+        // The conclusive answer is the settled `mcp-status`, not the release
+        // dispatch, which legally answers `running`. Park that reply inside
+        // the proxy: the record must stay `releasing` and the close route
+        // must stay unanswered until the Harness receives it.
+        holdSettledReply("mcp-status", releaseId);
+        HttpResponse<String> settled = null;
+        for (int attempt = 0; attempt < 60 && settled == null; attempt++) {
+            Future<HttpResponse<String>> pending = caseExecutor.submit(
+                    () -> rawLifecycle(reloaded, closeId, claimGeneration,
+                            "settle_resources"));
+            await().atMost(Duration.ofSeconds(60)).until(() ->
+                    replyParked.getCount() == 0 || pending.isDone());
+            if (replyParked.getCount() == 0) {
+                try {
+                    assertThat(pending.isDone())
+                            .as("settle must wait for the held status reply")
+                            .isFalse();
+                    assertThat(configuration(session.id()).path("releaseState")
+                            .asText())
+                            .as("released must not be committed before the "
+                                    + "settled answer reaches the Harness")
+                            .isEqualTo("releasing");
+                } finally {
+                    releaseReply();
+                }
+                settled = pending.get(30, TimeUnit.SECONDS);
+                break;
+            }
+            HttpResponse<String> response = pending.get(30,
+                    TimeUnit.SECONDS);
+            if (response.statusCode() == 200) {
+                settled = response;
+                break;
+            }
+            if (response.statusCode() == 409) {
+                JsonNode refusal = json.readTree(response.body());
+                String code = refusal.path("error").asText(
+                        refusal.path("code").asText());
+                if ("hosted_turn_active".equals(code)) {
+                    Thread.sleep(1_000);
+                    continue;
+                }
+            }
+            assertThat(response.statusCode()).as("settle: %s",
+                    response.body()).isEqualTo(503);
+            Thread.sleep(1_000);
+        }
+        assertThat(settled).as("settle must complete").isNotNull();
+        assertThat(settled.statusCode()).as("settle: %s", settled.body())
+                .isEqualTo(200);
+        assertThat(replyParked.getCount())
+                .as("the settled status reply must be parked, or the ordering "
+                        + "witness never ran")
+                .isZero();
+
+        JsonNode released = configuration(session.id());
+        assertThat(released.path("releaseState").asText())
+                .isEqualTo("released");
+        assertThat(released.path("run").path("runtime"))
+                .as("the replacement keeps the original generation")
+                .isEqualTo(identity);
+        assertThat(controls("mcp-release"))
+                .as("the resumption looks the original release up; it does "
+                        + "not mint a second release")
+                .hasSize(1);
+        assertThat(controls("mcp-configure")).isEmpty();
+        assertThat(controls("mcp-invoke")).isEmpty();
+        assertThat(wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .filter(entry -> {
+                    JsonNode request = (JsonNode) entry.get("request");
+                    return request != null
+                            && "mcp-status".equals(request.at(
+                                    "/operation/kind").asText())
+                            && releaseId.equals(request.at(
+                                    "/operation/targetOperationId").asText())
+                            && runtimeSessionId.equals(request.path(
+                                    "runtimeSessionId").asText());
+                })
+                .filter(entry -> Integer.valueOf(200)
+                        .equals(entry.get("status")))
+                .filter(entry -> {
+                    JsonNode answer = (JsonNode) entry.get("answer");
+                    return answer != null && "settled".equals(
+                            answer.path("result").path("state").asText());
+                })
+                .count())
+                .as("a settled status lookup for the original release")
+                .isPositive();
+        assertThat(fixtureEvents("mcp.start"))
+                .as("the release does not start a second server")
+                .hasSize(1);
+        assertThat(fixtureEvents("mcp.exit"))
+                .as("the released stdio server exits once")
+                .hasSize(1);
+        ProcessHandle.of(fixturePid()).ifPresent(handle -> {
+            try {
+                handle.onExit().get(10, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // The fixture records mcp.exit just before it exits.
+            }
+        });
+        assertThat(ProcessHandle.of(fixturePid()).map(
+                ProcessHandle::isAlive).orElse(false))
+                .as("the released stdio server is gone")
+                .isFalse();
+        assertThat(controlRequests("mcp-status").stream()
+                .filter(request -> releaseId.equals(request.at(
+                        "/operation/operationId").asText()))
+                .map(request -> request.path("runtimeSessionId").asText())
+                .filter(runtimeSessionId::equals).count())
+                .as("the replacement addresses the original Runtime Session")
+                .isPositive();
     }
 
     @Test
@@ -496,6 +682,27 @@ class HostedMcpRestartFaultGatesIT {
         }
     }
 
+    // A release dispatch answers `running`; only the later `mcp-status`
+    // lookup is conclusive. Parking that answer inside the proxy separates
+    // "the Broker settled it" from "the Harness received it", which is what
+    // proves `released` cannot be committed before it.
+    private void holdSettledReply(String kind, String targetOperationId) {
+        replyHoldKind = kind;
+        replyHoldTarget = targetOperationId;
+        replyParked = new CountDownLatch(1);
+        replyHold = new CountDownLatch(1);
+    }
+
+    private void releaseReply() {
+        CountDownLatch latch = replyHold;
+        replyHold = null;
+        replyHoldKind = null;
+        replyHoldTarget = null;
+        if (latch != null) {
+            latch.countDown();
+        }
+    }
+
     private String writeRelease() throws IOException {
         Path release = Path.of(evidence + ".release");
         Files.createFile(release);
@@ -520,6 +727,16 @@ class HostedMcpRestartFaultGatesIT {
         waitFor(() -> assertThat(harnessRequest("GET", "/session/"
                 + session.id() + "/status", null, session.clientId(), 200)
                         .path("hasActivePrompt").asBoolean()).isFalse());
+        // The MCP configure settles inside the turn; a lifecycle close that
+        // starts before it does answers turn_active/unsettled instead of
+        // reaching the release.
+        waitFor(() -> {
+            JsonNode record = configuration(session.id());
+            assertThat(record.path("run").path("state").asText())
+                    .isEqualTo("settled");
+            assertThat(record.path("run").path("execution").asText())
+                    .isEqualTo("settled");
+        });
         // The baseline's own configure is not part of the case under test;
         // sequence marks avoid clearing a list an in-flight relay is still
         // completing.
@@ -635,6 +852,147 @@ class HostedMcpRestartFaultGatesIT {
                                 .equals(error));
     }
 
+    private Map<String, Object> terminalStatus(String configuration) {
+        return wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .filter(entry -> {
+                    JsonNode request = (JsonNode) entry.get("request");
+                    return request != null
+                            && "mcp-status".equals(request.at(
+                                    "/operation/kind").asText())
+                            && configuration.equals(request.at(
+                                    "/operation/targetOperationId").asText());
+                })
+                .filter(entry -> Integer.valueOf(200)
+                        .equals(entry.get("status")))
+                .filter(entry -> {
+                    JsonNode answer = (JsonNode) entry.get("answer");
+                    String state = answer == null ? ""
+                            : answer.path("result").path("state").asText();
+                    return "settled".equals(state)
+                            || "outcome_unknown".equals(state);
+                })
+                .findFirst().orElse(null);
+    }
+
+    private OperationRecord admitClose(SessionRef session) {
+        String key = "close-" + uuid();
+        RuntimeException last = null;
+        for (int attempt = 0; attempt < 60; attempt++) {
+            try {
+                var admission = store.beginWorkspaceLifecycle(tenant,
+                        session.id(), OperationKind.CLOSE, "actor",
+                        DigestUtils.sha256Hex("actor"), key,
+                        "sha256:" + DigestUtils.sha256Hex(key), true, 2);
+                return store.claimOperation(tenant, session.id(),
+                        admission.operation().operationId(), "fg12d-close",
+                        Duration.ofMinutes(10)).orElseThrow();
+            } catch (RuntimeException failure) {
+                last = failure;
+                String message = String.valueOf(failure.getMessage());
+                if (!message.contains("turn_active")
+                        && !message.contains("journal_unverified")) {
+                    throw failure;
+                }
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw failure;
+                }
+            }
+        }
+        throw new AssertionError("close admission never became idle", last);
+    }
+
+    private Map<String, Object> lifecycleBody(SessionRef session,
+            String operationId, long claimGeneration, String phase) {
+        return Map.of(
+                "protocolVersion", 2,
+                "phase", phase,
+                "kind", "close",
+                "toolProfile", PROFILE,
+                "sessionKey", Map.of("tenantId", tenant,
+                        "workspaceId", "workspace",
+                        "sessionId", session.id()),
+                "authority", Map.of("operationId", operationId,
+                        "claimGeneration", claimGeneration));
+    }
+
+    private JsonNode driveLifecycle(SessionRef session, String operationId,
+            long claimGeneration, String phase) throws Exception {
+        return privateRequest("POST", "/session/" + session.id()
+                + "/lifecycle", lifecycleBody(session, operationId,
+                claimGeneration, phase), session, 200);
+    }
+
+    private HttpResponse<String> rawLifecycle(SessionRef session,
+            String operationId, long claimGeneration, String phase)
+            throws Exception {
+        return rawRequest("POST", "/session/" + session.id() + "/lifecycle",
+                json.writeValueAsString(lifecycleBody(session, operationId,
+                        claimGeneration, phase)), session.clientId());
+    }
+
+    private List<JsonNode> controlRequests(String kind) {
+        return wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .map(entry -> (JsonNode) entry.get("request"))
+                .filter(request -> request != null
+                        && kind.equals(request.at("/operation/kind").asText()))
+                .toList();
+    }
+
+    private String earlyBody(Future<HttpResponse<String>> future) {
+        if (!future.isDone()) {
+            return "";
+        }
+        try {
+            HttpResponse<String> response = future.get();
+            return response.statusCode() + " " + response.body();
+        } catch (Exception failure) {
+            return String.valueOf(failure);
+        }
+    }
+
+    private Map<String, Object> awaitWireControl(String kind,
+            String operationId, String state) {
+        AtomicReference<Map<String, Object>> found = new AtomicReference<>();
+        await().atMost(Duration.ofSeconds(60)).ignoreExceptions()
+                .untilAsserted(() -> {
+                    wire.stream()
+                            .filter(entry -> ((Number) entry.get("seq"))
+                                    .intValue() > wireBaseline)
+                            .filter(entry -> {
+                                JsonNode request = (JsonNode) entry.get("request");
+                                return request != null
+                                        && kind.equals(request.at(
+                                                "/operation/kind").asText())
+                                        && operationId.equals(request.at(
+                                                "/operation/operationId")
+                                                .asText());
+                            })
+                            .filter(entry -> Integer.valueOf(200)
+                                    .equals(entry.get("status")))
+                            .filter(entry -> {
+                                if (state == null) {
+                                    return true;
+                                }
+                                JsonNode answer = (JsonNode) entry.get("answer");
+                                return answer != null && state.equals(answer
+                                        .path("result").path("state").asText());
+                            })
+                            .findFirst().ifPresent(found::set);
+                    assertThat(found.get())
+                            .as("%s %s must settle before the replacement",
+                                    kind, operationId)
+                            .isNotNull();
+                });
+        return found.get();
+    }
+
     private String uuid() {
         return UUID.randomUUID().toString();
     }
@@ -675,6 +1033,11 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private SessionRef reload(SessionRef session) throws Exception {
+        return reload(session, null, 0);
+    }
+
+    private SessionRef reload(SessionRef session, String lifecycleOperation,
+            long claimGeneration) throws Exception {
         startHarness();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("sessionScope", "thread");
@@ -682,6 +1045,11 @@ class HostedMcpRestartFaultGatesIT {
         body.put("approvalMode", "yolo");
         body.put("mcpServers", List.of(mcpPin(1)));
         body.put("managedSessionStore", storeDescriptor());
+        if (lifecycleOperation != null) {
+            body.put("lifecycleProtocolVersion", 2);
+            body.put("lifecycleAuthority", Map.of("operationId",
+                    lifecycleOperation, "claimGeneration", claimGeneration));
+        }
         String payload = json.writeValueAsString(body);
         JsonNode loaded = null;
         for (int attempt = 0; attempt < 60 && loaded == null; attempt++) {
@@ -856,6 +1224,8 @@ class HostedMcpRestartFaultGatesIT {
     private void startBrokerProxy() throws IOException {
         brokerProxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0),
                 0);
+        brokerExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        brokerProxy.setExecutor(brokerExecutor);
         brokerProxy.createContext("/", this::relay);
         brokerProxy.start();
     }
@@ -928,13 +1298,34 @@ class HostedMcpRestartFaultGatesIT {
                     HttpResponse.BodyHandlers.ofByteArray());
             proxyCalls.set(index, call.complete(response.statusCode()));
             entry.put("status", response.statusCode());
+            JsonNode answer;
             try {
-                entry.put("answer", json.readTree(response.body()));
+                answer = json.readTree(response.body());
             } catch (IOException unparsable) {
-                entry.put("answer", new String(response.body(),
-                        StandardCharsets.UTF_8));
+                answer = null;
             }
+            entry.put("answer", answer != null ? answer
+                    : new String(response.body(), StandardCharsets.UTF_8));
             wire.add(entry);
+            CountDownLatch reply = replyHold;
+            if (reply != null && parsed != null && replyHoldKind != null
+                    && replyHoldKind.equals(kind)
+                    && replyHoldTarget != null
+                    && replyHoldTarget.equals(parsed.at(
+                            "/operation/targetOperationId").asText())
+                    && answer != null
+                    && "settled".equals(answer.path("result").path("state")
+                            .asText())) {
+                CountDownLatch parked = replyParked;
+                if (parked != null) {
+                    parked.countDown();
+                }
+                try {
+                    reply.await(120, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             exchange.getResponseHeaders().set("Content-Type",
                     "application/json");
             exchange.sendResponseHeaders(response.statusCode(),
@@ -1033,6 +1424,9 @@ class HostedMcpRestartFaultGatesIT {
                 spring.close();
             }
         } finally {
+            if (brokerExecutor != null) {
+                brokerExecutor.shutdownNow();
+            }
             if (brokerProxy != null) {
                 brokerProxy.stop(0);
             }
@@ -1080,11 +1474,12 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private void saveEvidence() {
+        assertThat(caseLetter).as("caseLetter must be set by each test").isNotNull();
         try {
             Path destination = Files.createDirectories(Path.of(
-                    "target/fg12-cases/fg12c", tenant));
+                    "target/fg12-cases", caseLetter, tenant));
             System.out
-                    .println("FG12C_EVIDENCE " + destination.toAbsolutePath());
+                    .println("FG12_EVIDENCE " + destination.toAbsolutePath());
             json.writeValue(destination.resolve("proxy.json").toFile(),
                     proxyCalls);
             json.writeValue(destination.resolve("wire.json").toFile(), wire);
