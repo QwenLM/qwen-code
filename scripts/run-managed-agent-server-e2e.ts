@@ -1352,7 +1352,7 @@ try {
               QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
               QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: `http://127.0.0.1:${springPort}`,
               QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
-              QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '1s',
+              QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(brokerPort),
@@ -1938,7 +1938,7 @@ try {
         ) {
           break;
         }
-        if (attempt === 20) {
+        if (attempt === 100) {
           throw new Error(
             'The original control plane never stopped outside a store transaction',
           );
@@ -1946,7 +1946,9 @@ try {
         for (const [child] of formerPair) {
           signalProcessTree(child.child, 'SIGCONT');
         }
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        // InnoDB reuses its transaction snapshot until no reader has
+        // queried it for 100ms; faster polling can keep a stale busy view.
+        await new Promise((resolve) => setTimeout(resolve, 150));
       }
     } else if (harnessOnly) {
       // Kill only the Harness: a live control plane must adopt the next
@@ -2068,7 +2070,7 @@ try {
             QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
             QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: replacementSpringUrl,
             QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
-            QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '1s',
+            QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
             QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(
@@ -3140,7 +3142,7 @@ try {
           30_000,
           owners,
         );
-        // Several lease periods for anything the wake set in motion.
+        // Several dispatch lease periods for anything the wake set in motion.
         await new Promise((resolve) => setTimeout(resolve, 6_000));
         const afterWake = fencedState();
         // The probes are synchronous: let the loop record an exit during

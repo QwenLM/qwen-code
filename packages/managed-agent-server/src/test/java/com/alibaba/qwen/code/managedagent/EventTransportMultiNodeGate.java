@@ -503,12 +503,16 @@ class EventTransportMultiNodeGate {
         Node a = node("a").start(true);
         String session = createSession(a);
         turn(a, session, "MQ3_BEFORE_LONG_OUTAGE");
-        // The surviving node must own the journal whose failed sends we await.
+        assertThat(writerId(session)).isEqualTo(a.bootId);
+        // Establish a's writer before b joins: either dispatcher can claim
+        // a fresh Turn, but a live writer keeps its journal ownership.
         Node b = node("b").start(true);
+        // The surviving node must still own the journal whose failed sends we await.
         assertThat(writerId(session)).isEqualTo(a.bootId);
 
         try (Frozen proxy = freezeProxy()) {
             turn(a, session, "MQ3_DURING_LONG_OUTAGE");
+            assertThat(writerId(session)).isEqualTo(a.bootId);
             b.crashSpring();
             String refused = b.startSpringExpectingFailure(true, Duration.ofMinutes(4));
             // Pins MQ3 finding 3 (startup needs the broker): a fix that lets a
