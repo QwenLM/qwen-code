@@ -523,16 +523,20 @@ describe('build artifact — transcript entry (#11031)', () => {
     // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
     // increase is shared i18n copy; substituting main's table restores the
     // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
-    // Attachment recovery copy measures 1,338,049 at 9c3555b334. Building
-    // with the base (6d9df42d99) i18n table measures 1,337,798; the 251-unit
-    // increase is shared copy, while Managed interactive code stays excluded.
-    // A 1,339,500 ceiling retains 1,451 units of margin.
+    // ReadFile hints, the shared detail loader and attachment recovery copy
+    // stay in this entry; interactive detail HTTP transport stays excluded.
+    // Keep the measured remainder below 1,341,000 UTF-16 units.
     // Re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_339_500);
+    expect(js.length).toBeLessThan(1_341_000);
+  });
+
+  it('keeps Managed tool-detail transport out of the transcript entry', () => {
+    expect(readPackageJavascript()).toContain('/tool-details/get');
+    expect(readTranscriptBundle()).not.toContain('/tool-details/get');
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {

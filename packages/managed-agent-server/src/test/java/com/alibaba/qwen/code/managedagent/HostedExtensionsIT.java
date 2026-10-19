@@ -468,7 +468,11 @@ class HostedExtensionsIT {
         assertThat(running(worker)).isTrue();
         assertThat(running(mcp)).isTrue();
         String operation = api("POST", "/v1/agents/sessions/" + session + "/close", null, "close-" + session, 202).path("id").asText();
-        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+        // A close the daemon answers with its recovery refusal is re-driven
+        // on the dispatch backoff, whose cap is 60s; the default 40s window
+        // ends mid-backoff and reads the still-recovering operation as a
+        // failure.
+        waitFor(Duration.ofSeconds(150), () -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
                 null, null, 200).path("status").asText()).isEqualTo("completed"));
         assertThat(running(worker)).isFalse();
         assertThat(running(mcp)).isFalse();
@@ -566,7 +570,12 @@ class HostedExtensionsIT {
     }
 
     private void waitFor(org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(Duration.ofSeconds(40)).ignoreException(java.net.ConnectException.class).failFast(() -> {
+        waitFor(Duration.ofSeconds(40), assertion);
+    }
+
+    private void waitFor(Duration timeout,
+            org.junit.jupiter.api.function.Executable assertion) {
+        await().atMost(timeout).ignoreException(java.net.ConnectException.class).failFast(() -> {
             if (modelFailure.get() != null) {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }

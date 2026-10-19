@@ -110,6 +110,7 @@ class HarnessEventProjectorTest {
         assertThat(event.type()).isEqualTo("item.tool_call.updated");
         assertThat(event.data()).containsEntry("toolCallId", "tool-1")
                 .containsEntry("name", "read_file")
+                .containsEntry("sourceSequence", 7L)
                 .containsEntry("title", "Read file")
                 .containsEntry("status", "completed");
         // The same allowlist guards the tool path: the raw update map must

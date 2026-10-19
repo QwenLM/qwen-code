@@ -1222,6 +1222,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
+    @Override
+    public void discardManagedRecovery(String tenantId, String sessionId) {
+        // The recheck must ask the Broker again, not replay the snapshot the
+        // park was decided on. Dropping the cached attachment forces the
+        // next load to re-read; a concurrent stream keeps its own ref.
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        pendingRecovery.remove(key);
+        attachments.remove(key);
+    }
+
     private Attachment loadCancellationTakeover(SessionRecord session) {
         AttachmentKey key = new AttachmentKey(session.tenantId(), session.sessionId());
         // A Session THIS Harness already serves can still park a dead
