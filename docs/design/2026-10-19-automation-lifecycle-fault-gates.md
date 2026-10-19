@@ -1,0 +1,78 @@
+# FG11d: retire, disable, close and the cancellation matrix
+
+Status: proposed. Two slices are scoped here; neither is implemented yet.
+
+Issue: #14446, the FG11 tracker. The `d` row records per-run task
+cancellation as implemented by #14526, and states that retire, disable,
+close and the round-level cancellation matrix are not discharged by that
+merge.
+
+## Why
+
+FG11a already pins lost replies for `retire_schedule`, and FG11b pins store
+faults around the ledger. Neither answers the lifecycle questions:
+
+- What happens to a claim that has reached the Harness as `intent` when its
+  definition is retired?
+- Does a retired or disabled definition ever fire again, including the slot
+  that was already due?
+- What happens to an automation input that is queued when its Session closes?
+- Does a cancel stop only its occurrence, leaving the schedule, future slots,
+  siblings and foreground work intact?
+
+`AutomationScannerTest` covers `session_not_active` and `count_limit` on H2,
+and `WorkspaceSessionCloseMySqlIT` covers close for Workspace Sessions, but no
+packaged lane runs these questions on the real schema with the real scanner.
+
+## Fixture
+
+Both slices live in `HostedAutomationFaultGatesIT`, which already provides the
+packaged stack: in-JVM Spring with the scanner on, a real Harness behind
+`HostedLifecycleRelay`, real MySQL and a model stub. These cells never run a
+Workspace tool, so they avoid the execution-authority path that blocks FG11f.
+
+The existing relays carry the faults: `held(...)` parks an operation before
+the Harness sees it, `relayed(...)` drops one answer, and the scanner's own
+scheduler is held while a case arms. No new fixture is needed for slice 1.
+
+## Slice 1: retire, disable, close
+
+| Cell                    | Setup                                                                                  | Expected                                                                                                                                                                                   |
+| ----------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `retire-at-intent`      | Retire while the claim sits at the Harness as `intent` (the relay parks the operation) | The claim settles `cancelled` with `not_started_proven`; the occurrence is not `unknown`.                                                                                                  |
+| `retire-dropped-answer` | Drop the retire's `202` after the Harness committed it                                 | The re-driven retire answers the committed retire, never re-arms, and no slot after the retire fires.                                                                                      |
+| `disable-span`          | Disable the definition across two due slots, then enable it                            | The disabled span records no `fired` occurrence and no run; the first slot after re-enabling fires once.                                                                                   |
+| `close-queued-input`    | Close the Session while an automation input is queued behind a held turn               | The queued input settles without a model Turn; a live definition on the closed Session records `skipped(session_not_active)` for each slot, which is today's behaviour and is pinned here. |
+
+## Slice 2: the cancellation matrix
+
+Per-run public `TASK_CANCEL` must stop only the target occurrence. The matrix
+asserts:
+
+- the cancelled run reaches `cancelled` from its committed proof, and its
+  occurrence settles once;
+- the schedule, future slots, sibling runs and foreground work are untouched;
+- a queued input cancelled before any attempt settles with no model call, and
+  a run that completes naturally keeps its outcome;
+- a retry under the same key reuses the original operation and run, and a
+  parked cancel is never redelivered.
+
+#14526 implemented the per-run cancel; slice 2 pins the round-level matrix
+around it.
+
+## Limits
+
+- These cells do not exercise Workspace tools or publication; FG11f owns
+  those, and is blocked on the execution-authority gap recorded in its
+  design.
+- Lease takeover during a cancel is out of scope, as in FG11c.
+- The stream-gap gate (`FG11e`) is untouched.
+
+## Acceptance
+
+- Each slice green on JDK 21 with a real MySQL 8, selected with
+  `-Phosted-automation-gates`.
+- Every cell red at the site it names when its guard is removed.
+- Budgets in `scripts/tests/hosted-process-ci.test.js` recomposed if the
+  class's runtime moves; no new class is added.
+- Delivered in both languages with matching structure.
