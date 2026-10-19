@@ -201,7 +201,9 @@ test('launchers load the distribution config only when it exists', async () => {
         'printf "ARG=%s\\n" "$@"\n',
     );
     await chmod(java, 0o755);
-    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
+    const baseEnv = { ...process.env };
+    delete baseEnv.SPRING_CONFIG_ADDITIONAL_LOCATION;
+    const env = { ...baseEnv, PATH: `${fakeBin}:${process.env.PATH}` };
     const launcherPath = path.join(bundle, 'bin/qwen-managed-agent-server');
     const recoveryPath = path.join(
       bundle,
