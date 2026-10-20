@@ -1289,13 +1289,33 @@ class HostedMcpStoreFaultGatesIT {
             assertThat(harness.isAlive())
                     .as("Harness log: %s", temporary.resolve("harness.log"))
                     .isTrue();
-            JsonNode capabilities = json.readTree(http.send(
-                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
-                            + harnessPort + "/capabilities"))
-                            .timeout(Duration.ofSeconds(2))
-                            .header("Authorization", "Bearer " + TOKEN)
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString()).body());
+            HttpResponse<String> answer;
+            try {
+                answer = http.send(
+                        HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                                + harnessPort + "/capabilities"))
+                                .timeout(Duration.ofSeconds(2))
+                                .header("Authorization", "Bearer " + TOKEN)
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+            } catch (IOException notReady) {
+                // AssertionError is what the boot wait retries.
+                throw new AssertionError("capabilities: " + notReady,
+                        notReady);
+            }
+            assertThat(answer.statusCode())
+                    .as("capabilities: %s", answer.body())
+                    .isEqualTo(200);
+            JsonNode capabilities;
+            try {
+                capabilities = json.readTree(answer.body());
+            } catch (IOException notJsonYet) {
+                throw new AssertionError("capabilities: " + answer.body(),
+                        notJsonYet);
+            }
+            assertThat(capabilities)
+                    .as("capabilities: %s", answer.body())
+                    .isNotNull();
             bootId = capabilities.at("/hostedHarness/bootId").asText();
             assertThat(bootId).isNotBlank();
         });
