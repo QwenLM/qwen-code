@@ -8,9 +8,9 @@ Read、Write 和 Edit。Session 关闭会结算并撤销原上下文，下一个
 本目录尚未在 ACK 部署或验收。
 
 运行环境已通过 PR #14340 在主干实现。简化后的 PR #14758 说明本部署边界。
-常驻路径独立于已从 #14758 撤出的节点证据候选，以及安装提案 #14761 和物理退役
-提案 #14765。本配置不需要 Go 工具链、定制 containerd/shim、节点 collector 或
-冷启动安装。
+常驻路径独立于已从 #14758 撤出的节点证据候选和已关闭的安装提案 #14761。
+可选的显式空闲退役由 #14765 实现，使用方式见下文。本配置不需要 Go 工具链、
+定制 containerd/shim、节点 collector 或冷启动安装。
 
 ## 可信平台与支持的存储
 
@@ -67,6 +67,58 @@ reservation 并阻止切换。每个 Session 的 cwd 固定，可在下一 Sessi
 选择其他目录。本版不支持 Shell、MCP、Hooks、共享运行环境的子 Session 或
 原地 cwd 变更。
 
+## 显式空闲退役
+
+正常 Session 关闭后 Workspace 仍可复用。退役空闲 Workspace 时，使用私有 Java
+维护入口，加载相同部署配置、数据库和 Runtime 凭据密钥。先通过正常服务升级
+执行当前 schema 迁移，并封锁旧 Server/Broker 二进制。维护命令只验证目录，不迁移。
+
+创建有界请求文件，只指定原 scope 和当前具有 Workspace `OWNER` grant 的授权
+审计 actor：
+
+```json
+{
+  "tenantId": "tenant-a",
+  "workspaceId": "workspace-a",
+  "workspaceGeneration": 1,
+  "actorId": "owner-a",
+  "retirementId": "retire-workspace-a-1"
+}
+```
+
+操作者须已控制可信维护主机及部署凭据；actor 字段本身不认证身份。在 server 包
+目录中使用既有 fat jar 和配置：
+
+```bash
+java -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetirementMain \
+  -cp target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  org.springframework.boot.loader.launch.PropertiesLauncher \
+  inspect /absolute/path/retirement.json \
+  --spring.config.additional-location=file:/absolute/path/application.yaml
+```
+
+将 `inspect` 替换为 `begin`，原子拒绝新 Session、获取、激活、派发和恢复。它要求
+Session 终结、journal head 封存或永久删除且 writer 已清除、Runtime Session 已释放、
+执行已结算。保留原 binding/
+active slot，存储保持 `RESERVED`。回复丢失后复用同一请求。查询只读，不访问 Kubernetes。
+
+删除是独立显式命令，将动作和参数替换为
+`delete-pod /absolute/path/retirement.json <observed-resourceVersion>`。它通过配置的
+Kubernetes API 核验原资源，再记录带原 UID/resourceVersion 前置条件、30 秒宽限期
+及 Background propagation 的正常 Pod DELETE。凭据留在已有 API/token/CA 配置中。
+不删除 PVC/PV、Secret 或保护对象。同版本重试只读原结果，不重发；新版本需要
+显式再次调用，总计最多八次。HTTP 回复和 Pod 缺失不会释放存储或重新开放 Workspace。
+物理释放和复用延后。
+
+即使 Kubernetes 已接受删除，回复丢失仍可能留下 `UNKNOWN`。原 Pod 一旦具有
+`deletionTimestamp` 或已缺失，不同 `resourceVersion` 也不能授权再次 DELETE。
+同版本重放仍只返回保留尝试，不访问 Kubernetes；使用 `inspect` 读取该回执。
+最多八次的上限只允许在原 Pod 仍通过全部核验时显式发起尝试。
+
+完整退役设计见[English](../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
+与[简体中文](../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md)。
+原生 ACK 退役资格验证继续待完成。
+
 ## 故障处理与验收
 
 执行或释放结果未知时，保留其 Session 和 reservation，并拒绝下一个 Session。
@@ -85,10 +137,12 @@ reservation 并阻止切换。每个 Session 的 cwd 固定，可在下一 Sessi
    副作用不能重复。
 3. 在空闲边界重启实际应用/Broker 进程，保留数据库和 worker。确认接管原运行环境，
    不新建 Pod。另行验证缺失或变化身份被拒绝。
+4. 在独立的空闲退役边界开始维护，确认拒绝新 Session 和 Runtime 工作。仅以
+   观察到的原 UID/version 删除原 Pod，测试回复丢失和同版本重试，并核验封锁、
+   active slot 及原存储 reservation 均保留。
 
 每次记录源码提交、环境、原身份及观察结果。组件/H2、MySQL、独立进程与 ACK
-证据分别记录。本次文档修订不执行这些部署检查，继续标为待完成。既有历史夹具
-不作为新部署的验收证据。
+证据分别记录。这些部署检查继续标为待完成。既有历史夹具不作为新部署的验收证据。
 
 Session 关闭后常驻资源继续产生正常的 Pod、节点和存储费用。此模板不授权云上
 安装、付费资源创建或手工物理销毁；这些动作使用另外批准的部署或维护方案。
