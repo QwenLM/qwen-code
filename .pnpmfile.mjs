@@ -30,6 +30,7 @@ export const workspacePackageNames = new Set([
   '@qwen-code/external-context',
   '@qwen-code/external-context-mem0',
   '@qwen-code/test-failure-explorer',
+  '@qwen-code/generated-ui',
   '@qwen-code/mobile-mcp',
   '@qwen-code/node-repl-mcp',
   '@qwen-code/qwen-code',

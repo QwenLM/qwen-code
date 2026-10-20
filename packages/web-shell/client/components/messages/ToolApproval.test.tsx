@@ -709,6 +709,47 @@ describe('ToolApproval accessibility', () => {
     expect(commandPre).toBeTruthy();
   });
 
+  it('neutralises bidi and C0 controls in the generic content block', () => {
+    // #13566 named three sites. The command block, the exec warnings and the
+    // description were sanitised by #13578; this `<pre>` — rendered for any
+    // approval that shows content without being an exec one, and reused as the
+    // body, the tooltip and the `aria-describedby` target — was still raw.
+    const craftedContent = [
+      'Writes to notes\u202e.txt', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'then \u2066--force\u2069', // bidi isolates
+      'and \u001b[31mstops\u001b[0m\tthere', // C0 ANSI escape, tab kept
+    ].join('\n');
+    render(undefined, {
+      id: 'req-13566-content',
+      toolName: 'write_file',
+      title: 'write_file',
+      content: [{ type: 'text', text: craftedContent }],
+      options: [
+        { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const contentPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent!.includes('Writes to notes'),
+    )!;
+    expect(contentPre).toBeTruthy();
+    const rendered = contentPre.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    // `\n` and `\t` stay unescaped so the block stays legible.
+    expect(rendered).toBe(
+      [
+        'Writes to notes\\u202e.txt',
+        'then \\u2066--force\\u2069',
+        'and \\u001b[31mstops\\u001b[0m\tthere',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(contentPre.getAttribute('title')).toBe(rendered);
+  });
+
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([
       {
@@ -968,6 +1009,23 @@ describe('ToolApproval accessibility', () => {
     ]);
     act(() => optionButtons()[0].click());
     expect(onConfirm).toHaveBeenCalledWith(planRequest.id, 'reject');
+  });
+  it('labels the Managed allow/deny plan options with the frozen execution policy', () => {
+    const req = {
+      ...planRequest,
+      options: [
+        { id: 'allow', label: 'Allow', kind: 'allow_once' as const },
+        { id: 'deny', label: 'Deny', kind: 'reject_once' as const },
+      ],
+    };
+    render(undefined, req, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'deny',
+      'allow',
+    ]);
+    expect(container!.textContent).toContain('Full Access');
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(req.id, 'allow');
   });
 
   it('keeps ordinary tool permissions unchanged when a plan execution mode is supplied', () => {

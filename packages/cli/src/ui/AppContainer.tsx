@@ -156,6 +156,7 @@ import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { getInteractiveModSession } from '../services/interactive-mod-session.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
@@ -163,6 +164,7 @@ import {
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
+import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -844,6 +846,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [props.extensionRefreshState],
   );
   const historyManager = useHistory();
+  const addHistoryItem = historyManager.addItem;
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribe((text) => {
+        addHistoryItem({ type: MessageType.INFO, text }, Date.now());
+      }),
+    [config, addHistoryItem],
+  );
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
   // would rebuild them on every message. Mirror history into a ref so
@@ -1134,8 +1144,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
-      // Note: the program will not work if this fails so let errors be
-      // handled by the global catch.
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       // Bound the goal-runtime gate: under session-writer lease contention
@@ -1232,7 +1240,15 @@ export const AppContainer = (props: AppContainerProps) => {
             config.getSessionId(),
           ),
         );
+      }
 
+      // Restore the transcript before Mod diagnostics, without making input
+      // or Mod startup wait for asynchronous session recovery.
+      void getInteractiveModSession(config)
+        ?.initialize()
+        .catch(() => {});
+
+      if (resumedSessionData) {
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
         );
@@ -1319,7 +1335,17 @@ export const AppContainer = (props: AppContainerProps) => {
           Date.now(),
         );
       }
-    })();
+    })().catch((error: unknown) => {
+      getInteractiveModSession(config)?.failStartup(error);
+      debugLogger.error('Failed to initialize session:', error);
+      historyManager.addItem(
+        {
+          type: MessageType.ERROR,
+          text: `Failed to initialize session: ${sanitizeTerminalLine(getErrorMessage(error)).slice(0, 2000)}`,
+        },
+        Date.now(),
+      );
+    });
 
     // Register SessionEnd cleanup for process exit
     registerCleanup(async () => {
@@ -1518,10 +1544,13 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const preferredEditor = usePreferredEditor();
-  const restoredSubmissionRef = useRef<Pick<
-    QueuedUserSubmission,
-    'modelText' | 'submittedPrompt'
-  > | null>(null);
+  const restoredSubmissionRef = useRef<
+    | (Pick<QueuedUserSubmission, 'modelText' | 'submittedPrompt'> & {
+        /** Model-bound prompt, when it differs from what the buffer holds. */
+        modelSubmission?: string;
+      })
+    | null
+  >(null);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
@@ -1620,6 +1649,13 @@ export const AppContainer = (props: AppContainerProps) => {
         isInteractiveTerminal(),
       ),
   );
+
+  useEffect(() => {
+    getInteractiveModSession(config)?.setPresentation({
+      isFullscreen: useTerminalBuffer,
+      columns: terminalWidth,
+    });
+  }, [config, useTerminalBuffer, terminalWidth]);
 
   // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
   // <Static> content from the viewport just like the wake path; pair it with
@@ -1867,7 +1903,6 @@ export const AppContainer = (props: AppContainerProps) => {
     };
   }, [config]);
 
-  const addHistoryItem = historyManager.addItem;
   useEffect(() => {
     if (typeof config.onChatRecordingFailure !== 'function') return;
     return config.onChatRecordingFailure(() => {
@@ -3106,8 +3141,9 @@ export const AppContainer = (props: AppContainerProps) => {
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
       const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
-      const submittedPrompt =
-        submittedPromptProvenanceUnavailable || !provenanceEnabled
+      let submittedPrompt = submittedPromptProvenanceUnavailable
+        ? undefined
+        : !provenanceEnabled
           ? undefined
           : restoredSubmission === null
             ? trimmedSubmittedPrompt || undefined
@@ -3129,6 +3165,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // The user's raw text, captured before any `<system-reminder>` prefix is
       // prepended below (so keyword detection sees only what the user typed).
       const userPromptText = submittedValue;
+      // A cancelled turn comes back to the composer as the user's own text;
+      // re-send the model-bound copy so its consumed notice is not lost.
+      if (
+        restoredSubmission !== null &&
+        restoredSubmission.modelSubmission !== undefined
+      ) {
+        submittedValue = restoredSubmission.modelSubmission;
+      }
       // Quit must bypass reminders and the message queue so it can stop an
       // active stream without consuming one-shot session state.
       if (
@@ -3265,6 +3309,11 @@ export const AppContainer = (props: AppContainerProps) => {
           );
           submittedValue = sizePrefix + submittedValue;
         }
+      }
+      // The one-shot notices above are model-only context; whenever one was
+      // added, the composer-side text is the display projection (#11553).
+      if (submittedPrompt === undefined && submittedValue !== userPromptText) {
+        submittedPrompt = userPromptText;
       }
       if (options?.deferUntilIdle) {
         addMessage(submittedValue, true, submittedPrompt, shellModeActive);
@@ -3500,13 +3549,19 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const popped = popAllMessages();
       if (popped) {
-        restoredSubmissionRef.current = popped;
+        // Same contract as the auto-restore path below: the buffer holds the
+        // user's own text, and the model-bound copy rides along so an
+        // unchanged resubmit keeps the one-shot notice (#11553).
+        const restoredText = popped.submittedPrompt ?? popped.modelText;
+        restoredSubmissionRef.current = {
+          modelText: restoredText,
+          submittedPrompt: popped.submittedPrompt,
+          modelSubmission: popped.modelText,
+        };
         submittedPromptProvenanceUnavailableRef.current = false;
         const currentText = buffer.text;
         buffer.setText(
-          currentText
-            ? `${popped.modelText}\n${currentText}`
-            : popped.modelText,
+          currentText ? `${restoredText}\n${currentText}` : restoredText,
         );
       }
 
@@ -3572,6 +3627,9 @@ export const AppContainer = (props: AppContainerProps) => {
           ...(cancelledTurnUserItem.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
+          ...(cancelledTurnUserItem.modelText === undefined
+            ? {}
+            : { modelSubmission: cancelledTurnUserItem.modelText }),
         };
         submittedPromptProvenanceUnavailableRef.current = false;
         buffer.setText(cancelledTurnUserItem.text);
@@ -3832,18 +3890,30 @@ export const AppContainer = (props: AppContainerProps) => {
       const ac = new AbortController();
       suggestionAbortRef.current = ac;
 
-      // Only clone the tail — full structuredClone of a large resumed session
-      // causes transient heap peaks that trigger OOM (#4624).
-      const conversationHistory = llmClient.getHistoryTail(40, true);
-      generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        // On by default: the schema declares `default: true`, but
-        // `mergeSettings` doesn't apply schema defaults, so an unset value is
-        // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Only an explicit
-        // `false` opts out of cache sharing. This flag does not inherit the
-        // follow-up suggestion runtime gate.
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
-      })
+      const generate = async () => {
+        const mods = getInteractiveModSession(config);
+        if (mods) await mods.ready;
+        ac.signal.throwIfAborted();
+        // Only clone the tail — full structuredClone of a large resumed session
+        // causes transient heap peaks that trigger OOM (#4624).
+        const conversationHistory = llmClient.getHistoryTail(40, true);
+        return generatePromptSuggestion(
+          config,
+          conversationHistory,
+          ac.signal,
+          {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value is
+            // `undefined` and a `=== true` gate left the cache-aware fork as dead
+            // code unless the flag was explicitly set (#9230). Only an explicit
+            // `false` opts out of cache sharing. This flag does not inherit the
+            // follow-up suggestion runtime gate.
+            enableCacheSharing:
+              settings.merged.ui?.enableCacheSharing !== false,
+          },
+        );
+      };
+      void generate()
         .then((result) => {
           if (ac.signal.aborted) return;
           if (result.suggestion) {

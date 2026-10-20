@@ -37,7 +37,10 @@ import {
   type ManagedCsiFileBoot,
   type ManagedCsiFileReady,
 } from './managed-csi-file-envelope.js';
-import { validateManagedCsiPodIdentity } from './managed-csi-envelope.js';
+import {
+  validateManagedCsiPodIdentity,
+  type ManagedCsiMountReceipt,
+} from './managed-csi-envelope.js';
 import { ManagedCsiMount } from './managed-csi-mount.js';
 import { composeManagedCsiFiles } from './managed-csi-file-composer.js';
 import {
@@ -52,6 +55,12 @@ import {
   readCsiPreparationEvidence,
   type CsiFileHistoryObservation,
 } from './managed-csi-file-history-protocol.js';
+import {
+  CSI_FILE_FINALIZE_PATH,
+  CSI_FILE_FINALIZE_LIMIT,
+  readCsiFileFinalizeRequest,
+  requireSavedCsiApplicationCut,
+} from './managed-csi-file-finalize-protocol.js';
 
 export interface ManagedCsiFileWorkerHandle {
   readonly ready: ManagedCsiFileReady;
@@ -143,7 +152,14 @@ export async function startManagedCsiFileWorker(
   );
   const installations = new ManagedContextInstallations(boot.context);
   let closed = false;
+  let originalMount: ManagedCsiMountReceipt | undefined;
   let retirementId: string | undefined;
+  let operationFailed = false;
+  type FinalizeRequest = ReturnType<typeof readCsiFileFinalizeRequest>;
+  let preCut: { request: FinalizeRequest; result: Promise<Buffer> } | undefined;
+  let finalization:
+    | { request: FinalizeRequest; result: Promise<Buffer> }
+    | undefined;
   let composition:
     | Awaited<ReturnType<typeof composeManagedCsiFiles>>
     | undefined;
@@ -165,7 +181,10 @@ export async function startManagedCsiFileWorker(
     operations.add(operation);
     void operation.then(
       () => operations.delete(operation),
-      () => operations.delete(operation),
+      () => {
+        operationFailed = true;
+        operations.delete(operation);
+      },
     );
     return operation;
   };
@@ -213,6 +232,8 @@ export async function startManagedCsiFileWorker(
     ...middleware,
     async (req: Request, res: Response) => {
       try {
+        if (closed || (boot.version === 6 && retirementId !== undefined))
+          throw new Error();
         const outcome = checkManagedContextAttestation(
           readManagedCsiFileContext(req.body, boot),
           boot.context,
@@ -224,7 +245,7 @@ export async function startManagedCsiFileWorker(
           });
           return;
         }
-        await mount.observe();
+        await track(mount.observe());
         if (closed || !mount.isAvailable) throw new Error();
         res.json(wrapManagedCsiFileContext(boot, outcome.body));
       } catch {
@@ -253,7 +274,7 @@ export async function startManagedCsiFileWorker(
           context.binding.contextConfigRef !== CONFIG
         )
           throw new Error();
-        if (boot.version === 5)
+        if (boot.version === 5 || boot.version === 6)
           readCsiNativeRequest({
             protocolVersion: 1,
             requestId: '00000000-0000-4000-8000-000000000000',
@@ -302,8 +323,10 @@ export async function startManagedCsiFileWorker(
     ...middleware,
     async (req: Request, res: Response) => {
       try {
+        if (closed || (boot.version === 6 && retirementId !== undefined))
+          throw new Error();
         validateManagedCsiFileAttestationRequest(req.body, boot);
-        const observation = await mount.observe();
+        const observation = await track(mount.observe());
         if (closed || !mount.isAvailable) throw new Error();
         const response = {
           protocolVersion: 2,
@@ -327,7 +350,12 @@ export async function startManagedCsiFileWorker(
     ...middleware,
     async (req: Request, res: Response) => {
       try {
-        if (boot.version !== 5 || closed) throw new Error();
+        if (
+          (boot.version !== 5 && boot.version !== 6) ||
+          closed ||
+          (boot.version === 6 && retirementId !== undefined)
+        )
+          throw new Error();
         if (historyFailed) {
           refuse(res, 'managed_csi_history_retirement_required');
           return;
@@ -524,7 +552,7 @@ export async function startManagedCsiFileWorker(
         const request = readCsiNativeRequest(req.body);
         const installed = installations.installation(boot.identity.sessionId);
         if (
-          boot.version !== 5 ||
+          (boot.version !== 5 && boot.version !== 6) ||
           request.action !== 'execute' ||
           typeof request.subject !== 'string' ||
           !installed ||
@@ -688,6 +716,171 @@ export async function startManagedCsiFileWorker(
     handleManagedRuntimeJsonError,
   );
   app.post(
+    CSI_FILE_FINALIZE_PATH,
+    ...middleware,
+    async (req: Request, res: Response) => {
+      try {
+        const installed = installations.installation(boot.identity.sessionId);
+        if (
+          boot.version !== 6 ||
+          !installed ||
+          !binding ||
+          !originalMount ||
+          closed ||
+          bindIdentity !== JSON.stringify(installed)
+        )
+          throw new Error();
+        const request = readCsiFileFinalizeRequest(
+          req.body,
+          boot,
+          installed,
+          pod,
+          originalMount,
+        );
+        if (retirementId !== undefined && retirementId !== request.retirementId)
+          throw new Error();
+        if (request.operation === 'observe') {
+          if (preCut && !isDeepStrictEqual(preCut.request, request))
+            throw new Error();
+          if (!preCut) {
+            retirementId = request.retirementId;
+            executor.sealAdmission(request.retirementId);
+            const originalBinding = binding;
+            const result = (async () => {
+              const joined = await Promise.allSettled([
+                originalBinding,
+                observationTail,
+                ...operations,
+                ...[...preparations.values()].map(
+                  (prepared) => prepared.observation,
+                ),
+              ]);
+              if (
+                operationFailed ||
+                joined.some((item) => item.status === 'rejected') ||
+                closed ||
+                !composition
+              )
+                throw new Error('Original CSI work did not join successfully.');
+              const execution = await executor.csiRetirementInventory(
+                request.retirementId,
+                boot.identity.sessionId,
+              );
+              if (
+                execution.workState !== 'QUIESCENT' ||
+                execution.pendingStarts ||
+                execution.pendingInvocations
+              )
+                throw new Error('Original CSI execution is not quiescent.');
+              const files = await composition.retirementInventory();
+              const prepared = [];
+              for (const [resourceId, item] of [...preparations.entries()].sort(
+                ([a], [b]) => a.localeCompare(b),
+              ))
+                prepared.push({
+                  resourceId,
+                  reference: structuredClone(item.reference),
+                  observation: await item.observation,
+                });
+              if (operations.size || operationFailed || closed)
+                throw new Error();
+              const bytes = Buffer.from(
+                JSON.stringify({
+                  ...request,
+                  state: 'FROZEN_CANDIDATE',
+                  execution,
+                  preparations: prepared,
+                  files,
+                }),
+              );
+              if (bytes.length > CSI_FILE_FINALIZE_LIMIT) throw new Error();
+              return bytes;
+            })();
+            preCut = { request, result };
+          }
+          res.type('application/json').send(await preCut.result);
+          return;
+        }
+        if (
+          !preCut ||
+          preCut.request.retirementId !== request.retirementId ||
+          preCut.request.preparedCommitSha256 !== request.preparedCommitSha256
+        )
+          throw new Error();
+        if (finalization && !isDeepStrictEqual(finalization.request, request))
+          throw new Error();
+        if (!finalization) {
+          const candidate = preCut;
+          const result = (async () => {
+            const observation = await candidate.result;
+            if (!composition || operations.size || operationFailed || closed)
+              throw new Error();
+            const preCutObservationSha256 = createHash('sha256')
+              .update(observation)
+              .digest('hex');
+            await requireSavedCsiApplicationCut(
+              boot,
+              request,
+              preCutObservationSha256,
+            );
+            const frozen = JSON.parse(observation.toString('utf8')) as {
+              execution: unknown;
+              files: unknown;
+            };
+            const execution = await executor.csiRetirementInventory(
+              request.retirementId,
+              boot.identity.sessionId,
+            );
+            const files = await composition.retirementInventory();
+            if (
+              !isDeepStrictEqual(execution, frozen.execution) ||
+              !isDeepStrictEqual(files, frozen.files) ||
+              operations.size ||
+              operationFailed ||
+              closed
+            )
+              throw new Error('Original CSI inventory changed after freezing.');
+            await executor.closeCsiFiles(
+              request.retirementId,
+              boot.identity.sessionId,
+            );
+            await composition.close();
+            const cleanup = await composition.retirementCloseInspection();
+            if (
+              !cleanup.compositionClosed ||
+              !cleanup.backend.closed ||
+              cleanup.backend.blocked ||
+              cleanup.backend.pendingOperations ||
+              cleanup.backend.openDescriptors.length ||
+              !cleanup.mount.admissionClosed ||
+              cleanup.mount.pendingOperations ||
+              cleanup.mount.closeFailed ||
+              !cleanup.mount.root.admissionClosed ||
+              cleanup.mount.root.pendingOperations ||
+              cleanup.mount.root.fd !== null
+            )
+              throw new Error('Original CSI file descriptors did not close.');
+            const bytes = Buffer.from(
+              JSON.stringify({
+                ...request,
+                state: 'DRAINED',
+                preCutObservationSha256,
+                cleanup,
+              }),
+            );
+            if (bytes.length > CSI_FILE_FINALIZE_LIMIT) throw new Error();
+            return bytes;
+          })();
+          finalization = { request, result };
+        }
+        res.type('application/json').send(await finalization.result);
+      } catch {
+        refuse(res, 'managed_csi_finalize_unavailable');
+      }
+    },
+    handleManagedRuntimeJsonError,
+  );
+  app.post(
     `${MANAGED_CSI_FILE_PREFIX}/drain`,
     ...middleware,
     async (req: Request, res: Response) => {
@@ -732,11 +925,14 @@ export async function startManagedCsiFileWorker(
   const server = createServer(
     ownedManagedRuntimeRouteGate(app, [
       ...MANAGED_CSI_FILE_ROUTES,
-      ...(boot.version === 5
+      ...(boot.version === 5 || boot.version === 6
         ? [
             { method: 'POST', path: CSI_FILE_HISTORY_PATH },
             { method: 'POST', path: `${MANAGED_CSI_FILE_PREFIX}/execute` },
           ]
+        : []),
+      ...(boot.version === 6
+        ? [{ method: 'POST', path: CSI_FILE_FINALIZE_PATH }]
         : []),
     ]),
   );
@@ -758,7 +954,11 @@ export async function startManagedCsiFileWorker(
           server.closeAllConnections();
         }),
       ]);
-      const joined = await Promise.allSettled([...operations]);
+      const joined = await Promise.allSettled([
+        ...operations,
+        ...(preCut ? [preCut.result] : []),
+        ...(finalization ? [finalization.result] : []),
+      ]);
       const executed = await Promise.allSettled([executor.close()]);
       preparations.clear();
       const retained = await Promise.allSettled([
@@ -776,7 +976,7 @@ export async function startManagedCsiFileWorker(
     return closing;
   };
   try {
-    await mount.observe();
+    originalMount = await mount.observe();
     if (!mount.isAvailable)
       throw new Error('Managed CSI mount is unavailable.');
     await new Promise<void>((resolve, reject) => {

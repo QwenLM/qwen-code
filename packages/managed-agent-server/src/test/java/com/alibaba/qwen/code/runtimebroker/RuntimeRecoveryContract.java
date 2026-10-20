@@ -5,7 +5,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -17,6 +19,7 @@ final class RuntimeRecoveryContract {
 
     static void verify(RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, String prefix) throws Exception {
+        verifyHistoricalInventory(sessions, prefix + "-history-ids");
         for (ToolExecutionRecord.State state : ToolExecutionRecord.State.values()) {
             if (state == ToolExecutionRecord.State.ABANDONED) {
                 continue;
@@ -201,6 +204,67 @@ final class RuntimeRecoveryContract {
     }
 
     /**
+     * The harness-scoped candidate read that resolves the restart drain
+     * inventory in one statement per hundred ids (#13986 review R1-9):
+     * missing ids stay absent so the caller can keep counting them as held,
+     * RELEASED rows come back so the caller can discharge them, and a
+     * duplicated identity is still refused as ambiguous.
+     */
+    static void verifyHistoricalInventory(RuntimeSessionRepository sessions,
+            String prefix) {
+        String tenant = prefix + "-tenant";
+        String harness = prefix + "-harness";
+        RuntimeScope scope = new RuntimeScope(tenant, "workspace", "generation",
+                "/workspace", "profile", "workspace");
+        RuntimeScope otherScope = new RuntimeScope(tenant, "other-workspace",
+                "generation", "/other", "profile", "workspace");
+        sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-active", "bootstrap", scope),
+                prefix + "-binding", 1, RuntimeSessionRecord.State.ACQUIRING,
+                0, Instant.now()));
+        sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-released", "bootstrap", scope),
+                prefix + "-binding", 1, RuntimeSessionRecord.State.RELEASED,
+                0, Instant.now()));
+        sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-ambiguous", "bootstrap", scope),
+                prefix + "-binding", 1, RuntimeSessionRecord.State.ACQUIRING,
+                0, Instant.now()));
+        sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-ambiguous", "bootstrap", otherScope),
+                prefix + "-binding", 2, RuntimeSessionRecord.State.ACQUIRING,
+                0, Instant.now()));
+
+        List<RuntimeSessionRecord> found = sessions.findHistoricalByIds(tenant,
+                harness, List.of(prefix + "-released", prefix + "-missing",
+                        prefix + "-active"));
+        assertEquals(Set.of(prefix + "-released", prefix + "-active"),
+                found.stream().map(RuntimeSessionRecord::getRuntimeSessionId)
+                        .collect(java.util.stream.Collectors.toSet()));
+        assertTrue(sessions.findHistoricalByIds(tenant, harness, List.of()).isEmpty());
+        assertTrue(sessions.findHistoricalByIds(tenant, harness + "-other",
+                List.of(prefix + "-active")).isEmpty());
+        RuntimeBrokerException ambiguous = assertThrows(
+                RuntimeBrokerException.class,
+                () -> sessions.findHistoricalByIds(tenant, harness,
+                        List.of(prefix + "-ambiguous")));
+        assertEquals("runtime_session_ambiguous", ambiguous.getCode());
+        // 101 candidates cross the one-hundred-id statement boundary; a
+        // batched read that only issued the first chunk would lose one.
+        List<String> bulk = new java.util.ArrayList<>();
+        for (int index = 0; index < 101; index++) {
+            String id = prefix + "-bulk-" + index;
+            bulk.add(id);
+            sessions.findOrCreate(new RuntimeSessionRecord(
+                    new RuntimeSession(harness, id, "bootstrap", scope),
+                    prefix + "-binding", 1,
+                    RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        }
+        assertEquals(101,
+                sessions.findHistoricalByIds(tenant, harness, bulk).size());
+    }
+
+    /**
      * Contract for the release decision's outcomes (#13183 item 1). Every leg
      * is single-threaded, so this pins the state machine and the refusals,
      * not the atomicity itself: the evidence that the no-active-execution
@@ -295,6 +359,52 @@ final class RuntimeRecoveryContract {
         assertEquals(RuntimeSessionRecord.State.RELEASED,
                 bindings.beginSessionRelease(sessions, executions, released)
                         .getState());
+    }
+
+    /**
+     * #13800: the mount handback's capture probe. Only a SETTLED row of this
+     * binding generation and Runtime Session counts, and only when its
+     * capture never proved the writer stopped; a complete or detached
+     * capture, or a result without one, frees the mount.
+     */
+    static void verifyUnprovenCapture(RuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            String prefix) {
+        Fixture fixture = new Fixture(bindings, sessions, executions,
+                prefix + "-capture", "capture-id");
+        Fixture other = new Fixture(bindings, sessions, executions,
+                prefix + "-capture-other", "capture-id");
+        String binding = fixture.binding.getBindingId();
+        long generation = fixture.binding.getGeneration();
+        settle(fixture, "complete", "complete");
+        settle(fixture, "detached", "detached");
+        settle(fixture, "plain", null);
+        fixture.prepare("unsettled");
+        settle(other, "foreign", "partial");
+        assertFalse(executions.hasUnprovenCaptureByRuntimeSession(binding,
+                generation, "capture-id"));
+        assertTrue(executions.hasUnprovenCaptureByRuntimeSession(
+                other.binding.getBindingId(), other.binding.getGeneration(),
+                "capture-id"));
+        settle(fixture, "unavailable", "unavailable");
+        assertTrue(executions.hasUnprovenCaptureByRuntimeSession(binding,
+                generation, "capture-id"));
+        assertFalse(executions.hasUnprovenCaptureByRuntimeSession(binding,
+                generation + 1, "capture-id"));
+        assertFalse(executions.hasUnprovenCaptureByRuntimeSession(binding,
+                generation, "other-id"));
+    }
+
+    private static void settle(Fixture fixture, String suffix, String captureStatus) {
+        ToolExecutionRecord claimed = fixture.executions.claimDispatch(
+                fixture.prepare(suffix).getExecutionCallId(), "dispatcher",
+                Duration.ofMinutes(5));
+        Map<String, Object> result = captureStatus == null
+                ? Map.of("executionStatus", "success")
+                : Map.of("executionStatus", "success", "capture",
+                        Map.of("captureStatus", captureStatus, "deliveryStatus", "pending"));
+        fixture.executions.compareAndSet(claimed, claimed.withResult(result, 3,
+                Instant.now()), "dispatcher", claimed.getDispatchGeneration());
     }
 
     static RuntimeRecoveryEvidence evidence(RuntimeBindingRecord binding, RuntimeRecoveryEvidence.Fact fact) {

@@ -1,3 +1,8 @@
+import { plural } from './utils/plural.js';
+import {
+  MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_ZH,
+} from './components/message-deletion-messages.js';
 import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
@@ -43,6 +48,11 @@ import {
   MANAGED_TASK_MESSAGES_ZH,
 } from './components/managed/managed-task-messages.js';
 
+import {
+  WORKSPACE_REGISTRATION_MESSAGES_EN,
+  WORKSPACE_REGISTRATION_MESSAGES_ZH,
+} from './components/managed/managed-workspace-messages.js';
+
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
@@ -52,13 +62,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/** English count plus its noun, pluralised the regular way. */
-function plural(count: string | number | undefined, noun: string): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
-}
 
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
@@ -156,6 +159,10 @@ const EN: Messages = {
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
   'managed.discard': 'Discard this request',
+  'managed.pendingRestoreFailed':
+    'The pending request cannot be restored and may already have been submitted. Check the session before discarding this pending record.',
+  'managed.pendingDiscardFailed':
+    'Could not discard this request. Browser storage is unavailable. Retry or reload the page.',
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
@@ -252,6 +259,23 @@ const EN: Messages = {
   'managed.newWorkspaceTitle': 'New workspace',
   'managed.modelFixed':
     'The model is fixed for this task. Start a new task to choose another model.',
+  'managed.approvalChange.loading': 'Loading approval policies…',
+  'managed.approvalChange.optionsError': 'Could not load approval policies.',
+  'managed.approvalChange.reload': 'Reload policies',
+  'managed.approvalChange.nextTurn':
+    'Approval policy changes apply to the next turn.',
+  'managed.approvalChange.changing': 'Changing approval policy…',
+  'managed.approvalChange.unconfirmed':
+    'Approval change is not confirmed. Continue confirming the original request.',
+  'managed.approvalChange.confirm': 'Continue confirming',
+  'managed.approvalChange.busy':
+    'Finish the current turn or recovery before changing approval policy.',
+  'managed.approvalChange.storage':
+    'Browser session storage is unavailable. The approval change was not sent.',
+  'managed.approvalChange.conflict':
+    'Approval policy changed elsewhere. Review the current selection.',
+  'managed.approvalChange.failed':
+    'Approval change was refused. Review the available policies.',
   'managed.model.loading': 'Loading available models…',
   'managed.model.optionsError': 'Could not load available models.',
   'managed.model.reload': 'Reload models',
@@ -274,16 +298,22 @@ const EN: Messages = {
   'managed.approvalOptionsInvalid':
     'The service returned unsupported approval modes.',
   'managed.approvalFixed':
-    'Approval mode is fixed for this task. Start a new task to choose another mode.',
+    'This session does not support changing its approval policy.',
   'managed.newWorkspaceDescription':
-    'Create an empty workspace for Managed tasks.',
+    'Choose an existing project directory, or name a new empty workspace.',
+  'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
+  'managed.workspaceDirectoryHint':
+    'Choose an existing project on the Linux execution host within this authorized root.',
+  'managed.workspaceChooseDirectory': 'Choose existing directory',
+  'managed.workspaceDirectoryScope':
+    'Choose a directory inside the selected root.',
   'managed.newWorkspaceName': 'Workspace name',
   'managed.newWorkspaceNameInvalid':
     'Use a name of 1–128 characters without control characters.',
   'managed.newWorkspaceCreate': 'Create workspace',
   'managed.newWorkspaceCreating': 'Creating workspace…',
   'managed.newWorkspaceUncertain':
-    'The creation is not yet confirmed. Retry to check the same workspace.',
+    'The creation is not yet confirmed. Retry to check the same workspace, or abandon local confirmation to start again. Abandoning does not delete a workspace that may already exist.',
   'managed.newWorkspaceResume': 'Resume workspace creation',
   'managed.newWorkspaceClose': 'Close',
   'managed.workspaceUnsupported':
@@ -1158,9 +1188,10 @@ const EN: Messages = {
   'markdownTable.selection.average': 'Average',
   'markdownTable.selection.min': 'Min',
   'markdownTable.selection.max': 'Max',
-  'markdownTable.copyTsv': 'Copy TSV',
-  'markdownTable.copyTsvHint': 'Copy as TSV for pasting into spreadsheet apps',
-  'markdownTable.copyVisible': 'Copy table',
+  'markdownTable.copyTsv': 'Copy text',
+  'markdownTable.copyTsvHint': 'Copy text for pasting into spreadsheet apps',
+  'markdownTable.copyVisible': 'Copy',
+  'markdownTable.copyMarkdown': 'Copy Markdown',
   'markdownTable.customColumns': 'Custom columns',
   'markdownTable.customColumns.tableSection': 'Columns shown in the table',
   'markdownTable.customColumns.detailSection': 'Fields shown in expanded rows',
@@ -1835,6 +1866,7 @@ const EN: Messages = {
   'codeReview.failureScenario': 'Failure scenario',
   'codeReview.witness': 'Witness',
   'codeReview.suggestedFix': 'Suggested fix',
+  'codeReview.fixWitness': 'Fix witness',
   'codeReview.outcome': 'Outcome',
   'codeReview.locations': 'Locations',
   'codeReview.evidence': 'Evidence',
@@ -1852,6 +1884,8 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'sideTask.archiveCompleted': 'Archive completed',
+  'sideTask.archiveUnavailable': 'Only completed side tasks can be archived.',
   'webPreview.title': 'Web preview',
   'webPreview.openHint': 'Preview web apps',
   'webPreview.address': 'Development URL',
@@ -1947,6 +1981,7 @@ const EN: Messages = {
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
   'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactChanged': 'Modified since recorded',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path
       ? `File not found in the workspace · ${v.path}`
@@ -2401,6 +2436,7 @@ const EN: Messages = {
   'shell.result.cancelled': 'Cancelled',
   'shell.result.waiting': 'Waiting for output…',
   'shell.result.empty': 'No output',
+  'shell.result.unavailable': 'Output is unavailable for this tool call.',
   'shell.result.exited': (v) => `Exited with code ${v?.code}`,
   'turnCalls.open': 'View tool calls',
   'turnCalls.title': 'Tool calls',
@@ -3368,6 +3404,9 @@ const EN: Messages = {
     'Context usage has not been observed for this session yet.',
   'tokenUsage.avgLatency': 'Avg latency',
   'tokenUsage.cached': 'Cached input',
+  'tokenUsage.firstTokenLatency': (v) =>
+    `First-token latency ${v?.duration ?? ''}`,
+  'tokenUsage.generationTime': (v) => `Generation ${v?.duration ?? ''}`,
   'tokenUsage.input': 'Input',
   'tokenUsage.loadError': 'Failed to load token usage.',
   'tokenUsage.models': 'By model',
@@ -3376,6 +3415,7 @@ const EN: Messages = {
   'tokenUsage.noTools': 'No tool calls in this session yet.',
   'tokenUsage.open': 'Session token usage',
   'tokenUsage.output': 'Total output',
+  'tokenUsage.outputSpeed': (v) => `Output speed ${v?.rate ?? ''} tok/s`,
   'tokenUsage.refresh': 'Refresh',
   'tokenUsage.requests': 'Requests',
   'tokenUsage.retry': 'Retry',
@@ -3723,6 +3763,8 @@ const EN: Messages = {
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
+  'message.moreActions': 'More message actions',
+  ...MESSAGE_DELETION_MESSAGES_EN,
   'userMessage.editSubmit': 'Send',
   'userMessage.editSending': 'Sending…',
   'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
@@ -4440,6 +4482,7 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...MANAGED_TASK_MESSAGES_EN,
+  ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4530,6 +4573,10 @@ const ZH: Messages = {
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
   'managed.discard': '丢弃本次请求',
+  'managed.pendingRestoreFailed':
+    '无法恢复待确认请求，此前的提交可能已成功。请先检查会话，再决定是否丢弃这条待确认记录。',
+  'managed.pendingDiscardFailed':
+    '无法丢弃此请求，浏览器存储不可用。请重试或刷新页面。',
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
@@ -4613,6 +4660,20 @@ const ZH: Messages = {
   'managed.workspaceEmpty': '没有可读取的工作区。',
   'managed.newWorkspaceTitle': '新建工作区',
   'managed.modelFixed': '当前任务的模型已固定；如需更换，请新建任务。',
+  'managed.approvalChange.loading': '正在加载审批策略…',
+  'managed.approvalChange.optionsError': '加载审批策略失败。',
+  'managed.approvalChange.reload': '重新加载策略',
+  'managed.approvalChange.nextTurn': '审批策略变更从下一轮生效。',
+  'managed.approvalChange.changing': '正在切换审批策略…',
+  'managed.approvalChange.unconfirmed':
+    '审批策略切换尚未确认，请继续确认原请求。',
+  'managed.approvalChange.confirm': '继续确认',
+  'managed.approvalChange.busy': '当前回合或恢复完成后才能切换审批策略。',
+  'managed.approvalChange.storage':
+    '浏览器会话存储不可用，审批策略变更未发送。',
+  'managed.approvalChange.conflict':
+    '审批策略已在其他页面修改，请检查当前选择。',
+  'managed.approvalChange.failed': '审批策略切换被拒绝，请检查可用策略。',
   'managed.model.loading': '正在加载可用模型…',
   'managed.model.optionsError': '加载可用模型失败。',
   'managed.model.reload': '重新加载模型',
@@ -4629,14 +4690,21 @@ const ZH: Messages = {
   'managed.approvalOptionsLoading': '正在加载审批策略…',
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
-  'managed.approvalFixed': '当前任务的审批策略已固定；如需更换，请新建任务。',
-  'managed.newWorkspaceDescription': '为托管任务创建一个空工作区。',
+  'managed.approvalFixed': '当前会话不支持更改审批策略。',
+  'managed.newWorkspaceDescription':
+    '选择已有项目目录，或输入名称创建空工作区。',
+  'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',
+  'managed.workspaceDirectoryHint':
+    '选择此授权根目录内、位于 Linux 执行机器上的已有项目。',
+  'managed.workspaceChooseDirectory': '选择已有目录',
+  'managed.workspaceDirectoryScope': '请选择已选根目录中的目录。',
   'managed.newWorkspaceName': '工作区名称',
   'managed.newWorkspaceNameInvalid':
     '名称需为 1–128 个字符，不能包含控制字符。',
   'managed.newWorkspaceCreate': '创建工作区',
   'managed.newWorkspaceCreating': '正在创建工作区…',
-  'managed.newWorkspaceUncertain': '创建结果尚未确认，重试将查询同一个工作区。',
+  'managed.newWorkspaceUncertain':
+    '创建结果尚未确认。重试将查询同一个工作区，也可放弃本地确认后重新开始。放弃不会删除可能已经创建的工作区。',
   'managed.newWorkspaceResume': '继续确认工作区创建',
   'managed.newWorkspaceClose': '关闭',
   'managed.workspaceUnsupported': '当前服务不支持工作区绑定。',
@@ -5535,9 +5603,10 @@ const ZH: Messages = {
   'markdownTable.selection.average': '平均',
   'markdownTable.selection.min': '最小',
   'markdownTable.selection.max': '最大',
-  'markdownTable.copyTsv': '复制 TSV',
-  'markdownTable.copyTsvHint': '复制为 TSV，可粘贴到 Excel 等表格应用',
-  'markdownTable.copyVisible': '复制表格',
+  'markdownTable.copyTsv': '复制文本',
+  'markdownTable.copyTsvHint': '复制文本，可粘贴到 Excel 等表格应用',
+  'markdownTable.copyVisible': '复制',
+  'markdownTable.copyMarkdown': '复制 Markdown',
   'markdownTable.customColumns': '自定义列',
   'markdownTable.customColumns.tableSection': '显示在表格列的信息',
   'markdownTable.customColumns.detailSection': '显示在折叠面板的信息',
@@ -6163,6 +6232,7 @@ const ZH: Messages = {
   'codeReview.failureScenario': '失败场景',
   'codeReview.witness': '实测证据',
   'codeReview.suggestedFix': '建议修复',
+  'codeReview.fixWitness': '修复验收标准',
   'codeReview.outcome': '处理结果',
   'codeReview.locations': '位置',
   'codeReview.evidence': '证据',
@@ -6178,6 +6248,8 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'sideTask.archiveCompleted': '归档已完成任务',
+  'sideTask.archiveUnavailable': '只能归档已完成的侧边任务。',
   'webPreview.title': '网页预览',
   'webPreview.openHint': '预览网页应用',
   'webPreview.address': '开发地址',
@@ -6267,6 +6339,7 @@ const ZH: Messages = {
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
   'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactChanged': '登记后已被修改',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
@@ -6679,6 +6752,7 @@ const ZH: Messages = {
   'shell.result.cancelled': '已取消',
   'shell.result.waiting': '等待输出…',
   'shell.result.empty': '无输出',
+  'shell.result.unavailable': '无法获取此工具调用的输出。',
   'shell.result.exited': (v) => `退出码 ${v?.code}`,
   'turnCalls.open': '查看工具调用',
   'turnCalls.title': '工具调用',
@@ -7572,6 +7646,8 @@ const ZH: Messages = {
   'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
   'tokenUsage.avgLatency': '平均延迟',
   'tokenUsage.cached': '缓存输入',
+  'tokenUsage.firstTokenLatency': (v) => `首 token 延迟 ${v?.duration ?? ''}`,
+  'tokenUsage.generationTime': (v) => `生成 ${v?.duration ?? ''}`,
   'tokenUsage.input': '输入',
   'tokenUsage.loadError': 'Token 消耗加载失败。',
   'tokenUsage.models': '按模型',
@@ -7580,6 +7656,7 @@ const ZH: Messages = {
   'tokenUsage.noTools': '本会话还没有工具调用。',
   'tokenUsage.open': '会话 Token 消耗',
   'tokenUsage.output': '总输出',
+  'tokenUsage.outputSpeed': (v) => `输出速度 ${v?.rate ?? ''} tok/s`,
   'tokenUsage.refresh': '刷新',
   'tokenUsage.requests': '请求',
   'tokenUsage.retry': '重试',
@@ -7899,6 +7976,8 @@ const ZH: Messages = {
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
+  'message.moreActions': '更多操作',
+  ...MESSAGE_DELETION_MESSAGES_ZH,
   'userMessage.editSubmit': '发送',
   'userMessage.editSending': '发送中…',
   'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
@@ -8556,6 +8635,7 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...MANAGED_TASK_MESSAGES_ZH,
+  ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

@@ -216,6 +216,24 @@ export function parseBridgeManagedSessionStore(
       'managedSessionStore.baseUrl must be an HTTP(S) URL without credentials, query, or fragment',
     );
   }
+  // Type-check the opt-in before the transport gate reads it, so a mistyped
+  // flag is reported as invalid rather than as a missing opt-in.
+  const allowInsecureHttp = record['allowInsecureHttp'];
+  if (
+    allowInsecureHttp !== undefined &&
+    typeof allowInsecureHttp !== 'boolean'
+  ) {
+    throw new TypeError('managedSessionStore.allowInsecureHttp is invalid');
+  }
+  if (
+    parsedBaseUrl.protocol === 'http:' &&
+    !isManagedSessionStoreLoopback(parsedBaseUrl.hostname) &&
+    allowInsecureHttp !== true
+  ) {
+    throw new TypeError(
+      'managedSessionStore.baseUrl must use HTTPS outside the loopback interface; pass allowInsecureHttp: true to opt in',
+    );
+  }
   const leaseDurationMs = record['leaseDurationMs'];
   if (
     typeof leaseDurationMs !== 'number' ||
@@ -235,13 +253,6 @@ export function parseBridgeManagedSessionStore(
   ) {
     throw new TypeError('managedSessionStore.writerToken is invalid');
   }
-  const allowInsecureHttp = record['allowInsecureHttp'];
-  if (
-    allowInsecureHttp !== undefined &&
-    typeof allowInsecureHttp !== 'boolean'
-  ) {
-    throw new TypeError('managedSessionStore.allowInsecureHttp is invalid');
-  }
   return Object.freeze({
     baseUrl: parsedBaseUrl.toString().replace(/\/$/u, ''),
     tenantId,
@@ -251,6 +262,43 @@ export function parseBridgeManagedSessionStore(
     ...(allowInsecureHttp === undefined ? {} : { allowInsecureHttp }),
     leaseDurationMs,
   });
+}
+
+/**
+ * Loopback predicate for the session-store parser. The URL parser folds
+ * inet_aton short forms and case, but a four-label *name* whose labels are
+ * not all numeric (`127.foo.example.test`) survives verbatim, so the
+ * per-octet numeric test below is what keeps such a DNS name out of the
+ * 127/8 allowance; acp-bridge cannot import the CLI's isLoopbackBind and
+ * must keep this minimal. The `.localhost` arm mirrors core's
+ * isLoopbackHostname — the plaintext guard of the store this descriptor
+ * feeds, and the policy this parser must agree with; isLoopbackBind
+ * answers a different question (whether a `--hostname` value is a bindable
+ * loopback address) and correctly has no such arm. IPv4-mapped loopback
+ * (`[::ffff:127.0.0.1]`, canonicalized to `[::ffff:7f00:1]`) is deliberately
+ * outside this allowlist — both policies refuse the mapped spelling, so it
+ * must use HTTPS.
+ */
+function isManagedSessionStoreLoopback(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  if (
+    normalized === 'localhost' ||
+    normalized.endsWith('.localhost') ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized === '[::1]'
+  ) {
+    return true;
+  }
+  const octets = normalized.split('.');
+  return (
+    octets.length === 4 &&
+    octets[0] === '127' &&
+    octets.every(
+      (octet) =>
+        /^\d+$/u.test(octet) && Number(octet) >= 0 && Number(octet) <= 255,
+    )
+  );
 }
 
 function requireManagedSessionStoreString(
@@ -276,6 +324,26 @@ function requireManagedSessionStoreString(
 }
 
 export type { ManagedToolV2Client } from '@qwen-code/qwen-code-core';
+
+export interface MessageGroupsSnapshot {
+  snapshot: string;
+  groups: Array<{
+    id: string;
+    promptId?: string;
+    promptIds?: string[];
+    recordIds: string[];
+  }>;
+}
+
+export interface DeleteMessageGroupsRequest {
+  snapshot: string;
+  groupIds: string[];
+}
+
+export interface DeleteMessageGroupsResponse {
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
+}
 
 export interface RewindRequest {
   promptId: string;
@@ -1260,6 +1328,14 @@ export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
   /** Explicit client close cancels active work as user intent. */
   cancelReason?: 'user';
+  /**
+   * Attempt to close without interrupting known active work. A negotiated
+   * child confirms atomically; refusal, uncertainty, or unsafe local state
+   * leaves the session live.
+   */
+  closeIfUnheld?: boolean;
+  /** Refuse the close unless the owning runtime confirms the session is idle. */
+  requireIdle?: boolean;
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
   /**
@@ -2074,12 +2150,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `InvalidClientIdError`, `PromptQueueFullError`,
-   * `PromptIdConflictError`, and pre-aborted signals throw synchronously so
-   * HTTP routes can reject before returning 202. A retry with the same
-   * `promptId` and payload returns the original promise and must not abort
-   * the admitted turn. Deferred failures such as `SessionNotFoundError` may
-   * be returned as rejected promises.
+   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
+   * pre-aborted signals throw synchronously so HTTP routes can reject
+   * before returning 202. Deferred failures such as `SessionNotFoundError`
+   * may be returned as rejected promises.
+   *
+   * Reserved contract (not yet implemented): promptId admission dedup — a
+   * `PromptIdConflictError` admission failure class, and a rule that a
+   * retry with the same `promptId` and payload returns the original
+   * promise without aborting the admitted turn. No implementation provides
+   * this today; the follow-up admission-dedup change must land it before
+   * any caller relies on it.
    */
   sendPrompt(
     sessionId: string,
@@ -2206,8 +2287,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): SessionReplaySnapshot | undefined;
 
   /**
-   * Explicitly close a live session. Force-closes even when other clients
-   * are attached. Throws `SessionNotFoundError` for unknown ids.
+   * Explicitly close a live session. Force-closes even when other clients are
+   * attached unless `closeIfUnheld` requests a conditional close. Throws
+   * `SessionNotFoundError` for unknown ids.
    */
   closeSession(
     sessionId: string,
@@ -2631,12 +2713,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
-   * Broadcast extension refresh to all active sessions and emit an
-   * `extensions_changed` workspace event when complete.
+   * Refresh selected active sessions, or all when sessionIds is omitted,
+   * and emit an `extensions_changed` workspace event when complete.
    */
   refreshExtensionsForAllSessions(
     data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
-    options?: { skillsOnly?: boolean },
+    options?: { skillsOnly?: boolean; sessionIds?: readonly string[] },
   ): Promise<{
     refreshed: number;
     failed: number;
@@ -2952,11 +3034,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<ShellCommandResult>;
 
+  /** List persisted message groups after previously admitted history mutations. */
+  getMessageGroups(sessionId: string): Promise<MessageGroupsSnapshot>;
+  deleteMessageGroups(
+    sessionId: string,
+    req: DeleteMessageGroupsRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<DeleteMessageGroupsResponse>;
+
   /**
    * List rewindable snapshots for a session with per-turn diff stats.
-   * Answered only after every rewind admitted before the call has run, so
-   * the listing never describes a turn the bridge has already agreed to
-   * drop.
+   * Answered after previously admitted history mutations.
    */
   getRewindSnapshots(
     sessionId: string,
@@ -3004,6 +3092,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     name: string,
     originatorClientId?: string,
   ): Promise<RuntimeMcpServerRemoveResult>;
+
+  /**
+   * Whether this workspace runtime holds any MCP server that was added at
+   * runtime and is still registered. A paired Bridge reads it while it
+   * evaluates whether the Managed engine can reproduce the runtime's
+   * configuration: a Managed child starts without those servers, so a session
+   * must not select Managed while one is registered.
+   */
+  hasRuntimeMcpServers(): boolean;
 
   /**
    * Add a runtime MCP server to one live session only. This does not mutate

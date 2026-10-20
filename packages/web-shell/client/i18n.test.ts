@@ -12,11 +12,33 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('pluralizes deletion counts and explains unsupported sessions in both locales', () => {
+    const en = getTranslator('en');
+    expect(en('messageDelete.selected', { count: 1 })).toBe('1 group selected');
+    expect(en('messageDelete.selected', { count: 2 })).toBe(
+      '2 groups selected',
+    );
+    expect(en('messageDelete.confirmTitle', { count: 1 })).toBe(
+      'Delete 1 message group?',
+    );
+    expect(en('messageDelete.confirmTitle', { count: 2 })).toBe(
+      'Delete 2 message groups?',
+    );
+    expect(en('messageDelete.unsupported')).toBe(
+      'Deleting saved messages is not supported for this session.',
+    );
+    expect(getTranslator('zh-CN')('messageDelete.unsupported')).toBe(
+      '此会话不支持删除已保存的消息。',
+    );
+    expect(getTranslator('zh-CN')('messageDelete.selected', { count: 2 })).toBe(
+      '已选 2 组',
+    );
+  });
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
-    expect(en('managed.tasks.title')).toBe('Child Agent tasks');
-    expect(zh('managed.tasks.title')).toBe('子 Agent 任务');
+    expect(en('managed.tasks.title')).toBe('Session tasks');
+    expect(zh('managed.tasks.title')).toBe('会话任务');
     expect(en('managed.tasks.cancel.stopping')).toBe(
       'Stop requested. Waiting for the task to end.',
     );

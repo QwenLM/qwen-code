@@ -1,19 +1,19 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.RenewWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -119,7 +119,7 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(count("ma_request_receipt", "namespace = 'SESSION_COMMAND' AND operation = 'UNARCHIVE_WORKSPACE_SESSION'")).isEqualTo(1);
         assertThat(count("ma_public_event", "event_type = 'session.unarchived'")).isEqualTo(1);
         assertThatThrownBy(() -> transaction(() -> first.unarchiveWorkspaceSession(tenant, session, OWNER, "key", "changed")))
-                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         assertThat(first.requireSession(tenant, session).status()).isEqualTo("CLOSED");
     }
 
@@ -199,7 +199,7 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(retention.observe(Duration.ZERO)).singleElement().extracting(ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("recovery_protected");
         assertThatThrownBy(() -> transaction(() -> new ManagedSessionStore(jdbc).acquireWriter(tenant, session, TOKEN,
                 new AcquireWriterRequest("workspace", "new-writer", 60_000L))))
-                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
     }
 
     @Test
@@ -265,7 +265,7 @@ class WorkspaceSessionRetentionMySqlIT {
                     try {
                         return transaction(() -> new ManagedSessionStore(jdbc).acquireWriter(tenant, session, TOKEN,
                                 new AcquireWriterRequest("workspace", "late", 60_000L)));
-                    } catch (ApiException rejected) {
+                    } catch (ManagedAgentException rejected) {
                         return rejected;
                     }
                 });
@@ -275,7 +275,7 @@ class WorkspaceSessionRetentionMySqlIT {
                 release.countDown();
                 assertThat(holder.get(5, TimeUnit.SECONDS)).isTrue();
                 assertThat(completed.get(5, TimeUnit.SECONDS)).isTrue();
-                assertThat(writer.get(5, TimeUnit.SECONDS)).isInstanceOfSatisfying(ApiException.class,
+                assertThat(writer.get(5, TimeUnit.SECONDS)).isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
                 assertThat(projected.get(5, TimeUnit.SECONDS)).isFalse();
             } finally {
@@ -285,6 +285,62 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class)).isEqualTo("SUPPRESSED");
         assertThat(count("ma_public_event", "event_type = 'tool.result'")).isZero();
         assertThat(count("ma_artifact", "1=1")).isZero();
+    }
+
+    /**
+     * A heartbeat queued behind a retirement must see it once the
+     * retirement commits. renewWriter takes no tenant guard (#13800); it
+     * waits on the Session root that retirement holds, and every consistent
+     * read it runs comes after that wait, so it fails with the retirement's
+     * name instead of renewing a retired writer.
+     */
+    @Test
+    void retirementSerializesAQueuedWriterRenewal() throws Exception {
+        var store = store(Clock.systemUTC());
+        String tenant = "late-renewal";
+        String session = closed(store, tenant, true);
+        publication(tenant, session);
+        // Restore the sealed writer with a lapsed lease: retirement then
+        // proceeds, and a renewal that misses it fails on the lease instead.
+        jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE',"
+                + " writer_lease_until = (" + ManagedSchemaTime.SQL_NOW + " + -60000)");
+        var deletion = deleteClaim(store, tenant, session);
+        var publicLocked = new CountDownLatch(1);
+        var completingPublicLock = new CountDownLatch(1);
+        var completingStore = observingCompletion(completingPublicLock);
+        var release = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(3)) {
+            var holder = pool.submit(() -> transaction(() -> {
+                lock(tenant, session);
+                publicLocked.countDown();
+                awaitLatch(release);
+                return true;
+            }));
+            try {
+                awaitLatch(publicLocked);
+                var completed = pool.submit(() -> transaction(() -> completingStore.completeOperation(tenant,
+                        session, deletion.operationId(), "delete-worker", deletion.claimGeneration(), false)));
+                awaitLatch(completingPublicLock);
+                MySqlLockProbe.awaitLockWaits(jdbc, schema, 1, "the queued writer renewal");
+                var renewal = pool.submit(() -> {
+                    try {
+                        return transaction(() -> new ManagedSessionStore(jdbc).renewWriter(tenant, session, TOKEN,
+                                new RenewWriterRequest("workspace", "writer", 1, 60_000L)));
+                    } catch (ManagedAgentException rejected) {
+                        return rejected;
+                    }
+                });
+                MySqlLockProbe.awaitLockWaits(jdbc, schema, 2, "both queued transactions");
+                assertThrows(TimeoutException.class, () -> renewal.get(100, TimeUnit.MILLISECONDS));
+                release.countDown();
+                assertThat(holder.get(5, TimeUnit.SECONDS)).isTrue();
+                assertThat(completed.get(5, TimeUnit.SECONDS)).isTrue();
+                assertThat(renewal.get(5, TimeUnit.SECONDS)).isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
+            } finally {
+                release.countDown();
+            }
+        }
     }
 
     @Test
@@ -310,14 +366,14 @@ class WorkspaceSessionRetentionMySqlIT {
                 var completed = pool.submit(() -> {
                     try {
                         return transaction(() -> store.completeOperation(tenant, session, deletion.operationId(), "delete-worker", deletion.claimGeneration(), false));
-                    } catch (ApiException rejected) {
+                    } catch (ManagedAgentException rejected) {
                         return rejected;
                     }
                 });
                 assertThrows(TimeoutException.class, () -> completed.get(100, TimeUnit.MILLISECONDS));
                 release.countDown();
                 assertThat(renewal.get(5, TimeUnit.SECONDS)).isTrue();
-                assertThat(completed.get(5, TimeUnit.SECONDS)).isInstanceOfSatisfying(ApiException.class,
+                assertThat(completed.get(5, TimeUnit.SECONDS)).isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_active"));
             } finally {
                 release.countDown();
@@ -408,7 +464,7 @@ class WorkspaceSessionRetentionMySqlIT {
     private ManagedAgentStore observingCompletion(CountDownLatch reachedPublicLock) {
         var observedJdbc = new ManagedSchemaJdbcTemplate(source) {
             @Override
-            public int update(String sql, Object... arguments) {
+            public int update(String sql, org.springframework.jdbc.core.PreparedStatementSetter arguments) {
                 if (sql.startsWith("INSERT INTO ma_session")) {
                     reachedPublicLock.countDown();
                 }

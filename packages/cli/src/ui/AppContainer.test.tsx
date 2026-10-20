@@ -11,11 +11,15 @@ const {
   buildWakeRepaintSpy,
   readCronTasksMock,
   restoreWorktreeContextMock,
+  generatePromptSuggestionMock,
+  startSpeculationMock,
 } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
   useWakeRepaintMock: vi.fn(),
   readCronTasksMock: vi.fn(),
   restoreWorktreeContextMock: vi.fn(),
+  generatePromptSuggestionMock: vi.fn(),
+  startSpeculationMock: vi.fn(),
   buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
     vi.fn(() => deps),
   ),
@@ -41,6 +45,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     // Control the resume-time worktree restore so tests can pin how the
     // container surfaces its outcomes without a real sidecar on disk.
     restoreWorktreeContext: restoreWorktreeContextMock,
+    generatePromptSuggestion: generatePromptSuggestionMock,
+    startSpeculation: startSpeculationMock,
   };
 });
 
@@ -73,6 +79,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
+import * as interactiveMods from '../services/interactive-mod-session.js';
+import { ModSession } from '../services/mod-session.js';
+import { CommandService } from '../services/CommandService.js';
+import { registerCleanup } from '../utils/cleanup.js';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
@@ -141,6 +151,8 @@ import {
   ToolCallStatus,
 } from './types.js';
 import { CommandKind } from './commands/types.js';
+import { helpCommand } from './commands/helpCommand.js';
+import { quitCommand } from './commands/quitCommand.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   isContextFilesAnnouncement,
@@ -630,6 +642,10 @@ describe('AppContainer State Management', () => {
       contextMessage: null,
       session: null,
     });
+    generatePromptSuggestionMock.mockReset();
+    generatePromptSuggestionMock.mockResolvedValue({ suggestion: null });
+    startSpeculationMock.mockReset();
+    startSpeculationMock.mockResolvedValue({ status: 'idle' });
 
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
@@ -702,6 +718,117 @@ describe('AppContainer State Management', () => {
       await mockConfig.shutdown();
     }
   });
+
+  it.each(['failed', 'ready', 'cancelled'] as const)(
+    'gates follow-up suggestions and speculation on Mod startup: %s',
+    async (outcome) => {
+      let release!: () => void;
+      let reject!: (error: Error) => void;
+      const ready = new Promise<void>((resolve, rejectStartup) => {
+        release = resolve;
+        reject = rejectStartup;
+      });
+      void ready.catch(() => {});
+      const initialize = vi.fn().mockResolvedValue(undefined);
+      const readReady = vi.fn(() => ready);
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          get ready() {
+            return readReady();
+          },
+          initialize,
+          subscribe: () => () => {},
+          setPresentation: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getSdkMode').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      const getHistoryTail = vi.fn(() => []);
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: () => false,
+        getHistoryTail,
+      } as unknown as LlmClient);
+      mockSettings.merged.ui!.enableSpeculation = true;
+      generatePromptSuggestionMock.mockResolvedValue({
+        suggestion: 'Run the tests',
+      });
+      const stream = {
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+        clearPendingState: vi.fn(),
+      };
+      let setStreaming!: (state: StreamingState) => void;
+      let streamMounted = false;
+      mockedUseLlmStream.mockImplementation(() => {
+        const [streamingState, setStreamingState] = useState(
+          StreamingState.Responding,
+        );
+        useEffect(() => {
+          streamMounted = true;
+          return () => {
+            streamMounted = false;
+          };
+        }, []);
+        setStreaming = setStreamingState;
+        return { ...stream, streamingState };
+      });
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      try {
+        await flushConfigInitialization();
+        expect(streamMounted).toBe(true);
+        expect(capturedUIState.streamingState).toBe(StreamingState.Responding);
+        await act(async () => {
+          setStreaming(StreamingState.Idle);
+        });
+        await vi.waitFor(() =>
+          expect(capturedUIState.streamingState).toBe(StreamingState.Idle),
+        );
+        await vi.waitFor(() => expect(readReady).toHaveBeenCalled());
+        expect(generatePromptSuggestionMock).not.toHaveBeenCalled();
+        expect(startSpeculationMock).not.toHaveBeenCalled();
+        expect(getHistoryTail).not.toHaveBeenCalled();
+        if (outcome === 'cancelled') view.unmount();
+        await act(async () => {
+          if (outcome === 'failed') reject(new Error('Mod rejected startup'));
+          else release();
+        });
+        if (outcome === 'ready') {
+          await vi.waitFor(() => {
+            expect(generatePromptSuggestionMock).toHaveBeenCalledOnce();
+            expect(startSpeculationMock).toHaveBeenCalledOnce();
+          });
+        } else {
+          expect(generatePromptSuggestionMock).not.toHaveBeenCalled();
+          expect(startSpeculationMock).not.toHaveBeenCalled();
+        }
+      } finally {
+        release();
+        cleanup();
+        owner.mockRestore();
+      }
+    },
+  );
 
   describe('speculative tool results', () => {
     it('renders error envelopes as failed tools', () => {
@@ -3147,6 +3274,8 @@ describe('AppContainer State Management', () => {
         '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
           '</system-reminder>\n\ncontinue the review',
         false,
+        // #11553: no composer provenance on this submit, so the history row
+        // must still show the user's text without the injected envelope.
         'continue the review',
         false,
       );
@@ -3357,9 +3486,8 @@ describe('AppContainer State Management', () => {
       );
       // The startup effect arms pendingWorktreeNoticeRef from the consumed
       // one-shot Config notice; wait for it before submitting.
-      await vi.waitFor(() => {
-        expect(startupNoticeSpy).toHaveBeenCalled();
-      });
+      await flushConfigInitialization();
+      expect(startupNoticeSpy).toHaveBeenCalled();
 
       act(() => {
         capturedUIActions.setShellModeActive(true);
@@ -4671,6 +4799,84 @@ describe('AppContainer State Management', () => {
       });
 
       expect(mockSetText).toHaveBeenCalledWith(modelText);
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        'review this',
+        false,
+      );
+    });
+
+    it('restores a queued prompt as the user wrote it and keeps the model text for resubmit', async () => {
+      // The queue-pop restore is the twin of the auto-restore path above: ESC
+      // must hand the composer the same text on both, while an unchanged
+      // resubmit still sends the notice the queued entry consumed.
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'info', text: 'Request cancelled.' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: ['review this'],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('review this'),
+        popAllMessages: vi
+          .fn()
+          .mockReturnValue({ modelText, submittedPrompt: 'review this' }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel({
+        pendingItem: null,
+        lastTurnUserItem: null,
+        canUndoLastLoggedUserMessage: false,
+        turnProducedMeaningfulContent: false,
+      });
+
+      expect(mockSetText).toHaveBeenCalledWith('review this');
+
+      capturedUIActions.handleFinalSubmit('review this', {
+        submittedPrompt: 'review this',
+      });
       expect(mockQueueMessage).toHaveBeenCalledWith(
         modelText,
         false,
@@ -6499,6 +6705,240 @@ describe('AppContainer State Management', () => {
         }),
         expect.any(Number),
       );
+    });
+
+    it.each(['config', 'restore'] as const)(
+      'releases command discovery when Ink %s fails before Mod startup',
+      async (failure) => {
+        const errorText =
+          failure === 'config'
+            ? 'Config initialization failed'
+            : 'outputs is not iterable';
+        vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+        const initializeConfig = vi.spyOn(mockConfig, 'initialize');
+        if (failure === 'config') {
+          initializeConfig.mockRejectedValue(new Error(errorText));
+        } else {
+          initializeConfig.mockResolvedValue(undefined);
+        }
+        vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+          getMcpClientManager: () => ({
+            getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+          }),
+        } as unknown as ReturnType<Config['getToolRegistry']>);
+        vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+          conversation: {
+            sessionId: 'session-1',
+            projectHash: 'test-project-hash',
+            startTime: '2024-01-01T00:00:00Z',
+            lastUpdated: '2024-01-01T00:00:01Z',
+            messages: [
+              {
+                uuid: 'bad-result',
+                parentUuid: null,
+                sessionId: 'session-1',
+                timestamp: '2024-01-01T00:00:00Z',
+                type: 'system',
+                subtype: 'slash_command',
+                systemPayload: {
+                  phase: 'result',
+                  rawCommand: '/about',
+                  outputHistoryItems: {},
+                },
+                cwd: '/test/workspace',
+                version: '1.0.0',
+              },
+            ],
+          },
+          filePath: '/tmp/session.jsonl',
+          lastCompletedUuid: 'bad-result',
+        } as unknown as ReturnType<Config['getResumedSessionData']>);
+        const runtime = {
+          initialize: vi.fn().mockResolvedValue(undefined),
+          loadCommands: vi.fn().mockResolvedValue([]),
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+        const create = vi
+          .spyOn(ModSession, 'create')
+          .mockReturnValue(runtime as unknown as ModSession);
+        vi.mocked(registerCleanup).mockReturnValue(() => {});
+        mockSettings.merged.experimental = { mods: true };
+        const owner = interactiveMods.createInteractiveModSession(
+          mockConfig,
+          mockSettings,
+        )!;
+        const startupFailure = vi.fn();
+        void owner.ready.catch(startupFailure);
+        const loaded = vi.fn();
+        const commands = CommandService.create(
+          [{ loadCommands: async () => [helpCommand, quitCommand] }, owner],
+          new AbortController().signal,
+        ).then(loaded);
+        try {
+          render(
+            <AppContainer
+              config={mockConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+          await vi.waitFor(() => expect(loaded).toHaveBeenCalledOnce());
+          expect(loaded.mock.calls[0][0].getCommands()).toEqual([
+            helpCommand,
+            quitCommand,
+          ]);
+          expect(startupFailure).toHaveBeenCalledWith(
+            expect.objectContaining({ message: errorText }),
+          );
+          expect(runtime.initialize).not.toHaveBeenCalled();
+          expect(runtime.loadCommands).not.toHaveBeenCalled();
+          expect(interactiveMods.getInteractiveModSession(mockConfig)).toBe(
+            owner,
+          );
+          expect(
+            mockedUseHistory.mock.results.at(-1)!.value.addItem,
+          ).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: MessageType.ERROR,
+              text: expect.stringContaining(errorText),
+            }),
+            expect.any(Number),
+          );
+          if (failure === 'restore') {
+            expect(capturedUIState.isInputActive).toBe(true);
+          }
+        } finally {
+          cleanup();
+          await owner.close();
+          await commands;
+          create.mockRestore();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'keeps restored Mod diagnostics and input available when startup fails=%s',
+      async (fails) => {
+        const calls: string[] = [];
+        const historyManager = {
+          history: [] as HistoryItem[],
+          addItem: vi.fn((item: HistoryItemWithoutId) => {
+            calls.push(`add:${item.text}`);
+          }),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(() => calls.push('load')),
+          truncateToItem: vi.fn(),
+        };
+        mockedUseHistory.mockReturnValue(historyManager);
+        vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+        vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+          conversation: {
+            sessionId: 'session-1',
+            projectHash: 'test-project-hash',
+            startTime: '2024-01-01T00:00:00Z',
+            lastUpdated: '2024-01-01T00:00:01Z',
+            messages: [],
+          },
+          filePath: '/tmp/session.jsonl',
+          lastCompletedUuid: null,
+        } as ReturnType<typeof mockConfig.getResumedSessionData>);
+        let releaseRecovery!: () => void;
+        vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              releaseRecovery = () => resolve([]);
+            }),
+        );
+        let release!: () => void;
+        const ready = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let emit!: (text: string) => void;
+        const initialize = vi.fn(async () => {
+          emit('Mod tool hooks are unavailable in terminal sessions.');
+          await ready;
+          if (fails) throw new Error('tool.call is unsupported');
+        });
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({
+            initialize,
+            subscribe: (listener: (text: string) => void) => {
+              emit = listener;
+              return () => {};
+            },
+            setPresentation: vi.fn(),
+          } as unknown as interactiveMods.InteractiveModSession);
+        try {
+          render(
+            <AppContainer
+              config={mockConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+          await vi.waitFor(() => expect(initialize).toHaveBeenCalledOnce());
+          expect(calls).toEqual([
+            'load',
+            'add:Mod tool hooks are unavailable in terminal sessions.',
+          ]);
+          expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalledOnce();
+          expect(capturedUIState.isConfigInitialized).toBe(true);
+          expect(capturedUIState.isInputActive).toBe(true);
+          release();
+          releaseRecovery();
+          await flushConfigInitialization();
+          expect(capturedUIState.isInputActive).toBe(true);
+        } finally {
+          release();
+          releaseRecovery?.();
+          cleanup();
+          owner.mockRestore();
+        }
+      },
+    );
+
+    it('enables input before asynchronous resume recovery when Mods are disabled', async () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: null,
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      let release!: () => void;
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve([]);
+          }),
+      );
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      try {
+        await vi.waitFor(() => {
+          expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalledOnce();
+          expect(capturedUIState.isConfigInitialized).toBe(true);
+          expect(capturedUIState.isInputActive).toBe(true);
+        });
+      } finally {
+        release();
+        await flushConfigInitialization();
+      }
     });
 
     it('announces active scheduled tasks after restoring resumed history', async () => {
