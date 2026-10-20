@@ -204,6 +204,48 @@ describe('TerminalPanel', () => {
     );
   });
 
+  it.each(['held\r\n', ''])(
+    'replays failed-session output %j without a protocol mismatch',
+    async (output) => {
+      const ws = render();
+      act(() => {
+        ws.open();
+        ws.message(
+          '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+        );
+      });
+      expect(terminalInstances).toHaveLength(1);
+
+      act(() => ws.message(new TextEncoder().encode(output).buffer));
+      expect(terminalInstances).toHaveLength(2);
+      const restored = terminalInstances[1]!;
+      expect(restored.write).toHaveBeenCalledExactlyOnceWith(
+        output,
+        expect.any(Function),
+      );
+      expect(terminal.dispose).not.toHaveBeenCalled();
+
+      act(() => {
+        ws.message('\x00{"type":"error","message":"resource limit reached"}');
+        ws.closeWith(4001);
+      });
+      expect(restored.writeln).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('[Error: resource limit reached]'),
+      );
+      expect(terminal.writeln).not.toHaveBeenCalled();
+      expect(ws.send).not.toHaveBeenCalledWith('\x00{"type":"release"}');
+      expect(ws.close).not.toHaveBeenCalled();
+      expect(restored.dispose).not.toHaveBeenCalled();
+
+      act(() => restored.write.mock.calls[0]![1]!());
+      expect(terminal.dispose).toHaveBeenCalledOnce();
+      expect(restored.onData).toHaveBeenCalledOnce();
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      expect(ws.send).not.toHaveBeenCalledWith('\x00{"type":"release"}');
+    },
+  );
+
   it.each([4000, 4001, 4002, 4004])(
     'does not reconnect after non-retryable close code %s',
     async (code) => {
