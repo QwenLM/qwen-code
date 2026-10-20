@@ -12,6 +12,9 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
   'tokenUsage.total': 'Total tokens',
   'tokenUsage.shareTooltip': (v) => `Token share: ${v?.percent ?? '0.0'}%`,
   'tokenUsage.avgLatency': 'Avg latency',
+  'tokenUsage.modelApiMeta': (v) => `${v?.model ?? ''}: Requests · Avg latency`,
+  'tokenUsage.valueWithRate': (v) =>
+    `${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
   'tokenUsage.cached': 'Cache',
   'tokenUsage.cachedDetail': (v) =>
     `Cache: ${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
@@ -43,6 +46,9 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
   'tokenUsage.total': '总 Token',
   'tokenUsage.shareTooltip': (v) => `Token 占比：${v?.percent ?? '0.0'}%`,
   'tokenUsage.avgLatency': '平均延迟',
+  'tokenUsage.modelApiMeta': (v) => `${v?.model ?? ''}：请求 · 平均延迟`,
+  'tokenUsage.valueWithRate': (v) =>
+    `${v?.count ?? 0}（${v?.percent ?? '0.0'}%）`,
   'tokenUsage.cached': '缓存',
   'tokenUsage.cachedDetail': (v) =>
     `缓存：${v?.count ?? 0}（${v?.percent ?? '0.0'}%）`,

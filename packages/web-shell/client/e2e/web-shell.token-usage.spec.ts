@@ -10,15 +10,17 @@ for (const { width, language, theme } of [
   { width: 1200, language: 'en', theme: 'light' },
   { width: 1200, language: 'zh-CN', theme: 'light' },
   { width: 1200, language: 'en', theme: 'dark' },
+  { width: 390, language: 'en', theme: 'light' },
   { width: 390, language: 'zh-CN', theme: 'light' },
   { width: 390, language: 'zh-CN', theme: 'dark' },
 ]) {
   test.describe(`token usage ${width}px ${language} ${theme}`, () => {
-    test.use({ hasTouch: width === 390 });
+    test.use({ hasTouch: width === 390, timezoneId: 'UTC' });
     test(`token usage disclosure ${width}px ${language} ${theme} @smoke`, async ({
       page,
     }, testInfo) => {
       await page.setViewportSize({ width, height: 960 });
+      await page.clock.setFixedTime(new Date('2026-10-20T11:49:29Z'));
       await page.addInitScript(
         ({ language, theme }) => {
           localStorage.setItem('qwen-code-web-shell-language', language);
@@ -58,7 +60,7 @@ for (const { width, language, theme } of [
           'gpt-5.6-sol': metrics(300000, 100000, 294000),
           'bailian/kimi-k3-with-a-very-long-model-name-for-layout': metrics(
             900000,
-            100000,
+            90000,
             720000,
           ),
         },
@@ -128,7 +130,7 @@ for (const { width, language, theme } of [
       await expect(model.locator('details, summary')).toHaveCount(0);
       const info = model.getByRole('button', {
         name: zh
-          ? 'qwen3.8-flash: 请求 · 平均延迟'
+          ? 'qwen3.8-flash：请求 · 平均延迟'
           : 'qwen3.8-flash: Requests · Avg latency',
         exact: true,
       });
@@ -148,7 +150,7 @@ for (const { width, language, theme } of [
           .first()
           .getAttribute('title');
         expect(infoNames[index]).toBe(
-          `${name}: ${zh ? '请求 · 平均延迟' : 'Requests · Avg latency'}`,
+          zh ? `${name}：请求 · 平均延迟` : `${name}: Requests · Avg latency`,
         );
       }
       await info.hover();
@@ -158,21 +160,31 @@ for (const { width, language, theme } of [
       await expect(page.getByRole('tooltip')).toContainText(
         zh ? '平均延迟 22.9s' : 'Avg latency 22.9s',
       );
+      await panel.locator('[data-color] button').nth(1).hover();
+      await expect(
+        page.locator('[data-slot="tooltip-content"][data-state$="open"]'),
+      ).toHaveAttribute('data-state', 'instant-open');
       await page.mouse.move(0, 0);
-      await expect(page.getByRole('tooltip')).toBeHidden();
+      await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+        0,
+      );
       await info.focus();
       await expect(page.getByRole('tooltip')).toContainText(
         zh ? '请求 105' : 'Requests 105',
       );
       await info.press('Escape');
-      await expect(page.getByRole('tooltip')).toBeHidden();
+      await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+        0,
+      );
       await info.blur();
       if (width === 390) {
         await info.tap();
         const touchTooltip = page.locator('[data-slot="tooltip-content"]');
         await expect(touchTooltip).toHaveAttribute('data-state', /open$/);
         await expect(touchTooltip).toHaveCSS('opacity', '1');
-        await expect(touchTooltip).toContainText('请求 105');
+        await expect(touchTooltip).toContainText(
+          zh ? '请求 105' : 'Requests 105',
+        );
         const touchPath = testInfo.outputPath('token-info-touch.png');
         await page.screenshot({ path: touchPath, animations: 'disabled' });
         await expect(touchTooltip).toHaveAttribute('data-state', /open$/);
@@ -181,7 +193,9 @@ for (const { width, language, theme } of [
           contentType: 'image/png',
         });
         await hero.tap();
-        await expect(page.getByRole('tooltip')).toBeHidden();
+        await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+          0,
+        );
       }
       const checkContrast = async (
         target: Locator,
@@ -228,6 +242,29 @@ for (const { width, language, theme } of [
       };
       await checkContrast(info, 'color');
       await checkContrast(hero, 'color', 4.5);
+      for (const card of await panel.locator('[data-color]').all()) {
+        await checkContrast(card.getByText(/^\d+\.\d+%$/), 'color', 4.5);
+      }
+      for (const label of await panel
+        .locator('dl')
+        .first()
+        .locator('dt')
+        .all()) {
+        await checkContrast(label, 'color', 4.5);
+      }
+      const longName = panel.locator(
+        '[title="bailian/kimi-k3-with-a-very-long-model-name-for-layout"]',
+      );
+      await expect(longName).toHaveCSS('white-space', 'nowrap');
+      await expect(longName).toHaveCSS('text-overflow', 'ellipsis');
+      expect(
+        await longName.evaluate(
+          (element) =>
+            element.clientHeight <=
+            parseFloat(getComputedStyle(element).lineHeight) + 1,
+        ),
+      ).toBe(true);
+
       expect(
         await model
           .locator('dl > div')
@@ -265,6 +302,11 @@ for (const { width, language, theme } of [
         await expect(popup).toHaveCSS('opacity', '1');
         const items = popup.locator(':scope > dl > div');
         await expect(items).toHaveCount(4);
+        expect(await items.locator('dt').allTextContents()).toEqual(
+          zh
+            ? ['输入', '缓存', '总输出', '思考']
+            : ['Input', 'Cache', 'Total output', 'Reasoning'],
+        );
         expect(await items.locator('dd').allTextContents()).toEqual(values);
         const positions = await items.evaluateAll((elements) =>
           elements.map((element) => element.getBoundingClientRect().top),
@@ -275,11 +317,15 @@ for (const { width, language, theme } of [
           ),
         ).toBe(true);
         await page.mouse.move(0, 0);
-        await expect(page.getByRole('tooltip')).toBeHidden();
+        await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+          0,
+        );
         await row.focus();
         await expect(popup).toHaveAttribute('data-state', /open$/);
         await row.press('Escape');
-        await expect(page.getByRole('tooltip')).toBeHidden();
+        await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+          0,
+        );
         await row.blur();
         if (width === 390) {
           await row.tap();
@@ -295,12 +341,14 @@ for (const { width, language, theme } of [
             contentType: 'image/png',
           });
           await hero.tap();
-          await expect(page.getByRole('tooltip')).toBeHidden();
+          await expect(
+            page.locator('[data-slot="tooltip-content"]'),
+          ).toHaveCount(0);
         }
       };
       await checkMetricTooltip(model.locator('dl'), [
         '14M',
-        '12.32M (88.0%)',
+        zh ? '12.32M（88.0%）' : '12.32M (88.0%)',
         '250K',
         '125K',
       ]);
@@ -309,12 +357,34 @@ for (const { width, language, theme } of [
       await modelTrack.hover();
       await expect(page.getByRole('tooltip')).toHaveText(modelShareLabel);
       await page.mouse.move(0, 0);
-      await expect(page.getByRole('tooltip')).toBeHidden();
+      await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+        0,
+      );
       await modelTrack.focus();
       await expect(page.getByRole('tooltip')).toHaveText(modelShareLabel);
       await modelTrack.press('Escape');
-      await expect(page.getByRole('tooltip')).toBeHidden();
+      await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+        0,
+      );
       await modelTrack.blur();
+      if (width === 390) {
+        await modelTrack.tap();
+        const popup = page.locator('[data-slot="tooltip-content"]');
+        await expect(popup).toHaveCSS('opacity', '1');
+        await expect(page.getByRole('tooltip')).toHaveText(modelShareLabel);
+        await expect(popup).toHaveCSS('pointer-events', 'none');
+        await model.locator('dl').tap();
+        await expect(popup.locator(':scope > dl > div > dt')).toHaveText(
+          zh
+            ? ['输入', '缓存', '总输出', '思考']
+            : ['Input', 'Cache', 'Total output', 'Reasoning'],
+        );
+        await hero.tap();
+        await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+          0,
+        );
+      }
+
       const subagents = panel
         .locator('details')
         .filter({
@@ -339,12 +409,12 @@ for (const { width, language, theme } of [
       await expect(mainAgent.locator('dd').first()).toHaveText(
         zh ? '17.85M（缓存率：89.0%）' : '17.85M (cache rate: 89.0%)',
       );
-      await expect(mainAgent.locator('dd').last()).toHaveText('1.29M');
+      await expect(mainAgent.locator('dd').last()).toHaveText('1.28M');
       await checkMetricTooltip(mainAgent.locator('dl'), [
         '17.85M',
-        '15.89M (89.0%)',
-        '1.29M',
-        '645.8K',
+        zh ? '15.89M（89.0%）' : '15.89M (89.0%)',
+        '1.28M',
+        '640.8K',
       ]);
       await expect(panel.locator('[data-color="4"]')).toHaveCount(1);
       await expect(
@@ -364,21 +434,47 @@ for (const { width, language, theme } of [
         path,
         contentType: 'image/png',
       });
+      const readFonts = () =>
+        Promise.all([
+          model
+            .getByText('qwen3.8-flash', { exact: true })
+            .evaluate((element) => getComputedStyle(element).fontSize),
+          model
+            .getByText('71.3%', { exact: true })
+            .evaluate((element) => getComputedStyle(element).fontSize),
+          model
+            .locator('dl')
+            .evaluate((element) => getComputedStyle(element).fontSize),
+          hero
+            .locator('..')
+            .evaluate((element) => getComputedStyle(element).fontSize),
+          panel
+            .locator('dl')
+            .first()
+            .locator('strong')
+            .first()
+            .evaluate((element) => getComputedStyle(element).fontSize),
+          mainAgent
+            .getByText('95.7%', { exact: true })
+            .evaluate((element) => getComputedStyle(element).fontSize),
+          panel
+            .locator('dl')
+            .first()
+            .locator('dd span')
+            .first()
+            .evaluate((element) => getComputedStyle(element).fontSize),
+        ]);
+      const dockedFonts = await readFonts();
+      expect(dockedFonts).toEqual([
+        '15px',
+        '14px',
+        '12px',
+        '28px',
+        '24px',
+        '12px',
+        '12px',
+      ]);
       if (width === 1200) {
-        const readFonts = () =>
-          Promise.all([
-            model
-              .getByText('qwen3.8-flash', { exact: true })
-              .evaluate((element) => getComputedStyle(element).fontSize),
-            model
-              .getByText('71.3%', { exact: true })
-              .evaluate((element) => getComputedStyle(element).fontSize),
-            model
-              .locator('dl')
-              .evaluate((element) => getComputedStyle(element).fontSize),
-          ]);
-        const dockedFonts = await readFonts();
-        expect(dockedFonts).toEqual(['15px', '14px', '12px']);
         const resize = page.locator(
           '[role="separator"][aria-orientation="vertical"][aria-valuenow]',
         );
@@ -415,11 +511,19 @@ for (const { width, language, theme } of [
               })
               .evaluate((button) => {
                 const meta = button.parentElement!.getBoundingClientRect();
-                const header =
-                  button.parentElement!.parentElement!.getBoundingClientRect();
-                return Math.abs(meta.right - header.right);
+                const header = button.parentElement!.parentElement!;
+                const value = header.firstElementChild!.getBoundingClientRect();
+                return {
+                  right: Math.abs(
+                    meta.right - header.getBoundingClientRect().right,
+                  ),
+                  wrapped: meta.top >= value.bottom,
+                  fits: header.scrollWidth <= header.clientWidth + 1,
+                };
               });
-            expect(alignment).toBeLessThanOrEqual(1);
+            expect(alignment.right).toBeLessThanOrEqual(1);
+            expect(alignment.wrapped).toBe(true);
+            expect(alignment.fits).toBe(true);
           }
         }
         await page
@@ -429,6 +533,24 @@ for (const { width, language, theme } of [
           })
           .click();
         expect(await readFonts()).toEqual(dockedFonts);
+        // Wide cards leave enough space to detect lost right alignment.
+        const wideType = subagents
+          .locator('[data-source-id]')
+          .first()
+          .getByText(zh ? '通用' : 'General-purpose', { exact: true });
+        await expect
+          .poll(() =>
+            wideType.evaluate((type) => type.parentElement!.clientWidth),
+          )
+          .toBeGreaterThan(width / 2);
+        expect(
+          await wideType.evaluate((type) =>
+            Math.abs(
+              type.getBoundingClientRect().right -
+                type.parentElement!.getBoundingClientRect().right,
+            ),
+          ),
+        ).toBeLessThanOrEqual(1);
         const wideMetrics = model.locator('dl');
         await expect(wideMetrics).toHaveAttribute('tabindex', '0');
         expect(
@@ -438,7 +560,7 @@ for (const { width, language, theme } of [
         ).toBe(true);
         await checkMetricTooltip(wideMetrics, [
           '14M',
-          '12.32M (88.0%)',
+          zh ? '12.32M（88.0%）' : '12.32M (88.0%)',
           '250K',
           '125K',
         ]);
@@ -485,12 +607,16 @@ for (const { width, language, theme } of [
       const typeBox = await sourceType.boundingBox();
       expect(typeBox!.x).toBeGreaterThanOrEqual(nameBox!.x + nameBox!.width);
       expect(Math.abs(typeBox!.y - nameBox!.y)).toBeLessThan(2);
+      const headerBox = (await sourceHeader.boundingBox())!;
+      expect(
+        Math.abs(typeBox!.x + typeBox!.width - headerBox.x - headerBox.width),
+      ).toBeLessThanOrEqual(1);
       await expect(cards.first().locator('dd').first()).toHaveText(
         zh ? '500K（缓存率：70.0%）' : '500K (cache rate: 70.0%)',
       );
       await checkMetricTooltip(cards.first().locator('dl'), [
         '500K',
-        '350K (70.0%)',
+        zh ? '350K（70.0%）' : '350K (70.0%)',
         '5K',
         '2.5K',
       ]);
@@ -498,7 +624,9 @@ for (const { width, language, theme } of [
       await cards.first().getByRole('img', { name: sourceShareLabel }).hover();
       await expect(page.getByRole('tooltip')).toHaveText(sourceShareLabel);
       await page.mouse.move(0, 0);
-      await expect(page.getByRole('tooltip')).toBeHidden();
+      await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+        0,
+      );
       await expect(cards.first()).not.toContainText(zh ? '思考' : 'Reasoning');
       await expect(
         cards.first().getByText('Review tests e2e and docs', { exact: true }),
@@ -522,6 +650,11 @@ for (const { width, language, theme } of [
             return [style.fontSize, style.fontWeight, style.color];
           }),
         );
+      for (const heading of await panel
+        .getByRole('heading', { level: 3 })
+        .all()) {
+        await checkContrast(heading, 'color', 4.5);
+      }
       expect(headings).toHaveLength(3);
       expect(headings[1]).toEqual(headings[0]);
       expect(headings[2]).toEqual(headings[0]);
@@ -562,8 +695,8 @@ for (const { width, language, theme } of [
       const before = reads;
       await refresh.click();
       await expect.poll(() => reads).toBe(before + 1);
-      await expect(model).toHaveText(modelText('15M', '82.1', '72.6'));
-      await expect(hero.locator('..')).toContainText('21M');
+      await expect(model).toHaveText(modelText('15M', '82.1', '72.7'));
+      await expect(hero.locator('..')).toContainText('20.99M');
       const expandedPath = testInfo.outputPath(
         `token-usage-expanded-${width}-${language}-${theme}.png`,
       );

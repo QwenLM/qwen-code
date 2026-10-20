@@ -132,29 +132,33 @@ function renderPanel(
 }
 
 describe('TokenUsagePanel', () => {
-  it('renders hero totals, model cards, and tool details', async () => {
-    const getStats = vi.fn().mockResolvedValue(statsFixture());
-    const container = renderPanel(getStats);
-    await act(async () => {});
-    expect(getStats).toHaveBeenCalledTimes(1);
-    // Hero grand total uses the provider-reported total across models.
-    expect(container.textContent).toContain('1.35MTotal tokens');
-    expect(
-      Array.from(container.querySelector('dl')!.querySelectorAll('dt')).map(
-        (node) => node.textContent,
-      ),
-    ).toEqual(['Input', 'Total output']);
-    // Model cards sorted by total tokens desc.
-    expect(container.textContent).toContain('qwen-plus::hybrid');
-    expect(container.textContent).toContain('qwen-max::auto');
-    // Cache rate uses total cached input / total input across models.
-    expect(container.textContent).toContain('Input');
-    expect(container.textContent).toContain('Input1M');
-    expect(container.textContent).toContain('Cache');
-    expect(container.textContent).toContain('300K');
-    expect(container.textContent).toContain('30.0%');
-    expect(container.textContent).toContain('Total output350K');
-  });
+  it.each(['en', 'zh-CN'] as const)(
+    'renders complete hero metrics in %s',
+    async (language) => {
+      const getStats = vi.fn().mockResolvedValue(statsFixture());
+      const container = renderPanel(getStats, language);
+      await act(async () => {});
+      const zh = language === 'zh-CN';
+      expect(getStats).toHaveBeenCalledTimes(1);
+      // Hero grand total uses the provider-reported total across models.
+      expect(container.textContent).toContain(
+        zh ? '1.35M总 Token' : '1.35MTotal tokens',
+      );
+      expect(
+        Array.from(container.querySelector('dl')!.querySelectorAll('dt')).map(
+          (node) => node.textContent,
+        ),
+      ).toEqual(zh ? ['输入', '总输出'] : ['Input', 'Total output']);
+      // Model cards sorted by total tokens desc.
+      expect(container.textContent).toContain('qwen-plus::hybrid');
+      expect(container.textContent).toContain('qwen-max::auto');
+      expect(container.querySelector('dl')?.textContent).toBe(
+        zh
+          ? '输入1M缓存：300K（30.0%）总输出350K思考：40K'
+          : 'Input1MCache: 300K (30.0%)Total output350KReasoning: 40K',
+      );
+    },
+  );
 
   it('shows model shares, metadata and token details without disclosure', async () => {
     const stats = statsFixture();
@@ -216,6 +220,9 @@ describe('TokenUsagePanel', () => {
         ),
       ).toEqual(['legacy', 'reported']);
       expect(models[0]?.lastElementChild?.textContent).toBe('66.7%');
+      expect(container.querySelector('dl')?.textContent).toBe(
+        `Input300Cache: ${cached} (${((cached / 300) * 100).toFixed(1)}%)Total output60Reasoning: 15`,
+      );
     },
   );
 
@@ -334,44 +341,126 @@ describe('TokenUsagePanel', () => {
     expect(main?.lastElementChild?.lastElementChild?.textContent).toBe('80.0%');
   });
 
-  it('bounds Main Agent cache and reasoning in the full tooltip', async () => {
-    const stats = statsFixture();
-    stats.models = {
+  it.each(['en', 'zh-CN'] as const)(
+    'bounds and labels Main Agent details in %s',
+    async (language) => {
+      const stats = statsFixture();
+      stats.models = {
+        model: {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 100,
+            candidates: 20,
+            total: 120,
+            cached: 80,
+            thoughts: 15,
+          },
+        },
+      };
+      stats.sources = [
+        {
+          ...stats.sources![0]!,
+          tokens: {
+            prompt: 80,
+            candidates: 10,
+            total: 90,
+            cached: 10,
+            thoughts: 1,
+          },
+        },
+      ];
+      const container = renderPanel(vi.fn().mockResolvedValue(stats), language);
+      await act(async () => {});
+      expect(
+        container
+          .querySelector('[data-color] button')
+          ?.getAttribute('aria-label'),
+      ).toBe(
+        language === 'zh-CN'
+          ? 'model：请求 · 平均延迟'
+          : 'model: Requests · Avg latency',
+      );
+      const main = container.querySelector('[data-main-agent]')!;
+      await act(async () => main.querySelector<HTMLElement>('dl')!.focus());
+      expect(
+        Array.from(
+          document
+            .querySelector('[data-slot="tooltip-content"]')!
+            .querySelectorAll(':scope > dl > div'),
+        ).map((row) => [
+          row.querySelector('dt')?.textContent,
+          row.querySelector('dd')?.textContent,
+        ]),
+      ).toEqual(
+        language === 'zh-CN'
+          ? [
+              ['输入', '20'],
+              ['缓存', '20（100.0%）'],
+              ['总输出', '10'],
+              ['思考', '10'],
+            ]
+          : [
+              ['Input', '20'],
+              ['Cache', '20 (100.0%)'],
+              ['Total output', '10'],
+              ['Reasoning', '10'],
+            ],
+      );
+    },
+  );
+
+  it.each([
+    {
+      name: 'cached-only source',
       model: {
-        api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
-        tokens: {
-          prompt: 100,
-          candidates: 20,
-          total: 120,
-          cached: 80,
-          thoughts: 15,
-        },
+        prompt: 100,
+        candidates: 50,
+        total: 160,
+        cached: 40,
+        thoughts: 10,
       },
-    };
-    stats.sources = [
-      {
-        ...stats.sources![0]!,
-        tokens: {
-          prompt: 80,
-          candidates: 10,
-          total: 90,
-          cached: 10,
-          thoughts: 1,
-        },
+      source: { prompt: 0, candidates: 5, total: 20, cached: 12, thoughts: 1 },
+      values: ['88', '28 (31.8%)', '52', '9'],
+    },
+    {
+      name: 'over-reported input, cache and reasoning',
+      model: {
+        prompt: 100,
+        candidates: 100,
+        total: 200,
+        cached: 20,
+        thoughts: 10,
       },
-    ];
-    const container = renderPanel(vi.fn().mockResolvedValue(stats));
-    await act(async () => {});
-    const main = container.querySelector('[data-main-agent]')!;
-    await act(async () => main.querySelector<HTMLElement>('dl')!.focus());
-    expect(
-      Array.from(
-        document
-          .querySelector('[data-slot="tooltip-content"]')!
-          .querySelectorAll(':scope > dl > div > dd'),
-      ).map((node) => node.textContent),
-    ).toEqual(['20', '20 (100.0%)', '10', '10']);
-  });
+      source: {
+        prompt: 150,
+        candidates: 5,
+        total: 160,
+        cached: 60,
+        thoughts: 15,
+      },
+      values: ['0', '0 (0.0%)', '40', '0'],
+    },
+  ])(
+    'normalizes and floors Main Agent for $name',
+    async ({ model, source, values }) => {
+      const stats = statsFixture();
+      stats.models = {
+        model: { ...stats.models['qwen-plus::hybrid']!, tokens: model },
+      };
+      stats.sources = [{ ...stats.sources![0]!, tokens: source }];
+      const container = renderPanel(vi.fn().mockResolvedValue(stats));
+      await act(async () => {});
+      const main = container.querySelector('[data-main-agent]')!;
+      await act(async () => main.querySelector<HTMLElement>('dl')!.focus());
+      expect(
+        Array.from(
+          document.querySelectorAll(
+            '[data-slot="tooltip-content"] > dl > div > dd',
+          ),
+        ).map((node) => node.textContent),
+      ).toEqual(values);
+    },
+  );
 
   it.each([1, 2])(
     'keeps Main Agent at zero when sources account for %s times the session',
@@ -412,6 +501,11 @@ describe('TokenUsagePanel', () => {
       );
       expect(main?.textContent).not.toMatch(/NaN|Infinity|-/);
       if (factor === 2) {
+        expect(
+          container
+            .querySelector('[data-source-id] [role="img"]')
+            ?.getAttribute('aria-label'),
+        ).toBe('Token share: 200.0%');
         await act(async () => main!.querySelector<HTMLElement>('dl')!.focus());
         expect(
           Array.from(
@@ -476,6 +570,31 @@ describe('TokenUsagePanel', () => {
       );
     }
   });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'deduplicates localized agent names in %s',
+    async (language) => {
+      const stats = statsFixture();
+      stats.sources = [
+        {
+          ...stats.sources![0]!,
+          name: 'general-purpose',
+          type: 'general-purpose',
+        },
+      ];
+      const container = renderPanel(vi.fn().mockResolvedValue(stats), language);
+      await act(async () => {});
+      const header =
+        container.querySelector('[data-source-id]')!.firstElementChild!;
+      expect(
+        Array.from(header.children).map((node) => node.textContent),
+      ).toEqual(
+        language === 'zh-CN'
+          ? ['general-purpose', '通用']
+          : ['general-purpose'],
+      );
+    },
+  );
 
   it('uses zero shares and cache rates when API requests have no tokens', async () => {
     const stats = statsFixture();

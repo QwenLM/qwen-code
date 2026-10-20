@@ -239,7 +239,7 @@ function TokenUsageBody({
   };
 
   return (
-    <>
+    <TooltipProvider delayDuration={300} disableHoverableContent>
       <div className={styles.hero}>
         <div className={styles.heroHeader}>
           <div className={styles.heroValue}>
@@ -330,7 +330,7 @@ function TokenUsageBody({
           <ToolList status={status} />
         </details>
       )}
-    </>
+    </TooltipProvider>
   );
 }
 
@@ -357,35 +357,34 @@ function ModelCard({
           <div className={styles.modelName} title={entry.key}>
             {entry.label}
           </div>
-          <TooltipProvider delayDuration={300} disableHoverableContent>
-            <Tooltip open={infoOpen} onOpenChange={setInfoOpen}>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className={styles.modelInfoButton}
-                  onClick={(event) => {
-                    // Touch focus may open first; prevent Radix's click-close.
-                    event.preventDefault();
-                    setInfoOpen(true);
-                  }}
-                  aria-label={`${entry.label}: ${t('tokenUsage.requests')} · ${t('tokenUsage.avgLatency')}`}
-                >
-                  <InfoIcon size={14} aria-hidden="true" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top" sideOffset={6}>
-                <div className={styles.modelApiMeta}>
-                  <span>
-                    {t('tokenUsage.requests')}{' '}
-                    {formatCount(m.api.totalRequests)}
-                  </span>
-                  <span>
-                    {t('tokenUsage.avgLatency')} {formatDuration(avgLatency)}
-                  </span>
-                </div>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <Tooltip open={infoOpen} onOpenChange={setInfoOpen}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={styles.modelInfoButton}
+                onClick={(event) => {
+                  // Touch focus may open first; prevent Radix's click-close.
+                  event.preventDefault();
+                  setInfoOpen(true);
+                }}
+                aria-label={t('tokenUsage.modelApiMeta', {
+                  model: entry.label,
+                })}
+              >
+                <InfoIcon size={14} aria-hidden="true" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top" sideOffset={6}>
+              <div className={styles.modelApiMeta}>
+                <span>
+                  {t('tokenUsage.requests')} {formatCount(m.api.totalRequests)}
+                </span>
+                <span>
+                  {t('tokenUsage.avgLatency')} {formatDuration(avgLatency)}
+                </span>
+              </div>
+            </TooltipContent>
+          </Tooltip>
         </div>
       </div>
       <TokenDetails tokens={m.tokens} />
@@ -396,29 +395,33 @@ function ModelCard({
 
 function ShareBar({ share }: { share: number }) {
   const { t } = useI18n();
+  const [shareOpen, setShareOpen] = useState(false);
   const label = t('tokenUsage.shareTooltip', { percent: share.toFixed(1) });
   return (
     <div className={styles.shareRow}>
-      <TooltipProvider delayDuration={300} disableHoverableContent>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div
-              className={styles.shareTrack}
-              role="img"
-              aria-label={label}
-              tabIndex={0}
-            >
-              <div
-                className={styles.shareFill}
-                style={{ width: `${share}%` }}
-              />
-            </div>
-          </TooltipTrigger>
-          <TooltipContent side="top" sideOffset={6}>
-            {label}
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      <Tooltip open={shareOpen} onOpenChange={setShareOpen}>
+        <TooltipTrigger asChild>
+          <div
+            className={styles.shareTrack}
+            role="img"
+            aria-label={label}
+            tabIndex={0}
+            onClick={(event) => {
+              event.preventDefault();
+              setShareOpen(true);
+            }}
+          >
+            <div className={styles.shareFill} style={{ width: `${share}%` }} />
+          </div>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          sideOffset={6}
+          style={{ pointerEvents: 'none' }}
+        >
+          {label}
+        </TooltipContent>
+      </Tooltip>
       <span className={styles.modelShare}>{share.toFixed(1)}%</span>
     </div>
   );
@@ -482,51 +485,52 @@ function TokenDetails({
     { label: t('tokenUsage.input'), value: formatCompact(input) },
     {
       label: t('tokenUsage.cached'),
-      value: `${formatCompact(cached)} (${cacheRate}%)`,
+      value: t('tokenUsage.valueWithRate', {
+        count: formatCompact(cached),
+        percent: cacheRate,
+      }),
     },
     { label: t('tokenUsage.output'), value: formatCompact(output) },
     { label: t('tokenUsage.thoughts'), value: formatCompact(thoughts) },
   ];
 
   return (
-    <TooltipProvider delayDuration={300} disableHoverableContent>
-      <Tooltip open={detailsOpen} onOpenChange={setDetailsOpen}>
-        <TooltipTrigger asChild>
-          <dl
-            className={styles.tokenDetails}
-            tabIndex={0}
-            onClick={(event) => {
-              event.preventDefault();
-              setDetailsOpen(true);
-            }}
-          >
-            <div>
-              <dt>{t('tokenUsage.input')}</dt>
-              <dd>
-                {t('tokenUsage.inputWithCacheRate', {
-                  count: formatCompact(input),
-                  percent: cacheRate,
-                })}
-              </dd>
+    <Tooltip open={detailsOpen} onOpenChange={setDetailsOpen}>
+      <TooltipTrigger asChild>
+        <dl
+          className={styles.tokenDetails}
+          tabIndex={0}
+          onClick={(event) => {
+            event.preventDefault();
+            setDetailsOpen(true);
+          }}
+        >
+          <div>
+            <dt>{t('tokenUsage.input')}</dt>
+            <dd>
+              {t('tokenUsage.inputWithCacheRate', {
+                count: formatCompact(input),
+                percent: cacheRate,
+              })}
+            </dd>
+          </div>
+          <div>
+            <dt>{t('tokenUsage.output')}</dt>
+            <dd>{formatCompact(output)}</dd>
+          </div>
+        </dl>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6}>
+        <dl className={styles.tokenDetailsTooltip}>
+          {metrics.map(({ label, value }) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
             </div>
-            <div>
-              <dt>{t('tokenUsage.output')}</dt>
-              <dd>{formatCompact(output)}</dd>
-            </div>
-          </dl>
-        </TooltipTrigger>
-        <TooltipContent side="top" sideOffset={6}>
-          <dl className={styles.tokenDetailsTooltip}>
-            {metrics.map(({ label, value }) => (
-              <div key={label}>
-                <dt>{label}</dt>
-                <dd>{value}</dd>
-              </div>
-            ))}
-          </dl>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+          ))}
+        </dl>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -558,7 +562,7 @@ function AgentCard({
         <span className={styles.subagentName} title={name}>
           {name}
         </span>
-        {typeName && typeName !== name && (
+        {typeName && typeName.toLowerCase() !== name.toLowerCase() && (
           <span className={styles.subagentType} title={typeName}>
             {typeName}
           </span>
