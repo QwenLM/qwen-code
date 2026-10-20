@@ -520,8 +520,19 @@
                                  to 9411 s and the Verify step to 167 minutes;
                                  the FG11f publication cell adds 82 s, so the
                                  fork moves to 9493 s and the Verify step to
-                                 169 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9533</forkedProcessTimeoutInSeconds>
+                                 169 minutes; the FG12f delivery cell adds
+                                 30 s, so the fork moves to 9523 s and Verify
+                                 stays 169 minutes; the FG11f refusing-arms
+                                 cells add 242 s, so the fork moves to 9765 s
+                                 and the Verify step to 173 minutes. The
+                                 FG13b Hook result store-rejection cell adds
+                                 150 s: the healthy sum becomes 9315 s, so
+                                 the fork moves to 9915 s and the Verify step
+                                 to 176 minutes. The FG13b Hook plan-result
+                                 store-rejection cell adds 150 s: the healthy
+                                 sum becomes 9465 s, so the fork moves to
+                                 10065 s and the Verify step to 178 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10115</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

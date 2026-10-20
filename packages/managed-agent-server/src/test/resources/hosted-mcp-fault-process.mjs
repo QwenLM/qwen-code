@@ -100,7 +100,7 @@ lines.on('line', async (line) => {
         // second answer, same id, then settles the original exactly once.
         record('mcp.effect', { kind: 'resource_read', value: uri });
         respond(request.id, { contents: 'not-an-array' });
-        await new Promise((resolve) => setTimeout(resolve, 150));
+        await new Promise((resolve) => setTimeout(resolve, 1500));
         respond(request.id, {
           contents: [
             { uri, mimeType: 'text/plain', text: `EXT_RESOURCE_${revision}` },

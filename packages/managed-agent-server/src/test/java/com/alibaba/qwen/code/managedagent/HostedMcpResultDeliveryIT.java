@@ -37,7 +37,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -238,6 +237,10 @@ class HostedMcpResultDeliveryIT {
         assertThat(controls("mcp-invoke"))
                 .as("the late reply is not a second invoke")
                 .hasSize(1);
+        assertThat(operations(session.id())).hasSize(1);
+        assertThat(operations(session.id()).getLast().at("/run/state").asText())
+                .as("the committed record settles")
+                .isEqualTo("settled");
     }
 
     private Map<String, Object> mcpPin(int revision) {
@@ -306,7 +309,6 @@ class HostedMcpResultDeliveryIT {
         }
     }
 
-
     private List<String> effects(String kind) {
         if (!Files.exists(evidence)) {
             return List.of();
@@ -334,10 +336,6 @@ class HostedMcpResultDeliveryIT {
         return proxyCalls.stream().filter(call -> kind.equals(call.kind()))
                 .toList();
     }
-
-
-
-
 
     private String uuid() {
         return UUID.randomUUID().toString();
@@ -400,7 +398,6 @@ class HostedMcpResultDeliveryIT {
         return response.body().isEmpty() ? json.createObjectNode()
                 : json.readTree(response.body());
     }
-
 
     private void boot() throws Exception {
         assertThat(System.getProperty("mysql.url"))
@@ -831,6 +828,5 @@ class HostedMcpResultDeliveryIT {
             return new ProxyCall(method, path, kind, value, dropped,
                     operationId);
         }
-
     }
 }
