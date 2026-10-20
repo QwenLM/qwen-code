@@ -64,12 +64,19 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   尚未开始」之间扣留，本夹具暂未暴露该注入点。
 - `close-*` 需要工作区支撑的 Session：automation API 拒绝没有工作区的
   Session（`session_not_found`），而在本夹具里关闭工作区 Session 会得到
-  `workspace_unavailable`，来自托管会话的 workspace 执行可用性检查，而非
-  FG11f 命中的 store 级授权。
+  `409 workspace_unavailable`，消息为 `Hosted Workspace execution is not
+available.`。公开 close 路由经 `SessionLifecycleService.admit` 的 workspace
+  分支进入 `ManagedAgentStore.beginWorkspaceLifecycle`，由 `beginLifecycle`
+  抛出。该消息由五个类里的十处共享，因此要指名路由而非某个类：它不是 FG11f
+  故障的 store 级授权。那一片记录了两种拒绝——非持久 broker 在 `resolveScope`
+  的 409，以及切到持久 broker 后 `WorkspaceExecutionStore` 的
+  `Workspace execution authority is unavailable.`——两者都不是本条生命周期抛错。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
-  接受。把 wake turn 扣在模型上时，该取消在 120 s 内没有让 run 结算，
-  Harness 连接以 socket EOF 断开；要构造这一格需要换一个扣留点。
+  接受。把 wake turn 一直扣在模型上时，取消会赢：task 与 run 都在一秒内结算为
+  `cancelled`，之后再释放模型也不会复活。反之，在收到 `202` 后立刻释放模型，
+  turn 会先跑完，run 结算为 `completed`。因此扣住的模型本身就是这一格所需的
+  扣留点；决定结果的是释放顺序，而不是夹具。
 - 取消期间的租约接管不在范围内，与 FG11c 一致。
 - stream gap 门禁（FG11e）不在此处。
 
