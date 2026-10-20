@@ -1046,3 +1046,47 @@ describe('setup-java Maven cache stays on hosted runners', () => {
     expect(step.with?.cache).toBe(hostedOnly);
   });
 });
+
+// A bare `corepack pnpm install` has no retry: run 39348512071's daemon E2E
+// lane died in that step before any test ran, on a tree whose install
+// reproduces clean, while every neighbouring main run was green. e2e.yml,
+// repo-hygiene.yml and qwen-autofix.yml already absorb this #11726 transient
+// with the same bounded retry; pin the recipe on every install here so a new
+// bare step fails this suite instead of a main-branch run.
+describe('SDK Java install-transient retry', () => {
+  const installs = Object.entries(parse(workflow).jobs).flatMap(
+    ([jobName, job]) =>
+      (job.steps ?? [])
+        .filter(
+          (s) => typeof s.run === 'string' && s.run.includes('pnpm install'),
+        )
+        .map((s) => [jobName, s]),
+  );
+
+  it('finds every install step', () => {
+    expect(installs.map(([jobName]) => jobName).sort()).toEqual([
+      'daemon-e2e',
+      'event-transport-multi-node',
+      'hosted-failover-e2e',
+      'hosted-harness-mysql',
+      'mysql-integration',
+      'test',
+    ]);
+  });
+
+  it.each(installs)('%s retries a transient install', (jobName, step) => {
+    for (const fragment of [
+      'for attempt in 1 2 3; do',
+      'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+      'if [[ "${attempt}" != "1" ]]; then',
+      'echo "::warning::corepack pnpm install',
+      'break',
+      'if [[ "${attempt}" == "3" ]]; then',
+      'exit 1',
+      'sleep $((attempt * 15))',
+    ]) {
+      expect(step.run, jobName).toContain(fragment);
+    }
+    expect(step.run, jobName).not.toMatch(/^\s*corepack pnpm install/m);
+  });
+});
