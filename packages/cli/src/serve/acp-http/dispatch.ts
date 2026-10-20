@@ -310,6 +310,7 @@ const SSH_METHODS = new Set([
     'session/detach',
     'session/context_usage',
     'session/tasks',
+    'session/task_runtime',
     'session/agents',
     'session/agent_trace',
     'session/attachments',
@@ -379,6 +380,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/task_runtime`,
   `${QWEN_METHOD_NS}session/agents`,
   `${QWEN_METHOD_NS}session/agent_trace`,
   `${QWEN_METHOD_NS}session/attachments`,
@@ -4123,6 +4125,26 @@ export class AcpDispatcher {
             includeWorkflows:
               this.isWorkspaceTrusted() && params['includeWorkflows'] === true,
           });
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/task_runtime`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const taskId = params['taskId'];
+          if (typeof taskId !== 'string' || taskId.length === 0) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`taskId` is required'),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.getSessionTaskRuntime(
+            sessionId,
+            taskId,
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }

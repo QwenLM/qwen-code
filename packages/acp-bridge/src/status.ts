@@ -141,6 +141,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionTaskRuntime: 'qwen/status/session/task_runtime',
   sessionAgents: 'qwen/status/session/agents',
   sessionAgentTrace: 'qwen/status/session/agent_trace',
   sessionStats: 'qwen/status/session/stats',
@@ -1141,6 +1142,47 @@ export interface ServeSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: ServeSessionTaskStatus[];
+}
+
+/**
+ * Point-in-time detail for one running or retained shell task.
+ *
+ * The tasks list carries lifecycle facts only; this surface carries the
+ * things that need a filesystem read or an OS probe and are therefore fetched
+ * on demand by an open detail panel.
+ */
+export interface ServeSessionShellTaskRuntime {
+  /**
+   * Resident set size of the shell's process tree, in bytes. Absent when the
+   * pid is unknown, the process already exited, or the platform probe failed.
+   * Shared pages are counted once per process, so this is an upper bound for
+   * "how much this task holds".
+   */
+  memoryBytes?: number;
+  /** Size of the captured stdout/stderr file, in bytes. */
+  outputBytes?: number;
+  /** Epoch ms of the output file's last write. */
+  outputModifiedAt?: number;
+  /**
+   * Tail of the captured stdout/stderr, sanitized for display. Absent when
+   * the file is missing or empty.
+   */
+  outputTail?: string;
+  /** True when `outputTail` starts mid-file (the head was dropped). */
+  outputTailTruncated?: boolean;
+  /**
+   * Read failure message. Fields from a part that did succeed may still be
+   * present (the stat and the tail read fail independently).
+   */
+  outputError?: string;
+}
+
+export interface ServeSessionTaskRuntimeStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  taskId: string;
+  /** Null when the task is unknown/evicted or is not a shell task. */
+  runtime: ServeSessionShellTaskRuntime | null;
 }
 
 export interface ServeSessionAgentsStatus {

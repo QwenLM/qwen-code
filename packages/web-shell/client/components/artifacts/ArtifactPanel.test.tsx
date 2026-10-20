@@ -49,6 +49,7 @@ const {
     mockActions: {
       cancelTask: vi.fn(),
       getTasks: vi.fn(),
+      getTaskRuntime: vi.fn(),
     },
     mockWorkspaceActions: {
       readFileBytes: vi.fn(),
@@ -453,6 +454,10 @@ afterEach(() => {
   }
   mockActions.cancelTask.mockReset();
   mockActions.getTasks.mockReset();
+  mockActions.getTaskRuntime.mockReset();
+  // The shell detail effect fetches once on mount. Keep it pending so the
+  // synchronous assertions never race a post-render state update.
+  mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
   mockWorkspaceActions.readFileBytes.mockReset();
   mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.stat.mockReset();
@@ -4233,6 +4238,7 @@ describe('ArtifactPanel shell tab', () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     mounted.push({ root, container });
+    mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
 
     act(() => {
       root.render(shellPanel(task));

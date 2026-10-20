@@ -539,6 +539,14 @@ describe('build artifact — transcript entry (#11031)', () => {
     }
   });
 
+  it('keeps Token Usage copy and lookups in the interactive entry only', () => {
+    expect(readTranscriptBundle()).not.toMatch(/["'`]tokenUsage\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('tokenUsage.inputWithCacheRate');
+    expect(interactive).toContain('Failed to load token usage.');
+    expect(interactive).toContain('Token 消耗加载失败。');
+  });
+
   it('carries no Live Voice strings and looks none up', () => {
     // vite.lib.config.ts swaps client/live/messages.ts for an empty stub in
     // this build, which keeps ~200 entries out of every exported document. It

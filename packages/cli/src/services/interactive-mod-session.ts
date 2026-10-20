@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import type { ModCommandPresentation } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
@@ -136,6 +137,25 @@ export class InteractiveModSession implements ICommandLoader {
       if (this.logs.length === 100) this.logs.shift();
       this.logs.push({ text, sessionId });
     }
+  }
+
+  captureToolSignal(): AbortSignal {
+    return AbortSignal.any([
+      this.lifetime.signal,
+      this.session.captureToolSignal(),
+    ]);
+  }
+
+  restoreTools(): Promise<void> {
+    return this.session.restoreTools();
+  }
+
+  invalidateTools(): void {
+    this.session.invalidateTools();
+  }
+
+  toolCall(): ModToolCall | undefined {
+    return this.session.toolCall(() => {});
   }
 
   syncSession(reason: 'clear' | 'resume'): Promise<void> {
