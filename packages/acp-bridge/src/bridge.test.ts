@@ -20803,58 +20803,85 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('caps live promptText at TURN_RESULT_TEXT_MAX_CHARS', async () => {
-      let resolveTurn: (() => void) | undefined;
-      const turnGate = new Promise<void>((r) => {
-        resolveTurn = r;
-      });
-      const handle = makeChannel({
-        promptImpl: async () => {
-          await turnGate;
-          return { stopReason: 'end_turn' } as PromptResponse;
-        },
-      });
-      const bridge = makeBridge({
-        channelFactory: async () => handle.channel,
-      });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const longText = 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS + 100);
-      const promptPromise = bridge.sendPrompt(
-        session.sessionId,
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: longText }],
-        },
-        undefined,
-        { promptId: 'prompt-long' },
-      );
+    it.each([
+      {
+        name: 'BMP overflow',
+        text: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS + 100),
+        expected: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS),
+        truncated: true,
+      },
+      {
+        name: 'surrogate pair crossing the cap',
+        text: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 1) + '🙂y',
+        expected: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 1),
+        truncated: true,
+      },
+      {
+        name: 'surrogate pair ending at the cap',
+        text: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+        expected: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+        truncated: false,
+      },
+      {
+        name: 'complete surrogate pair before overflow',
+        text: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂y',
+        expected: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+        truncated: true,
+      },
+    ])(
+      'caps live promptText at TURN_RESULT_TEXT_MAX_CHARS ($name)',
+      async ({ text, expected, truncated }) => {
+        let resolveTurn: (() => void) | undefined;
+        const turnGate = new Promise<void>((r) => {
+          resolveTurn = r;
+        });
+        const handle = makeChannel({
+          promptImpl: async () => {
+            await turnGate;
+            return { stopReason: 'end_turn' } as PromptResponse;
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const promptPromise = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text }],
+          },
+          undefined,
+          { promptId: 'prompt-long' },
+        );
 
-      await vi.waitFor(() => {
-        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
-      });
+        await vi.waitFor(() => {
+          expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+        });
 
-      const status = await bridge.getSessionTurnStatus(
-        session.sessionId,
-        undefined,
-        'prompt-long',
-      );
-      expect(status?.promptText).toHaveLength(TURN_RESULT_TEXT_MAX_CHARS);
-      expect(status?.promptTextTruncated).toBe(true);
+        const status = await bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-long',
+        );
+        expect(status?.promptText).toBe(expected);
+        expect(status?.promptTextTruncated).toBe(truncated ? true : undefined);
 
-      resolveTurn!();
-      await promptPromise;
+        resolveTurn!();
+        await promptPromise;
 
-      const settled = await bridge.getSessionTurnStatus(
-        session.sessionId,
-        undefined,
-        'prompt-long',
-      );
-      expect(settled?.state).toBe('completed');
-      expect(settled?.promptText).toHaveLength(TURN_RESULT_TEXT_MAX_CHARS);
-      expect(settled?.promptTextTruncated).toBe(true);
+        const settled = await bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-long',
+        );
+        expect(settled?.state).toBe('completed');
+        expect(settled?.promptText).toBe(expected);
+        expect(settled?.promptTextTruncated).toBe(truncated ? true : undefined);
 
-      await bridge.shutdown();
-    });
+        await bridge.shutdown();
+      },
+    );
 
     it('rejects a foreign clientId like /prompt does', async () => {
       const bridge = makeBridge({

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
@@ -1404,7 +1405,11 @@ function truncateTurnText(text: string): {
   if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
     return { text, truncated: false };
   }
-  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+  const end =
+    (text.codePointAt(TURN_RESULT_TEXT_MAX_CHARS - 1) ?? 0) > 0xffff
+      ? TURN_RESULT_TEXT_MAX_CHARS - 1
+      : TURN_RESULT_TEXT_MAX_CHARS;
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function stripReferencedAttachmentDataParts(
@@ -13258,9 +13263,12 @@ export class Session implements SessionContext {
       ? this.sessionReasoningSelection
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
-    const thinkingMandatory = generation?.thinkingMandatory === true;
     const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
-    const gptCapabilities = getGptReasoningCapabilities(modelId);
+    const requestModel = getRequestModel(generation ?? {}, modelId);
+    const thinkingMandatory =
+      requestModel === (generation?.model ?? modelId) &&
+      generation?.thinkingMandatory === true;
+    const gptCapabilities = getGptReasoningCapabilities(requestModel);
     const configuredReasoning = parseModelReasoningCapabilities(modelReasoning);
     const gptModel = gptCapabilities !== undefined && !configuredReasoning;
     const supportsPreference = (value: ReasoningSelection | undefined) =>
@@ -13268,7 +13276,7 @@ export class Session implements SessionContext {
       value !== REASONING_EFFORT_DEFAULT &&
       ((gptModel && value !== REASONING_EFFORT_NONE) ||
         isReasoningSelectionSupported(
-          modelId,
+          requestModel,
           value,
           thinkingMandatory,
           modelReasoning,
@@ -16912,11 +16920,14 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
+                  this.config,
                 )
               : convertToFunctionResponse(
                   modelFacingToolName,
                   callId,
                   toolResult.llmContent,
+                  toolResult,
+                  this.config,
                 );
 
           // A tool can fail "softly" by returning toolResult.error without

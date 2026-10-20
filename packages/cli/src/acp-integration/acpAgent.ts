@@ -321,7 +321,12 @@ import {
   startChildHeapProbe,
   type ChildHeapProbe,
 } from './child-heap-probe.js';
-import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import {
+  captureReasoningSnapshot,
+  resolveReasoningForModel,
+} from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { getDeepSeekReasoningState } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
+import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
@@ -394,6 +399,7 @@ import {
   isWorkspaceTrusted,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
+import { createParentWorkflowAncestorTrustProvider } from './workflow-ancestor-trust.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
@@ -4007,6 +4013,11 @@ class QwenAgent implements Agent {
     ApprovalMode
   >();
   private managedShuttingDown = false;
+  private workflowAncestorTrustConnected = true;
+  private readonly workflowAncestorTrustCwdEpochs = new WeakMap<
+    Config,
+    number
+  >();
   /**
    * A workspace change is being applied. New prompts wait for it, so no turn
    * is admitted under the revision the change replaces.
@@ -5308,6 +5319,15 @@ class QwenAgent implements Agent {
     private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
     private readonly managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'],
   ) {
+    if (expectedPrivateParentCapability !== undefined) {
+      const onClosed = () => {
+        this.workflowAncestorTrustConnected = false;
+      };
+      // ACP initializes the connection after its agent factory returns.
+      void Promise.resolve()
+        .then(() => connection.closed)
+        .then(onClosed, onClosed);
+    }
     if (config.getShellExecutionSandbox?.()) {
       throw new Error(
         'Tool execution sandbox does not support ACP sessions yet.',
@@ -6978,6 +6998,10 @@ class QwenAgent implements Agent {
             .getModelsConfig?.()
             ?.getGenerationConfig?.();
           const previousRebuildableReasoning = rebuildable?.reasoning;
+          const previousReasoningSources = [
+            config.getContentGeneratorConfigSources?.(),
+            config.getModelsConfig?.()?.getGenerationConfigSources?.(),
+          ].map((sources) => [sources, sources?.['reasoning']] as const);
           try {
             if (modelReasoning && !modelReasoning.toggleOnly) {
               clearReasoningRequestOverrides(generation);
@@ -7032,6 +7056,11 @@ class QwenAgent implements Agent {
             Object.assign(generation, previous);
             if (rebuildable)
               rebuildable.reasoning = previousRebuildableReasoning;
+            for (const [sources, previousSource] of previousReasoningSources) {
+              if (!sources) continue;
+              if (previousSource) sources['reasoning'] = previousSource;
+              else delete sources['reasoning'];
+            }
             throw error;
           }
         }
@@ -8500,8 +8529,31 @@ class QwenAgent implements Agent {
         : (config.getModel() || '').trim();
       const hasCurrentModel = currentModelId.length > 0;
       const currentAuth = activeRuntimeSnapshot?.authType ?? currentAuthType;
-      const modelOptions = buildAcpModelOptions(
-        config.getAllConfiguredModels(),
+      const models = config.getAllConfiguredModels();
+      const resolvedModels = new Map(
+        models.map((model) => [
+          model,
+          !model.isRuntimeModel
+            ? config.getResolvedModelConfig?.(
+                model.authType,
+                model.id,
+                model.registryBaseUrl,
+              )
+            : undefined,
+        ]),
+      );
+      const modelOptions = buildAcpModelOptions(models);
+      const reasoningSnapshot = captureReasoningSnapshot(
+        models.map((model) => ({
+          ...model,
+          baseUrl: resolvedModels.get(model)?.baseUrl ?? model.baseUrl,
+          capabilities: {
+            ...model.capabilities,
+            reasoning:
+              model.capabilities?.reasoning ??
+              resolvedModels.get(model)?.capabilities?.reasoning,
+          },
+        })),
       );
       const currentAcpModelId = hasCurrentModel
         ? getCurrentAcpModelId(
@@ -8532,28 +8584,20 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
-        const resolved = !model.isRuntimeModel
-          ? config.getResolvedModelConfig?.(
-              model.authType,
-              model.id,
-              model.registryBaseUrl,
-            )
-          : undefined;
+        const resolved = resolvedModels.get(model);
         const generation: ContentGeneratorConfig = {
           ...resolved?.generationConfig,
           model: model.id,
           authType: model.authType,
           baseUrl: resolved?.baseUrl,
+          reasoningSnapshot,
+          reasoningRouteBaseUrl: model.registryBaseUrl ?? null,
         };
         const configOptions = model.isRuntimeModel
           ? undefined
           : buildModelReasoningRoutePreview(
               generation,
-              resolveReasoningCapabilities(
-                generation,
-                model.capabilities?.reasoning ??
-                  resolved?.capabilities?.reasoning,
-              ),
+              resolveReasoningForModel(undefined, generation),
               settings.merged.model?.reasoningEffort,
               modelId.startsWith(ACP_ROUTE_ID_PREFIX),
             );
@@ -9364,10 +9408,23 @@ class QwenAgent implements Agent {
     // repeated calls of the same agent type stay distinguishable. Output as a
     // structured array with readable type/name labels from sourceMeta.
     for (const [name, rawMetrics] of Object.entries(metrics.models)) {
-      const m = metrics.statsModels?.[name] ?? rawMetrics;
+      const statsModel = metrics.statsModels?.[name];
+      const m = statsModel ?? rawMetrics;
+      const generation = statsModel?.generation;
       models[name] = {
         api: { ...m.api },
         tokens: { ...m.tokens },
+        ...(generation
+          ? {
+              generation: {
+                timedRequests: generation.timedRequests,
+                totalTtftMs: generation.totalTtftMs,
+                totalGenerationDurationMs: generation.totalGenerationDurationMs,
+                totalThroughputOutputTokens:
+                  generation.totalThroughputOutputTokens,
+              },
+            }
+          : {}),
       };
     }
     const sources: ServeSessionStatsStatus['sources'] = [];
@@ -12697,6 +12754,8 @@ class QwenAgent implements Agent {
           session,
           SESSION_DRAIN_TIMEOUT_MS,
         );
+        const cwdEpoch = this.workflowAncestorTrustCwdEpochs.get(config) ?? 0;
+        this.workflowAncestorTrustCwdEpochs.set(config, cwdEpoch + 1);
         try {
           const settledPreviousCwd = config.getTargetDir();
           if (
@@ -12791,6 +12850,7 @@ class QwenAgent implements Agent {
             warnings,
           };
         } finally {
+          this.workflowAncestorTrustCwdEpochs.set(config, cwdEpoch + 2);
           releaseGate();
         }
       }
@@ -15745,12 +15805,41 @@ class QwenAgent implements Agent {
       ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
+    const workflowAncestorTrustSession: {
+      config: Config | undefined;
+      sessionId: string | undefined;
+    } = {
+      config: undefined,
+      sessionId: undefined,
+    };
     const workflowAncestorTrustProvider =
       this.expectedPrivateParentCapability === undefined
         ? createLocalWorkflowAncestorTrustProvider(
             getOperatorTrustSettings(settings),
           )
-        : undefined;
+        : this.hostExecutionEngine === 'legacy' && executionEngine !== 'managed'
+          ? createParentWorkflowAncestorTrustProvider(this.connection, {
+              isParentTrusted: () =>
+                this.isTrustedManagedParent() &&
+                this.workflowAncestorTrustConnected &&
+                !this.managedShuttingDown,
+              getSessionId: () => workflowAncestorTrustSession.sessionId,
+              getCwdState: () => {
+                const config = workflowAncestorTrustSession.config;
+                if (!config) return undefined;
+                try {
+                  return {
+                    canonicalTargetDir: realpathSync.native(
+                      config.getTargetDir(),
+                    ),
+                    epoch: this.workflowAncestorTrustCwdEpochs.get(config) ?? 0,
+                  };
+                } catch {
+                  return undefined;
+                }
+              },
+            })
+          : undefined;
     const config = await loadCliConfig(
       mergedSettings,
       argvForSession,
@@ -15825,6 +15914,11 @@ class QwenAgent implements Agent {
           }
         : undefined,
       agentHostReadOnly ? undefined : buildEnabledSkillNamesProvider(settings),
+    );
+    workflowAncestorTrustSession.config = config;
+    // /clear rotates the recording ID while the ACP transport keeps its ID.
+    workflowAncestorTrustSession.sessionId = normalizeSessionIdForLookup(
+      config.getSessionId(),
     );
     if (sessionSource) {
       config.setSessionSource(sessionSource.sourceType, sessionSource.sourceId);
@@ -16166,12 +16260,13 @@ class QwenAgent implements Agent {
     }
     const generation = config.getContentGeneratorConfig?.();
     const modelId = generation?.model ?? config.getModel();
+    const requestModel = getRequestModel(generation ?? {}, modelId);
     const modelReasoning = getConfiguredModelReasoning(config, modelId);
     if (
       !isReasoningSelectionSupported(
-        modelId,
+        requestModel,
         selection,
-        generation?.thinkingMandatory === true,
+        requestModel === modelId && generation?.thinkingMandatory === true,
         modelReasoning,
       )
     ) {
@@ -16180,8 +16275,15 @@ class QwenAgent implements Agent {
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
       clearReasoningRequestOverrides(generation);
     }
-    if (selection === REASONING_EFFORT_NONE) {
-      applyReasoningSelection(config, REASONING_EFFORT_NONE);
+    if (
+      selection === REASONING_EFFORT_NONE ||
+      (generation &&
+        getDeepSeekReasoningState(
+          generation,
+          resolveReasoningForModel(config, generation),
+        ))
+    ) {
+      applyReasoningSelection(config, selection);
     }
   }
 
@@ -16968,12 +17070,24 @@ class QwenAgent implements Agent {
       currentModelId,
     );
 
+    const generation = config.getContentGeneratorConfig?.();
+    const reasoningModel = getRequestModel(generation ?? {}, rawCurrentModelId);
+    const thinkingMandatory =
+      reasoningModel === (generation?.model ?? rawCurrentModelId) &&
+      generation?.thinkingMandatory === true;
+    const deepSeekState =
+      generation &&
+      getDeepSeekReasoningState(
+        generation,
+        resolveReasoningForModel(config, generation),
+      );
     if (
       activeRuntimeSnapshot ||
       (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
-        !modelReasoning?.profile) ||
+        !modelReasoning?.profile &&
+        !deepSeekState) ||
       !isReasoningSelectionSupported(
-        rawCurrentModelId,
+        reasoningModel,
         REASONING_EFFORT_DEFAULT,
         false,
         modelReasoning,
@@ -16982,7 +17096,6 @@ class QwenAgent implements Agent {
       return [modeConfigOption, modelConfigOption];
     }
 
-    const generation = config.getContentGeneratorConfig?.();
     if (!generation) {
       return [modeConfigOption, modelConfigOption];
     }
@@ -17038,7 +17151,7 @@ class QwenAgent implements Agent {
           )
         : gptOverride;
     const mandatoryUsesDefaultEffort =
-      generation.thinkingMandatory === true &&
+      thinkingMandatory &&
       (overrideDisablesReasoning ||
         (generation.reasoning === false &&
           reasoningOverride?.field === 'reasoning_effort'));
@@ -17060,19 +17173,20 @@ class QwenAgent implements Agent {
         : generation.reasoning !== false &&
           (!reasoningOverride || !overrideDisablesReasoning) &&
           gptOverride?.enabled !== false;
-    const canDisableReasoning = generation.thinkingMandatory !== true;
+    const canDisableReasoning = !thinkingMandatory;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(
-          rawCurrentModelId,
+          reasoningModel,
           {
             enabled: reasoningEnabled,
             effort: effectiveModelEffort,
+            ...deepSeekState,
             ...(gptEnableOverride?.blocksTierChange
               ? gptEnableOverride.enabled && defaultReasoning !== false
                 ? { enableValue: REASONING_EFFORT_DEFAULT }
                 : { canEnable: false }
               : {}),
-            thinkingMandatory: generation.thinkingMandatory === true,
+            thinkingMandatory,
           },
           modelReasoning,
         )
@@ -17129,8 +17243,16 @@ class QwenAgent implements Agent {
         config.getCurrentModelRegistryBaseUrl?.(),
       );
     const reasoning = getConfiguredModelReasoning(config);
+    const generation = config.getContentGeneratorConfig?.();
+    const deepSeekState =
+      generation &&
+      getDeepSeekReasoningState(
+        generation,
+        resolveReasoningForModel(config, generation),
+      );
     return completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
-      !reasoning?.profile
+      !reasoning?.profile &&
+      !deepSeekState
       ? undefined
       : reasoning;
   }

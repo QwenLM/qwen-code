@@ -1,5 +1,7 @@
 # GenAI and ARMS field alignment
 
+[中文](./gen-ai-arms-field-alignment.zh-CN.md)
+
 ## Scope and standards baseline
 
 This design aligns the first set of Qwen Code span attributes whose names,
@@ -27,23 +29,28 @@ This supplement adopts only `gen_ai.request.stream` and
 `gen_ai.response.time_to_first_chunk`; it is not a wholesale upgrade of the
 baseline above.
 
+`gen_ai.request.reasoning.level` is a narrow OTel-only supplement from the
+pinned GenAI registry above. It exposes the reasoning effort already present
+in OpenAI-compatible requests; no private alias or ARMS-specific dashboard
+mapping is introduced.
+
 The ARMS baseline is [LLM Trace field definitions](https://help.aliyun.com/zh/arms/application-monitoring/developer-reference/llm-trace-field-definition-description).
 An upgrade to either baseline requires regenerating and reviewing this matrix.
 
 ## Field contract
 
-| Span         | Standard attributes emitted in this phase                                                                                                                                                                                         | Source and omission rule                                                                                                                                                                                                         |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| LLM          | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `gen_ai.request.model`                                                                                                                                 | Written at span creation. Conversation ID is the existing session ID.                                                                                                                                                            |
-| LLM request  | `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`          | Read from the first provider-final SDK request object. Invalid or unavailable values are omitted; no SDK or server defaults are inferred.                                                                                        |
-| LLM stream   | `gen_ai.request.stream`, `gen_ai.response.time_to_first_chunk`                                                                                                                                                                    | Streaming requests emit `true`; non-streaming requests omit the standard stream flag. First-chunk time is emitted in seconds after the first normalized response arrives.                                                        |
-| LLM input    | `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.tool.definitions`                                                                                                                                                  | Sensitive compact JSON from the same first provider-final request. Each complete value is independently omitted if invalid or oversized.                                                                                         |
-| LLM response | `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`                                                                                                                                                   | Provider response data only. Missing response model is omitted rather than replaced with the request model. All candidate finish reasons are ordered by candidate index.                                                         |
-| LLM output   | `gen_ai.output.type`, `gen_ai.output.messages`                                                                                                                                                                                    | Output type is emitted for supported Gemini/Vertex request settings. Sensitive output messages come from the final physical request attempt and preserve every candidate.                                                        |
-| LLM usage    | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`                                                                                     | Only provider-reported non-negative safe integers. Explicit zero is retained. When only a total is reported, input/output are omitted instead of estimated.                                                                      |
-| Tool         | `gen_ai.operation.name=execute_tool`, conditional `gen_ai.agent.name`, `gen_ai.tool.name`, `gen_ai.tool.description`, `gen_ai.tool.type=function`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` | Agent name is copied from the actual parent agent. Description is static metadata; sensitive arguments reflect the executed invocation and result is success-only.                                                               |
-| Main agent   | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name=qwen-code`, `gen_ai.conversation.id`, optional `gen_ai.output.type=json`, sensitive `gen_ai.input.messages`, sensitive `gen_ai.output.messages`                          | Uses the existing interaction span. Input is one original user-prompt projection; output is one final user-visible answer. Request model, provider, agent ID/version/description, instructions, and aggregate usage are omitted. |
-| Subagent     | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, optional `gen_ai.request.model`                                                                                  | Description is bounded to 1024 UTF-16 code units. Internal invocation IDs remain private.                                                                                                                                        |
+| Span         | Standard attributes emitted in this phase                                                                                                                                                                                                                  | Source and omission rule                                                                                                                                                                                                         |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| LLM          | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `gen_ai.request.model`                                                                                                                                                          | Written at span creation. Conversation ID is the existing session ID.                                                                                                                                                            |
+| LLM request  | `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, `gen_ai.request.reasoning.level` | Read from the first provider-final SDK request object. Invalid or unavailable values are omitted; no SDK or server defaults are inferred.                                                                                        |
+| LLM stream   | `gen_ai.request.stream`, `gen_ai.response.time_to_first_chunk`                                                                                                                                                                                             | Streaming requests emit `true`; non-streaming requests omit the standard stream flag. First-chunk time is emitted in seconds after the first normalized response arrives.                                                        |
+| LLM input    | `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.tool.definitions`                                                                                                                                                                           | Sensitive compact JSON from the same first provider-final request. Each complete value is independently omitted if invalid or oversized.                                                                                         |
+| LLM response | `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`                                                                                                                                                                            | Provider response data only. Missing response model is omitted rather than replaced with the request model. All candidate finish reasons are ordered by candidate index.                                                         |
+| LLM output   | `gen_ai.output.type`, `gen_ai.output.messages`                                                                                                                                                                                                             | Output type is emitted for supported Gemini/Vertex request settings. Sensitive output messages come from the final physical request attempt and preserve every candidate.                                                        |
+| LLM usage    | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`                                                                                                              | Only provider-reported non-negative safe integers. Explicit zero is retained. When only a total is reported, input/output are omitted instead of estimated.                                                                      |
+| Tool         | `gen_ai.operation.name=execute_tool`, conditional `gen_ai.agent.name`, `gen_ai.tool.name`, `gen_ai.tool.description`, `gen_ai.tool.type=function`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                          | Agent name is copied from the actual parent agent. Description is static metadata; sensitive arguments reflect the executed invocation and result is success-only.                                                               |
+| Main agent   | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name=qwen-code`, `gen_ai.conversation.id`, optional `gen_ai.output.type=json`, sensitive `gen_ai.input.messages`, sensitive `gen_ai.output.messages`                                                   | Uses the existing interaction span. Input is one original user-prompt projection; output is one final user-visible answer. Request model, provider, agent ID/version/description, instructions, and aggregate usage are omitted. |
+| Subagent     | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, optional `gen_ai.request.model`                                                                                                           | Description is bounded to 1024 UTF-16 code units. Internal invocation IDs remain private.                                                                                                                                        |
 
 Private attributes without an exact standard equivalent remain available for
 compatibility unless explicitly listed for removal below. Exact-equivalent
@@ -136,6 +143,7 @@ body. A logical LLM span records only its first such request snapshot.
 | `gen_ai.request.frequency_penalty` | `frequency_penalty`                                        | Not currently sent | `config.frequencyPenalty` |
 | `gen_ai.request.presence_penalty`  | `presence_penalty`                                         | Not currently sent | `config.presencePenalty`  |
 | `gen_ai.request.stop_sequences`    | `stop`                                                     | `stop_sequences`   | `config.stopSequences`    |
+| `gen_ai.request.reasoning.level`   | `reasoning_effort`                                         | Not mapped         | Not mapped                |
 
 Finite numbers and safe integers are preserved exactly, including zero and
 negative values on failed provider requests. Choice count is omitted when it is
@@ -148,6 +156,18 @@ When multiple OpenAI-compatible output-budget aliases are present, the standard
 maximum is emitted only if all present values are valid safe integers and
 equal. Conflicting values are omitted because compatible endpoints do not have
 a common precedence rule.
+
+Reasoning level preserves the exact non-empty string from the request's own
+`reasoning_effort` property, including provider-specific tiers and `none` when
+actually sent. Absent, empty, non-string, and inherited values are omitted.
+Values removed by a provider adapter are not recovered from settings, and
+nested provider-specific reasoning objects are not mapped. This non-sensitive
+request parameter uses the existing first-request observer and generic span
+exporters, independently of sensitive-content capture. Implementation and
+regression tests live in `packages/core/src/telemetry/gen-ai-request.ts` and its
+collocated test; the developer telemetry guide lists the exported attribute.
+Verification compares captured requests with exported LLM spans and checks
+omission and first-request retention without changing provider or retry behavior.
 
 ## Content and tool payloads
 

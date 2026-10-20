@@ -10282,6 +10282,83 @@ describe('Session', () => {
       },
     );
 
+    it.each(['low', 'none'] as const)(
+      'reconciles persisted %s across official and MaaS routes of the same DeepSeek model',
+      async (selection) => {
+        const official = 'https://api.deepseek.com/v1';
+        const maas = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+        const models = [official, maas].map((baseUrl) => ({
+          id: 'deepseek-v4-pro',
+          label: baseUrl,
+          authType: AuthType.USE_OPENAI,
+          baseUrl,
+          registryBaseUrl: baseUrl,
+        }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        const state = installReasoningPreference(selection);
+        Object.assign(state.live, {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: official,
+        });
+        Object.assign(state.rebuildable, state.live);
+        switchModelSpy.mockImplementation(async (authType, modelId, route) => {
+          currentAuthType = authType;
+          currentModel = modelId;
+          Object.assign(state.live, {
+            model: modelId,
+            authType,
+            baseUrl: route?.baseUrl,
+            reasoning: undefined,
+          });
+          Object.assign(state.rebuildable, state.live);
+        });
+        const routes = buildAcpModelOptions(models);
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: routes[0]!.modelId,
+        });
+        expect(state.live.reasoning).toEqual(
+          selection === 'none' ? false : { effort: 'low' },
+        );
+        expect(state.user.settings.model.reasoningEffort).toBe(selection);
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: routes[1]!.modelId,
+        });
+        const expected = selection === 'none' ? false : undefined;
+        expect(state.live.reasoning).toEqual(expected);
+        expect(state.rebuildable.reasoning).toEqual(expected);
+        expect(state.user.settings.model.reasoningEffort).toBe(
+          selection === 'none' ? 'none' : undefined,
+        );
+      },
+    );
+
+    it.each(['low', 'max'] as const)(
+      'reconciles persisted %s against the final DeepSeek model on reload',
+      (selection) => {
+        const state = installReasoningPreference(selection);
+        currentModel = 'deepseek-v4.1-flash-1017';
+        Object.assign(state.live, {
+          model: currentModel,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          extra_body: { model: 'deepseek-v4-pro' },
+        });
+        Object.assign(state.rebuildable, state.live);
+        session.reloadReasoningSelection();
+        expect(state.live.reasoning).toEqual(
+          selection === 'max' ? { effort: 'max' } : undefined,
+        );
+        expect(state.rebuildable.reasoning).toEqual(state.live.reasoning);
+        expect(state.user.settings.model.reasoningEffort).toBe(
+          selection === 'max' ? 'max' : undefined,
+        );
+        expect(state.live.extra_body).toEqual({ model: 'deepseek-v4-pro' });
+      },
+    );
+
     it('falls back to a compatible persisted tier after dropping a session-only tier', async () => {
       const state = installReasoningPreference('low');
       session.setSessionReasoningSelection('max');
@@ -12146,35 +12223,66 @@ describe('Session', () => {
         expect(payload.resultTruncated).toBeUndefined();
       });
 
-      it('caps resultText at TURN_RESULT_TEXT_MAX_CHARS and flags truncation', async () => {
-        const longText = 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100);
-        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                candidates: [{ content: { parts: [{ text: longText }] } }],
+      it.each([
+        {
+          name: 'BMP overflow',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100),
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS),
+          truncated: true,
+        },
+        {
+          name: 'surrogate pair crossing the cap',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 1) + '🙂y',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 1),
+          truncated: true,
+        },
+        {
+          name: 'surrogate pair ending at the cap',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          truncated: false,
+        },
+        {
+          name: 'complete surrogate pair before overflow',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂y',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          truncated: true,
+        },
+      ])(
+        'caps recorded turn text at TURN_RESULT_TEXT_MAX_CHARS ($name)',
+        async ({ text, expected, truncated }) => {
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text }] } }],
+                },
               },
+            ]),
+          );
+
+          await session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text }],
             },
-          ]),
-        );
+            trustedContext,
+          );
 
-        await session.prompt(
-          {
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'long' }],
-          },
-          trustedContext,
-        );
-
-        const payload =
-          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
-        expect(payload.resultText).toHaveLength(
-          core.TURN_RESULT_TEXT_MAX_CHARS,
-        );
-        expect(payload.resultTruncated).toBe(true);
-        expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
-      });
+          const payload =
+            mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+          expect(payload.promptText).toBe(expected);
+          expect(payload.promptTextTruncated).toBe(
+            truncated ? true : undefined,
+          );
+          expect(payload.resultText).toBe(expected);
+          expect(payload.resultTruncated).toBe(truncated ? true : undefined);
+          expect(payload.resultCode).toBe(
+            truncated ? 'RESULT_TEXT_TRUNCATED' : undefined,
+          );
+        },
+      );
 
       it('keeps the same surface contract when many chunks exceed the cap', async () => {
         const chunk = 'a'.repeat(
