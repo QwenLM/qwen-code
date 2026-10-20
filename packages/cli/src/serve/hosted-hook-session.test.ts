@@ -1450,13 +1450,15 @@ it('cancels a detached child after its async marker has admitted it', async () =
     true,
   );
   await hooks.status('call-1', true);
-  await vi.waitFor(() =>
-    expect(
-      session.authority
-        .extensionRecordsInDomain('hook_execution')
-        .filter((record) => !record.recordId.startsWith('hook-plan-'))
-        .map((record) => record.run.state),
-    ).toEqual(['cancelled']),
+  await vi.waitFor(
+    () =>
+      expect(
+        session.authority
+          .extensionRecordsInDomain('hook_execution')
+          .filter((record) => !record.recordId.startsWith('hook-plan-'))
+          .map((record) => record.run.state),
+      ).toEqual(['cancelled']),
+    { timeout: isSlowTestHost() ? 30_000 : 1_000 },
   );
   expect(
     requests.filter((request) => request.kind === 'hook-cancel').length,
@@ -1999,7 +2001,7 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
         expect(
           requests.filter((request) => request.kind === 'hook-execute'),
         ).toHaveLength(1),
-      { timeout: 5000 },
+      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
     );
     abort.abort();
     await expect(fired).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
