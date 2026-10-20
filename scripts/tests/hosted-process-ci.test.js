@@ -479,9 +479,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (181 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (182 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 271, 284],
+    ['hosted-harness-mysql', 272, 285],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -698,12 +698,17 @@ describe('Hosted real-process gates', () => {
       // FG13b Hook dispatch store-rejection cell adds 150 s, so the fork
       // moves to 9411 and the Verify step to 167 minutes; the FG11f publication
       // cell adds 82 s (2x its measured 41.1 s), so the fork moves to 9493 and
-      // the step to 169 minutes):
+      // the step to 169 minutes; the FG11d cancel cell adds 15 s (2x its
+      // measured 7.4 s), so the fork moves to 10080 and the step to 179
+      // minutes; the FG11d retire-at-intent cell adds 18 s (2x its measured
+      // 8.6 s), so the fork moves to 10118 and the step stays 179 minutes; the
+      // FG13e Hook stream-gap cell adds 150 s, so the fork moves to 10268 and
+      // the step to 182 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10250);
+        expect(forkSeconds).toBe(10268);
       }
     },
   );
@@ -779,14 +784,15 @@ describe('Hosted real-process gates', () => {
   // plan-result store-rejection cell adds 150s, so it becomes 9465s; the FG11d
   // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s; the
   // FG12f delivery entry moves from 30s to 50s at 2x (four cases, 24.16s
-  // measured), so it becomes 9500s and the fork moves to 10100s; the FG13e
-  // Hook stream-gap cell adds 150s, so it becomes 9650s. The
+  // measured), so it becomes 9500s; the FG11d retire-at-intent cell adds 18s
+  // (2x its measured 8.6s), so it becomes 9518s; the FG13e Hook stream-gap
+  // cell adds 150s, so it becomes 9668s. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9650;
+  const hostedForkHealthySeconds = 9668;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
