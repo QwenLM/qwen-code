@@ -861,6 +861,8 @@ describe('ReadFileTool', () => {
 
       const capped = await read(await put('big.txt', numberedLines(2000)));
       expect(capped.rawOutputSize).toBeNull();
+      expect(capped.truncatedByProducer).toBe(true);
+      expect(whole.truncatedByProducer).toBeUndefined();
     });
 
     it('returns image content without tool guidance before the registry is available', async () => {
