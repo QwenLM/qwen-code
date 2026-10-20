@@ -40,6 +40,13 @@ const renameRedirect = vi.hoisted<{ directory: string | null }>(() => ({
   directory: null,
 }));
 
+// Simulates the persistent shape: the bytes land outside and the kind
+// directory keeps pointing there, so a target-only identity check resolves
+// the outside file and compares it to itself.
+const renameSwap = vi.hoisted<{ outside: string | null }>(() => ({
+  outside: null,
+}));
+
 const directoryOpens = vi.hoisted<string[]>(() => []);
 
 const noFollowFault = vi.hoisted<{
@@ -86,6 +93,17 @@ vi.mock('node:fs/promises', async (importOriginal) => {
           from,
           path.join(renameRedirect.directory, path.basename(to as string)),
         );
+      }
+      if (renameSwap.outside !== null) {
+        const outside = renameSwap.outside;
+        await actual.rename(
+          from,
+          path.join(outside, path.basename(to as string)),
+        );
+        const directory = path.dirname(to as string);
+        await actual.rm(directory, { recursive: true, force: true });
+        await actual.symlink(outside, directory);
+        return;
       }
       return actual.rename(from, to);
     },
@@ -134,6 +152,7 @@ afterEach(async () => {
   }
   temporaryDirectories.clear();
   renameRedirect.directory = null;
+  renameSwap.outside = null;
   directoryOpens.length = 0;
 });
 
@@ -448,6 +467,17 @@ describe('managed session resource store', () => {
     expect(
       await fs.readdir(path.join(store.sessionRoot, 'managed-input')),
     ).toEqual([]);
+  });
+
+  it('refuses a publish whose kind directory is still swapped after the rename', async () => {
+    const { store, runtimeBaseDir } = await createStore();
+    const outside = path.join(runtimeBaseDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    renameSwap.outside = outside;
+
+    await expect(
+      store.publish('managed-input', Buffer.from('x', 'utf8')),
+    ).rejects.toThrow(/was not published inside its session directory/);
   });
 
   it('syncs only the kind directory once the directories exist', async () => {

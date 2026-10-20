@@ -6,6 +6,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -97,7 +98,7 @@ export class LocalManagedSessionResourceStore
     const target = path.join(directory, resourceId);
     await ensurePrivateDirectory(path.dirname(this.root));
     await ensurePrivateDirectory(this.root);
-    await ensurePrivateDirectory(directory);
+    const checkedDirectory = await ensurePrivateDirectory(directory);
 
     const digest = createHash('sha256');
     const handle = await open(pending, 'wx', 0o600);
@@ -118,15 +119,21 @@ export class LocalManagedSessionResourceStore
       await rename(pending, target);
       // The directory checks above and this rename are path-based, and Node
       // has no `openat`, so a swap between them can land the bytes outside the
-      // session tree. Comparing the entry at `target` with the file this call
-      // wrote refuses to hand back a ref for those bytes; preventing the
-      // outside deposit itself would need an `openat`-style handle.
-      const published = await lstat(target).catch((cause: unknown) => {
-        if ((cause as NodeJS.ErrnoException).code === 'ENOENT')
-          return undefined;
-        throw cause;
-      });
+      // session tree. These checks refuse a publish whose entry is no longer
+      // the file this call wrote, or whose kind directory is no longer the
+      // directory that was checked — including the case where the swapped
+      // symlink is still in place, which a target-only check resolves through
+      // and compares the outside file to itself. A swap reverted before the
+      // checks still escapes, so this narrows the window rather than proving
+      // containment.
+      const destination = await lstatOrUndefined(directory);
+      const published = await lstatOrUndefined(target);
       if (
+        destination === undefined ||
+        destination.isSymbolicLink() ||
+        !destination.isDirectory() ||
+        destination.dev !== checkedDirectory.dev ||
+        destination.ino !== checkedDirectory.ino ||
         published === undefined ||
         !published.isFile() ||
         published.dev !== written.dev ||
@@ -342,7 +349,9 @@ function assertPathSegment(value: string, label: string): string {
  * directory to 0700 when permitted rather than refusing it. Without the
  * check a pre-existing symlink redirects every resource written through it.
  */
-async function ensurePrivateDirectory(directory: string): Promise<void> {
+async function ensurePrivateDirectory(
+  directory: string,
+): Promise<{ dev: number; ino: number }> {
   const created = await mkdir(directory, { recursive: true, mode: 0o700 });
   const stat = await lstat(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
@@ -364,6 +373,16 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
   // publish would add a directory fsync per level for nothing.
   if (created !== undefined) {
     await syncDirectory(path.dirname(directory));
+  }
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+async function lstatOrUndefined(target: string): Promise<Stats | undefined> {
+  try {
+    return await lstat(target);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw cause;
   }
 }
 
