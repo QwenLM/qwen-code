@@ -1720,6 +1720,7 @@ function appendStatusBlock(
     ...(event?.type === 'error' && event.errorKind
       ? { errorKind: event.errorKind }
       : {}),
+    ...(event?.type === 'error' && event.loop ? { loop: event.loop } : {}),
     ...(event?.type === 'error' && event.source
       ? { source: event.source }
       : {}),

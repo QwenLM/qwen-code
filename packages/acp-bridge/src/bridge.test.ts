@@ -7758,6 +7758,9 @@ describe('createAcpSessionBridge', () => {
           code: 'LOOP_DETECTED',
           errorKind: 'loop_detected',
           loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
         });
       },
       extMethodImpl: (method, params) => {
@@ -7816,6 +7819,8 @@ describe('createAcpSessionBridge', () => {
         content: { type: 'text', text: 'persisted turn content' },
       }),
     });
+    // The loop reason and tool-call numbers survive the refresh too, so Web
+    // Shell can keep showing the cause-specific text after a reload.
     expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
       type: 'turn_error',
       promptId: 'prompt-loop',
@@ -7823,6 +7828,9 @@ describe('createAcpSessionBridge', () => {
         code: 'LOOP_DETECTED',
         errorKind: 'loop_detected',
         loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
       }),
     });
 
