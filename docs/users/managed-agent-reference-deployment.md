@@ -74,6 +74,16 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 This base configuration supports text-only Hosted Sessions. Keep the listener on loopback unless a signed or authenticated ingress is configured. The complete authentication, API, and capability configuration is bundled as `docs/server-reference.md`.
 
+## Bootstrap credentials
+
+`bin/qwen-managed-agent-bootstrap` generates the shared Harness token and capability digest, the broker token and the Runtime credential key. It writes `config/harness.env`, `config/server.env` and `config/application.yml` with mode 0600, refuses to overwrite existing files unless `--force` is given, and prints paths only:
+
+```bash
+bin/qwen-managed-agent-bootstrap
+```
+
+The generated `harness.env` and `server.env` are shell-sourceable and also valid systemd `EnvironmentFile`s. Pass `--directory /etc/qwen-managed-agent` for the systemd layout, fill in `SPRING_DATASOURCE_PASSWORD`, and adjust ownership to the service account.
+
 ## Preflight check
 
 Run the bundled launcher with `--check` before the first start and after installing each new artifact. It binds the same configuration (`config/application.yml` plus the environment), starts no listener, and prints one row per input:
@@ -82,7 +92,11 @@ Run the bundled launcher with `--check` before the first start and after install
 bin/qwen-managed-agent-server --check
 ```
 
-It covers the JDK, the configuration file and its permissions, the credential key ring, the startup property validation, the auth/bind combination, Harness reachability, the Workspace files and Shell cross-settings, broker credentials and directories, the Workspace `cwd`, free ports, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1. The port checks bind the configured addresses, so stop the service first. The command does not verify the Harness capability digest or Workspace mount registration.
+It covers the JDK, the configuration file and its permissions, the credential key ring, the startup property validation, the auth/bind combination, Harness reachability, the Workspace files and Shell cross-settings (including the mount, creation-root or SSH-node requirement), broker credentials and directories, the Workspace `cwd`, free ports, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1. The port checks bind the configured addresses, so stop the service first. The command does not verify the Harness capability digest or the native Workspace storage registration.
+
+## systemd
+
+The distribution includes `systemd/` unit and environment templates for the accepted single-host topology. The control-plane unit uses `KillMode=process` so Runtime workers survive a Broker restart; the Harness unit uses `KillMode=mixed` so its tool processes terminate with it. Follow `systemd/README.md` to install them.
 
 ## Enable the accepted local-process tool path
 
@@ -108,7 +122,7 @@ Before admitting file, Shell, or child Git work, complete the native storage reg
 1. Download and verify the new archive and read both manifests. Confirm the new Qwen Code/Harness, Java, protocol, and database requirements before touching the running deployment.
 2. Stop new ingress. Wait for admitted work to settle according to the deployment's existing drain procedure.
 3. Back up MySQL, `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`, the complete Runtime credential key ring, and the exact old distribution. Do not rotate the credential key during the distribution upgrade.
-4. Stop the Java service and Hosted Harness. Preserve the Workspace and durable Runtime state.
+4. Stop the Java service and Hosted Harness. Preserve the Workspace and durable Runtime state. The shipped control-plane unit uses `KillMode=process`, so `systemctl stop` leaves Runtime workers running; reap them with `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` before starting the new version.
 5. Install the manifest-compatible Qwen Code/Harness and start it with the existing token and capability digest.
 6. Start the new `bin/qwen-managed-agent-server` with the same database and durable settings. Flyway migrates the schema forward.
 7. Require a healthy actuator response, read an existing Session and history, then complete one new no-tool Turn before reopening ingress. Requalify any optional tool capability before enabling it.

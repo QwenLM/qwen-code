@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,8 +42,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedProcessCrashIT {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final List<String> CASES = List.of("harness-prepare", "harness-start", "harness-result",
-            "spring-kill", "worker-kill", "worker-stop");
+    private static final List<String> CASES = List.of("harness-prepare", "harness-start", "harness-unknown",
+            "harness-result", "spring-kill", "worker-kill", "worker-stop");
     @TempDir
     private Path temporary;
 
@@ -58,7 +58,7 @@ class HostedProcessCrashIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         source.setConnectionProperties(timeouts);
-        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         var database = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
         try (var connection = source.getConnection()) {
@@ -95,7 +95,7 @@ class HostedProcessCrashIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         source.setConnectionProperties(timeouts);
-        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         try (var fixture = new CoordinatorRestartFixture(jdbc)) {
             fixture.run();
@@ -366,7 +366,7 @@ class HostedProcessCrashIT {
                 storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
                         new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                                 tenant, "storage", root.resolve("workspace").toString())));
-                new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+                new com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard(jdbc,
                         new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
                         .register(tenant, "storage", UUID.randomUUID().toString());
             }
@@ -524,7 +524,7 @@ class HostedProcessCrashIT {
             assertThat(execution.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
             assertThat(execution.get("turn_id")).isEqualTo(report.path("promptId").asText());
             boolean prepared = fault.equals("harness-prepare");
-            boolean settled = List.of("harness-start", "harness-result").contains(fault);
+            boolean settled = List.of("harness-start", "harness-result", "harness-unknown").contains(fault);
             assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(prepared ? 0 : 1);
             assertThat(execution.get("execution_state")).isEqualTo(prepared ? "PREPARED" : settled ? "SETTLED"
                     : fault.equals("spring-kill") ? "EXECUTING" : "UNKNOWN");

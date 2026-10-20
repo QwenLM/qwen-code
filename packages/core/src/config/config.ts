@@ -20,6 +20,8 @@ import {
   resolveReasoningForModel,
   type ReasoningSnapshot,
 } from '../core/reasoning-overrides.js';
+import { getBuiltinDeepSeekReasoning } from '../core/deepseek-reasoning.js';
+import { getRequestModel } from '../core/request-model.js';
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
@@ -5897,7 +5899,13 @@ export class Config {
     // /effort survives an auth refresh, including the initial one at startup.
     // `reasoning` is `false | { effort?, ... } | undefined`; the truthy check
     // already excludes both `false` and `undefined`.
-    const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
+    const priorGeneration = {
+      ...this.modelsConfig.getGenerationConfig(),
+      authType: this.modelsConfig.getCurrentAuthType(),
+    };
+    const priorReasoning = priorGeneration.reasoning;
+    const priorReasoningSource =
+      this.modelsConfig.getGenerationConfigSources()['reasoning'];
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
       : undefined;
@@ -5920,11 +5928,36 @@ export class Config {
       },
     );
     const newContentGeneratorConfig = config;
-    if (
+    const requestModel = getRequestModel(newContentGeneratorConfig);
+    const deepSeekRoute =
+      getBuiltinDeepSeekReasoning({
+        ...priorGeneration,
+        model: getRequestModel(priorGeneration),
+      }) ||
+      getBuiltinDeepSeekReasoning({
+        ...newContentGeneratorConfig,
+        model: requestModel,
+      });
+    const explicitOff =
+      (priorReasoningSource?.kind === 'settings' &&
+        priorReasoningSource.settingsPath === 'model.reasoningEffort') ||
+      (priorReasoningSource?.kind === 'programmatic' &&
+        priorReasoningSource.detail === 'reasoning selection');
+    const preserveReasoningOff =
       priorReasoning === false &&
-      newContentGeneratorConfig.thinkingMandatory !== true
-    ) {
+      (requestModel !== newContentGeneratorConfig.model ||
+        newContentGeneratorConfig.thinkingMandatory !== true) &&
+      (!deepSeekRoute ||
+        (explicitOff &&
+          priorGeneration.authType === newContentGeneratorConfig.authType &&
+          priorGeneration.model === newContentGeneratorConfig.model &&
+          priorGeneration.baseUrl === newContentGeneratorConfig.baseUrl &&
+          resolveReasoningForModel(this, newContentGeneratorConfig)
+            ?.canDisable !== false));
+    if (preserveReasoningOff) {
       newContentGeneratorConfig.reasoning = false;
+      if (deepSeekRoute && priorReasoningSource)
+        sources['reasoning'] = priorReasoningSource;
     }
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
@@ -5944,6 +5977,10 @@ export class Config {
       newContentGeneratorConfig.reasoning === false
     ) {
       this.modelsConfig.getGenerationConfig().reasoning = false;
+      if (preserveReasoningOff && deepSeekRoute && priorReasoningSource) {
+        this.modelsConfig.getGenerationConfigSources()['reasoning'] =
+          priorReasoningSource;
+      }
     }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
@@ -7182,12 +7219,13 @@ export class Config {
     }
 
     const configuredReasoning = resolveReasoningForModel(this, cfg);
-    const tieredModel = isTieredEffortWireModel(cfg.model, configuredReasoning);
+    const model = getRequestModel(cfg);
+    const tieredModel = isTieredEffortWireModel(model, configuredReasoning);
     if (!tieredModel) return undefined;
 
     const currentEffort = this.getReasoningEffort();
     const selected = selectDashScopeThinkingKnob(
-      cfg.model,
+      model,
       cfg.extra_body,
       cfg.samplingParams,
       currentEffort,
@@ -7209,7 +7247,7 @@ export class Config {
         return undefined;
       }
       const below = selectDashScopeThinkingKnob(
-        cfg.model,
+        model,
         undefined,
         cfg.samplingParams,
         currentEffort,

@@ -49,6 +49,7 @@ import {
   type HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import {
+  HOSTED_TOOL_INPUT_ORDER,
   hostedHookOccurrenceId,
   HostedHookRecoveryRequiredError,
   semanticInputDigest,
@@ -106,6 +107,9 @@ import {
 } from './hosted-file-history.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerExecutionUnresolved,
+  HostedWorkspaceBrokerRejection,
+  isTerminalUnknownRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 
@@ -230,6 +234,27 @@ function isTransientStoreBlock(
   return (
     authorization.reason === 'missing_state' &&
     authorization.message !== undefined
+  );
+}
+
+/** Broker answers that prove nothing about whether the command committed:
+ * the takeover reports the execution as unknown and re-checks it on its next
+ * pass. A transport or protocol fault is not one of these, so it still fails
+ * the load retriably instead of being read as an unknown outcome. */
+function isUnprovableExecutionAnswer(cause: unknown): boolean {
+  if (!(cause instanceof HostedWorkspaceBrokerRejection)) return false;
+  if (cause.status === 404 && cause.code === 'runtime_execution_not_found')
+    return true;
+  if (
+    cause.status === 409 &&
+    (cause.code === 'runtime_execution_evidence_unavailable' ||
+      cause.code === 'runtime_broker_execution_unknown')
+  )
+    return true;
+  return (
+    cause.status === 503 &&
+    (cause.code === 'runtime_reconciliation_required' ||
+      cause.code === 'runtime_execution_reconcile_failed')
   );
 }
 
@@ -1028,7 +1053,14 @@ async function hostedSkillResponse(
       new TextDecoder('utf-8', { fatal: true }).decode(
         await session.resources.read(record.planRef),
       ),
-    ) as { refusedInputDigest?: unknown };
+    ) as { refusedInputDigest?: unknown; toolInputOrder?: unknown };
+    // A Skill's PreToolUse runs on the model's input in either order, but a
+    // plan from an unknown order is no evidence of what it decided.
+    if (
+      plan.toolInputOrder !== undefined &&
+      plan.toolInputOrder !== HOSTED_TOOL_INPUT_ORDER
+    )
+      throw new HostedHookRecoveryRequiredError();
     if (plan.refusedInputDigest !== undefined) {
       const definition = JSON.parse(
         new TextDecoder('utf-8', { fatal: true }).decode(
@@ -2435,7 +2467,17 @@ export async function recoverHostedRuntimeTurn(input: {
   if (pending.length > 0) {
     if (passive) {
       for (const item of pending) {
-        const status = await broker.status(item.executionCallId);
+        // The record may be UNKNOWN only because the dead owner never
+        // reported: ask the original Runtime once instead of reading a state
+        // nobody refreshes. A settled answer becomes observable, a terminal
+        // fence keeps its abandoned distinction, and an answer the Runtime
+        // still cannot prove stays unknown.
+        const status = await broker
+          .status(item.executionCallId, { reconcile: true })
+          .catch((cause) => {
+            if (isUnprovableExecutionAnswer(cause)) return undefined;
+            throw cause;
+          });
         // Only a still-reconcilable unknown reports as failing to account
         // for the execution; a terminally fenced abandoned record keeps its
         // distinction so the coordinator can cancel over it.
@@ -2478,11 +2520,33 @@ export async function recoverHostedRuntimeTurn(input: {
           ) as { payloadJson?: unknown };
           if (typeof stored.payloadJson !== 'string')
             throw new RecoveryDeclined();
-          const result = await broker.execute(
-            item.executionCallId,
-            stored.payloadJson,
-            new AbortController().signal,
-          );
+          const result = await broker
+            .execute(
+              item.executionCallId,
+              stored.payloadJson,
+              new AbortController().signal,
+              undefined,
+              false,
+              // A record the dead owner left UNKNOWN is reconciled once:
+              // its settled answer is journaled below, and anything still
+              // unproved is reported unknown instead of re-dispatched.
+              true,
+            )
+            .catch((cause) => {
+              if (isTerminalUnknownRejection(cause)) {
+                // Fenced permanently: the outcome can never be observed, so
+                // the report keeps it for the cancel route to settle.
+                states.set(item.executionCallId, { state: 'abandoned' });
+                return undefined;
+              }
+              if (
+                cause instanceof HostedWorkspaceBrokerExecutionUnresolved ||
+                isUnprovableExecutionAnswer(cause)
+              )
+                return undefined;
+              throw cause;
+            });
+          if (result === undefined) continue;
           let parts = toolResultParts(item, result);
           let outcome = outcomeBytes(item, parts);
           let record: ChatRecord = {

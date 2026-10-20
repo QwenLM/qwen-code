@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.security.WriterCredentialPolicy;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;

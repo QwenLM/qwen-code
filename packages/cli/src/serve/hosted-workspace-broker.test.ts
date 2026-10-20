@@ -8,6 +8,7 @@ import { createServer, type Server } from 'node:http';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerExecutionUnresolved,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
@@ -80,6 +81,21 @@ it.each([false, true])(
       cleanupGeneration: '7',
     });
     expect(requests[0]['drain']).toBe(drain ? true : undefined);
+  },
+);
+
+it.each([false, true])(
+  'carries the drain marker without a cleanup fence (drain=%s)',
+  async (drain) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const broker = await fixture((_path, body) => {
+      requests.push(body);
+      return { body: { ...identity, released: true } };
+    });
+    await broker.release(drain ? { drain: true } : undefined);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]['drain']).toBe(drain ? true : undefined);
+    expect('cleanupBindingId' in requests[0]).toBe(false);
   },
 );
 
@@ -526,6 +542,128 @@ it('queries the original identity when start reports an unknown execution', asyn
     '/internal/runtime-broker/v1/executions/execution:start',
     '/internal/runtime-broker/v1/executions/execution',
   ]);
+});
+
+it('reconciles an unknown recovery read once and reports the settled result', async () => {
+  const paths: string[] = [];
+  const queries: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, fields) => {
+    paths.push(path);
+    if (path.endsWith(':start'))
+      return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
+    if (fields['reconcile'] !== 'true') {
+      queries.push(fields);
+      return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
+    }
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'success', responseParts: [] },
+        },
+      },
+    };
+  });
+  await expect(
+    broker.execute(
+      'execution',
+      '{}',
+      new AbortController().signal,
+      undefined,
+      false,
+      true,
+    ),
+  ).resolves.toMatchObject({ executionStatus: 'success' });
+  expect(queries).toHaveLength(1);
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/execution:start',
+    '/internal/runtime-broker/v1/executions/execution',
+    '/internal/runtime-broker/v1/executions/execution',
+  ]);
+});
+
+it.each([{ state: 'executing' }, { state: 'unknown' }])(
+  'parks a recovery read reconciliation cannot settle (%o)',
+  async (observation) => {
+    const broker = await fixture((path, fields) => {
+      if (path.endsWith(':start'))
+        return {
+          code: 409,
+          body: { code: 'runtime_broker_execution_unknown' },
+        };
+      if (fields['reconcile'] !== 'true')
+        return {
+          code: 409,
+          body: { code: 'runtime_broker_execution_unknown' },
+        };
+      return {
+        body: {
+          ...identity,
+          executionCallId: 'execution',
+          status: observation,
+        },
+      };
+    });
+    await expect(
+      broker.execute(
+        'execution',
+        '{}',
+        new AbortController().signal,
+        undefined,
+        false,
+        true,
+      ),
+    ).rejects.toThrow(HostedWorkspaceBrokerExecutionUnresolved);
+  },
+);
+
+it('keeps the terminal fence when reconciliation reports the record abandoned', async () => {
+  const broker = await fixture((path, fields) => {
+    if (path.endsWith(':start') || fields['reconcile'] !== 'true')
+      return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
+    return {
+      code: 409,
+      body: {
+        code: 'runtime_broker_execution_unknown',
+        details: { terminal: true },
+      },
+    };
+  });
+  await expect(
+    broker.execute(
+      'execution',
+      '{}',
+      new AbortController().signal,
+      undefined,
+      false,
+      true,
+    ),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'runtime_broker_execution_unknown',
+    details: { terminal: true },
+  });
+});
+
+it('asks for reconciliation only on a recovery status read', async () => {
+  const queries: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, fields) => {
+    queries.push(fields);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: { state: 'executing' },
+      },
+    };
+  });
+  await broker.status('execution');
+  await broker.status('execution', { reconcile: true });
+  expect(queries).toHaveLength(2);
+  expect(queries[0]?.['reconcile']).toBeUndefined();
+  expect(queries[1]?.['reconcile']).toBe('true');
 });
 
 it('observes a late original result after unknown cancellation without starting again', async () => {

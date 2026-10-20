@@ -100,6 +100,7 @@ import {
 /** The narrow authority/resource pair a HostedChildAgentSession commits through. */
 export interface HostedChildAgentStore {
   readonly authority: {
+    settlePendingAppend(): Promise<void>;
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
