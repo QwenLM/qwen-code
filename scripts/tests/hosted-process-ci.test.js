@@ -475,7 +475,7 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (178 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (179 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     ['hosted-harness-mysql', 269, 282],
     // Twenty failover arms at 10 each.

@@ -534,7 +534,9 @@
                                  10065 s and the Verify step to 178 minutes;
                                  the FG11d cancel cell adds 15 s (2x its
                                  measured 7.4 s), so the fork moves to 10080 s
-                                 and the Verify step stays 178 minutes. -->
+                                 and the Verify step to 179 minutes: 10680 s of
+                                 fork plus wrap is exactly 178, so 179 is what
+                                 keeps the margin. -->
                             <forkedProcessTimeoutInSeconds>10080</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
