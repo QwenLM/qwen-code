@@ -64,18 +64,6 @@ class HostedMcpResultDeliveryIT {
     private final String tenant = "mcp-delivery-" + UUID.randomUUID();
     private final List<ProxyCall> proxyCalls =
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-    private volatile boolean dropControls;
-    private final java.util.concurrent.atomic.AtomicBoolean dropArmed =
-            new java.util.concurrent.atomic.AtomicBoolean();
-    private volatile boolean dropOwnerRelease;
-    private final java.util.concurrent.atomic.AtomicBoolean ownerDropArmed =
-            new java.util.concurrent.atomic.AtomicBoolean();
-    private volatile boolean dropExecutionPrepare;
-    private final java.util.concurrent.atomic.AtomicBoolean prepareDropArmed =
-            new java.util.concurrent.atomic.AtomicBoolean();
-    private volatile boolean dropExecutionStart;
-    private final java.util.concurrent.atomic.AtomicBoolean startDropArmed =
-            new java.util.concurrent.atomic.AtomicBoolean();
     private final List<Map<String, Object>> wire = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
@@ -153,6 +141,9 @@ class HostedMcpResultDeliveryIT {
                 .isEqualTo("managed_mcp_output_limit");
         assertThat(operations(session.id()).getLast().at("/run/state").asText())
                 .isEqualTo("failed");
+        assertThat(operations(session.id()).getLast()
+                .at("/run/execution").asText())
+                .isEqualTo("settled");
         assertThat(effects("resource_read")).containsExactly("ext://big");
         assertThat(operations(session.id())).hasSize(1);
         int invokes = controls("mcp-invoke").size();
@@ -258,37 +249,6 @@ class HostedMcpResultDeliveryIT {
         }
     }
 
-    private void assertLookupFollows(String kind, String operationId) {
-        int control = -1;
-        for (int index = 0; index < wire.size(); index++) {
-            JsonNode operation = (JsonNode) wire.get(index).get("request");
-            if (operation == null) {
-                continue;
-            }
-            operation = operation.path("operation");
-            if (kind.equals(operation.path("kind").asText())
-                    && operationId.equals(
-                            operation.path("operationId").asText())) {
-                control = index;
-            }
-        }
-        assertThat(control).as("%s control for %s", kind, operationId)
-                .isGreaterThanOrEqualTo(0);
-        for (int index = control + 1; index < wire.size(); index++) {
-            JsonNode operation = (JsonNode) wire.get(index).get("request");
-            if (operation == null) {
-                continue;
-            }
-            operation = operation.path("operation");
-            if ("mcp-status".equals(operation.path("kind").asText())
-                    && operationId.equals(
-                            operation.path("targetOperationId").asText())) {
-                return;
-            }
-        }
-        throw new AssertionError("No status lookup follows the " + kind
-                + " for " + operationId);
-    }
 
     private List<String> effects(String kind) {
         if (!Files.exists(evidence)) {
@@ -318,37 +278,9 @@ class HostedMcpResultDeliveryIT {
                 .toList();
     }
 
-    private List<ProxyCall> startCalls() {
-        return proxyCalls.stream()
-                .filter(call -> "POST".equals(call.method())
-                        && call.path().endsWith(":start"))
-                .toList();
-    }
 
-    private int storageHolders(SessionRef session) {
-        String binding = jdbc.queryForObject(
-                "SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?"
-                        + " AND isolation_key = ?",
-                String.class, tenant, session.id());
-        return jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?"
-                        + " AND holder_key IS NOT NULL",
-                Integer.class, binding);
-    }
 
-    private List<ProxyCall> prepareCalls() {
-        return proxyCalls.stream()
-                .filter(call -> "POST".equals(call.method())
-                        && call.path().endsWith("/executions:prepare"))
-                .toList();
-    }
 
-    private List<ProxyCall> ownerReleaseCalls() {
-        return proxyCalls.stream()
-                .filter(call -> "POST".equals(call.method())
-                        && call.path().endsWith(":release"))
-                .toList();
-    }
 
     private String uuid() {
         return UUID.randomUUID().toString();
@@ -412,26 +344,6 @@ class HostedMcpResultDeliveryIT {
                 : json.readTree(response.body());
     }
 
-    private CompletableFuture<HttpResponse<String>> harnessRequestAsync(
-            String method, String path, Object body, String clientId)
-            throws Exception {
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(
-                "http://127.0.0.1:" + harnessPort + path))
-                .timeout(Duration.ofSeconds(120))
-                .header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", bootId)
-                .header("Content-Type", "application/json")
-                .method(method, body == null
-                        ? HttpRequest.BodyPublishers.noBody()
-                        : HttpRequest.BodyPublishers
-                                .ofString(json.writeValueAsString(body)));
-        if (clientId != null) {
-            builder.header("X-Qwen-Client-Id", clientId);
-        }
-        return http.sendAsync(builder.build(),
-                HttpResponse.BodyHandlers.ofString());
-    }
 
     private void boot() throws Exception {
         assertThat(System.getProperty("mysql.url"))
@@ -667,24 +579,6 @@ class HostedMcpResultDeliveryIT {
         if (parsed != null) {
             entry.put("request", parsed);
         }
-        boolean drop = dropControls
-                && ("mcp-configure".equals(kind)
-                        || "mcp-invoke".equals(kind)
-                        || "mcp-cancel".equals(kind)
-                        || "mcp-release".equals(kind))
-                && dropArmed.compareAndSet(true, false);
-        drop = drop || (dropOwnerRelease
-                && "POST".equals(exchange.getRequestMethod())
-                && path.endsWith(":release")
-                && ownerDropArmed.compareAndSet(true, false));
-        drop = drop || (dropExecutionPrepare
-                && "POST".equals(exchange.getRequestMethod())
-                && path.endsWith("/executions:prepare")
-                && prepareDropArmed.compareAndSet(true, false));
-        drop = drop || (dropExecutionStart
-                && "POST".equals(exchange.getRequestMethod())
-                && path.endsWith(":start")
-                && startDropArmed.compareAndSet(true, false));
         URI upstream = URI.create("http://127.0.0.1:" + brokerPort + path
                 + (query == null ? "" : "?" + query));
         HttpRequest.Builder builder = HttpRequest.newBuilder(upstream)
@@ -717,14 +611,6 @@ class HostedMcpResultDeliveryIT {
                         StandardCharsets.UTF_8));
             }
             wire.add(entry);
-            if (drop) {
-                // The upstream answered and the effect happened; the reply
-                // never reaches the Harness — a connection-level loss, not
-                // an HTTP refusal it could mistake for a rejection.
-                proxyCalls.set(index, call.markDropped(response.statusCode()));
-                exchange.close();
-                return;
-            }
             exchange.getResponseHeaders().set("Content-Type",
                     "application/json");
             exchange.sendResponseHeaders(response.statusCode(),
@@ -867,7 +753,7 @@ class HostedMcpResultDeliveryIT {
             Path destination = Files.createDirectories(Path.of(
                     "target/fg12-cases/fg12f", tenant));
             System.out
-                    .println("FG12A_EVIDENCE " + destination.toAbsolutePath());
+                    .println("FG12F_EVIDENCE " + destination.toAbsolutePath());
             json.writeValue(destination.resolve("proxy.json").toFile(),
                     proxyCalls);
             json.writeValue(destination.resolve("wire.json").toFile(), wire);
@@ -889,9 +775,5 @@ class HostedMcpResultDeliveryIT {
                     operationId);
         }
 
-        ProxyCall markDropped(int value) {
-            return new ProxyCall(method, path, kind, value, true,
-                    operationId);
-        }
     }
 }
