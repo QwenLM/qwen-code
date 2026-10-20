@@ -502,8 +502,11 @@
                                  159 minutes. The FG13f failClosed lost-reply
                                  cell adds 150 s: the healthy sum becomes
                                  8445 s, so the fork moves to 9045 s and the
-                                 Verify step to 161 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9045</forkedProcessTimeoutInSeconds>
+                                 Verify step to 161 minutes; the FG11f
+                                 publication cell adds 82 s (2x its measured
+                                 41.1 s), so the fork moves to 9127 s and the
+                                 Verify step to 163 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9127</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

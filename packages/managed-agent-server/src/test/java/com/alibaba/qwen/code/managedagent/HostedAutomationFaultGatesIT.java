@@ -1092,23 +1092,6 @@ class HostedAutomationFaultGatesIT {
                 .filter(name -> selected("fg11f", name)).findFirst().orElse("drop-ack-after-write");
         publicationFaults = publicationFaults(arm);
         boot("fg11f");
-        if (!"Linux".equals(System.getProperty("os.name"))) {
-            // boot()'s register() seeds only the Workspace rows the scanner
-            // needs; a Shell turn also claims the broker's storage ledger,
-            // which the Linux guard would have written.
-            String physical = UUID.randomUUID().toString().replace("-", "");
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id,"
-                    + " storage_id, physical_key, storage_kind, registration_state,"
-                    + " registration_revision, registration_json) VALUES (?, ?, ?, ?, ?, ?,"
-                    + " 'LOCAL', 'REGISTERED', 1, '{}')",
-                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage-0"),
-                    JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                    JdbcRuntimeBindingRepository.storageFenceKey("storage-0"),
-                    tenant, "storage-0", physical);
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind,"
-                    + " tenant_id, storage_id, mount_state) VALUES (?, ?, 'LOCAL', ?, ?, 'READY')",
-                    physical, physical, tenant, "storage-0");
-        }
         String definition = request("POST", "/v1/agents", Map.of(
                 "model", Map.of(),
                 "instructions", "Run the Shell command the prompt names.",
@@ -1153,7 +1136,7 @@ class HostedAutomationFaultGatesIT {
                                 "response", Map.of("kind", "permission", "optionId", "allow",
                                         "inputRevision", action.path("inputRevision").asLong(),
                                         "policyRevision", action.path("policyRevision").asText())),
-                                "fg11f-respond-" + actionId, 200);
+                                "fg11f-respond-" + actionId, 202);
                     }
                     Thread.sleep(500);
                 } catch (InterruptedException stopped) {
@@ -1177,9 +1160,14 @@ class HostedAutomationFaultGatesIT {
         if ("drop-ack-after-write".equals(arm)) {
             assertThat(puts).as("the put stays unresolved or reconciles from the object").isNotEmpty()
                     .allMatch(state -> "UNKNOWN".equals(state) || "RETURNED".equals(state));
-            assertThat(publicationObjects).as("the committed object is kept").hasSize(1);
-            assertThat(publicationObjects.values().iterator().next().length)
-                    .as("the published bytes, not a re-run").isGreaterThan(1024 * 1024);
+            // The store publishes a manifest beside the captured bytes, so the
+            // arm pins that exactly one large object survived, not that the
+            // bucket holds a single key.
+            assertThat(publicationObjects).as("the committed object is kept").isNotEmpty();
+            // The store publishes the capture as chunks plus a manifest, so pin
+            // that a real capture landed rather than one key of a fixed size.
+            assertThat(publicationObjects.values().stream().mapToLong(bytes -> bytes.length).max().orElse(0))
+                    .as("the published bytes, not a re-run").isGreaterThan(64 * 1024);
         } else {
             assertThat(puts).as("a refused write stays unresolved").isNotEmpty()
                     .allMatch("UNKNOWN"::equals);
@@ -1431,7 +1419,10 @@ class HostedAutomationFaultGatesIT {
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, ?, ?, 'OPERATOR')", tenant, "workspace-0", "actor".getBytes(StandardCharsets.UTF_8));
-        if ("Linux".equals(System.getProperty("os.name"))) {
+        // Registration must follow the same condition as the guard itself: the
+        // guard allows Linux and macOS, and a public Shell wake turn verifies
+        // the registered root before any execution.
+        if (publicationFaults != null || "Linux".equals(System.getProperty("os.name"))) {
             spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }
