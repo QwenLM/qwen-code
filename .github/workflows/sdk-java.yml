@@ -712,11 +712,14 @@ jobs:
     # 153 minutes; the FG11d disabled-automation span adds 336 s, so the fork
     # moves to 8895 s and Verify to 159 minutes, and the FG13f failClosed
     # lost-reply cell adds 150 s, so the fork moves to 9045 s and Verify to
-    # 161 minutes, which wraps its fork + 600 s plus margin; the Broker fault
+    # 161 minutes; the FG12d refused-release cell adds 6 s, so the fork moves
+    # to 9051 s; the FG11f publication cell adds 82 s and its two refusing arms
+    # another 242 s, so the fork moves to 9375 s and Verify to 167 minutes,
+    # which wraps its fork + 600 s plus margin; the Broker fault
     # gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 251 + 13. The failover arms run in hosted-failover-e2e.
+    # checks): 257 + 13. The failover arms run in hosted-failover-e2e.
     timeout-minutes: 270
     services:
       mysql:

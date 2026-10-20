@@ -105,7 +105,6 @@ class HostedAutomationFaultGatesIT {
     // FG11f: the publication case faults the physical object write and keeps
     // whatever the store accepted, so the assertions read the same bytes.
     private HostedGateTestSupport.PublicationFaults publicationFaults;
-    private String forcedArm;
     private final Map<String, byte[]> publicationObjects = new ConcurrentHashMap<>();
     private final AtomicInteger shellSteps = new AtomicInteger();
     // Fronts the Session Store for the Harness when a test asks for it before booting, and
@@ -1085,30 +1084,31 @@ class HostedAutomationFaultGatesIT {
     // arm faults the physical object write. The store never rewrites the
     // object and never re-runs the Shell, so these assertions read what it
     // kept rather than assuming a retry the store does not drive.
-    // The two refusing arms run through the same body: what differs is the
-    // fault injected into the physical put, and CI must exercise each one
-    // rather than only whichever the property selects by default.
+    // One method per arm keeps a stall in one arm inside its own ceiling. The
+    // selector keeps the meaning it has for fg11b and fg11c: unset runs every
+    // arm, and naming one runs only that one.
     @Test
     @Timeout(600)
     void fg11fPublicationFailsBeforeWriteOnMySql() throws Exception {
-        forcedArm = "fail-before-write";
-        fg11fPublicationFaultsSettleOnceOnMySql();
+        assumeTrue(selected("fg11f", "fail-before-write"));
+        runPublicationArm("fail-before-write");
     }
 
     @Test
     @Timeout(600)
     void fg11fPublicationTimesOutOnMySql() throws Exception {
-        forcedArm = "timeout";
-        fg11fPublicationFaultsSettleOnceOnMySql();
+        assumeTrue(selected("fg11f", "timeout"));
+        runPublicationArm("timeout");
     }
 
     @Test
     @Timeout(600)
     void fg11fPublicationFaultsSettleOnceOnMySql() throws Exception {
-        assumeTrue(anySelected("fg11f", "drop-ack-after-write", "fail-before-write", "timeout"));
-        String arm = forcedArm != null ? forcedArm
-                : List.of("drop-ack-after-write", "fail-before-write", "timeout").stream()
-                        .filter(name -> selected("fg11f", name)).findFirst().orElse("drop-ack-after-write");
+        assumeTrue(selected("fg11f", "drop-ack-after-write"));
+        runPublicationArm("drop-ack-after-write");
+    }
+
+    private void runPublicationArm(String arm) throws Exception {
         publicationFaults = publicationFaults(arm);
         boot("fg11f");
         String definition = request("POST", "/v1/agents", Map.of(
