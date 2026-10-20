@@ -99,9 +99,11 @@ attempt was the same commit and that at least three were made.
   pins the answer: it accepts only `202` or `503`.
 
   A same-key manual-run retry inside the occurrence's defer window answers
-  the retryable 503 without spending an attempt once the first re-drive
-  has been spent; the scanner owns the next fire. The first retry after a
-  lost answer still re-drives, so the gate's second send reaches `202`.
+  the class the recorded failure implies — the retryable 503 for a
+  transient or lost answer, the same 409 for a final refusal — without
+  spending an attempt once the first re-drive has been spent; the scanner
+  owns the next fire. The first retry after a lost answer still re-drives,
+  so the gate's second send reaches `202`.
 
 ## Mutation witnesses
 

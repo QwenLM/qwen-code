@@ -1142,6 +1142,59 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aDeferredRetryAnswersTheRecordedWorkspaceCode() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none",
+                null, true);
+        String id = automation.id();
+        seedDeferred(id, "manual:workspace", 2,
+                "fire failed with HTTP 409: {\"error\":\"workspace_busy\","
+                        + "\"code\":\"workspace_busy\"}");
+        fake.failNextFire = new DaemonException("must not fire");
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, id, "workspace"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode()).isEqualTo("workspace_busy");
+                });
+        assertThat(fake.fires()).isZero();
+    }
+
+    @Test
+    void aDeferredRetryKeepsAFinalRefusalFinal() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none",
+                null, true);
+        String id = automation.id();
+        seedDeferred(id, "manual:blocked", 2,
+                "fire failed with HTTP 409: {\"error\":\"hosted_session_blocked\","
+                        + "\"code\":\"hosted_session_blocked\"}");
+        fake.failNextFire = new DaemonException("must not fire");
+        assertThatThrownBy(() -> service.run(tenant, ACTOR, id, "blocked"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("hosted_session_blocked");
+                });
+        assertThat(fake.fires()).isZero();
+    }
+
+    private void seedDeferred(String id, String occurrenceKey, int attempts,
+            String lastError) {
+        ScheduleRow held = ledger.findSchedule(tenant, id).orElseThrow();
+        long fence = ledger.claim(tenant, id, "seed",
+                clock.get() + 60_000, clock.get());
+        assertThat(fence).isPositive();
+        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+                .decision(held, occurrenceKey, null,
+                        AutomationScanner.TRIGGER_MANUAL,
+                        AutomationLedgerStore.OUTCOME_FIRING, null, fence,
+                        clock.get()), "seed")).isPresent();
+        assertThat(ledger.deferOccurrence(tenant, id, occurrenceKey, attempts,
+                clock.get() + 30_000, lastError, "seed", fence,
+                clock.get())).isTrue();
+        ledger.release(tenant, id, "seed", fence, clock.get());
+    }
+
+    @Test
     void theScannerRunsOnADedicatedScheduler() throws Exception {
         assertThat(applicationContext.containsBean("managedAutomationScheduler"))
                 .isTrue();

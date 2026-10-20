@@ -357,10 +357,7 @@ public class ManagedAutomationService {
                     // is spent, a retry inside the window must not spend
                     // another one or move the scanner's schedule; the
                     // scanner owns the next fire when the delay lapses.
-                    throw new ManagedAgentException(HttpStatus.SERVICE_UNAVAILABLE,
-                            deferredCode(occurrence),
-                            "The Hosted Harness answer is pending; retry"
-                                    + " the same key.");
+                    throw deferred(occurrence);
                 }
                 try {
                     scanner.fire(held, occurrence, owner, fence, now);
@@ -834,6 +831,19 @@ public class ManagedAutomationService {
             }
         }
         return "automation_operation_unknown";
+    }
+
+    private static ManagedAgentException deferred(OccurrenceRow occurrence) {
+        String code = deferredCode(occurrence);
+        boolean retryable = "automation_operation_unknown".equals(code)
+                || HarnessConflictCodes.isTransient(code);
+        return new ManagedAgentException(
+                retryable ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.CONFLICT,
+                code,
+                retryable
+                        ? "The Hosted Harness answer is pending; retry"
+                                + " the same key."
+                        : "The Hosted Harness refused the automation operation.");
     }
 
     static ManagedAgentException translate(DaemonHttpException error) {
