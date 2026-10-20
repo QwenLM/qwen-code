@@ -174,8 +174,10 @@ class HostedHookStreamGapIT {
         startHarness();
     }
 
+    // Above the inner await budgets (60 + 60 + 60 + 60 + 90 + 90 = 420 s), so
+    // a hung wait reports its own description instead of the outer timeout.
     @Test
-    @Timeout(300)
+    @Timeout(480)
     void bothStreamsResumeTheHeldHookTurnOnMySql() throws Exception {
         String agent = api("POST", "/v1/agents", definition(), "definition",
                 202).path("id").asText();

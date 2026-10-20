@@ -63,8 +63,10 @@ result. The cursor machinery is shared; the Hook lane is the new subject.
 
 - Ignore the cursor (serve from the start): each view replays the cut
   client's frames and the union's sequence list reddens on the duplicate.
-- Serve only live frames to a resumed client: the union loses the terminal
-  tool-call frame and reddens on the gap, not on a timeout.
+- Serve only live frames to a resumed client: the turn is already complete,
+  so that client never reaches the ledger tail; `continueFrom`'s 90 s wait
+  exhausts and the case reddens on that timeout (the union's gap check is
+  never reached).
 - Let the tool run despite the deny: the model request contains the proof
   file's contents and `doesNotContain(PROOF)` reddens.
 
@@ -73,6 +75,8 @@ result. The cursor machinery is shared; the Hook lane is the new subject.
 - Stop or `MessageDisplay` suppressed text in a replay: suppression is a
   decision/output property, tracked as FG13f `message-display-reload`.
 - FG13a store acks and store-side faults stay on #14449.
+- Moving the stream and ledger helpers into `HostedGateTestSupport` is a
+  follow-up sweep tracked in #14921, not part of this cell.
 
 ## Validation
 
