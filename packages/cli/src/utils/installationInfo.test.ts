@@ -802,6 +802,66 @@ describe('getNpmCliPath', () => {
     vi.resetAllMocks();
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('prefers the npm in the global prefix npm exports to its children', () => {
+    vi.stubEnv(
+      'npm_config_global_prefix',
+      'C:\\Users\\dev\\AppData\\Roaming\\npm',
+    );
+    const userNpm =
+      'C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\npm\\bin\\npm-cli.js';
+    mockedExistsSync.mockImplementation(
+      (candidate) => String(candidate) === userNpm,
+    );
+
+    const result = getNpmCliPath(
+      'C:\\Program Files\\nodejs\\node.exe',
+      'win32',
+    );
+
+    expect(result).toBe(userNpm);
+    expect(mockedExistsSync).toHaveBeenCalledWith(userNpm);
+    // Resolution stays synchronous: the posix branch's realpath walk must not
+    // start running on Windows as a side effect of preferring the user's npm.
+    expect(mockedRealPathSync).not.toHaveBeenCalled();
+  });
+
+  it("prefers npm in npm's default %APPDATA%\\npm prefix when npm exports none", () => {
+    vi.stubEnv('npm_config_global_prefix', '');
+    vi.stubEnv('npm_config_prefix', '');
+    vi.stubEnv('APPDATA', 'C:\\Users\\dev\\AppData\\Roaming');
+    const userNpm =
+      'C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\npm\\bin\\npm-cli.js';
+    mockedExistsSync.mockImplementation(
+      (candidate) => String(candidate) === userNpm,
+    );
+
+    const result = getNpmCliPath(
+      'C:\\Program Files\\nodejs\\node.exe',
+      'win32',
+    );
+
+    expect(result).toBe(userNpm);
+  });
+
+  it('keeps the bundled npm when no global prefix holds an npm-cli.js', () => {
+    vi.stubEnv('npm_config_global_prefix', 'C:\\custom\\prefix');
+    mockedExistsSync.mockReturnValue(false);
+
+    const result = getNpmCliPath(
+      'C:\\Program Files\\nodejs\\node.exe',
+      'win32',
+    );
+
+    expect(result).toBe(
+      'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js',
+    );
+    expect(mockedRealPathSync).not.toHaveBeenCalled();
+  });
+
   it('returns the resolved path when adjacent npm is a .js file', () => {
     const nodePath = '/usr/local/bin/node';
     mockedRealPathSync.mockReturnValue(
