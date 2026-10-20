@@ -437,6 +437,11 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg13-cases/',
     );
+    // The writer side of the same path: the Java literal must stay under
+    // the directory the step uploads, or the artifact is silently empty.
+    expect(read(hostedTestPath('HostedHookStreamGapIT'))).toContain(
+      '"target/fg13-cases"',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag. The arms
     // that write it run in the failover job, so the upload lives there.
@@ -481,6 +486,20 @@ describe('Hosted real-process gates', () => {
     // The delegation step smoke-tests admission with a real child joining a
     // unit — cgroup.kill existing alone proves nothing about migration.
     expect(delegate.run).toContain('/sys/fs/cgroup/fg8/smoke/cgroup.procs');
+  });
+
+  it('sweeps every Hook cgroup subtree a Hosted IT allocates', () => {
+    const owners = hostedTestClasses().filter(({ file }) =>
+      read(file).includes('QWEN_MANAGED_HOOK_CGROUP_ROOT'),
+    );
+    expect(owners.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(['HostedExtensionsIT', 'HostedHookStreamGapIT']),
+    );
+    for (const { name, file } of owners) {
+      const source = javaCode(read(file));
+      expect(source, name).toContain('Files.walk(');
+      expect(source, name).toContain('hookRoot');
+    }
   });
 
   it.each([

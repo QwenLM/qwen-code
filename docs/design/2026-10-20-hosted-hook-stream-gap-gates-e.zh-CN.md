@@ -63,8 +63,10 @@ Hook 状态本身不在公共流上，所以这一格钉的是台账与断流，
 - Stop 或 `MessageDisplay` 被抑制文本的重放：抑制属于决策/输出性质，由 FG13f 的
   `message-display-reload` 跟踪。
 - FG13a 的 store 确认与 store 侧故障仍留在 #14449。
-- 将流与台账辅助方法移入 `HostedGateTestSupport` 是 #14921 跟踪的后续清扫，
-  不属于本格。
+- 将共享机制移入 `HostedGateTestSupport` 是 #14921 跟踪的后续清扫，不属于本格：
+  流与台账辅助（`Observer`、`ledger`、`served`、`camel`、`continueFrom`）、
+  Spring 启动块（`startSpring`、`stop`），以及请求/等待辅助（`api`、`waitFor`、
+  `quote`、`events`、`createSession`、`submit`、`turnStatus`、`awaitCompleted`）。
 
 ## 验证
 

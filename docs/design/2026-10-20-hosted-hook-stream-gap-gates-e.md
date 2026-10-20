@@ -75,8 +75,12 @@ result. The cursor machinery is shared; the Hook lane is the new subject.
 - Stop or `MessageDisplay` suppressed text in a replay: suppression is a
   decision/output property, tracked as FG13f `message-display-reload`.
 - FG13a store acks and store-side faults stay on #14449.
-- Moving the stream and ledger helpers into `HostedGateTestSupport` is a
-  follow-up sweep tracked in #14921, not part of this cell.
+- Moving the shared machinery into `HostedGateTestSupport` is a follow-up
+  sweep tracked in #14921, not part of this cell: the stream and ledger
+  helpers (`Observer`, `ledger`, `served`, `camel`, `continueFrom`), the
+  Spring boot block (`startSpring`, `stop`), and the request/wait helpers
+  (`api`, `waitFor`, `quote`, `events`, `createSession`, `submit`,
+  `turnStatus`, `awaitCompleted`).
 
 ## Validation
 

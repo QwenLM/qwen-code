@@ -38,6 +38,7 @@ import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -137,7 +138,10 @@ class HostedHookStreamGapIT {
                 quote(node) + " " + quote(program.toString()) + " hook "
                         + quote(evidence.toString()) + " "
                         + quote(HOOK_HOLD_MS) + " " + quote("hook-release"),
-                "timeout", 60000));
+                // The release runs only after both readers stop, a path the
+                // awaits above budget past 60 s; a shorter timeout would
+                // fail-closed before the release and read as a lost deny.
+                "timeout", 240000));
         hook.put("onceKey", null);
         json.writeValue(temporary.resolve("hooks.json").toFile(),
                 Map.of("version", 1, "catalogs", List.of(Map.of("tenantId",
@@ -174,10 +178,11 @@ class HostedHookStreamGapIT {
         startHarness();
     }
 
-    // Above the inner await budgets (60 + 60 + 60 + 60 + 90 + 90 = 420 s), so
-    // a hung wait reports its own description instead of the outer timeout.
+    // The awaits total 480 s (5 x 60 for the Hook call, both first frames,
+    // the deny and the completion, plus 2 x 90 for the two resumes), so 600
+    // leaves 120 s for a hung wait to report its own description first.
     @Test
-    @Timeout(480)
+    @Timeout(600)
     void bothStreamsResumeTheHeldHookTurnOnMySql() throws Exception {
         String agent = api("POST", "/v1/agents", definition(), "definition",
                 202).path("id").asText();
@@ -780,6 +785,25 @@ class HostedHookStreamGapIT {
         } catch (Exception stopped) {
             // The worker directory is already gone.
         }
+        try {
+            if (hookRoot != null) {
+                try (var units = Files.list(hookRoot)) {
+                    for (Path unit : units.toList()) {
+                        if (Files.exists(unit.resolve("cgroup.kill"))) {
+                            Files.writeString(unit.resolve("cgroup.kill"), "1");
+                        }
+                    }
+                }
+                try (var entries = Files.walk(hookRoot)) {
+                    for (Path entry : entries.filter(Files::isDirectory)
+                            .sorted(Comparator.reverseOrder()).toList()) {
+                        Files.deleteIfExists(entry);
+                    }
+                }
+            }
+        } catch (IOException ignored) {
+            // Best effort: a still-populated unit keeps the subtree.
+        }
         http.close();
     }
 
@@ -803,6 +827,13 @@ class HostedHookStreamGapIT {
                             tenant));
             json.writeValue(destination.resolve("model-requests.json")
                     .toFile(), modelRequests);
+            for (String name : List.of("processes.jsonl",
+                    "harness-" + boots + ".log")) {
+                Path source = temporary.resolve(name);
+                if (Files.exists(source)) {
+                    Files.copy(source, destination.resolve(source.getFileName()));
+                }
+            }
         } catch (IOException ignored) {
             // Evidence is best effort; the assertions already reported.
         }
