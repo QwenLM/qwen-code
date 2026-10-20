@@ -1844,6 +1844,7 @@ describe('bootstrap import boundaries', () => {
       ['batchCommand', 'batch'],
       ['boardCommand', 'board'],
       ['channelCommand', 'channel'],
+      ['daemonCommand', 'daemon'],
       ['extensionsCommand', 'extensions'],
       ['hooksCommand', 'hooks'],
       ['mcpCommand', 'mcp'],

@@ -11,6 +11,7 @@ import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
+  parseRefreshSessionIds,
 } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -477,6 +478,30 @@ export function registerWorkspaceSkillsRoutes(
   const route = 'POST /workspace/skills/:name/enable';
   const batchRoute = 'POST /workspace/skills/enable';
   app.post(
+    '/workspace/skills/refresh',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = deps.workspaceRuntime;
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const clientId = deps.parseAndValidateClientId(req, res);
+      if (clientId === null) return;
+      const refreshRoute = 'POST /workspace/skills/refresh';
+      try {
+        const input = parseRefreshSessionIds(req.body, res, runtime.bridge);
+        if (!input) return;
+        const result = await runtime.workspaceService.refreshWorkspaceSkills(
+          buildWorkspaceCtx(refreshRoute, clientId),
+          input.sessionIds,
+        );
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        res.status(200).json(result);
+      } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+        deps.sendBridgeError(res, error, { route: refreshRoute });
+      }
+    },
+  );
+  app.post(
     '/workspace/skills/install',
     deps.mutate({ strict: true }),
     async (req, res) => {
@@ -618,6 +643,38 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       deps.invalidateSkillsConfigStatus(entry.workspaceCwd);
     }
   };
+  app.post(
+    '/workspaces/:workspace/skills/refresh',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+      const refreshRoute = 'POST /workspaces/:workspace/skills/refresh';
+      try {
+        const input = parseRefreshSessionIds(req.body, res, runtime.bridge);
+        if (!input) return;
+        const result = await runtime.workspaceService.refreshWorkspaceSkills(
+          createBuildWorkspaceCtx(runtime.workspaceCwd)(refreshRoute, clientId),
+          input.sessionIds,
+        );
+        invalidateConfigStatus(runtime);
+        res.status(200).json(result);
+      } catch (error) {
+        invalidateConfigStatus(runtime);
+        deps.sendBridgeError(res, error, { route: refreshRoute });
+      }
+    },
+  );
   app.get('/workspaces/:workspace/config/skills', async (req, res) => {
     const entry = resolveWorkspaceEntryFromParam(
       deps.workspaceRegistry,

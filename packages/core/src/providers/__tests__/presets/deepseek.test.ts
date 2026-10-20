@@ -48,6 +48,7 @@ describe('deepseekProvider', () => {
       contextWindowSize: 1000000,
     });
     expect(models?.[2]?.capabilities?.reasoning).toEqual({
+      profile: 'deepseek-openai',
       thinking: true,
       efforts: ['low', 'high', 'max'],
       defaultEffort: 'high',

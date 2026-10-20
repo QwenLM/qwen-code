@@ -9,11 +9,20 @@ import java.util.Map;
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
 
+    /** Reattaches a SQL-proven unowned Session without trusting the local attachment cache. */
+    default void recoverForWake(String tenantId, String sessionId) {
+        throw new UnsupportedOperationException("Hosted wake recovery is unavailable");
+    }
+
     default boolean supportsApprovalSelection() { return false; }
 
     default boolean supportsAgentDefinitionApprovalSelection() { return false; }
 
     default boolean supportsModelSelection() { return false; }
+
+    default boolean supportsPlanMode() { return false; }
+
+    default boolean supportsInputAttachments() { return false; }
 
     default boolean isWorkspaceFilesAvailable() {
         return false;
@@ -22,24 +31,24 @@ public interface HarnessConnector extends AutoCloseable {
     default boolean supportsLifecycle() { return false; }
 
     default boolean supportsLifecycle(String profile) {
-        return com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
+        return com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
     }
 
-    default void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    default void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
     }
 
-    default void settleLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    default void settleLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
     }
 
     default boolean supportsFencedTitles() { return false; }
 
-    default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
 
-    default void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    default void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
 
@@ -81,6 +90,14 @@ public interface HarnessConnector extends AutoCloseable {
                 "Managed Runtime recovery is unavailable");
     }
 
+    /**
+     * Discards the takeover snapshot cached for a Session so the next
+     * recovery load re-reads the parked Runtime state instead of answering
+     * from a report already known to be stale.
+     */
+    default void discardManagedRecovery(String tenantId, String sessionId) {
+    }
+
     Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
 
@@ -113,8 +130,9 @@ public interface HarnessConnector extends AutoCloseable {
     /**
      * H6b/H6c: one automation operation onto the Session's journal, from the
      * control plane's automation service and scanner (define_schedule,
-     * retire_schedule, fire_run). The Hosted side settles it before
-     * answering, and the answer carries the operation's result.
+     * retire_schedule, fire_run, reconcile_run, cancel_run). The answer
+     * carries the committed operation result; a cancel_run may still be
+     * awaiting its Turn's physical settlement.
      */
     default Map<String, Object> runAutomationOperation(String tenantId,
             String sessionId, Map<String, Object> body) {

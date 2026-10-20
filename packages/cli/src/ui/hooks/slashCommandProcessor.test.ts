@@ -971,6 +971,8 @@ describe('useSlashCommandProcessor', () => {
             ready: Promise.resolve(),
             loadCommands: vi.fn().mockResolvedValue([]),
             syncSession,
+            invalidateTools: vi.fn(),
+            restoreTools: vi.fn().mockResolvedValue(undefined),
           } as unknown as interactiveMods.InteractiveModSession);
         const hooks = vi
           .spyOn(mockConfig, 'getHookSystem')

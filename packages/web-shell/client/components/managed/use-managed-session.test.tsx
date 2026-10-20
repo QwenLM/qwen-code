@@ -62,7 +62,8 @@ describe('useManagedSession', () => {
         modelSelection: { modelId: 'A', revision: 1 },
         approvalMode: 'default',
         initialApprovalMode: 'default',
-        approvalRevision: 0,
+        approvalRevision: 1,
+        planMode: true,
         modelContext: {
           modelId: 'A',
           inputTokens: 200,
@@ -76,12 +77,14 @@ describe('useManagedSession', () => {
         approvalMode: 'yolo',
         initialApprovalMode: 'default',
         approvalRevision: 2,
+        planMode: false,
       })
       .mockResolvedValue({
         sessionId: 'session-1',
         modelSelection: { modelId: 'A', revision: 1 },
         approvalMode: 'default',
-        approvalRevision: 0,
+        approvalRevision: 1,
+        planMode: true,
         modelContext: {
           modelId: 'A',
           inputTokens: 200,
@@ -115,6 +118,7 @@ describe('useManagedSession', () => {
       approvalMode: 'yolo',
       initialApprovalMode: 'default',
       approvalRevision: 2,
+      planMode: false,
     });
     await act(async () => {
       await latest!.refreshSummary();
@@ -128,6 +132,7 @@ describe('useManagedSession', () => {
       approvalMode: 'yolo',
       initialApprovalMode: 'default',
       approvalRevision: 2,
+      planMode: false,
     });
   });
 

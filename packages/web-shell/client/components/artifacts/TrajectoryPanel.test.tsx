@@ -138,11 +138,14 @@ async function render(
   loadPage: TrajectoryPageLoader | undefined,
   liveStore: TrajectoryLiveStore | null = null,
   historyGapRevision = 0,
+  shadow = false,
 ): Promise<HTMLElement> {
   const container = document.createElement('div');
-  document.body.appendChild(container);
+  const host = shadow ? document.createElement('div') : container;
+  document.body.appendChild(host);
+  if (shadow) host.attachShadow({ mode: 'open' }).append(container);
   const root = createRoot(container);
-  mounted.push({ root, container });
+  mounted.push({ root, container: host });
   await act(async () => {
     root.render(
       <I18nProvider language="en">
@@ -230,7 +233,428 @@ const metricsOf = (container: HTMLElement) =>
     container.querySelectorAll('[data-testid="trajectory-row-metrics"]'),
   ).map((node) => node.textContent ?? '');
 
+describe('execution following', () => {
+  const followStatus = (container: HTMLElement) =>
+    text(container.querySelector('[data-testid="trajectory-follow-status"]'));
+  const returnButton = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-follow-return"]',
+    )!;
+  const event = (key: string, id: number): DaemonEvent => ({
+    v: 1,
+    id,
+    type: 'session_update',
+    data: {
+      sessionUpdate: 'agent_message_chunk',
+      _meta: {
+        executionLifecycle: {
+          v: 1,
+          kind: 'request',
+          phase: 'started',
+          executionId: key,
+          sessionId: 's',
+          promptId: 'p',
+          model: key,
+          startedAt: 1_000 + id,
+        },
+      },
+    },
+  });
+  async function setup(shadow = false) {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, {
+      sessionId: 's',
+      scope: 'scope',
+      epoch: 'epoch',
+      events: [],
+      incomplete: false,
+    });
+    store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+    store.ingest(owner, event('initial', 1));
+    const read = vi.fn(async () => page(REAL_EVENTS));
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: read },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store, 0, shadow);
+    return { container, read, store, owner };
+  }
+  const pause = async (container: HTMLElement) =>
+    act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-follow-pause"]',
+        )!
+        .click(),
+    );
+
+  it.each([false, true])(
+    'refreshes even the latest window before resuming, preserving return focus (shadow=%s)',
+    async (shadow) => {
+      const { container, read, store, owner } = await setup(shadow);
+      expect(followStatus(container)).toBe('Following');
+      await act(async () => store.ingest(owner, event('new', 2)));
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(followStatus(container)).toBe('Following');
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      expect(followStatus(container)).toBe('Paused');
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).not.toBeNull();
+      let complete!: (result: TrajectoryPageResult) => void;
+      read.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      const button = returnButton(container);
+      await act(async () => {
+        button.focus();
+        button.click();
+      });
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(followStatus(container)).toBe('Refreshing history…');
+      expect(button.getAttribute('aria-disabled')).toBe('true');
+      await act(async () => complete(page(REAL_EVENTS)));
+      expect(followStatus(container)).toBe('Following');
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
+          .scrollTop,
+      ).toBe(SCROLL_HEIGHT);
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(button);
+    },
+  );
+
+  it('keeps the reading filter after failure and clears it only on successful return', async () => {
+    const { container, read } = await setup();
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'model');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(followStatus(container)).toBe('Paused');
+    read.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Paused');
+    expect(input.value).toBe('model');
+    expect(container.textContent).toContain('offline');
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Following');
+    expect(input.value).toBe('');
+    expect(
+      container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
+        .scrollTop,
+    ).toBe(SCROLL_HEIGHT);
+  });
+
+  it('cancels resumption when the user reads while history is loading', async () => {
+    const { container, read } = await setup();
+    await pause(container);
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-executions"] [role="grid"]',
+    )!;
+    await act(async () =>
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
+      ),
+    );
+    await act(async () => complete(page(REAL_EVENTS)));
+    expect(followStatus(container)).toBe('Paused');
+  });
+
+  it.each([
+    { input: 'upward wheel', deltaY: -180, top: 420 },
+    { input: 'downward wheel', deltaY: 180, top: 780 },
+    { input: 'scrollbar', deltaY: undefined, top: 420 },
+  ])('cancels a pending return on $input reading', async ({ deltaY, top }) => {
+    const { container, read, store, owner } = await setup();
+    await act(async () => {
+      for (let id = 2; id <= 40; id++)
+        store.ingest(owner, event(`execution-${id}`, id));
+    });
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-executions"] [role="grid"]',
+    )!;
+    Object.defineProperty(grid, 'clientHeight', { value: 136 });
+    await act(async () => {
+      grid.scrollTop = 600;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(followStatus(container)).toBe('Paused');
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Refreshing history…');
+    await act(async () => store.ingest(owner, event('during-return', 41)));
+    expect(grid.scrollTop).toBe(634);
+    await act(async () => grid.dispatchEvent(new Event('scroll')));
+    expect(followStatus(container)).toContain('Refreshing history…');
+    await act(async () => {
+      if (deltaY !== undefined)
+        grid.dispatchEvent(new WheelEvent('wheel', { deltaY, bubbles: true }));
+      grid.scrollTop = top;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(followStatus(container)).toContain('Paused');
+    await act(async () => complete(page(REAL_EVENTS)));
+    expect(followStatus(container)).toBe('Paused');
+    expect(grid.scrollTop).toBe(top);
+  });
+
+  it.each(['wheel', 'pointerdown', 'PageUp', 'PageDown', ' '])(
+    'keeps layout scrolling separate from history reading with %j',
+    async (input) => {
+      const { container, read } = await setup();
+      const grid = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-rows"]',
+      )!;
+      let complete!: (result: TrajectoryPageResult) => void;
+      read.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      await act(async () => returnButton(container).click());
+      await act(async () => {
+        grid.scrollTop = 600;
+        grid.dispatchEvent(new Event('scroll'));
+      });
+      expect(followStatus(container)).toBe('Refreshing history…');
+      await act(async () =>
+        grid.dispatchEvent(
+          input === 'wheel'
+            ? new WheelEvent('wheel', { deltaY: -180, bubbles: true })
+            : input === 'pointerdown'
+              ? new MouseEvent('pointerdown', { bubbles: true })
+              : new KeyboardEvent('keydown', { key: input, bubbles: true }),
+        ),
+      );
+      expect(followStatus(container)).toBe('Paused');
+      await act(async () => complete(page(REAL_EVENTS)));
+      expect(followStatus(container)).toBe('Paused');
+    },
+  );
+
+  it('pauses on connection loss and does not announce replay as newly arrived execution', async () => {
+    const { container, store, owner } = await setup();
+    await act(async () => store.reconnect(owner));
+    expect(followStatus(container)).toBe('Paused');
+    await act(async () => {
+      store.ingest(owner, event('replayed', 2));
+      store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+    });
+    expect(followStatus(container)).toBe('Paused');
+    expect(container.querySelector('[data-status="running"]')).toBeNull();
+    await act(async () => store.ingest(owner, event('live', 3)));
+    expect(followStatus(container)).toContain('Execution list updated');
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Following');
+  });
+
+  it('discards an old loader return when switching sessions', async () => {
+    const { container, read, store } = await setup();
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    const loader = createTrajectoryPageLoader(
+      {
+        getSessionTranscriptPage: async () =>
+          page([userText('new session', 'new')]),
+      },
+      'other',
+      'scope',
+    );
+    await act(async () =>
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <TrajectoryLiveContext.Provider value={store}>
+            <TrajectoryPanel loadPage={loader} />
+          </TrajectoryLiveContext.Provider>
+        </I18nProvider>,
+      ),
+    );
+    await pause(container);
+    await act(async () => complete(page(REAL_EVENTS)));
+    expect(followStatus(container)).toBe('Paused');
+    expect(container.textContent).toContain('new session');
+    expect(
+      container.querySelector('[data-testid="trajectory-execution-row"]'),
+    ).toBeNull();
+  });
+
+  it('keeps a concurrent connection loss from resuming a completed return', async () => {
+    const { container, read, store, owner } = await setup();
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    await act(async () => {
+      store.reconnect(owner);
+      complete(page(REAL_EVENTS));
+    });
+    expect(followStatus(container)).toBe('Paused');
+  });
+
+  it('returns from a historical window to the latest end without requiring live support', async () => {
+    const loadPage: TrajectoryPageLoader = async ({ cursor }) => {
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `page-${index}`)], {
+        hasMore: true,
+        nextCursor: String(index + 1),
+      });
+    };
+    const container = await render(loadPage);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-older"]',
+        )!
+        .click(),
+    );
+    expect(followStatus(container)).toBe('Paused');
+    expect(container.textContent).toContain('page-7');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-latest"]',
+        )!
+        .click(),
+    );
+    expect(followStatus(container)).toBe('Waiting for live updates');
+    expect(container.textContent).toContain('page-0');
+    expect(container.textContent).not.toContain('page-7');
+    expect(
+      container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
+        .scrollTop,
+    ).toBe(SCROLL_HEIGHT);
+  });
+});
+
 describe('TrajectoryPanel', () => {
+  it.each([false, true])(
+    'does not recover old execution focus into a different loader (shadow=%s)',
+    async (shadow) => {
+      const store = createTrajectoryLiveStore();
+      const seed = (sessionId: string) =>
+        store.begin(
+          {},
+          {
+            sessionId,
+            scope: 'scope',
+            incomplete: false,
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'agent_message_chunk',
+                  _meta: {
+                    executionLifecycle: {
+                      v: 1,
+                      kind: 'request',
+                      phase: 'started',
+                      executionId: 'selected',
+                      sessionId,
+                      promptId: 'p',
+                      model: 'model',
+                      startedAt: 10,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        );
+      const client = {
+        getSessionTranscriptPage: async () => page(REAL_EVENTS),
+      };
+      seed('old');
+      const container = await render(
+        createTrajectoryPageLoader(client, 'old', 'scope'),
+        store,
+        0,
+        shadow,
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      const close = container.querySelector<HTMLButtonElement>(
+        '[aria-label="Close details"]',
+      )!;
+      close.focus();
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(close);
+      const focus = vi.fn();
+      container.addEventListener('focusin', focus);
+      await act(async () => {
+        seed('new');
+        mounted.at(-1)!.root.render(
+          <I18nProvider language="en">
+            <TrajectoryLiveContext.Provider value={store}>
+              <TrajectoryPanel
+                loadPage={createTrajectoryPageLoader(client, 'new', 'scope')}
+              />
+            </TrajectoryLiveContext.Provider>
+          </I18nProvider>,
+        );
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="trajectory-execution-row"]'),
+      ).not.toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
+
   it('discloses incomplete lifecycle details separately from page truncation', async () => {
     const store = createTrajectoryLiveStore();
     store.begin(
@@ -421,6 +845,97 @@ describe('TrajectoryPanel', () => {
     expect(document.activeElement).toBe(refresh);
   });
 
+  it.each(
+    [false, true].flatMap((shadow) =>
+      (['grid', 'collapsed', 'outside'] as const).map((target) => ({
+        shadow,
+        target,
+      })),
+    ),
+  )(
+    'recovers focused details on execution eviction ($target, shadow=$shadow)',
+    async ({ shadow, target }) => {
+      const store = createTrajectoryLiveStore();
+      const owner = {};
+      store.begin(owner, {
+        sessionId: 's',
+        scope: 'scope',
+        epoch: 'epoch',
+        events: [],
+        incomplete: false,
+      });
+      store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+      const event = (id: number): DaemonEvent => ({
+        v: 1,
+        id: id + 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            executionLifecycle: {
+              v: 1,
+              kind: 'request',
+              phase: 'ended',
+              executionId: `execution-${id}`,
+              sessionId: 's',
+              promptId: 'p',
+              model: 'model',
+              startedAt: id,
+              endedAt: id + 1,
+              durationMs: 1,
+              outcome: 'success',
+            },
+          },
+        },
+      });
+      store.ingest(owner, event(0));
+      const loader = createTrajectoryPageLoader(
+        { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+        's',
+        'scope',
+      );
+      const container = await render(loader, store, 0, shadow);
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-executions"] button[aria-expanded]',
+      )!;
+      if (target === 'collapsed') await act(async () => toggle.click());
+      const details = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-inspector"]',
+      )!;
+      const refresh = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Refresh"]',
+      )!;
+      const close = details.querySelector<HTMLButtonElement>(
+        '[aria-label="Close details"]',
+      )!;
+      (target === 'outside' ? refresh : close).focus();
+      await act(async () => {
+        for (let id = 1; id <= 256; id++) store.ingest(owner, event(id));
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(
+        target === 'outside'
+          ? refresh
+          : target === 'collapsed'
+            ? toggle
+            : container.querySelector(
+                '[data-testid="trajectory-executions"] [role="grid"]',
+              ),
+      );
+    },
+  );
+
   it('returns focus to the recent toggle when closing details with its grid collapsed', async () => {
     const store = createTrajectoryLiveStore();
     store.begin(
@@ -464,7 +979,7 @@ describe('TrajectoryPanel', () => {
         .click(),
     );
     const toggle = container.querySelector<HTMLButtonElement>(
-      '[data-testid="trajectory-executions"] > button',
+      '[data-testid="trajectory-executions"] button[aria-expanded]',
     )!;
     await act(async () => toggle.click());
     expect(
@@ -942,9 +1457,9 @@ describe('TrajectoryPanel', () => {
     });
     const container = await render(async () => pending);
 
-    expect(text(container.querySelector('[role="status"]'))).toContain(
-      'Loading',
-    );
+    expect(
+      text(container.querySelector(`.${styles.placeholder}[role="status"]`)),
+    ).toContain('Loading');
     await act(async () => {
       release(page([userText('done', 'rec-1')]));
     });
@@ -1625,9 +2140,9 @@ describe('TrajectoryPanel', () => {
       await act(async () => {});
 
       expect(container.querySelector('[role="grid"]')).toBeNull();
-      expect(text(container.querySelector('[role="status"]'))).toContain(
-        '1 page so far',
-      );
+      expect(
+        text(container.querySelector(`.${styles.placeholder}[role="status"]`)),
+      ).toContain('1 page so far');
 
       await act(async () => {
         releaseOlder(page(prompts('older', 1)));

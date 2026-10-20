@@ -1,11 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -113,7 +113,7 @@ class HostedShellLifecycleRecoveryIT {
             Files.createDirectory(root.resolve("objects"));
             var source = new DriverManagerDataSource(required("mysql.url"), required("mysql.user"),
                     System.getProperty("mysql.password", ""));
-            jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+            jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
             jdbc.setQueryTimeout(10);
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("l4-fixture", new byte[32]));
         }
@@ -126,7 +126,7 @@ class HostedShellLifecycleRecoveryIT {
             storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
                     new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                             tenant, "storage", root.resolve("workspace").toString())));
-            new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+            new com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard(jdbc,
                     new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
                     .register(tenant, "storage", UUID.randomUUID().toString());
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
