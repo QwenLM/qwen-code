@@ -62,12 +62,6 @@ final class WorkspaceCsiApplicationInventory {
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(64).maxStringLength(MAX_BYTES).build()).build())
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
-    private static final Declaration SOURCE = declaration("ma_csi_source", "binding_id",
-            "binding_id:VARBINARY,runtime_generation:BIGINT,physical_key:CHAR,reservation_id:CHAR,"
-            + "reservation_revision:BIGINT,configuration_json:LONGTEXT,phase:VARCHAR,record_version:BIGINT,"
-            + "arm_bytes:LONGBLOB,arm_sequence:BIGINT,arm_hash:CHAR,pod_uid:CHAR,gated_spec_sha256:CHAR,"
-            + "bound_bytes:LONGBLOB,bound_sequence:BIGINT,bound_hash:CHAR,publication_bytes:LONGBLOB,"
-            + "publication_sequence:BIGINT,publication_hash:CHAR");
     private static final List<Declaration> CATALOGUE = List.of(
             declaration("ma_agent_definition", "tenant_id,agent_id,revision",
                     "tenant_id:VARBINARY,agent_id:VARBINARY,revision:BIGINT,digest:VARCHAR,definition_json:LONGTEXT,"
@@ -298,13 +292,6 @@ final class WorkspaceCsiApplicationInventory {
                     + "last_error:VARCHAR,is_default:BOOLEAN,default_tenant:VARBINARY,gmt_create:BIGINT,gmt_modified:BIGINT"),
             declaration("ma_workspace_access", "tenant_id,workspace_id,actor_id",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,actor_id:VARBINARY,role:VARCHAR"));
-
-    private static final List<Declaration> EVIDENCE_CATALOGUE = java.util.stream.Stream.concat(CATALOGUE.stream(), java.util.stream.Stream.of(SOURCE))
-            .sorted(java.util.Comparator.comparing(Declaration::name)).toList();
-
-    private static List<Declaration> catalogue(Snapshot snapshot) {
-        return snapshot.evidenceOwned() ? EVIDENCE_CATALOGUE : CATALOGUE;
-    }
 
     private static final Set<String> IDENTITY_FIELDS = Set.of(
             "account_id",
@@ -567,7 +554,7 @@ final class WorkspaceCsiApplicationInventory {
             this.rowCount = rowCount;
             this.byteCount = byteCount;
             this.bytes = encode(out -> {
-                write(out, evidenceOwned() ? "qwen-csi-application-inventory/3" : "qwen-csi-application-inventory/2");
+                write(out, "qwen-csi-application-inventory/2");
                 out.writeInt(tables.size());
                 for (Table table : tables) {
                     write(out, table.name());
@@ -595,7 +582,6 @@ final class WorkspaceCsiApplicationInventory {
             });
         }
 
-        boolean evidenceOwned() { return tables.stream().anyMatch(table -> SOURCE.name().equals(table.name())); }
         List<Table> tables() { return tables; }
         List<Blocker> blockers() { return blockers; }
         int rowCount() { return rowCount; }
@@ -611,15 +597,12 @@ final class WorkspaceCsiApplicationInventory {
         if (target == null || target.getAutoCommit() || original == null || intent == null) {
             throw new IllegalArgumentException("An original transaction and validated original intent are required");
         }
-        Inspection inventory = new Inspection(target, original, intent, CATALOGUE);
+        final Inspection inventory = new Inspection(target, original, intent);
         try {
             com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.validate(target);
         } catch (SQLException mismatch) {
             inventory.block("inventory", null, "schema_drift");
             return inventory.snapshot();
-        }
-        if (WorkspaceCsiNodeSourceStore.hasAssociation(target, original.bindingId(), intent.physicalKey(), true)) {
-            inventory = new Inspection(target, original, intent, EVIDENCE_CATALOGUE);
         }
         inventory.discover();
         inventory.validate();
@@ -639,7 +622,7 @@ final class WorkspaceCsiApplicationInventory {
         WorkspaceCsiApplicationImage.expected(baseline, com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.SETTLING,
                 null, null, null);
         // Only the saved-row validators run here; no discover, membership lookup or SQL is invoked.
-        final Inspection validation = new Inspection(null, actual, intent, catalogue(baseline));
+        final Inspection validation = new Inspection(null, actual, intent);
         var references = originalReferences(actual, intent, baseline);
         for (Row receipt : baseline.table("ma_request_receipt").rows()) {
             if (receipt.membership() == Membership.ORIGINAL && validation.rawSession(receipt)
@@ -1118,7 +1101,7 @@ final class WorkspaceCsiApplicationInventory {
     /** Own keys and strong roots only; never starts a nested carrier scan or changes the parent roots. */
     static void auditForeignOwner(HistoricalScan read, Snapshot expected, JdbcCsiFilesRetirementGuard.Original original,
             WorkspaceCsiReservationStore.Retirement intent) throws SQLException {
-        requireEncoded(read != null && read.imageRead && read.frozenReader != null && expected != null && !expected.evidenceOwned());
+        requireEncoded(read != null && read.imageRead && read.frozenReader != null && expected != null);
         expected = restoreCanonical(expected.bytes());
         requireEncoded(expected.blockers().isEmpty()
                 && expected.tables().stream().flatMap(table -> table.rows().stream()).noneMatch(row -> row.membership() == Membership.OTHER));
@@ -1148,7 +1131,7 @@ final class WorkspaceCsiApplicationInventory {
     }
 
     static Snapshot scanRetainedImage(HistoricalScan read, Snapshot expected, Map<String, Set<String>> references) throws SQLException {
-        requireEncoded(read != null && !read.imageRead && expected != null && !expected.evidenceOwned() && references != null);
+        requireEncoded(read != null && !read.imageRead && expected != null && references != null);
         expected = restoreCanonical(expected.bytes());
         requireEncoded(expected.blockers().isEmpty() && expected.table("ma_storage_owner").rows().size() == 1
                 && expected.table("ma_storage_owner").rows().getFirst().membership() == Membership.ORIGINAL
@@ -1936,14 +1919,12 @@ final class WorkspaceCsiApplicationInventory {
             throw new IllegalArgumentException("Invalid persisted CSI inventory");
         }
         try (var input = new DataInputStream(new ByteArrayInputStream(bytes))) {
-            String format = readText(input);
-            requireEncoded("qwen-csi-application-inventory/2".equals(format) || "qwen-csi-application-inventory/3".equals(format));
-            var declarations = "qwen-csi-application-inventory/3".equals(format) ? EVIDENCE_CATALOGUE : CATALOGUE;
-            requireEncoded(input.readInt() == declarations.size());
+            requireEncoded("qwen-csi-application-inventory/2".equals(readText(input))
+                    && input.readInt() == CATALOGUE.size());
             List<Table> tables = new ArrayList<>();
             int rows = 0;
             long rowBytes = 0;
-            for (Declaration declaration : declarations) {
+            for (Declaration declaration : CATALOGUE) {
                 requireEncoded(declaration.name().equals(readText(input))
                         && input.readInt() == declaration.columns().size());
                 for (Column column : declaration.columns()) {
@@ -1980,7 +1961,7 @@ final class WorkspaceCsiApplicationInventory {
     }
 
     static Row expectedRow(String table, Map<String, byte[]> values, Membership membership) {
-        Declaration declaration = EVIDENCE_CATALOGUE.stream().filter(value -> value.name().equals(table)).findFirst().orElseThrow();
+        Declaration declaration = CATALOGUE.stream().filter(value -> value.name().equals(table)).findFirst().orElseThrow();
         requireEncoded(values.keySet().equals(declaration.columns().stream().map(Column::name).collect(java.util.stream.Collectors.toSet())));
         byte[] bytes = encode(out -> {
             out.writeInt(declaration.columns().size());
@@ -2162,7 +2143,6 @@ final class WorkspaceCsiApplicationInventory {
 
     private static final class Inspection {
         private final Connection connection;
-        private final List<Declaration> catalogue;
         private final JdbcCsiFilesRetirementGuard.Original original;
         private final WorkspaceCsiReservationStore.Retirement intent;
         private final String tenant;
@@ -2178,9 +2158,8 @@ final class WorkspaceCsiApplicationInventory {
         private boolean overflow;
 
         private Inspection(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-                WorkspaceCsiReservationStore.Retirement intent, List<Declaration> catalogue) {
+                WorkspaceCsiReservationStore.Retirement intent) {
             this.connection = connection;
-            this.catalogue = catalogue;
             this.original = original;
             this.intent = intent;
             var scope = original.request().getScope();
@@ -2216,7 +2195,7 @@ final class WorkspaceCsiApplicationInventory {
             id("L", hash((tenant + "\u0000" + storage).getBytes(StandardCharsets.UTF_8)));
             id("Bscope", digest(scope.getTenantId(), scope.getWorkspaceId(), scope.getWorkspaceGeneration(),
                     scope.getCanonicalCwd(), scope.getCapabilityDigest(), scope.getIsolationClass()));
-            for (Declaration declaration : catalogue) {
+            for (Declaration declaration : CATALOGUE) {
                 tables.put(declaration.name(), new LinkedHashMap<>());
             }
         }
@@ -2244,7 +2223,7 @@ final class WorkspaceCsiApplicationInventory {
             boolean changed;
             do {
                 changed = false;
-                for (Declaration declaration : catalogue) {
+                for (Declaration declaration : CATALOGUE) {
                     if (overflow) {
                         return;
                     }
@@ -2348,7 +2327,6 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_workspace" -> query(table, "tenant_id=T&workspace_id=W", "tenant_id=T&storage_id=D",
                         "tenant_id=T&parent_session_id=sessions");
                 case "ma_storage" -> query(table, "alias_key=A", "physical_key=F", "tenant_id=T&storage_id=D");
-                case "ma_csi_source" -> query(table, "binding_id=bindings", "physical_key=F");
                 case "ma_storage_owner" -> query(table, "storage_key=F|L", "binding_id=bindings",
                         "tenant_id=T&storage_id=D", "csi_registration_key=A");
                 case "ma_runtime_slot" -> query(table, "request_key=requests", "active_binding_id=bindings",
@@ -2370,7 +2348,7 @@ final class WorkspaceCsiApplicationInventory {
         }
 
         private Query query(String table, String... terms) {
-            Declaration declaration = catalogue.stream().filter(value -> value.name().equals(table)).findFirst().orElseThrow();
+            Declaration declaration = CATALOGUE.stream().filter(value -> value.name().equals(table)).findFirst().orElseThrow();
             List<String> alternatives = new ArrayList<>();
             List<Cell> arguments = new ArrayList<>();
             for (String term : terms) {
@@ -2766,7 +2744,7 @@ final class WorkspaceCsiApplicationInventory {
         }
 
         private Row lookup(String table, String predicate, String... parameters) throws SQLException {
-            Declaration declaration = catalogue.stream().filter(value -> value.name().equals(table)).findFirst().orElseThrow();
+            Declaration declaration = CATALOGUE.stream().filter(value -> value.name().equals(table)).findFirst().orElseThrow();
             try (var statement = connection.prepareStatement("SELECT t.* FROM " + table + " t WHERE " + predicate
                     + " ORDER BY " + String.join(",", declaration.keys()) + " LIMIT 2 FOR UPDATE")) {
                 statement.setQueryTimeout(10);
@@ -2972,9 +2950,6 @@ final class WorkspaceCsiApplicationInventory {
                     block(table, null, "missing_or_extra_original");
                 }
             }
-            if (catalogue.contains(SOURCE) && rows("ma_csi_source").stream().filter(row -> row.membership == Membership.ORIGINAL).count() != 1) {
-                block("ma_csi_source", null, "missing_or_extra_original");
-            }
             for (String namespace : List.of("SESSION_CREATE_MODE", "SESSION_CREATE_ACTOR")) {
                 if (rows("ma_request_receipt").stream().filter(row -> row.membership != Membership.OTHER
                         && namespace.equals(row.text("namespace"))).count() != 1) {
@@ -3077,37 +3052,6 @@ final class WorkspaceCsiApplicationInventory {
                         String digest = row.text(field + "_sha256");
                         expect(table, row, bytes == null ? digest == null : hash(bytes).equals(digest));
                     }
-                }
-                case "ma_csi_source" -> {
-                    requireEncoded("PUBLISHED".equals(row.text("phase")) && row.number("runtime_generation") != null
-                            && row.number("reservation_revision") != null && row.number("record_version") != null);
-                    var configuration = WorkspaceCsiNodeSourceStore.decode(row.text("configuration_json"), WorkspaceCsiNodeSourceStore.Configuration.class);
-                    var association = new WorkspaceCsiNodeSourceStore.Association(row.text("binding_id"), row.number("runtime_generation"),
-                            row.text("physical_key"), row.text("reservation_id"), row.number("reservation_revision"), configuration,
-                            row.text("phase"), row.number("record_version"), sourceEvidence(row, "arm"), row.text("pod_uid"),
-                            row.text("gated_spec_sha256"), sourceEvidence(row, "bound"), sourceEvidence(row, "publication"));
-                    WorkspaceCsiNodeSourceStore.validate(association);
-                    var registered = originalRow("ma_storage");
-                    requireEncoded(registered != null);
-                    var registration = registration(registered.text("registration_json"));
-                    var handle = parse(intent.resourceHandleJson());
-                    requireEncoded(registration != null && handle != null && handle.path("placement").isObject());
-                    var placement = handle.path("placement");
-                    var observed = WorkspaceCsiNodeSourceStore.validateEvidence(configuration, association.publication(), "PUBLISHED", association.podUid());
-                    expect(table, row, original.bindingId().equals(association.bindingId())
-                            && original.generation() == association.generation() && intent.physicalKey().equals(association.physicalKey())
-                            && intent.reservation().reservationId().equals(association.reservationId())
-                            && intent.reservation().revision() == association.reservationRevision()
-                            && registration.namespace().equals(observed.scope().namespace())
-                            && registration.driver().equals(observed.scope().driver()) && registration.volumeHandle().equals(observed.scope().volumeId())
-                            && registration.pvUid().equals(observed.scope().pvUid()) && registration.pvcUid().equals(observed.scope().pvcUid())
-                            && ("/var/lib/kubelet/pods/" + association.podUid() + "/volumes/kubernetes.io~csi/" + registration.pvName() + "/mount").equals(observed.scope().target())
-                            && association.podUid().equals(placement.path("podUid").textValue())
-                            && configuration.scope().podName().equals(placement.path("podName").textValue())
-                            && configuration.node().name().equals(placement.path("nodeName").textValue())
-                            && configuration.node().identity().nodeUid().equals(placement.path("nodeUid").textValue())
-                            && ("containerd://" + observed.scope().containerId()).equals(placement.path("containerId").textValue())
-                            && placement.path("image").isTextual() && placement.path("image").textValue().endsWith("@sha256:" + configuration.imageDigest()));
                 }
                 case "ma_storage_owner" -> expect(table, row,
                         intent.physicalKey().equals(row.text("storage_key")) && "CSI".equals(row.text("storage_kind"))
@@ -3367,20 +3311,13 @@ final class WorkspaceCsiApplicationInventory {
             }
         }
 
-        private static com.alibaba.qwen.code.runtimebroker.transport.CsiNodeSourceJournal.Evidence sourceEvidence(Row row, String prefix) {
-            byte[] bytes = row.binary(prefix + "_bytes");
-            requireEncoded(bytes != null && bytes.length <= WorkspaceCsiNodeSourceStore.EVIDENCE_LIMIT && row.number(prefix + "_sequence") != null);
-            return com.alibaba.qwen.code.runtimebroker.transport.CsiNodeSourceJournal.verify(bytes,
-                    new com.alibaba.qwen.code.runtimebroker.transport.CsiNodeSourceJournal.Cursor(row.number(prefix + "_sequence"), row.text(prefix + "_hash")));
-        }
-
         private void block(String table, String key, String code) { blockers.add(new Blocker(table, key, code)); }
 
         private List<Row> rows(String table) { return List.copyOf(tables.get(table).values()); }
 
         private Snapshot snapshot() {
             List<Table> result = new ArrayList<>();
-            for (Declaration declaration : catalogue) {
+            for (Declaration declaration : CATALOGUE) {
                 List<Row> sorted = new ArrayList<>(tables.get(declaration.name()).values());
                 sorted.sort(WorkspaceCsiApplicationInventory::compareKeys);
                 result.add(new Table(declaration.name(), declaration.columns(), declaration.keys(), sorted));

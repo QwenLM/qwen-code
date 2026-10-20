@@ -28,7 +28,6 @@
 10005 dsw-swe-verified-release.yml
 40188 e2e.yml
 11634 finalize-release.yml
-1189 k2-node-evidence.yml
 16647 live-host-release.yml
 5950 live-host.yml
 14543 managed-agent-gate.yml

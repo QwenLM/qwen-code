@@ -98,9 +98,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
     );
-    expect(block).toContain('flock --wait 3600 9');
+    expect(block).toContain('flock --wait 5400 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 60 minutes',
+      '::error::sdk-java host lock not acquired within 90 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -679,37 +679,6 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     ).toHaveLength(1);
   });
 
-  it('sets the packet budget above the escaped inventory fixture before JDBC verification', () => {
-    const steps = parse(workflow).jobs['mysql-integration'].steps;
-    const index = steps.findIndex(
-      (candidate) =>
-        candidate.name ===
-        'Configure MariaDB packet budget for large-object tests',
-    );
-    expect(index).toBeGreaterThan(-1);
-    const configure = steps[index];
-    const packetBytes = Number(
-      configure.run.match(/SET GLOBAL max_allowed_packet=(\d+)/)?.[1],
-    );
-    const inventory = readFileSync(
-      'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationInventory.java',
-      'utf8',
-    );
-    const inventoryMiB = Number(
-      inventory.match(/MAX_BYTES = (\d+) \* 1024 \* 1024;/)?.[1],
-    );
-    expect(packetBytes).toBeGreaterThan(
-      2 * (inventoryMiB * 1024 * 1024 + 1) + 1024,
-    );
-    expect(configure.env.MARIADB_CONTAINER).toBe(
-      '${{ job.services.mariadb.id }}',
-    );
-    const verify = steps.findIndex((candidate) =>
-      candidate.run?.includes('clean verify'),
-    );
-    expect(verify).toBeGreaterThan(index);
-  });
-
   it('keeps the MariaDB datadir on tmpfs so a pool run strands no anonymous volume', () => {
     // mariadb declares VOLUME /var/lib/mysql, and the runner's service
     // teardown is `docker rm --force` without -v: an unmounted datadir
@@ -739,25 +708,28 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
         'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
       );
       const seconds = Number(s.run.match(/flock --wait (\d+) 9/)?.[1]);
-      expect(seconds, s.name).toBeGreaterThanOrEqual(50 * 60);
+      // The fast tier owns the same lock and waits behind these two steps, so
+      // one acquisition budget applies to every lane; run 39229303984 died at
+      // the old 60-minute wait before Maven started.
+      expect(seconds, s.name).toBe(90 * 60);
       return seconds;
     });
     // The ceiling must absorb one full lock wait per acquisition — this job
     // takes the lock once per Maven step — plus the ~50 minutes of measured
-    // Maven work. Run 39097018288 held it for 47m26s, longer than the old
-    // 40-minute acquisition budget. Derive the ceiling from the step count
-    // so another locked step cannot silently overdraw it.
+    // Maven work and ~30 minutes of uncapped setup. Derive it from the step
+    // count so another locked step cannot silently overdraw it.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(
-      lockWaits.reduce((total, seconds) => total + seconds, 0) + 50 * 60,
+      lockWaits.reduce((total, seconds) => total + seconds, 0) +
+        50 * 60 +
+        30 * 60,
     );
     // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured locked work (~5 minutes on
-    // the Java 21 leg of run 37743332082) and setup headroom. This job's holds
-    // now consume part of that wait budget.
+    // cover one full wait plus its own measured hold (the sdk-java suite plus
+    // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      3600 + 10 * 60,
+      lockWaits[0] + 925 + 11 * 60,
     );
   });
 

@@ -167,14 +167,6 @@ public final class WorkspaceCsiReservationStore {
             RuntimeBindingRecord current = lockRetirementBinding(bindings, original);
             verifyRegistration(registration);
             Reservation holder = readReservation(registration.physicalKey());
-            boolean hasSource = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
-                    WorkspaceCsiNodeSourceStore.hasAssociation(connection, current.getBindingId(), registration.physicalKey(), true)));
-            if (hasSource) {
-                jdbc.execute((ConnectionCallback<Void>) connection -> {
-                    WorkspaceCsiNodeSourceStore.requireOriginalPublication(connection, current, registration, holder);
-                    return null;
-                });
-            }
             Retirement prior = readRetirement(current);
             if (prior != null) {
                 verifyRetirement(prior, registration, current, holder);

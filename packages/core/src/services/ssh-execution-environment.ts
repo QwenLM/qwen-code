@@ -126,6 +126,11 @@ export class SshExecutionEnvironment implements ExecutionEnvironment {
       llmContent: output,
       returnDisplay: output,
       outputBudgetApplied: true,
+      // `bounded` may have cut this body under the environment's own
+      // threshold; the pre-cut size is gone, so declare it unknown rather
+      // than let the scheduler measure the cut body as the raw size
+      // (#13652 R5-1).
+      ...(output === text ? {} : { rawOutputSize: null }),
       persistedOutputFiles: [],
       resultFilePaths: [],
     };
