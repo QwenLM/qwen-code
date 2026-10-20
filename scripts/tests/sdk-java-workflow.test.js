@@ -78,13 +78,9 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   it('sizes the daemon-e2e budget for the stretched setup on the fast tier', () => {
-    // The fast tier runs this leg on every touched PR push instead of nightly
-    // only, so it meets the ~44 min stretched-setup tail far more often than a
-    // 45 ceiling leaves room for. This budget was originally sized for the
-    // post-job Maven cache save, which #14396 has since suppressed on
-    // self-hosted runners; a killed job concludes cancelled and reddens the
-    // gate of a green suite either way. The full tier keeps the budget the
-    // stretched-setup sizing below justifies.
+    // The derivation and its measurements live on the job's `timeout-minutes`
+    // comment in .github/workflows/sdk-java.yml; this pins the resulting
+    // expression so a re-derivation cannot change it silently.
     expect(parse(workflow).jobs['daemon-e2e']['timeout-minutes']).toBe(
       "${{ inputs.tier == 'fast' && 90 || 45 }}",
     );
@@ -1100,7 +1096,8 @@ describe('setup-java Maven cache stays on hosted runners', () => {
 // and qwen-autofix.yml already absorb (#11726); the heap class is capped in
 // pnpm-workspace.yaml, and a retry only offers it a quieter host. Pin the
 // recipe on every install so a new bare step fails here instead of on main.
-// Each attempt re-runs prepare's build (~4m32s observed), not just backoff.
+// Each attempt on the five installs that still run prepare re-runs its
+// build (~4m32s observed), not just backoff; daemon-e2e skips prepare.
 describe('SDK Java install-transient retry', () => {
   const installs = Object.entries(parse(workflow).jobs).flatMap(
     ([jobName, job]) =>
@@ -1125,8 +1122,12 @@ describe('SDK Java install-transient retry', () => {
   it.each(installs)(
     '%s skips prepare only where an explicit build step follows',
     (jobName, installStep) => {
-      if (jobName === 'daemon-e2e') return;
-      expect(installStep.env?.QWEN_SKIP_PREPARE, jobName).toBeUndefined();
+      const buildsExplicitly = parse(workflow).jobs[jobName].steps.some((s) =>
+        s.run?.includes('npm run build'),
+      );
+      expect(installStep.env?.QWEN_SKIP_PREPARE !== undefined, jobName).toBe(
+        buildsExplicitly,
+      );
     },
   );
 
