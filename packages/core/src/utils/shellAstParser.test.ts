@@ -308,6 +308,21 @@ describe('isShellCommandReadOnlyAST', () => {
       ['allows input redirection (read-only)', true, 'cat < input.txt'],
       ['rejects append redirection', false, 'echo hello >> out.txt'],
       ['allows here-string', true, 'cat <<< "hello"'],
+      [
+        'allows heredoc data through a read-only pipeline',
+        true,
+        'cat <<EOF | cat\ngit reset --hard\nEOF',
+        "cat <<'EOF' | sort | head -1\ngit stash drop\nEOF",
+      ],
+      [
+        'checks the pipeline nested in a heredoc redirect',
+        false,
+        'cat <<EOF | bash\ngit reset --hard\nEOF',
+        "cat <<'EOF' | sh -s\ngit stash drop\nEOF",
+        'cat <<EOF | sh\nterraform destroy\nEOF',
+        'cat <<EOF | sed s/soft/hard/ | bash\ngit reset --soft\nEOF',
+        'cat <<EOF | tee output.txt\nhello\nEOF',
+      ],
       ['rejects nested command substitution', false, 'echo $(echo $(rm foo))'],
       [
         'allows complex pipeline of read-only commands',

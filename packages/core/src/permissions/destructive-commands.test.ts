@@ -56,6 +56,13 @@ describe('isDestructiveCommand — text that is not executed', () => {
     `git log --grep 'git checkout -- .'`,
     `cat <<'EOF' > notes.md\ngit reset --hard\nEOF`,
     `NOTE='git clean -fd' && echo "$NOTE"`,
+    `printf 'git reset --hard\\n' > f.txt && sort f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort -- --compress-program=sh`,
+    `printf 'git reset --hard\\n' > f.txt && sort -o --compress-program=sh f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort --output --compress-program=sh f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort -k "$KEY" f.txt`,
+    `cat <<EOF | cat\ngit reset --hard\nEOF`,
+    `cat <<EOF | bash\necho safe\nEOF`,
     `[ "$x" = 'terraform destroy' ]`,
   ])('allows %j', async (command) => {
     expect(await reasonFor(command)).toBeNull();
@@ -80,6 +87,13 @@ describe('isDestructiveCommand — executed git and IaC operations', () => {
     ['git clean -d -f', 'git clean -f'],
     ['git clean -xdf', 'git clean -f'],
     ['git clean --force', 'git clean -f'],
+    ['git clean -nf --no-dry-run', 'git clean -f'],
+    ['git clean -fn --no-dry-run', 'git clean -f'],
+    ['git clean --dry-run -f --no-dry-r', 'git clean -f'],
+    ['git clean -nf --no-dry-run -e -n', 'git clean -f'],
+    ['git clean -nf --no-dry-run -- -n', 'git clean -f'],
+    ['git clean -nf $OPTIONS', 'git clean -f'],
+    ['git clean -nf --no-"$OPTION"', 'git clean -f'],
     ['git stash drop', 'git stash drop'],
     ['git stash drop stash@{1}', 'git stash drop'],
     // Options may come before the action.
@@ -132,6 +146,11 @@ describe('isDestructiveCommand — executed git and IaC operations', () => {
     // A dry run wins over --force and deletes nothing.
     'git clean -n -f',
     'git clean --dry-run -fd',
+    'git clean -nf --no-dry-run -n',
+    'git clean -nf --no-dry-run --dry-run',
+    'git clean -nf -e --no-dry-run',
+    'git clean -nf --exclude=--no-dry-run',
+    'git clean -nf -- --no-dry-run',
     // `-e` consumes `-f` as its exclude pattern.
     'git clean -e -f',
     'git stash',
@@ -207,7 +226,15 @@ describe('isDestructiveCommand — wrappers and shell structure', () => {
     `git rebase --exec 'git reset --hard' main`,
     `git rebase --exec='git reset --hard' main`,
     `git rebase -i -x 'git reset --hard' main`,
+    `git rebase --exe='git reset --hard' main`,
+    `git rebase --exe 'git reset --hard' main`,
+    `git rebase -qx'git reset --hard' main`,
+    `git rebase -qvx 'git reset --hard' main`,
+    `git rebase -S --exe='git reset --hard' main`,
+    `git rebase -r --exe='git reset --hard' main`,
     `git difftool -y -x 'git reset --hard #' HEAD~1`,
+    `git difftool -yx'git reset --hard #' HEAD~1`,
+    `git difftool --extc='git reset --hard #' HEAD~1`,
     `bash -c 'git difftool -y --extcmd="git reset --hard #" HEAD~1'`,
     // A heredoc attached to the group the shell sits in.
     `{ bash; } <<'EOF'\ngit reset --hard\nEOF`,
@@ -220,6 +247,20 @@ describe('isDestructiveCommand — wrappers and shell structure', () => {
   it('does not treat a wrapper option value as the program', async () => {
     expect(await reasonFor('bash -o pipefail -c "git status"')).toBeNull();
     expect(await reasonFor('timeout 30 npm test')).toBeNull();
+  });
+
+  it.each([
+    `git rebase --exe='printf "%s" "git reset --hard"' main`,
+    `git rebase -qx'printf "%s" "git reset --hard"' main`,
+    `git rebase -- -x 'git reset --hard'`,
+    `git rebase -s '--exec=git reset --hard' main`,
+    `git rebase -X 'xgit reset --hard' main`,
+    `git rebase -S'xgit reset --hard' main`,
+    `git rebase -r'xgit reset --hard' main`,
+    `git difftool -S'xgit reset --hard'`,
+    `git difftool -- -x 'git reset --hard'`,
+  ])('does not execute the data in %j', async (command) => {
+    expect(await reasonFor(command)).toBeNull();
   });
 });
 
@@ -298,6 +339,18 @@ describe('isDestructiveCommand — commands it cannot verify', () => {
     `printf 'git reset --hard\\n' > fixup.sh && rg --glob {x,--pre} bash . fixup.sh`,
     `printf 'git reset --hard\\n' > fixup.sh && rg -ng {x,--pre} bash . fixup.sh`,
     `printf 'git reset --hard\\n' > fixup.sh && rg --max-columns-preview --pre bash . fixup.sh`,
+    `printf 'git reset --hard\\n' > f.txt && sort --compress-program=sh f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort -S 1k --compress-program sh f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort -m --compress-program sh f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort --comp=sh f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort $OPTIONS f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort --compress-"$OPTION"=sh f.txt`,
+    `printf 'git reset --hard\\n' > f.txt && sort -k $KEY f.txt`,
+    `cat <<EOF | bash\ngit reset --hard\nEOF`,
+    `cat <<'EOF' | sh -s\ngit stash drop\nEOF`,
+    `cat <<EOF | sh\nterraform destroy\nEOF`,
+    `cat <<< 'git reset --hard' | bash`,
+    `cat <<EOF | sed s/soft/hard/ | bash\ngit reset --soft\nEOF`,
     `printf 'git reset --hard\\n' > fixup.sh && . ./fixup.sh`,
     `cat > fix.sh <<'EOF'\ngit stash drop\nEOF\nchmod +x fix.sh && ./fix.sh`,
     `printf 'git clean -fd\\n' | tee fix.sh > /dev/null && sh ./fix.sh`,

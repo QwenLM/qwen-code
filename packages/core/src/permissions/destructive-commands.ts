@@ -666,6 +666,18 @@ function runArgv(argv: string[], ctx: CommandContext, scan: Scan): void {
     }
     scan.hiddenCode ||= preprocessor;
   }
+  if (program === 'sort') {
+    const parsed = parseOptions(
+      args,
+      'koStT',
+      words(
+        'key files0-from output buffer-size field-separator temporary-directory parallel batch-size random-source sort compress-program',
+      ),
+    );
+    if (hasLong(parsed, 'compress-program') || parsed.dynamicOption) {
+      scan.hiddenCode = true;
+    }
+  }
   if (
     args.some((arg) => GIT_METADATA_PATH.test(literalOf(arg))) &&
     (args.some(isDynamic) ||
@@ -889,7 +901,21 @@ function checkGit(
     checkCheckout(rest, scan);
   } else if (subcommand === 'clean') {
     const parsed = parseOptions(rest, 'e', words('exclude'));
-    if (parsed.short.has('n') || hasLong(parsed, 'dry-run')) return;
+    let dryRun = false;
+    for (const option of parsed.ordered) {
+      if (
+        option === '-n' ||
+        (option.startsWith('--') && '--dry-run'.startsWith(option))
+      ) {
+        dryRun = true;
+      } else if (
+        option.startsWith('--no-') &&
+        '--no-dry-run'.startsWith(option)
+      ) {
+        dryRun = false;
+      }
+    }
+    if (dryRun && !parsed.dynamicOption) return;
     const force = parsed.short.has('f') || hasLong(parsed, 'force');
     report(scan, force, parsed.dynamicOption, 'git clean -f');
   } else if (subcommand === 'stash') {
@@ -991,32 +1017,27 @@ function runGitCommandOptions(
   ctx: CommandContext,
   scan: Scan,
 ): void {
-  for (let i = 0; i < rest.length; i++) {
-    const word = rest[i]!;
-    const literal = literalOf(word);
-    const equals = literal.indexOf('=');
-    const name = equals < 0 ? literal : literal.slice(0, equals);
-    if (options.has(name)) {
-      if (equals >= 0) {
-        runGitCommand(word.slice(equals + 1), [word], ctx, scan);
-      } else if (i + 1 < rest.length) {
-        runGitCommand(rest[i + 1]!, [word, rest[i + 1]!], ctx, scan);
-        i++;
+  const rebase = options.has('--exec');
+  const parsed = parseOptions(
+    rest,
+    rebase ? 'xCsX' : 'xtOSG',
+    words(
+      rebase
+        ? 'exec onto strategy strategy-option whitespace empty trailer'
+        : 'extcmd tool rotate-to skip-to',
+    ),
+    (option, value, from) => {
+      if (
+        options.has(option) ||
+        (option.startsWith('--') &&
+          [...options].some((name) => name.startsWith(option)))
+      ) {
+        runGitCommand(value, from, ctx, scan);
       }
-    } else if (
-      [...options].some(
-        (option) => option.length === 2 && name.startsWith(option),
-      ) &&
-      name.length > 2 &&
-      !name.startsWith('--')
-    ) {
-      // `-xCMD`.
-      runGitCommand(word.slice(2), [word], ctx, scan);
-    } else if (isDynamic(word) && !literal.startsWith('-') && literal === '') {
-      // A run-time word may be such an option.
-      scan.unverifiable = true;
-    }
-  }
+    },
+    rebase ? 'Sr' : '',
+  );
+  if (parsed.dynamicOption) scan.unverifiable = true;
 }
 
 /** A command git runs; one it cannot read is not given the benefit. */
@@ -1083,6 +1104,7 @@ function report(
 interface ParsedOptions {
   short: Set<string>;
   long: string[];
+  ordered: string[];
   operands: string[];
   /** A word known only at run time may add options. */
   dynamicOption: boolean;
@@ -1095,10 +1117,13 @@ function parseOptions(
   args: string[],
   shortWithValue = '',
   longWithValue: ReadonlySet<string> = new Set(),
+  onValue?: (option: string, value: string, from: string[]) => void,
+  shortWithOptionalValue = '',
 ): ParsedOptions {
   const parsed: ParsedOptions = {
     short: new Set(),
     long: [],
+    ordered: [],
     operands: [],
     dynamicOption: false,
     dynamicOperands: [],
@@ -1136,23 +1161,39 @@ function parseOptions(
       }
       const name = literal.slice(2, equals < 0 ? undefined : equals);
       parsed.long.push(name);
+      parsed.ordered.push(`--${name}`);
       // Git also accepts a prefix of a value option (`--mes` for
       // `--message`); an ambiguous prefix makes git refuse to run.
       if (
-        equals < 0 &&
         name !== '' &&
         [...longWithValue].some((option) => option.startsWith(name))
       ) {
-        consume(args[++i]);
+        const value = equals < 0 ? args[++i] : arg.slice(equals + 1);
+        consume(value);
+        if (value !== undefined) {
+          onValue?.(`--${name}`, value, equals < 0 ? [arg, value] : [arg]);
+        }
       }
     } else {
       let j = 1;
-      while (j < literal.length && !shortWithValue.includes(literal[j]!)) {
-        parsed.short.add(literal[j++]!);
+      while (
+        j < literal.length &&
+        !shortWithValue.includes(literal[j]!) &&
+        !shortWithOptionalValue.includes(literal[j]!)
+      ) {
+        parsed.short.add(literal[j]!);
+        parsed.ordered.push(`-${literal[j++]!}`);
       }
       if (j < literal.length) {
         parsed.short.add(literal[j]!);
-        if (j === arg.length - 1) consume(args[++i]);
+        parsed.ordered.push(`-${literal[j]!}`);
+        const separate =
+          j === arg.length - 1 && !shortWithOptionalValue.includes(literal[j]!);
+        const value = separate ? args[++i] : arg.slice(j + 1);
+        consume(value);
+        if (value !== undefined) {
+          onValue?.(`-${literal[j]!}`, value, separate ? [arg, value] : [arg]);
+        }
       } else if (dynamic) {
         // The bundle continues at run time.
         parsed.dynamicOption = true;
@@ -1263,6 +1304,13 @@ function readStdin(ctx: CommandContext, scan: Scan): void {
       ) {
         scan.hiddenCode = true;
       }
+    } else if (
+      parent.type === 'heredoc_redirect' ||
+      parent.type === 'herestring_redirect'
+    ) {
+      // The parser nests a trailing pipeline inside the stdin redirect.
+      scan.hiddenCode = true;
+      break;
     } else if (
       !(
         STDIN_SHARING.has(parent.type) ||

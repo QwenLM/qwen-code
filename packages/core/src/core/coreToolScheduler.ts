@@ -146,7 +146,7 @@ import {
 } from './plan-mode-entry-policy.js';
 import {
   applyAutoModeDecision,
-  AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE,
+  AUTO_MODE_DESTRUCTIVE_NON_INTERACTIVE_GUIDANCE,
   decorateAutoModeFallbackConfirmation,
   evaluateAutoMode,
   getAutoModeActionFingerprint,
@@ -4343,7 +4343,7 @@ export class CoreToolScheduler {
                   ? planShellDecision.noApprovalMessage
                   : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).` +
                     (autoModeFallbackRequiresHuman && humanOnlyReason
-                      ? `\n${humanOnlyReason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`
+                      ? `\n${humanOnlyReason}\n${AUTO_MODE_DESTRUCTIVE_NON_INTERACTIVE_GUIDANCE}`
                       : '');
               if (planShellDecision.classification === 'unknown') {
                 rejectPlanShell(errorMessage);

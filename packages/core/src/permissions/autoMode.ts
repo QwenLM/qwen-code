@@ -757,8 +757,14 @@ export function getAutoModePermissionDeniedReason(
 export const AUTO_MODE_DENIAL_GUIDANCE =
   'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. To request manual approval for this exact action, retry the same tool call without changing its arguments. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
-export const AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE =
-  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. A reply in chat does not lift this block. If this action is required, stop and tell the user it needs their manual approval: they can run it themselves, approve it outside AUTO mode, or add a matching permissions.ask rule so AUTO mode asks them to confirm it. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
+const DESTRUCTIVE_DENIAL_BOUNDARY =
+  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. A reply in chat does not lift this block.';
+const DESTRUCTIVE_DENIAL_SAFE_WORK =
+  'You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
+
+export const AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE = `${DESTRUCTIVE_DENIAL_BOUNDARY} If this action is required, stop and tell the user it needs their manual approval: they can run it themselves, approve it outside AUTO mode, or add a matching permissions.ask rule so AUTO mode asks them to confirm it. ${DESTRUCTIVE_DENIAL_SAFE_WORK}`;
+
+export const AUTO_MODE_DESTRUCTIVE_NON_INTERACTIVE_GUIDANCE = `${DESTRUCTIVE_DENIAL_BOUNDARY} If this action is required, stop and tell the user that manual confirmation needs an interactive session. They can retry the exact action there, run it themselves, or approve it outside AUTO mode. ${DESTRUCTIVE_DENIAL_SAFE_WORK}`;
 
 function formatDenialFallbackMessage(
   reason: DenialFallbackReason,

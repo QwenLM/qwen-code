@@ -1072,6 +1072,12 @@ function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
   for (const redirect of node.namedChildren) {
     if (!redirect.type.endsWith('_redirect')) continue;
     result = mergeSafety(result, evaluateSubstitutions(redirect));
+    // A pipeline after a heredoc opener is nested inside the redirect.
+    for (const child of redirect.namedChildren) {
+      if (child.type === 'pipeline') {
+        result = mergeSafety(result, evaluateStatementSafety(child));
+      }
+    }
     if (redirect.type !== 'file_redirect') continue;
     const operator = redirect.children.find(
       (child) => child.type !== 'file_descriptor',

@@ -5856,6 +5856,10 @@ describe('CoreToolScheduler', () => {
       expect(denied.response.error?.message).toContain(
         'A reply in chat does not lift this block.',
       );
+      expect(denied.response.error?.message).toContain(
+        'manual confirmation needs an interactive session',
+      );
+      expect(denied.response.error?.message).not.toContain('permissions.ask');
       expect(
         reportedCalls(harness.onToolCallsUpdate).map((c) => c.status),
       ).not.toContain('awaiting_approval');
