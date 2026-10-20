@@ -250,7 +250,9 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 
 - P2（MCP 结果保留）与 P3（media 与共享输出）是 #13534 的独立切片，引用闭包不同：
   MCP 记录的 set-once 引用规则与 omni 对象存储的跨 Session 内容寻址各自需要独立的
-  设计。
+  设计。Schema 整合后，当前[私有 SQL 媒体生命周期](managed-media-retention-boundary.zh-CN.md)
+  已由通用退役 owner 回收器覆盖。物理共享的 Hosted/omni 媒体及其完整引用释放
+  生命周期仍是后续工作。
 - 本地文件运行时（`LocalToolResultSegmentStore`，运行时基目录下的文件系统布局）不
   归本设计管理；它的保留是独立的主机本地问题。
 - 回放容忍：`loadExtensionRevision` 在恢复工作区时会重读 `child_run.outputRef`。

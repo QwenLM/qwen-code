@@ -5,16 +5,21 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,9 +29,13 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     private static final String CONTENT = "managed-tool-result-content";
     private static final String PAGE = "managed-tool-result-page";
     private static final String MANIFEST = "managed-tool-result-manifest";
+    private static final ObjectMapper MEDIA_JSON = new ObjectMapper();
+    private static final String MEDIA_TOKEN = "media-writer-token-0123456789abcdef";
 
     private String resScope;
     private String token;
+    @TempDir
+    private Path mediaDirectory;
 
     @Test
     void retirementInventoryCompletionIsAtomicWithVerifiedGcSettlement() {
@@ -1282,5 +1291,200 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(ledger()).isEqualTo(beforeLedger);
         assertThat(collector.runOnce()).isFalse();
         assertThat(rows()).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @Test
+    void nativeMediaCollectionPreservesAnotherSessionsIdenticalBytes() throws Exception {
+        initSession();
+        JsonNode original = commitNativeMedia(session);
+        JsonNode other = commitNativeMedia("media-other");
+        byte[] bytes = mediaBytes(original);
+        assertThat(mediaBytes(other)).isEqualTo(bytes);
+        assertThat(original.path("outcomeRef")).isEqualTo(other.path("outcomeRef"));
+        assertThat(ManagedSessionStore.resourceKey(resScope, "media-outcome"))
+                .isNotEqualTo(ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey(tenant, "media-other"), "media-outcome"));
+        assertThat(MEDIA_JSON.readTree(bytes).path("functionResponse").path("parts").get(0)
+                .path("inlineData").path("data").asText()).isEqualTo("AQID");
+        byte[] history = new ManagedSessionStore(jdbc).readResource(tenant, "workspace-1", session,
+                original.path("historyRef").path("resourceId").asText(), MEDIA_TOKEN).bytes();
+        assertThat(history).isEqualTo(Base64.getDecoder().decode(
+                original.required("historyBytesBase64").textValue()));
+        assertThat(MEDIA_JSON.readTree(history).path("message").path("parts").get(0)
+                .path("functionResponse").path("parts").get(0).path("inlineData").path("data")
+                .asText()).isEqualTo("AQID");
+        assertMediaReadable(session, bytes);
+        sealMedia(session);
+        assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
+        assertThat(readRecoveryMedia(original)).isEqualTo(bytes);
+        byte[] corrupt = bytes.clone();
+        corrupt[0] ^= 1;
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE session_scope_key = ? AND"
+                + " resource_id = ?", corrupt, resScope, "media-outcome");
+        try {
+            assertThatThrownBy(() -> readRecoveryMedia(original)).hasMessageContaining("resource_corrupt");
+        } finally {
+            jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE session_scope_key = ? AND"
+                    + " resource_id = ?", bytes, resScope, "media-outcome");
+        }
+        var before = rows();
+        long expected = jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE"
+                + " session_scope_key = ?", Long.class, resScope);
+        retire();
+        assertThat(new ManagedAgentProperties().getToolPublication().isGcEnabled()).isFalse();
+        assertThat(collector(false, Duration.ZERO).runOnce()).isFalse();
+        assertThat(rows()).usingRecursiveComparison().isEqualTo(before);
+        ageMediaRetirement();
+        collectMedia();
+        assertThat(rows()).hasSize(before.size()).allSatisfy(row -> {
+            assertThat(row.get("state")).isEqualTo("COLLECTED");
+            assertThat(row.get("inline_bytes")).isNull();
+        });
+        assertThat(ledger().get("collected_bytes")).isEqualTo(expected);
+        assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
+        assertThat(ledger().get("collected_bytes")).isEqualTo(expected);
+        assertThatThrownBy(() -> new ManagedSessionStore(jdbc).readResource(tenant, "workspace-1",
+                session, "media-outcome", MEDIA_TOKEN))
+                .hasFieldOrPropertyWithValue("code", "tool_output_session_retired");
+        assertThatThrownBy(() -> readRecoveryMedia(original)).hasMessageContaining("resource_collected");
+        assertMediaReadable("media-other", bytes);
+        assertThat(new ManagedSessionStore(jdbc).transactions(tenant, "workspace-1", "media-other",
+                MEDIA_TOKEN, 0, 100).transactions()).hasSize(other.required("transactions").size());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"reader", "recovery"})
+    void nativeMediaRetirementKeepsReaderAndRecoveryEvidence(String protection) throws Exception {
+        initSession();
+        JsonNode original = commitNativeMedia(session);
+        long expectedBytes = jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE"
+                + " session_scope_key = ?", Long.class, resScope);
+        long expectedRefs = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE"
+                + " session_scope_key = ?", Long.class, resScope);
+        boolean reader = "reader".equals(protection);
+        if (!reader) {
+            tx.executeWithoutResult(status -> new ManagedSessionStore(jdbc).blockRecovery(tenant,
+                    session, MEDIA_TOKEN, new ManagedSessionStoreModels.BlockRecoveryRequest(
+                            "workspace-1", "media-writer", 1, "BLOCKED_RESOURCE", "media_evidence")));
+        }
+        try (var lease = reader ? retention.read(key) : null) {
+            sealMedia(session);
+            retire();
+            ageMediaRetirement();
+            assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
+            assertThat(ledger().get("gc_blocker"))
+                    .isEqualTo(reader ? "reader_active" : "recovery_protected");
+            assertThat(rows()).allSatisfy(row -> assertThat(row.get("inline_bytes")).isNotNull());
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE"
+                    + " session_scope_key = ?", Long.class, resScope)).isEqualTo(expectedRefs);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE"
+                    + " tenant_id = ? AND session_id = ?", Long.class, tenant, session))
+                    .isEqualTo(original.required("transactions").size());
+        }
+        if (reader) {
+            jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_kind ="
+                    + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
+            collectMedia();
+            assertThat(ledger().get("collected_bytes")).isEqualTo(expectedBytes);
+        }
+    }
+
+    @Test
+    void foreignReferenceProtectsRetiredNativeMediaWithoutInventingASharingProducer()
+            throws Exception {
+        initSession();
+        JsonNode original = commitNativeMedia(session);
+        commitNativeMedia("media-other");
+        long expectedBytes = jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE"
+                + " session_scope_key = ?", Long.class, resScope) - mediaBytes(original).length;
+        String otherScope = ManagedSessionStore.sessionScopeKey(tenant, "media-other");
+        String resource = ManagedSessionStore.resourceKey(resScope, "media-outcome");
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                        + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                        + " resource_id, gmt_create) VALUES (?, 'RECOVERY', ?, 1, ?, ?,"
+                        + " 'workspace-1', 'media-other', 'media-outcome', " + ManagedSchemaTime.SQL_NOW + ")",
+                otherScope, ManagedSchemaKeys.key("defensive-media-pin"), resource, tenant);
+        sealMedia(session);
+        retire();
+        ageMediaRetirement();
+        collectMedia();
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE resource_key ="
+                + " ?", byte[].class, resource)).isEqualTo(mediaBytes(original));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key ="
+                + " ? AND session_scope_key = ?", Long.class, resource, otherScope)).isEqualTo(1);
+        assertThat(ledger().get("collected_bytes")).isEqualTo(expectedBytes);
+        assertMediaReadable("media-other", mediaBytes(original));
+    }
+
+    private JsonNode commitNativeMedia(String sessionId) throws Exception {
+        Path output = mediaDirectory.resolve(sessionId + ".json");
+        Path log = mediaDirectory.resolve(sessionId + ".log");
+        Path script = Path.of("src/test/resources/managed-media-retention-generator.mjs").toAbsolutePath();
+        Process process = new ProcessBuilder(System.getProperty("node.executable", "node"),
+                script.toString(), tenant, sessionId, output.toString())
+                .directory(Path.of("../..").toRealPath().toFile()).redirectErrorStream(true)
+                .redirectOutput(log.toFile()).start();
+        try {
+            assertThat(process.waitFor(30, TimeUnit.SECONDS)).as("native media producer finishes").isTrue();
+            assertThat(process.exitValue()).as(Files.readString(log)).isZero();
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+            }
+        }
+        JsonNode fixture = MEDIA_JSON.readTree(output.toFile());
+        var store = new ManagedSessionStore(jdbc);
+        tx.executeWithoutResult(status -> store.acquireWriter(tenant, sessionId, MEDIA_TOKEN,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "media-writer", 60000L)));
+        for (JsonNode transaction : fixture.required("transactions")) {
+            var request = MEDIA_JSON.treeToValue(transaction, ManagedSessionStoreModels.CommitTransactionRequest.class);
+            tx.executeWithoutResult(status -> store.commit(tenant, sessionId, MEDIA_TOKEN, request));
+        }
+        return fixture;
+    }
+
+    private static byte[] mediaBytes(JsonNode fixture) {
+        return Base64.getDecoder().decode(fixture.required("outcomeBytesBase64").textValue());
+    }
+
+    private void assertMediaReadable(String sessionId, byte[] expected) {
+        assertThat(new ManagedSessionStore(jdbc).readResource(tenant, "workspace-1", sessionId,
+                "media-outcome", MEDIA_TOKEN).bytes()).isEqualTo(expected);
+    }
+
+    private byte[] readRecoveryMedia(JsonNode fixture) {
+        var source = MEDIA_JSON.createObjectNode();
+        source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
+                .put("sessionId", fixture.path("sessionKey").path("sessionId").asText())
+                .put("journalRevision", fixture.required("transactions").size())
+                .putNull("latest_checkpoint_resource_id");
+        JsonNode resource = new WorkspaceRecoveryReader(jdbc, null).resource(source,
+                fixture.required("outcomeRef"));
+        return Base64.getDecoder().decode(resource.required("bytesBase64").textValue());
+    }
+
+    private void sealMedia(String sessionId) {
+        tx.executeWithoutResult(status -> new ManagedSessionStore(jdbc).sealWriter(tenant,
+                sessionId, MEDIA_TOKEN, new ManagedSessionStoreModels.SealWriterRequest(
+                        "workspace-1", "media-writer", 1)));
+    }
+
+    private void ageMediaRetirement() {
+        jdbc.update("UPDATE ma_session SET retired_at = retired_at - 60000 WHERE tenant_id = ?"
+                + " AND session_id = ?", tenant, session);
+    }
+
+    private void collectMedia() {
+        var collector = collector(true, Duration.ZERO);
+        boolean complete = false;
+        for (int page = 0; page < 16; page++) {
+            assertThat(collector.runOnce()).isTrue();
+            if ("SUCCEEDED".equals(ledger().get("state"))) {
+                complete = true;
+                break;
+            }
+            assertThat(rows()).allSatisfy(row -> assertThat(row.get("inline_bytes")).isNotNull());
+        }
+        assertThat(complete).isTrue();
     }
 }

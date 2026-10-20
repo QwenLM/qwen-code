@@ -2,9 +2,8 @@
 
 [English](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.md) | [简体中文](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.zh-CN.md)
 
-> Builds on #14701, now in main. The deny arm shipped there; `failclosed-reply-lost`
-> lands in this layer, and the remaining cells are planned and are not claimed
-> implemented until each test lands.
+> Builds on #14701. Both decision cells shipped: the deny arm there, and
+> `failclosed-reply-lost` in #14803. The remaining rows are assessed below.
 
 ## Problem and scope
 
@@ -18,7 +17,7 @@ MessageDisplay reload.
 
 `failclosed-reply-lost` is implemented in
 `fg13fFailClosedReplyLossReplaysTheBlockedFailureOnMySql`; the other rows are
-planned.
+assessed under Remaining arms.
 
 | Case                     | Inject                                                                                                                                                                                                                                                     | Expect                                                                                                                    |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -39,15 +38,33 @@ failure rather than a deny.
 Already on main: the failClosed wrap (`hosted-hook-session.test.ts`), the
 oversized worker bound (`managed-hook-runtime.test.ts`: a 70 KiB handler return
 against the 60 KiB `MAX_BYTES`, receipt under 1 KiB), and the receipt cap and
-the running quota (the 4096-operation worker test). The Hosted cells add what
-the in-process tests cannot see: the harness aggregate/settle bound, the
-transport leg, owner restart and lifecycle. `failclosed-reply-lost` adds the
+the running quota (the 4096-operation worker test). The Hosted cells add the
+transport leg, owner restart and lifecycle; the aggregate/settle bound is
+in-process too (see Remaining arms). `failclosed-reply-lost` adds the
 Hosted path for the wrap: the settled failure reply is dropped, the record
 shows `recovery_blocked` / `outcome_unknown`, and a later status read persists
 the wrapped block before the tool. For `receipt-cap` that marginal
 value is delivery — a cap refusal crosses the broker as a deny — not the cap
 arithmetic; its 4096 `hook-execute` requests are why the cell is budgeted
 separately.
+
+## Remaining arms
+
+Three rows are covered in-process and are not planned as Hosted cells:
+
+- `oversized-output`: the 60 KiB aggregate/settle bound is pinned by
+  `hosted-hook-session.test.ts` ("bounds combined ... decisions without losing
+  denial"), which runs two 36 KiB Hooks on PreToolUse and PermissionRequest,
+  with and without a lost final-marker write.
+- `receipt-cap` and `running-quota`: the 4096-operation worker test pins both
+  refusals and their outcomes.
+
+A Hosted cell for any of them would add the transport leg alone, at 150 s of
+the shared fork each. That is deferred until a transport-specific defect
+appears; the arms stay tracked on #14449.
+
+`message-display-reload` remains planned: suppression is display state in the
+Harness model, and no Hosted cell pins that it survives a reload.
 
 ## Mutation witnesses
 
@@ -56,14 +73,6 @@ separately.
   `failClosed` wrap and the result carries `success:false` with no
   `decision:'block'`, so the tool runs. Rerun the command on a lost reply and
   `hook.call` counts two.
-- `oversized-output`: mutate the layer the witness names. The worker bound is
-  already pinned by `managed-hook-runtime.test.ts`; reverting it turns that
-  test red, not this cell. This cell's witnesses are the harness
-  aggregate/settle bound and the transport leg.
-- `receipt-cap`: let one more receipt in, or serve the request. The deny
-  assertion fails.
-- `running-quota`: classify the refusal as blocking. It denies under the allow
-  policy too.
 - `message-display-reload`: retain the suppressed text. The reload replay
   contains it.
 
