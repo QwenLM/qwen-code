@@ -6307,7 +6307,7 @@ function isTerminalSessionHttpError(error: unknown): boolean {
  * transcript — treat the error as terminal and park with a visible error
  * instead of reconnecting.
  */
-function isSessionArchivedHttpError(error: unknown): boolean {
+export function isSessionArchivedHttpError(error: unknown): boolean {
   if (!(error instanceof DaemonHttpError) || error.status !== 409) return false;
   const body = isRecord(error.body) ? error.body : undefined;
   return body?.['code'] === 'session_archived';

@@ -125,6 +125,8 @@ export function useScopedSessions(
     nextCursor: scoped.nextCursor,
     liveMergeFailed: scoped.liveMergeFailed,
     truncated: scoped.truncated,
+    // Same reason: a stale-retained scoped page is not proof of absence.
+    stale: scoped.stale,
     deleteSession,
     deleteSessions,
     releaseSession: primaryReleaseSessionAction ? releaseSession : undefined,
