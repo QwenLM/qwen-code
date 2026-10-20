@@ -13974,6 +13974,40 @@ describe('DingtalkChannel proactive send', () => {
     },
   );
 
+  it.each(['\u0001', '\ud800'])(
+    'delivers nested lists with serialization-amplifying content (%j)',
+    async (character) => {
+      const channel = proactive(createChannel());
+      const { sendCalls } = stubProactiveFetch();
+      const text =
+        Array.from(
+          { length: 15 },
+          (_, i) => '  '.repeat(i) + '- level ' + i,
+        ).join('\n') +
+        '\n' +
+        '  '.repeat(15) +
+        character.repeat(32000);
+
+      await channel.pushProactive(groupTarget, text);
+
+      const sends = sendCalls();
+      expect(sends.length).toBeGreaterThan(1);
+      for (const call of sends) {
+        expect(
+          Buffer.byteLength(JSON.parse(String(call[1]?.body)).msgParam),
+        ).toBeLessThanOrEqual(15_000);
+      }
+      expect(
+        sends
+          .map(
+            (call) =>
+              msgParamOf(call).text.match(/```text\n([\s\S]*)\n```$/u)?.[1],
+          )
+          .join(''),
+      ).toBe(text);
+    },
+  );
+
   it.each([
     ['Worker one', 14_939, 'ts'],
     ['S'.repeat(3775), 11_142, 'ts'],

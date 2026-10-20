@@ -74,6 +74,29 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     expect(parts.join('')).toBe(text);
     expect(parts.every((part) => measure(part) <= 3800)).toBe(true);
   });
+  it('replans from source when nested container budgets cannot fit a fragment', () => {
+    const text =
+      Array.from(
+        { length: 15 },
+        (_, i) => '  '.repeat(i) + '- level ' + i,
+      ).join('\n') +
+      '\n' +
+      '  '.repeat(15) +
+      '\u0001'.repeat(32000);
+    const parts = splitMarkdown(text, {
+      targetLength: 1250,
+      maxLength: 1250,
+      unit,
+    });
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.every((part) => measure(part) <= 1250)).toBe(true);
+    expect(
+      parts
+        .flatMap(code)
+        .map((block) => block.value)
+        .join(''),
+    ).toBe(text);
+  });
   it.each([
     '[source](https://docs.example.com/' + 'x'.repeat(6000) + ')',
     '`' + 'x'.repeat(6000) + '`',

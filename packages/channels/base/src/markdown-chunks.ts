@@ -41,16 +41,17 @@ export function splitMarkdown(
     parts.reduce((total, part) => total + size(part) + reservedLength, 0) <=
       4 * length + maxLength + reservedLength &&
     parts.every((part) => size(part) <= maxLength);
-  const preferred = split(
-    text,
+  for (const target of [
     reservedLength > targetLength ? maxLength : targetLength,
     maxLength,
-    size,
-    0,
-  );
-  if (fits(preferred)) return preferred;
-  const expanded = split(text, maxLength, maxLength, size, 0);
-  if (fits(expanded)) return expanded;
+  ]) {
+    try {
+      const parts = split(text, target, maxLength, size, 0);
+      if (fits(parts)) return parts;
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+    }
+  }
   // Re-plan from the original source, without repeated container context.
   const literal = split(text, maxLength, maxLength, size, 16);
   if (fits(literal)) return literal;
