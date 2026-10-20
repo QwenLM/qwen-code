@@ -1002,7 +1002,7 @@ export function convertToFunctionResponse(
   toolName: string,
   callId: string,
   llmContent: PartListUnion,
-  producerResult?: Pick<ToolResult, 'rawOutputSize'>,
+  producerResult?: Pick<ToolResult, 'rawOutputSize' | 'truncatedByProducer'>,
   config?: Pick<Config, 'getChatCompression'>,
 ): Part[] {
   const processed = measureToolOutput(llmContent, config);
@@ -1029,7 +1029,11 @@ export function convertToFunctionResponse(
       toolType: toolName.startsWith('mcp__') ? 'mcp' : 'native',
       rawSize,
       truncated:
-        rawSize === undefined ? undefined : rawSize.chars > processed.chars,
+        producerResult?.truncatedByProducer === true
+          ? true
+          : rawSize === undefined
+            ? undefined
+            : rawSize.chars > processed.chars,
     },
   );
 }
@@ -6294,11 +6298,14 @@ export class CoreToolScheduler {
                 ? 'mcp'
                 : 'native',
             rawSize,
-            truncated: budgetReduced
-              ? true
-              : rawSize === undefined
-                ? undefined
-                : processedChars < rawSize.chars,
+            truncated:
+              !replacement && producerToolResult?.truncatedByProducer === true
+                ? true
+                : budgetReduced
+                  ? true
+                  : rawSize === undefined
+                    ? undefined
+                    : processedChars < rawSize.chars,
             budget: budgetReduced ? appliedOutputBudget?.value : undefined,
             budgetSource: budgetReduced
               ? appliedOutputBudget?.source

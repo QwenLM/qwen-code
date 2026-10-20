@@ -2894,6 +2894,7 @@ export class LlmChat {
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
             : newHistory,
+          summaryPrefixLength: newHistory.length,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3531,6 +3532,7 @@ export class LlmChat {
           this.chatRecordingService?.recordChatCompression({
             info: compressionInfo,
             compressedHistory: [...this.getHistoryShallow(), userContent],
+            summaryPrefixLength: this.getHistoryShallow().length,
             completedToolCallIds: this.completedToolCallIds,
           });
         }
