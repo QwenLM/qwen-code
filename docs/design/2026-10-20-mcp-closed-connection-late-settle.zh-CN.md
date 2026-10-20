@@ -10,7 +10,7 @@ Issue #14880 第 1 项还剩一半。#14892 已为「连接存活」形态建了
 
 - `managed-mcp-runtime.ts` 的 `control()` 在 Runtime 级去重：按 Session scope + `operationId` 查 Runtime 级 `operations` 表，内容相同的重试返回既有视图，改动请求内容则拒绝为 conflict。因此同 id 重试**不会**让工具执行第二次。
 - `client.onclose` 只把连接标为关闭，并对 pending 操作调用 `unknown()`；它不删除连接对象，也不删 `pending` 表，所以记录与去重都活过这次关闭。
-- 关闭摧毁的是本 Runtime 的连接对象，这比「协议禁止」窄得多。Streamable HTTP 定义了可恢复与重投递：客户端用 `Last-Event-ID` 重连，服务端重放断线期间的消息，包括原请求的响应，无需再次调用工具。Runtime 已经在用 `StreamableHTTPClientTransport`，但 `client.onclose` 从不尝试恢复，所以是本实现没有走这条路。要区分四种状态：物理 HTTP 连接中断（服务端保留会话则可恢复）、当前连接对象关闭（今天的行为：不恢复）、MCP 会话失效（无可重放）、stdio 进程退出（根本没有这条路）。下面的限制说的是本实现所走的路径，不是 MCP 允许什么。
+- 关闭只是把连接标为关闭——记录与去重都还在——而本 Runtime 不尝试恢复它；这比「协议禁止」窄得多。Streamable HTTP 定义了可恢复与重投递：客户端用 `Last-Event-ID` 重连，服务端重放断线期间的消息，包括原请求的响应，无需再次调用工具。Runtime 已经在用 `StreamableHTTPClientTransport`，但 `client.onclose` 从不尝试恢复，所以是本实现没有走这条路。要区分四种状态：物理 HTTP 连接中断（服务端保留会话则可恢复）、当前连接对象关闭（今天的行为：不恢复）、MCP 会话失效（无可重放）、stdio 进程退出（根本没有这条路）。下面的限制说的是本实现所走的路径，不是 MCP 允许什么。
 - Harness 通过 `commitOperation` 记录 unknown 视图，后续读取走 `lookup()`，向 Broker 查 `mcp-status`。
 - `ManagedMcpProtocol.RECOVERY_KINDS` 含 `mcp-status`/`mcp-cancel`/`mcp-release` 并按 `targetOperationId` 校验；迟到结果没有对应形态。
 
@@ -24,9 +24,10 @@ Issue #14880 第 1 项还剩一半。#14892 已为「连接存活」形态建了
 ## 待定问题
 
 - 选哪条解除路径：服务端重查契约，还是幂等键 + 调用方重做。
-- 若选后者，哪些工具能容忍重复副作用、哪些必须先有幂等键。
+- 是否实现 Streamable HTTP resume、本工作区哪些服务器能重投递。
+- 对 stdio 与不可恢复的服务：用服务端重查键，还是幂等键 + 调用方重做。
 
 ## 验收
 
-- 两种语言陈述同一限制、同样的两条解除路径，并同样不声称门禁。
+- 两种语言陈述同一限制、同样顺序的三条恢复路径，并同样不声称门禁。
 - 关于 `control()`、`client.onclose` 与 `connection.pending` 的主张与受审提交的代码树一致。
