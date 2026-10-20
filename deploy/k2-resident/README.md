@@ -33,7 +33,7 @@ does not contact the cluster or database. From the server package, invoke the
 built operator with:
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.service.WorkspaceCsiProtectionMain \
+java -Dloader.main=com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiProtectionMain \
   -cp target/qwen-managed-agent-server-0.1.0-alpha-csi-runtime.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   /absolute/path/registration.json resident-protection resident-binding
