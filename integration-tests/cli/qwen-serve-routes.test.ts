@@ -500,6 +500,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_branch',
       'session_branch_worktree',
       'workspace_reload',
+      'workspace_model_reload',
       'channel_delivery',
       'channel_control',
       'channel_management',

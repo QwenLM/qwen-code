@@ -755,6 +755,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'session_branch_worktree',
+  'workspace_model_reload',
   'channel_delivery',
   'workspace_channel_observed_contacts',
   'workspace_display_name',
@@ -850,6 +851,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'session_branch_worktree' &&
+      f !== 'workspace_model_reload' &&
       f !== 'channel_delivery' &&
       f !== 'workspace_channel_observed_contacts' &&
       f !== 'workspace_display_name' &&
@@ -907,6 +909,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch_worktree',
   'rate_limit',
   'workspace_reload',
+  'workspace_model_reload',
   'channel_delivery',
   'channel_reload',
   'channel_control',

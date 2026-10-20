@@ -1590,15 +1590,29 @@ function extractNestedErrorDetail(error: unknown): string | undefined {
   return undefined;
 }
 
+function getJsonRpcErrorDataField(err: unknown, field: string): unknown {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const data = (err as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return undefined;
+  return (data as Record<string, unknown>)[field];
+}
+
 function extractJsonRpcErrorField(
   err: unknown,
   field: string,
 ): string | undefined {
-  if (typeof err !== 'object' || err === null) return undefined;
-  const data = (err as { data?: unknown }).data;
-  if (typeof data !== 'object' || data === null) return undefined;
-  const value = (data as Record<string, unknown>)[field];
+  const value = getJsonRpcErrorDataField(err, field);
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function extractJsonRpcErrorNumber(
+  err: unknown,
+  field: string,
+): number | undefined {
+  const value = getJsonRpcErrorDataField(err, field);
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 export function extractErrorCode(err: unknown): string | undefined {
@@ -1742,6 +1756,9 @@ function broadcastTurnError(
       ? (extractJsonRpcErrorField(err, 'code') ?? extractErrorCode(err))
       : extractErrorCode(err);
   const loopType = extractJsonRpcErrorField(err, 'loopType');
+  const loopReason = extractJsonRpcErrorField(err, 'loopReason');
+  const toolCallCount = extractJsonRpcErrorNumber(err, 'toolCallCount');
+  const toolCallLimit = extractJsonRpcErrorNumber(err, 'toolCallLimit');
   if (errorKind) {
     writeServeDebugLine(
       `turn_error classified session=${JSON.stringify(sessionId)} ` +
@@ -1775,6 +1792,9 @@ function broadcastTurnError(
         ...(code ? { code } : {}),
         ...(errorKind ? { errorKind } : {}),
         ...(loopType ? { loopType } : {}),
+        ...(loopReason ? { loopReason } : {}),
+        ...(toolCallCount !== undefined ? { toolCallCount } : {}),
+        ...(toolCallLimit !== undefined ? { toolCallLimit } : {}),
         ...(promptId ? { promptId } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
