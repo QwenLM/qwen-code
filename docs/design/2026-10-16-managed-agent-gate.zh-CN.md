@@ -73,20 +73,21 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 
 `gate` job 为工作流启动的每次运行报告层级结果。它的名字是计算出来的：
 
-| 事件                  | 范围           | 名字                                 |
-| --------------------- | -------------- | ------------------------------------ |
-| 任意                  | 未改到         | `Managed Agent gate`（通过）         |
-| `pull_request`        | 改到           | `Managed Agent fast tier`            |
-| `pull_request_review` | 改到，跑了全量 | `Managed Agent gate`                 |
-| `pull_request_review` | 改到，未跑全量 | `Managed Agent review (no full run)` |
-| `pull_request_review` | 非 approve     | 所有 job 跳过，不报告任何名字        |
-| `push`、`merge_group` | 改到           | `Managed Agent gate`                 |
-| 任意                  | 层级选择失败   | `Managed Agent gate`（失败）         |
+| 事件                  | 范围                     | 名字                                 |
+| --------------------- | ------------------------ | ------------------------------------ |
+| 任意                  | 未改到                   | `Managed Agent gate`（通过）         |
+| `pull_request`        | 改到                     | `Managed Agent fast tier`            |
+| `pull_request_review` | 改到，跑了全量           | `Managed Agent gate`                 |
+| `pull_request_review` | 改到，未跑全量           | `Managed Agent review (no full run)` |
+| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不报告任何名字        |
+| `push`、`merge_group` | 改到                     | `Managed Agent gate`                 |
+| 任意                  | 层级选择失败             | `Managed Agent gate`（失败）         |
 
-非 approve 的 review 不启动任何 job：GitHub 仍会创建这次运行，但它永远选不到 `none`
-以上的层级，因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。它以前会
-报告 `Managed Agent review (no full run)`——一条没有任何规则读取的绿色 check——现在
-什么也不报告。
+非 approve 的 review，以及 PR 关闭后才提交的 review，都不启动任何 job：GitHub 仍会
+创建这次运行，但它永远选不到 `none` 以上的层级——或者它要报告的检查已经不再门禁任何
+东西——因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。它以前会报告
+`Managed Agent review (no full run)`——一条没有任何规则读取的绿色 check——现在什么
+也不报告。
 
 分支保护读取同名检查中最近一次更新的那个。因此改到路径的 PR 会一直显示
 `Managed Agent gate` 为 Expected，直到其 head 上的全量运行报告它；对这类 PR，只有
@@ -102,8 +103,7 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 
 main 开启了 `dismiss_stale_reviews`，所以一个 head 的首个 approve 必然在它最后一次
 push 之后。只有维护者的 approve 才会启动全量层级：reviewer 的 `author_association`
-必须是 `OWNER`、`MEMBER` 或 `COLLABORATOR`，缺失该字段时同样按不放行处理。PR 关闭后
-才提交的 review 会被跳过：分支保护不再读取该检查，且 push 臂已经覆盖了合并后的树。
+必须是 `OWNER`、`MEMBER` 或 `COLLABORATOR`，缺失该字段时同样按不放行处理。
 `qwen-triage-finalize.yml` 监听本工作流，并在一个 PR 的检查全绿后自动发 deferred
 `APPROVE`；少了这道限制，门禁自己的 fast 层级就会在无人参与的情况下买下仓库里最贵的
 一次运行。

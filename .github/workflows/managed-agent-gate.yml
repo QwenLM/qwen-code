@@ -36,10 +36,12 @@ concurrency:
 jobs:
   scope:
     name: 'Select the Managed Agent tier'
-    # Only an approval can select a tier above none (see `Choose the tier`), so
-    # any other review starts no job and costs no runner; it never reported the
-    # required name anyway.
-    if: "${{ github.event_name != 'pull_request_review' || github.event.review.state == 'approved' }}"
+    # Only an approval on an open pull request can select a tier above none
+    # (see `Choose the tier`), so any other review starts no job and costs no
+    # runner; it never reported the required name anyway. A review submitted
+    # after the pull request closed cannot gate anything — its head already
+    # merged or was abandoned — and the push arm covers the merged tree.
+    if: "${{ github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.pull_request.state == 'open') }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     permissions:
@@ -206,7 +208,6 @@ jobs:
           TOUCHED: '${{ steps.paths.outputs.touched }}'
           REVIEW_STATE: '${{ github.event.review.state }}'
           REVIEW_AUTHOR_ASSOCIATION: '${{ github.event.review.author_association }}'
-          PR_STATE: '${{ github.event.pull_request.state }}'
           BASE_REF: '${{ github.event.pull_request.base.ref }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
@@ -225,13 +226,7 @@ jobs:
                 # land green, so an ungated check lets the gate's own fast tier
                 # buy the most expensive run in the repository with no human
                 # involved. An empty association fails closed the same way.
-                # A review submitted after the PR closed cannot affect branch
-                # protection: its head already merged or was abandoned. The
-                # push arm covers the merged tree, so skip the suite instead of
-                # contending for the per-host Java lock.
-                if [[ "${PR_STATE}" == 'closed' ]]; then
-                  echo 'PR is closed; skipping the review run.'
-                elif [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' &&
+                if [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' &&
                   ' OWNER MEMBER COLLABORATOR ' == *" ${REVIEW_AUTHOR_ASSOCIATION} "* ]]; then
                   tier=full
                   urls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?check_name=Managed%20Agent%20gate&per_page=100" \
@@ -282,9 +277,10 @@ jobs:
       - 'suite'
     # A cancelled PR run must release concurrency even if scope was cancelled
     # before choosing a tier. Full runs and main/merge-group cancellations
-    # still report. A review that is not an approval skips with `scope` above:
-    # reporting a tier it never selected would only add a green check.
-    if: "${{ always() && (github.event_name != 'pull_request_review' || github.event.review.state == 'approved') && (github.event_name != 'pull_request' || needs.scope.outputs.tier == 'full' || !cancelled()) }}"
+    # still report. A review that is not an approval, or one submitted after
+    # the pull request closed, skips with `scope` above: reporting a tier it
+    # never selected would only add a green check.
+    if: "${{ always() && (github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.pull_request.state == 'open')) && (github.event_name != 'pull_request' || needs.scope.outputs.tier == 'full' || !cancelled()) }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
@@ -303,7 +299,7 @@ jobs:
           fi
           if [[ "${TIER}" == 'none' ]]; then
             if [[ "${TOUCHED}" == 'true' ]]; then
-              echo 'No full run for this review: the pull request is closed, this is not an approval, or an earlier approval run already covers this head.'
+              echo 'No full run for this review: not an approval, or an earlier approval run already covers this head.'
             else
               echo 'No Managed Agent paths changed.'
             fi

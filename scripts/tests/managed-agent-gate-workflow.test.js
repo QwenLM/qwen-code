@@ -338,11 +338,14 @@ describe('Managed Agent gate required check', () => {
     (event, tier, cancelled, expected) => {
       expect(
         evaluate(gate.jobs.gate.if, {
-          // Only an approval reaches this arm of a review event.
+          // Only an approval on an open pull request reaches this arm.
           github: github(
             event,
             event === 'pull_request_review'
-              ? { review: { state: 'approved' } }
+              ? {
+                  review: { state: 'approved' },
+                  pull_request: { state: 'open' },
+                }
               : {},
           ),
           needs: { scope: { outputs: { tier } } },
@@ -359,7 +362,10 @@ describe('Managed Agent gate required check', () => {
     'a %s review starts no job',
     (state) => {
       const context = {
-        github: github('pull_request_review', { review: { state } }),
+        github: github('pull_request_review', {
+          review: { state },
+          pull_request: { state: 'open' },
+        }),
         needs: { scope: { outputs: {} } },
       };
       expect(evaluate(gate.jobs.scope.if, context)).toBe(false);
@@ -369,11 +375,29 @@ describe('Managed Agent gate required check', () => {
 
   it('an approval still runs both jobs', () => {
     const context = {
-      github: github('pull_request_review', { review: { state: 'approved' } }),
+      github: github('pull_request_review', {
+        review: { state: 'approved' },
+        pull_request: { state: 'open' },
+      }),
       needs: { scope: { outputs: { tier: 'none' } } },
     };
     expect(evaluate(gate.jobs.scope.if, context)).toBe(true);
     expect(evaluate(gate.jobs.gate.if, context)).toBe(true);
+  });
+
+  // Branch protection no longer reads the check once a PR closes, and an
+  // automated reviewer can approve after merge (#14774). Starting the run
+  // would take two runners and publish a check nothing reads.
+  it('an approval on a closed pull request starts no job', () => {
+    const context = {
+      github: github('pull_request_review', {
+        review: { state: 'approved' },
+        pull_request: { state: 'closed' },
+      }),
+      needs: { scope: { outputs: {} } },
+    };
+    expect(evaluate(gate.jobs.scope.if, context)).toBe(false);
+    expect(evaluate(gate.jobs.gate.if, context)).toBe(false);
   });
 
   it.each(['pull_request', 'push', 'merge_group'])(
@@ -449,22 +473,6 @@ describe('Managed Agent gate required check', () => {
     });
     expect(result.status).toBe(code);
   });
-
-  it('names a closed pull request among the reasons no full run starts', () => {
-    const result = spawnSync('bash', ['-c', report], {
-      env: {
-        PATH: process.env.PATH,
-        EVENT_NAME: 'pull_request_review',
-        SCOPE_RESULT: 'success',
-        TIER: 'none',
-        TOUCHED: 'true',
-        SUITE_RESULT: 'skipped',
-      },
-      encoding: 'utf8',
-    });
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('pull request is closed');
-  });
 });
 
 describe('Managed Agent gate tier selection', () => {
@@ -501,7 +509,6 @@ describe('Managed Agent gate tier selection', () => {
         HEAD_SHA: 'h1',
         BASE_REF: 'main',
         PR_NUMBER: '7',
-        PR_STATE: 'open',
         REVIEW_AUTHOR_ASSOCIATION: 'MEMBER',
         TOUCHED: 'true',
         FAKE_URLS: '',
@@ -555,34 +562,6 @@ describe('Managed Agent gate tier selection', () => {
         JSON.stringify(association),
       ).toBe('tier=none');
     }
-  });
-
-  it('skips a review of a closed pull request', () => {
-    const approve = {
-      EVENT_NAME: 'pull_request_review',
-      REVIEW_STATE: 'approved',
-    };
-    // An automated reviewer can approve after merge. The check no longer
-    // gates anything, and a full run only starves live lanes on the host lock.
-    expect(tier({ ...approve, PR_STATE: 'closed' })).toBe('tier=none');
-    expect(tier({ ...approve, PR_STATE: 'open' })).toBe('tier=full');
-  });
-
-  it('feeds the pull request state into the tier step', () => {
-    expect(
-      evaluate(step.env.PR_STATE, {
-        github: github('pull_request_review', {
-          pull_request: { state: 'closed' },
-        }),
-      }),
-    ).toBe('closed');
-  });
-
-  it('keeps the fast tier when a push or merge group has no pull request', () => {
-    // Neither payload carries a pull_request object, so the env line renders
-    // empty and must not be mistaken for a closed pull request.
-    expect(tier({ EVENT_NAME: 'push', PR_STATE: '' })).toBe('tier=fast');
-    expect(tier({ EVENT_NAME: 'merge_group', PR_STATE: '' })).toBe('tier=fast');
   });
 
   it('skips an approval only when an earlier approval run covers the head', () => {
