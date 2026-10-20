@@ -203,6 +203,7 @@ export async function persistPermissionOutcome(
     | undefined,
   pm: PermissionManager | null | undefined,
   payload?: ToolConfirmationPayload,
+  isActive: () => boolean = () => true,
 ): Promise<void> {
   if (
     confirmationDetails.type !== 'exec' &&
@@ -232,9 +233,11 @@ export async function persistPermissionOutcome(
 
   if (rules.length > 0) {
     for (const rule of rules) {
+      if (!isActive()) return;
       // 1. Persist to disk (settings.json)
       if (persistFn) {
         await persistFn(scope, 'allow', rule);
+        if (!isActive()) return;
       }
       // 2. Immediately update in-memory PermissionManager so the
       //    new rule takes effect without restart.

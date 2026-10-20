@@ -3,13 +3,42 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { PauseIcon } from 'lucide-react';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
+import type { TrajectoryLifecycleProjection } from '../../trajectory/project-trajectory-lifecycle';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement, isFocusUnclaimed } from '../../utils/dom';
 import { formatDuration } from '../messages/StatsMessage';
 import styles from './TrajectoryExecutions.module.css';
+
+const ROW_HEIGHT = 34;
+
+interface ScrollAnchor {
+  keys: string[];
+  index: number;
+  offset: number;
+}
+
+function anchoredOffset(anchor: ScrollAnchor, keys: string[]): number {
+  const indices = new Map(keys.map((key, index) => [key, index]));
+  for (let distance = 0; distance < anchor.keys.length; distance++) {
+    for (const index of [anchor.index + distance, anchor.index - distance]) {
+      const key = anchor.keys[index];
+      const next = key === undefined ? undefined : indices.get(key);
+      if (next !== undefined) return next * ROW_HEIGHT + anchor.offset;
+    }
+  }
+  return anchor.index * ROW_HEIGHT + anchor.offset;
+}
 
 export function TrajectoryExecutions({
   rows,
@@ -18,6 +47,13 @@ export function TrajectoryExecutions({
   outsideWindow,
   selectedKey,
   onSelect,
+  following,
+  liveStatus,
+  historySnapshot,
+  onPause,
+  onReturnToLatest,
+  canReturn,
+  returning,
 }: {
   rows: readonly TrajectoryExecutionRow[];
   omitted: number;
@@ -25,6 +61,13 @@ export function TrajectoryExecutions({
   outsideWindow: number;
   selectedKey?: string;
   onSelect: (key: string) => void;
+  following: boolean;
+  liveStatus: TrajectoryLifecycleProjection['status'];
+  historySnapshot: object | undefined;
+  onPause: () => void;
+  onReturnToLatest: () => void;
+  canReturn: boolean;
+  returning: boolean;
 }) {
   const { t, language } = useI18n();
   const [expanded, setExpanded] = useState(true);
@@ -32,6 +75,13 @@ export function TrajectoryExecutions({
   const rootRef = useRef<HTMLElement>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
+  const anchorRef = useRef<ScrollAnchor | undefined>(undefined);
+  const restoreScrollRef = useRef<() => void>(() => {});
+  const followingRef = useRef(following);
+  const pause = () => {
+    followingRef.current = false;
+    onPause();
+  };
   const setScrollElement = useCallback((node: HTMLDivElement | null) => {
     const previous = scrollRef.current;
     if (!node && previous?.contains(getShadowAwareActiveElement(previous))) {
@@ -56,6 +106,39 @@ export function TrajectoryExecutions({
   const id = useId();
   const open = expanded && !compact;
   const running = rows.some((row) => row.status === 'running');
+  const [updated, setUpdated] = useState(false);
+  const previous = useRef({ rows, liveStatus, historySnapshot });
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = { rows, liveStatus, historySnapshot };
+    if (
+      following ||
+      liveStatus !== 'live' ||
+      before.liveStatus !== 'live' ||
+      historySnapshot !== before.historySnapshot
+    ) {
+      setUpdated(false);
+    } else {
+      const keys = new Set(before.rows.map((row) => row.key));
+      if (rows.some((row) => !keys.has(row.key))) setUpdated(true);
+    }
+  }, [rows, following, liveStatus, historySnapshot]);
+  const rememberScroll = (element: HTMLElement) => {
+    const index = Math.floor(element.scrollTop / ROW_HEIGHT);
+    anchorRef.current = {
+      keys: rows.map((row) => row.key),
+      index,
+      offset: element.scrollTop - index * ROW_HEIGHT,
+    };
+  };
+  useLayoutEffect(() => {
+    followingRef.current = following;
+    if (following) {
+      setActiveKey(undefined);
+      // A successful return requests the top once, even without live delivery.
+      anchorRef.current = undefined;
+    }
+  }, [following]);
   useEffect(() => {
     const update = () => setVisible(!document.hidden);
     document.addEventListener('visibilitychange', update);
@@ -64,11 +147,19 @@ export function TrajectoryExecutions({
   useEffect(() => {
     const panel = rootRef.current?.parentElement;
     if (!panel) return;
+    let frame = 0;
     const observer = new ResizeObserver(([entry]) => {
       if (entry) setCompact(entry.contentRect.height < 480);
+      restoreScrollRef.current();
+      cancelAnimationFrame(frame);
+      if (entry && entry.contentRect.height >= 480 && scrollRef.current)
+        frame = requestAnimationFrame(() => restoreScrollRef.current());
     });
     observer.observe(panel);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
   }, []);
   useEffect(() => {
     if (!open || !visible || !running) return;
@@ -79,10 +170,38 @@ export function TrajectoryExecutions({
   const virtualizer = useVirtualizer({
     count: open ? rows.length : 0,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 34,
+    estimateSize: () => ROW_HEIGHT,
     getItemKey: (index) => rows[index]!.key,
     overscan: 3,
   });
+  useLayoutEffect(() => {
+    const restore = () => {
+      const element = scrollRef.current;
+      if (!element || !open || !visible || element.clientHeight === 0) return;
+      const keys = rows.map((row) => row.key);
+      const target =
+        followingRef.current && (liveStatus === 'live' || !anchorRef.current)
+          ? 0
+          : anchorRef.current
+            ? anchoredOffset(anchorRef.current, keys)
+            : element.scrollTop;
+      const top = Math.max(
+        0,
+        Math.min(target, element.scrollHeight - element.clientHeight),
+      );
+      // Restore after the virtualizer attaches a replacement scroll element.
+      virtualizer.scrollToOffset(top);
+      element.scrollTop = top;
+      const index = Math.floor(element.scrollTop / ROW_HEIGHT);
+      anchorRef.current = {
+        keys,
+        index,
+        offset: element.scrollTop - index * ROW_HEIGHT,
+      };
+    };
+    restoreScrollRef.current = restore;
+    restore();
+  }, [rows, following, liveStatus, open, visible, virtualizer]);
   const points = rows.flatMap((row) => {
     const start = row.startedAt;
     return [
@@ -109,18 +228,58 @@ export function TrajectoryExecutions({
       className={styles.section}
       data-testid="trajectory-executions"
     >
-      <button
-        ref={toggleRef}
-        type="button"
-        className={styles.toggle}
-        aria-expanded={open}
-        onClick={() => {
-          setExpanded(!open);
-          if (!open) setCompact(false);
-        }}
-      >
-        {open ? '▾' : '▸'} {t('trajectory.executions.title')} ({rows.length})
-      </button>
+      <div className={styles.header}>
+        <button
+          ref={toggleRef}
+          type="button"
+          className={styles.toggle}
+          aria-expanded={open}
+          onClick={() => {
+            setExpanded(!open);
+            if (!open) setCompact(false);
+          }}
+        >
+          {open ? '▾' : '▸'} {t('trajectory.executions.title')} ({rows.length})
+        </button>
+        <div className={styles.followControls}>
+          <span role="status" data-testid="trajectory-follow-status">
+            {t(
+              returning
+                ? 'trajectory.executions.returning'
+                : !following
+                  ? 'trajectory.executions.paused'
+                  : liveStatus === 'live'
+                    ? 'trajectory.executions.following'
+                    : 'trajectory.executions.waiting',
+            )}
+            {updated && !following && (
+              <span> · {t('trajectory.executions.updated')}</span>
+            )}
+          </span>
+          <button
+            type="button"
+            aria-label={t('trajectory.executions.pause')}
+            title={t('trajectory.executions.pause')}
+            aria-disabled={!following && !returning}
+            onClick={() => {
+              if (following || returning) pause();
+            }}
+            data-testid="trajectory-follow-pause"
+          >
+            <PauseIcon size={12} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-disabled={!canReturn}
+            onClick={() => {
+              if (canReturn) onReturnToLatest();
+            }}
+            data-testid="trajectory-follow-return"
+          >
+            {t('trajectory.executions.return')}
+          </button>
+        </div>
+      </div>
       {open && (
         <>
           <div className={styles.notice}>
@@ -166,21 +325,39 @@ export function TrajectoryExecutions({
                   ? `${id}-${activeIndex}`
                   : undefined
               }
+              onWheel={(event) => {
+                if (event.deltaY !== 0) pause();
+              }}
+              onScroll={(event) => {
+                if (event.currentTarget.clientHeight === 0) return;
+                const anchor = anchorRef.current;
+                const previousTop = anchor
+                  ? anchor.index * ROW_HEIGHT + anchor.offset
+                  : 0;
+                if (event.currentTarget.scrollTop !== previousTop) pause();
+                rememberScroll(event.currentTarget);
+              }}
               onKeyDown={(event) => {
                 let next = activeIndex;
                 if (event.key === 'ArrowDown') next++;
                 else if (event.key === 'ArrowUp') next--;
                 else if (event.key === 'Home') next = 0;
                 else if (event.key === 'End') next = rows.length - 1;
-                else if (event.key === 'Enter' || event.key === ' ') {
+                else if (event.key === 'PageDown' || event.key === 'PageUp') {
+                  pause();
+                  return;
+                } else if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
+                  pause();
                   if (rows[activeIndex]) onSelect(rows[activeIndex].key);
                   return;
                 } else return;
                 event.preventDefault();
+                pause();
                 next = Math.max(0, Math.min(rows.length - 1, next));
                 setActiveKey(rows[next]!.key);
                 virtualizer.scrollToIndex(next, { align: 'auto' });
+                if (scrollRef.current) rememberScroll(scrollRef.current);
               }}
             >
               <div
@@ -223,6 +400,7 @@ export function TrajectoryExecutions({
                       data-testid="trajectory-execution-row"
                       style={{ transform: `translateY(${item.start}px)` }}
                       onClick={() => {
+                        pause();
                         setActiveKey(row.key);
                         onSelect(row.key);
                       }}
