@@ -8,7 +8,10 @@ import { isDeepStrictEqual } from 'node:util';
 import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { hasImagePayloadReferences } from '@qwen-code/qwen-code-core/services/image-payload-references.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import { parseHostedRecoveryResource } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
+import {
+  HOSTED_MODEL_REQUEST_BYTES,
+  parseHostedRecoveryResource,
+} from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
@@ -69,7 +72,7 @@ export async function publishHostedModelRequest(
   request: HostedModelRequest,
 ): Promise<ManagedSessionDurableRef | undefined> {
   const bytes = Buffer.from(JSON.stringify(request));
-  if (bytes.length > 64 * 1024) return undefined;
+  if (bytes.length > HOSTED_MODEL_REQUEST_BYTES) return undefined;
   return session.resources.publish('hosted-model-request', bytes);
 }
 
@@ -100,6 +103,7 @@ async function readHostedModelRequest(
   const raw = parseHostedRecoveryResource(
     await session.resources.read(ref),
     session.authority.sessionHeader.sessionKey,
+    ref.kind,
   );
   if (raw['promptId'] !== promptId) return undefined;
   const saved = raw as unknown as HostedModelRequest;

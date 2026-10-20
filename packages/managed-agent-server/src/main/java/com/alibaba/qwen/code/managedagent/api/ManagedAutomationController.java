@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.AutomationDefinitionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicAutomation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicAutomationRun;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
-import com.alibaba.qwen.code.managedagent.service.ManagedAutomationService;
-import com.alibaba.qwen.code.managedagent.service.ManagedAutomationService.Result;
+import com.alibaba.qwen.code.managedagent.automation.ManagedAutomationService;
+import com.alibaba.qwen.code.managedagent.automation.ManagedAutomationService.Result;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.AutomationDefinitionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomationRun;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

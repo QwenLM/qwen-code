@@ -1,3 +1,5 @@
+import { useManagedFileReferences } from './use-managed-file-references';
+import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useEffect, useRef, useState } from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
@@ -50,6 +52,10 @@ import {
   managedInputText,
   restoreManagedAttachments,
 } from './managed-input';
+import {
+  readManagedPending,
+  saveManagedPending,
+} from './managed-pending-storage';
 import { isManagedApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
 import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
@@ -110,9 +116,13 @@ function readPendingWorkspace(key: string): PendingWorkspace | undefined {
   return undefined;
 }
 
-function readPending(key: string): PendingCreation | undefined {
+function readPending(
+  key: string,
+  restored?: unknown,
+): PendingCreation | undefined {
   try {
-    const value: unknown = JSON.parse(sessionStorage.getItem(key) ?? 'null');
+    const value: unknown =
+      restored ?? JSON.parse(sessionStorage.getItem(key) ?? 'null');
     if (typeof value !== 'object' || !value) return undefined;
     const item = value as Record<string, unknown>;
     const input = item['input'];
@@ -136,14 +146,11 @@ function readPending(key: string): PendingCreation | undefined {
   }
 }
 
-function savePending(key: string, value?: PendingCreation): boolean {
-  try {
-    if (value) sessionStorage.setItem(key, JSON.stringify(value));
-    else sessionStorage.removeItem(key);
-    return true;
-  } catch {
-    return false;
-  }
+async function savePending(
+  key: string,
+  value?: PendingCreation,
+): Promise<boolean> {
+  return saveManagedPending(key, value);
 }
 
 function message(error: unknown): string {
@@ -223,7 +230,8 @@ export function WorkspaceBindingCreator({
   const [nextCursor, setNextCursor] = useState<string>();
   const [supported, setSupported] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(true);
+  const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState<string>();
   const [pathError, setPathError] = useState<string>();
@@ -239,6 +247,20 @@ export function WorkspaceBindingCreator({
   useEffect(() => {
     const abort = new AbortController();
     commandLifetime.current = abort;
+    setPendingRestoreFailed(false);
+    setBusy(true);
+    void readManagedPending(pendingKey).then(
+      (value) => {
+        if (abort.signal.aborted) return;
+        const saved = readPending(pendingKey, value);
+        pendingRef.current = saved;
+        setPending(saved);
+        setBusy(false);
+      },
+      () => {
+        if (!abort.signal.aborted) setPendingRestoreFailed(true);
+      },
+    );
     return () => abort.abort();
   }, [pendingKey]);
 
@@ -250,10 +272,11 @@ export function WorkspaceBindingCreator({
     }
   }, [selectionKey, selected]);
 
-  function updatePending(value?: PendingCreation) {
+  async function updatePending(value?: PendingCreation) {
+    const abort = commandLifetime.current;
     pendingRef.current = value;
     setPending(value);
-    if (!savePending(pendingKey, value))
+    if (!(await savePending(pendingKey, value)) && !abort?.signal.aborted)
       setError(t('managed.workspaceStorageUnavailable'));
   }
 
@@ -412,6 +435,13 @@ export function WorkspaceBindingCreator({
 
   const currentOptions =
     sessionOptions?.agentId === agentId ? sessionOptions : undefined;
+  const fileReferences = useManagedFileReferences(
+    provider,
+    clientId,
+    currentOptions?.inputAttachments
+      ? { workspaceId: selected, cwdRelative }
+      : undefined,
+  );
   const approvalReady =
     !supportsApprovalModeSelection ||
     (!optionsLoading && Boolean(currentOptions));
@@ -456,6 +486,7 @@ export function WorkspaceBindingCreator({
     commit?: ComposerSubmitCommit,
     images?: PromptImage[],
     files?: PromptFile[],
+    metadata?: ComposerSubmitMetadata,
   ) {
     const abort = commandLifetime.current;
     if (
@@ -497,8 +528,19 @@ export function WorkspaceBindingCreator({
       encoding.current = true;
       setBusy(true);
       try {
-        if (text !== undefined)
-          input = await encodeManagedInput(text, images, files);
+        if (text !== undefined) {
+          const prepared = await fileReferences.prepareInput(
+            text,
+            files,
+            metadata,
+          );
+          input = await encodeManagedInput(
+            prepared.text,
+            images,
+            prepared.files,
+          );
+          fileReferences.assertCurrent();
+        }
       } catch (failure) {
         setError(message(failure));
         return;
@@ -521,8 +563,14 @@ export function WorkspaceBindingCreator({
           ? { planMode: true }
           : {}),
       };
-      if (!savePending(pendingKey, attempt)) {
+      encoding.current = true;
+      setBusy(true);
+      const persisted = await savePending(pendingKey, attempt);
+      encoding.current = false;
+      if (abort.signal.aborted) return;
+      if (!persisted) {
         setError(t('managed.workspaceStorageUnavailable'));
+        setBusy(false);
         return;
       }
       pendingRef.current = attempt;
@@ -572,7 +620,8 @@ export function WorkspaceBindingCreator({
           : await binding.createEmpty(request, command);
         if (abort.signal.aborted) return;
         attempt = { ...attempt, sessionId: admitted.sessionId };
-        updatePending(attempt);
+        await updatePending(attempt);
+        if (abort.signal.aborted) return;
       }
       const createdSessionId = attempt.sessionId;
       if (!createdSessionId)
@@ -602,10 +651,11 @@ export function WorkspaceBindingCreator({
       }
       if (attempt.input.length) {
         if (acceptedCommit.current) acceptedCommit.current();
-        else editor.current?.clearText();
+        else editor.current?.clear();
       }
       acceptedCommit.current = undefined;
-      updatePending(undefined);
+      await updatePending(undefined);
+      if (abort.signal.aborted) return;
       onCreated(createdSessionId);
     } catch (failure) {
       if (abort.signal.aborted) return;
@@ -618,13 +668,15 @@ export function WorkspaceBindingCreator({
         failure.status !== 429 &&
         firstSubmission
       ) {
-        updatePending(undefined);
+        await updatePending(undefined);
+        if (abort.signal.aborted) return;
         if (failure.code === 'unsupported_approval_mode')
           setOptionsRevision((value) => value + 1);
         if (failure.code === 'invalid_cwd') setPathError(message(failure));
         else setError(message(failure));
       } else {
-        updatePending(attempt);
+        await updatePending(attempt);
+        if (abort.signal.aborted) return;
         setError(message(failure));
       }
     } finally {
@@ -803,6 +855,33 @@ export function WorkspaceBindingCreator({
           {error}
         </p>
       )}
+      {pendingRestoreFailed && (
+        <div>
+          <p role="alert" className="text-sm text-destructive">
+            {t('managed.pendingRestoreFailed')}
+          </p>
+          <Button
+            variant="outline"
+            onClick={async () => {
+              const abort = commandLifetime.current;
+              if (!abort || abort.signal.aborted) return;
+              const discarded = await savePending(pendingKey);
+              if (abort.signal.aborted) return;
+              if (!discarded) {
+                setError(t('managed.pendingDiscardFailed'));
+                return;
+              }
+              pendingRef.current = undefined;
+              setPending(undefined);
+              setPendingRestoreFailed(false);
+              setBusy(false);
+              setError(undefined);
+            }}
+          >
+            {t('managed.discard')}
+          </Button>
+        </div>
+      )}
       {directInput && pathError && (
         <p role="alert" className="text-sm text-destructive">
           {pathError}
@@ -874,7 +953,7 @@ export function WorkspaceBindingCreator({
               disabled={busy}
               onClick={() => {
                 const initial = pending.input;
-                updatePending(undefined);
+                void updatePending(undefined);
                 acceptedCommit.current = undefined;
                 if (initial.length) {
                   editor.current?.setText(managedInputText(initial));
@@ -1084,6 +1163,7 @@ export function WorkspaceBindingCreator({
             />
           </div>
           <div className={shellStyles.footer}>
+            {fileReferences.error && <p role="alert">{fileReferences.error}</p>}
             <ChatEditor
               ref={editor}
               commands={[]}
@@ -1091,6 +1171,8 @@ export function WorkspaceBindingCreator({
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
+              fileReferenceActions={fileReferences.actions}
+              persistFileReferences
               existingFolderWorkspaceSupported={
                 registrationAvailable && Boolean(binding.registration)
               }
@@ -1103,6 +1185,7 @@ export function WorkspaceBindingCreator({
                 interactive
                   ? [
                       ...(currentOptions?.inputAttachments ||
+                      fileReferences.actions ||
                       currentOptions?.planModeSupported
                         ? ['addMenu' as const]
                         : []),
@@ -1226,10 +1309,12 @@ export function WorkspaceBindingCreator({
                 Boolean(directoryPicker) ||
                 registrationOpen
               }
-              isPreparing={busy || loading || optionsLoading}
+              isPreparing={
+                busy || fileReferences.busy || loading || optionsLoading
+              }
               placeholderText={t('managed.prompt')}
-              onSubmit={(text, images, files, commit) => {
-                void createOrRead(text, commit, images, files);
+              onSubmit={(text, images, files, commit, metadata) => {
+                void createOrRead(text, commit, images, files, metadata);
                 return false;
               }}
             />

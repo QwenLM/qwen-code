@@ -1054,7 +1054,7 @@ export async function verifyRecoverySession(
       await enqueueRefs(state, io);
     } else if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
       for (const nested of hostedRecoveryReferences(
-        parseHostedRecoveryResource(bytes, key ?? undefined),
+        parseHostedRecoveryResource(bytes, key ?? undefined, ref.kind),
       ))
         await io.enqueue(nested);
     } else if (ref.kind === 'managed-agent-instructions') {

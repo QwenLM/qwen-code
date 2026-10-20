@@ -4,9 +4,9 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.h2.jdbcx.JdbcDataSource;
@@ -98,7 +98,7 @@ class ManagedHookAdmissionIndexTest {
                                 history.commit(
                                         "replanned", "hook_execution", replanned, List.of(plan)))
                 .as("replanned")
-                .isInstanceOf(ApiException.class)
+                .isInstanceOf(ManagedAgentException.class)
                 .hasMessageContaining("unique ordinals");
         assertThat(revisions(jdbc, sessionId)).isEqualTo(committed);
 
@@ -278,7 +278,7 @@ class ManagedHookAdmissionIndexTest {
         assertThatThrownBy(() -> history.commit(commandId, "hook_execution", execution, List.of()))
                 .as(commandId)
                 .isInstanceOfSatisfying(
-                        ApiException.class,
+                        ManagedAgentException.class,
                         error ->
                                 assertThat(error.getCode())
                                         .isEqualTo(ManagedExtensionRecordStore.ERROR_REJECTED))

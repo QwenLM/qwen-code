@@ -2,6 +2,30 @@ import type { ACPToolCall, Message } from '../../adapters/types';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 import type { ManagedToolResult } from './managed-tool-result-types';
 
+type ManagedEventEpoch = object;
+
+// The token identifies an append chain without retaining any predecessor
+// array. WeakMap entries disappear with the arrays held by session state.
+const managedEventEpochs = new WeakMap<
+  readonly ManagedAgentSessionEvent[],
+  ManagedEventEpoch
+>();
+
+function newManagedEventEpoch(): ManagedEventEpoch {
+  return {};
+}
+
+function carryManagedEventEpoch(
+  current: readonly ManagedAgentSessionEvent[],
+): ManagedEventEpoch {
+  const epoch = managedEventEpochs.get(current);
+  if (epoch !== undefined) {
+    managedEventEpochs.delete(current);
+    return epoch;
+  }
+  return newManagedEventEpoch();
+}
+
 // `current` must already be ascending and deduplicated by id (stream state
 // and transcript pages are); the append path checks only that `incoming`
 // extends it, so a disordered first argument stays disordered.
@@ -11,17 +35,26 @@ export function mergeManagedEvents(
 ): ManagedAgentSessionEvent[] {
   // An empty input cannot ride the ascending check: strictlyAscendingIds
   // loops from index 1, and the fast path dereferences incoming[0].
-  if (incoming.length === 0) return [...current];
+  if (incoming.length === 0) {
+    const merged = [...current];
+    managedEventEpochs.set(merged, carryManagedEventEpoch(current));
+    return merged;
+  }
   if (
     strictlyAscendingIds(incoming) &&
     (current.length === 0 || current[current.length - 1]!.id < incoming[0]!.id)
-  )
-    return [...current, ...incoming];
-  return [
+  ) {
+    const merged = [...current, ...incoming];
+    managedEventEpochs.set(merged, carryManagedEventEpoch(current));
+    return merged;
+  }
+  const merged = [
     ...new Map(
       [...current, ...incoming].map((event) => [event.id, event]),
     ).values(),
   ].sort((a, b) => a.id - b.id);
+  managedEventEpochs.set(merged, newManagedEventEpoch());
+  return merged;
 }
 
 function strictlyAscendingIds(
@@ -56,21 +89,35 @@ const BOUNDARY_SETTLE_TYPES = new Set([
   'cancelled',
 ]);
 
-export function managedEventsToMessages(
-  events: readonly ManagedAgentSessionEvent[],
-  truncatedLabel: string,
-): Message[] {
-  const messages: Message[] = [];
-  const tools = new Map<string, ACPToolCall>();
+interface ManagedMessageProjectionState {
+  messages: Message[];
+  tools: Map<string, ACPToolCall>;
   // Tools the non-fatal runtime_failed diagnostic failed, keyed to their
   // Turn, so a later same-Turn cancellation can re-mark them: their status
   // has already flipped to failed by then, which the terminal-event loop
   // alone skips. An authoritative result or completion retires the booking.
-  const runtimeFailed = new Map<ACPToolCall, string>();
-  let textMessage:
-    | Extract<Message, { role: 'assistant' | 'thinking' }>
-    | undefined;
-  let currentTurnId: string | undefined;
+  runtimeFailed: Map<ACPToolCall, string>;
+  textMessage: Extract<Message, { role: 'assistant' | 'thinking' }> | undefined;
+  currentTurnId?: string;
+}
+
+function createManagedMessageProjectionState(): ManagedMessageProjectionState {
+  return {
+    messages: [],
+    tools: new Map(),
+    runtimeFailed: new Map(),
+    textMessage: undefined,
+    currentTurnId: undefined,
+  };
+}
+
+function appendManagedEvents(
+  state: ManagedMessageProjectionState,
+  events: readonly ManagedAgentSessionEvent[],
+  truncatedLabel: string,
+): void {
+  const { messages, tools, runtimeFailed } = state;
+  let { textMessage, currentTurnId } = state;
   const stopStreaming = () => {
     for (const message of messages) {
       if (message.role === 'assistant' || message.role === 'thinking') {
@@ -225,6 +272,9 @@ export function managedEventsToMessages(
       if (legacyKey) tools.set(legacyKey, tool);
       if (typeof itemId === 'string') tool.callId = key;
       if (typeof callId === 'string') tool.toolCallId = callId;
+      if (Number.isSafeInteger(data['sourceSequence'])) {
+        tool.toolDetailsRevision = Number(data['sourceSequence']);
+      }
       if (typeof data['toolName'] === 'string')
         tool.toolName = data['toolName'];
       // The Harness titles each call itself; the approval card shows it as
@@ -357,7 +407,63 @@ export function managedEventsToMessages(
       }
     }
   }
-  return messages;
+  state.textMessage = textMessage;
+  state.currentTurnId = currentTurnId;
+}
+
+function snapshotManagedMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) =>
+    message.role === 'tool_group'
+      ? { ...message, tools: message.tools.map((tool) => ({ ...tool })) }
+      : { ...message },
+  );
+}
+
+export function managedEventsToMessages(
+  events: readonly ManagedAgentSessionEvent[],
+  truncatedLabel: string,
+): Message[] {
+  const state = createManagedMessageProjectionState();
+  appendManagedEvents(state, events, truncatedLabel);
+  return snapshotManagedMessages(state.messages);
+}
+
+export function createManagedMessageProjector(): (
+  events: readonly ManagedAgentSessionEvent[],
+  truncatedLabel: string,
+) => Message[] {
+  let epoch: ManagedEventEpoch | undefined;
+  let processedLength = 0;
+  let label: string | undefined;
+  let state: ManagedMessageProjectionState | undefined;
+  let snapshot: Message[] = [];
+
+  return (events, truncatedLabel) => {
+    const nextEpoch = managedEventEpochs.get(events);
+    const canAppend =
+      state !== undefined &&
+      nextEpoch !== undefined &&
+      nextEpoch === epoch &&
+      events.length >= processedLength &&
+      truncatedLabel === label;
+    if (!canAppend) {
+      state = createManagedMessageProjectionState();
+      appendManagedEvents(state, events, truncatedLabel);
+      epoch = nextEpoch;
+      processedLength = events.length;
+      label = truncatedLabel;
+      snapshot = snapshotManagedMessages(state.messages);
+    } else if (events.length > processedLength) {
+      appendManagedEvents(
+        state!,
+        events.slice(processedLength),
+        truncatedLabel,
+      );
+      processedLength = events.length;
+      snapshot = snapshotManagedMessages(state!.messages);
+    }
+    return snapshot;
+  };
 }
 
 function readResult(

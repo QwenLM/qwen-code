@@ -15,6 +15,9 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { ManagedCsiMount } from './managed-csi-mount.js';
+import { parseManagedCsiFileBoot } from './managed-csi-file-envelope.js';
+import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
+import * as csiFileWorker from './managed-csi-file-worker.js';
 import {
   MANAGED_CSI_ACK_PATH,
   parseManagedCsiBoot,
@@ -154,6 +157,40 @@ async function waitForReady(
 }
 
 describe('Managed Runtime attestation worker', () => {
+  it('refuses an SSH runtime for every CSI boot before worker delegation', async () => {
+    const fixtures = JSON.parse(
+      readFileSync(
+        new URL(
+          './contracts/managed-csi-files-v2.fixtures.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ) as { boot: unknown; executionBoot5: unknown; finalizationBoot6: unknown };
+    const start = vi
+      .spyOn(csiFileWorker, 'startManagedCsiFileWorker')
+      .mockRejectedValue(new Error('private worker delegation must not run'));
+    onTestFinished(() => start.mockRestore());
+    const sshRuntime = {} as ManagedSshRuntime;
+    for (const document of [
+      fixtures.boot,
+      fixtures.executionBoot5,
+      fixtures.finalizationBoot6,
+    ]) {
+      const csi = parseManagedCsiFileBoot(document);
+      await expect(
+        startManagedRuntimeAttestationWorker(
+          csi,
+          undefined,
+          undefined,
+          true,
+          sshRuntime,
+        ),
+      ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
+    }
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it('reads one bounded closed boot payload from stdin', async () => {
     const serialized = JSON.stringify(boot);
     const parsed = await readManagedRuntimeWorkerBoot(

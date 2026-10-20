@@ -16,9 +16,9 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的两个域 `m
 
 ## 门禁账本
 
-| Case                     | 注入                                                                                                | 期望                                                                                                                                                                                                                                                                 |
-| ------------------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `harness-kill-releasing` | 在 `releaseState: releasing` 已提交、且 `mcp-release` 派发被 Broker 代理持住时 SIGKILL 打包 Harness | 替换 Harness 加载同一 `runtimeSessionId` 与同一 lifecycle claim；按原 id 查询并完成 `${configurationId}:release`；恰好一次 `mcp-release`；没有第二次 `mcp-configure` 或 `mcp-invoke`；最终 `releaseState` 只在线上应答 settled 之后才为 `released`，绝不伪造 settled |
+| Case                     | 注入                                                                                                | 期望                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `harness-kill-releasing` | 在 `releaseState: releasing` 已提交、且 `mcp-release` 派发被 Broker 代理持住时 SIGKILL 打包 Harness | 替换 Harness 加载同一 `runtimeSessionId` 与同一 lifecycle claim；按原 id 查询并完成 `${configurationId}:release`；恰好一次 `mcp-release`；没有第二次 `mcp-configure` 或 `mcp-invoke`；最终 `releaseState` 只在线上应答 settled 之后才为 `released`，绝不伪造 settled。结论性的 `mcp-status` 应答被持在代理内：它被扣住期间记录保持 `releasing`、`settle_resources` 尚未应答；只有应答交付之后才出现 `drained`/`released`。 |
 
 ## 决策
 
@@ -27,6 +27,7 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的两个域 `m
 3. **持住 release 派发，在 `releasing` 之后杀进程。** 代理在转发前停住 `mcp-release`；测试先断言数据库记录为 `releasing` 且派发在飞，再 SIGKILL Harness。放开 hold 后，原派发到达 Runtime 并登记该操作，替换 Harness 的查询才有可结算的对象。
 4. **带原 claim 重载。** load 携带 `lifecycleProtocolVersion: 2` 与原 `{operationId, claimGeneration}`；替换 Harness 在 release 仍为 `running` 时有界重试 `settle_resources`，settled 查询后提交 `drained`/`released`。
 5. **先断言线上序列，再断言状态。** 恰好一次 `${configurationId}:release` 的 `mcp-release`、至少一次同 id 且 settled 的 `mcp-status`（有界重试可能发多次）、基线之后没有 `mcp-configure`/`mcp-invoke`、一次 `mcp.start`、`runtimeSessionId` 不变。只有该序列成立后才断言 `releaseState: released`。若 release 始终不 settle，路由回答 503，记录停在 `releasing`/`drained`；有界重试会失败，而不是接受伪造的 `released`。
+6. **结论性应答用 hold 见证，不做事后推断。** 线上出现一次 settled 查询只能说明该应答存在过，不能说明状态等到了它。代理因此在 Broker 产出 settled `mcp-status` 之后扣住这条应答；扣住期间测试断言记录仍为 `releasing`、close 路由尚未应答，放开后才期待 close 完成且记录为 `released`。release 派发本身不能作为见证：它合法地先回答 `running`。
 
 ## 夹具设计
 
@@ -39,13 +40,14 @@ issue #14447 是 #12380 的 Stage F 轮次 FG12：为 Hosted MCP 的两个域 `m
 
 不新增类，因此六处 fork 账目不变：类 `@Timeout` 600 s、共享 healthy 与 CI fork（当前值见 `hosted-process-ci.test.js`）及其字面钉点、本地 `hosted-mcp-gates` profile（`**/HostedMcp*IT.java`）、workflow 注释、artifact 根 `target/fg12-cases/`。
 
-JDK 21 + MariaDB 10.11 实测：新格 6.7–9.1 s；六格整类 33.0–50.5 s（最新 33.9 s）。FG12c 的 49 s 余量本就按 2×（约 98 s）预算，新增的 +9 s 仍在该余量内；共享 healthy 和 CI fork 均不动。artifact 根已覆盖 `fg12d`，无需改上传路径或元测试。
+JDK 21 实测（加入应答 hold 之后）：六格整类在 MySQL 8.0.46 上 32–37 s（两次）、在 MariaDB 10.11 上 40.5 s，release 格 6.0–7.0 s。FG12c 的 49 s 余量本就按 2×（约 98 s）预算，整类仍在该余量内；共享 healthy 和 CI fork 均不动。当前 `main`（含 #14618）两种 schema 均可校验。artifact 根已覆盖 `fg12d`，无需改上传路径或元测试。
 
 ## 验收
 
 - `mvn -q -DskipTests test-compile checkstyle:check` 干净。
-- `HostedMcpRestartFaultGatesIT` 在 JDK 21 + MariaDB 上 6/6 绿；新格在杀进程前先自证注入（数据库 `releasing` 与在飞的 `mcp-release`）。
+- `HostedMcpRestartFaultGatesIT` 在 JDK 21 + MySQL 8.0.46 与 MariaDB 10.11 上 6/6 绿；新格在杀进程前先自证注入（数据库 `releasing` 与在飞的 `mcp-release`）。
 - `fg12d` 证据显示一次 `mcp-release`、至少一次同 id 且 settled 的 `mcp-status`、一次 `mcp.start` 与一次 `mcp.exit`、最终 `released`，且没有第二次 configure/invoke。
+- settled 的 `mcp-status` 应答被扣住期间，记录仍为 `releasing`、`settle_resources` 尚未应答；两者只在应答交付后才推进。
 - 本切片不跑 TS 变异见证（按 FG12d 任务书）。剩余风险：绿依赖 release 在 60×1 s 重试窗口内 settle；更慢的 Runtime 会让门禁变红，而不是带着未结算记录变绿。
 - 整仓 Spring/Broker 重启在 `WorkspaceStorageGuard` 拒绝被占用 storage 期间继续拆出，不用第二套 rig 伪造。
 

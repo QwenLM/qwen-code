@@ -328,6 +328,48 @@ describe('UiTelemetryService', () => {
       expect(service.getMetrics().generation).toBeUndefined();
     });
 
+    it('measures generation time from generation_ms when the event has it', () => {
+      service.addEvent(timedResponse({ generation_ms: 300 }));
+      service.addEvent(timedResponse({ generation_ms: 0 }));
+
+      expect(service.getMetrics().generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 200,
+        totalGenerationDurationMs: 300,
+        totalThroughputOutputTokens: 20,
+        last: {
+          model: 'qwen3-coder',
+          ttftMs: 100,
+          generationDurationMs: 0,
+          outputTokens: 20,
+        },
+      });
+    });
+
+    it('aggregates generation per model for the stats route only', () => {
+      const add = (overrides: Partial<ApiResponseEvent>) =>
+        service.addEvent(timedResponse(overrides), 'session-a');
+      add({ generation_ms: 200 });
+      add({ ttft_ms: 50, generation_ms: 100, output_token_count: 10 });
+      add({ model: 'qwen-plus', ttft_ms: 300, generation_ms: 0 });
+      add({ model: 'qwen-plus', prompt_id: 'prompt_suggestion' });
+
+      const metrics = service.getMetricsForSession('session-a');
+      expect(metrics.statsModels?.['qwen3-coder'].generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 150,
+        totalGenerationDurationMs: 300,
+        totalThroughputOutputTokens: 30,
+      });
+      expect(metrics.statsModels?.['qwen-plus'].generation).toEqual({
+        timedRequests: 1,
+        totalTtftMs: 300,
+        totalGenerationDurationMs: 0,
+        totalThroughputOutputTokens: 0,
+      });
+      expect(metrics.models['qwen3-coder']).not.toHaveProperty('generation');
+    });
+
     it('clamps sampling time when TTFT exceeds request duration', () => {
       service.addEvent(timedResponse({ duration_ms: 100, ttft_ms: 150 }));
 
