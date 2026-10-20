@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher;
+import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
@@ -153,6 +154,13 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final ResidentWorkspaces residentWorkspaces;
     private final WorkspaceCreationRoots createdRoots;
+    private JournalEventTransport journalEventTransport;
+    private final boolean journalEventTransportEnabled;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setJournalEventTransport(JournalEventTransport transport) {
+        this.journalEventTransport = transport;
+    }
     private static final String SESSION_WITH_STREAM =
             "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
     private final RowMapper<SessionRecord> sessionMapper = (result, row) -> {
@@ -321,6 +329,7 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new WebShellModelOption(id, label);
         }).toList();
+        this.journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
@@ -511,6 +520,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestedRevision,
             String title,
             WorkspaceSelection selection) {
+        requireCsiJournalIsolation();
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Private CSI CREATE requires a transaction");
         }
@@ -546,8 +556,16 @@ public class ManagedAgentStore implements AgentStateStore {
                 registration);
     }
 
+    private void requireCsiJournalIsolation() {
+        if (journalEventTransportEnabled || journalEventTransport != null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "csi_journal_transport_unsupported",
+                    "The private CSI lane requires an isolated journal without an event transport.");
+        }
+    }
+
     RuntimeProvisionRequest requireCsiRequest(
             WorkspaceCsiRegistration registration, String sessionId) {
+        requireCsiJournalIsolation();
         SessionRecord session = requireSessionForUpdate(registration.tenantId(), sessionId);
         if (!CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())
                 || session.workspace() == null
@@ -1267,9 +1285,21 @@ public class ManagedAgentStore implements AgentStateStore {
             }
         }
         if (!commandEffect) {
-            // A Turn that already ended settles the cancel now; one already
-            // cancelling carries this cancel with the earlier one.
-            settleTurnCommands(tenantId, sessionId, turnId, now);
+            // The Turn read before insertCommand can be a stale snapshot
+            // while another transaction already made it terminal. Re-read
+            // it FOR UPDATE and settle this new cancel from the current
+            // row; a CANCELLING Turn still carries it with the earlier one.
+            TurnRecord current = requireTurnForUpdate(tenantId, sessionId,
+                    turnId);
+            boolean cancelled = "CANCELLED".equals(current.status());
+            if (cancelled || !ACTIVE_TURN_STATES.contains(current.status())) {
+                settleTurnCommand(tenantId, sessionId, turnId,
+                        OperationKind.CANCEL,
+                        cancelled ? "COMPLETED" : "FAILED",
+                        cancelled && current.harnessEventEpoch() != null
+                                ? "HARNESS_CONFIRMED" : "JAVA_DURABLE",
+                        cancelled ? null : "turn_already_settled", now);
+            }
         }
         return new Admission(sessionId, turnId, false, commandEffect,
                 operationId);
@@ -1986,14 +2016,21 @@ public class ManagedAgentStore implements AgentStateStore {
     // ever takes the row, nothing re-sends it, and only the reconciler
     // settles it, from the kind's own keyed evidence.
     private static final String ACCEPTANCE_UNKNOWN_KINDS =
-            "('TASK_CANCEL', 'SUBMIT_INPUT', 'RENAME')";
+            "('TASK_CANCEL', 'SUBMIT_INPUT', 'CANCEL', 'RENAME')";
     // For these it is a published wait on a precondition of an operation
     // whose acceptance is known: the lifecycle coordinator re-drives it, and
     // keyed effect receipts keep the re-drive from repeating an effect.
     private static final String LIFECYCLE_WAIT_KINDS =
             "('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE')";
+    // A Turn CANCEL parked cancel_unconfirmed is in ACCEPTANCE_UNKNOWN_KINDS
+    // (decision 11): the reconciler settles it from CancelEvidence, which
+    // reads the original prompt's retained durable terminal event, and the
+    // row is never claimed or delivered again.
     /** Turn input whose submission no Harness answered (D7-2). */
     static final String SUBMIT_INPUT_UNCONFIRMED = "submit_input_unconfirmed";
+    /** A Turn cancel whose effect on an unobserved execution no Harness
+     * answered (D7-2). */
+    static final String CANCEL_UNCONFIRMED = "cancel_unconfirmed";
     /** A Session title whose submitted delivery no Harness answered (D7-2). */
     static final String SESSION_TITLE_UNCONFIRMED = "session_title_unconfirmed";
     /** A parked Session title the sealed journal proves never landed. */
@@ -2061,7 +2098,10 @@ public class ManagedAgentStore implements AgentStateStore {
      * cancelled or failed Turn ends the input undelivered. A cancel
      * completes when the Turn is cancelled — by the Harness, or by Java
      * before any Harness admitted it — and fails turn_already_settled when
-     * the Turn ended otherwise. A Turn that has not ended leaves its cancels
+     * the Turn ended otherwise. One whose admitted Turn failed with
+     * managed_runtime_recovery_blocked parks recovery_blocked with
+     * cancel_unconfirmed: the cancel's effect on the unobserved execution
+     * is itself unknown. A Turn that has not ended leaves its cancels
      * pending, so cancels of one Turn coalesce.
      */
     private void settleTurnCommands(String tenantId, String sessionId,
@@ -2096,15 +2136,29 @@ public class ManagedAgentStore implements AgentStateStore {
                     OperationKind.CANCEL, "COMPLETED",
                     admitted ? "HARNESS_CONFIRMED" : "JAVA_DURABLE", null, now);
         } else if (!ACTIVE_TURN_STATES.contains(turn.status())) {
-            settleTurnCommand(tenantId, sessionId, turnId,
-                    OperationKind.CANCEL, "FAILED", "JAVA_DURABLE",
-                    "turn_already_settled", now);
+            if ((admitted || turn.submissionAttempted())
+                    && "managed_runtime_recovery_blocked".equals(
+                            turn.errorCode())) {
+                // Under the Session row lock, every cancel still pending
+                // here predates the failure; a cancel admitted afterwards
+                // settles itself in insertCancelCommand. A submission mark
+                // is enough: a null epoch does not prove non-admission
+                // (R10-4).
+                settleTurnCommand(tenantId, sessionId, turnId,
+                        OperationKind.CANCEL, "RECOVERY_BLOCKED",
+                        "JAVA_DURABLE", CANCEL_UNCONFIRMED, now);
+            } else {
+                settleTurnCommand(tenantId, sessionId, turnId,
+                        OperationKind.CANCEL, "FAILED", "JAVA_DURABLE",
+                        "turn_already_settled", now);
+            }
         }
     }
 
     // Only a completed operation is delivered and carries a receipt; a
     // failed or cancelled one stays java_durable and blocked, so it is never
-    // delivered again, and a parked one is due for the reconciler at once.
+    // delivered again. A parked submit_input or Turn cancel is due for the
+    // reconciler at once (decision 11).
     private void settleTurnCommand(String tenantId, String sessionId,
             String turnId, OperationKind kind, String state,
             String admissionStage, String failureCode, long now) {
@@ -2118,7 +2172,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " FROM ma_operation /*! FORCE INDEX (uq_ma_operation_identity) */"
                         + " WHERE scope_key = ? AND"
                         + " operation_kind = ? AND target_key = ? AND state ="
-                        + " 'PENDING' FOR UPDATE", String.class,
+                        + " 'PENDING' FOR UPDATE",
+                String.class,
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 kind.name(), turnOperationTarget(turnId))) {
             jdbc.update("UPDATE ma_operation SET state = ?, phase = ?,"

@@ -231,10 +231,27 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 seed.getGatewayIncarnation()).thenApply(bytes -> CsiNativeReadbackProtocol.executeResult(bytes, expected));
     }
 
+    @Override
+    public CompletionStage<byte[]> csiFileFinalize(RuntimeBindingRecord runtime, ContextBinding binding,
+            Map<String, Object> operation) {
+        if (runtime == null || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("Original CSI finalization transport is unavailable.");
+        }
+        var expected = CsiFileFinalizeProtocol.request(runtime, binding, operation);
+        return post(runtime.getLease(), CsiFileFinalizeProtocol.PATH,
+                encodeToolRequest(expected, CsiFileFinalizeProtocol.REQUEST_LIMIT), CsiFileFinalizeProtocol.RESPONSE_LIMIT,
+                runtime.getProvisionSeed().getGatewayIncarnation()).thenApply(bytes -> {
+                    CsiFileFinalizeProtocol.response(bytes, expected);
+                    return bytes.clone();
+                });
+    }
+
     private static Map<String, Object> originalCsiFilesBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> storage, Map<String, Object> originalBoot) {
         var authority = originalBoot.containsKey("authority") ? ProviderRuntimeProtocol.object(originalBoot.get("authority")) : null;
-        return ManagedCsiFilesProtocol.boot(request, seed, storage, authority);
+        return Long.valueOf(6).equals(BrokerValues.exactLong(originalBoot.get("version")))
+                ? ManagedCsiFilesProtocol.finalizationBoot(request, seed, storage, authority)
+                : ManagedCsiFilesProtocol.boot(request, seed, storage, authority);
     }
 
     @Override

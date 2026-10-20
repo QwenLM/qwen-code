@@ -267,6 +267,9 @@ export function normalizeDaemonEvent(
     case 'history_truncated':
       return normalizeHistoryTruncated(event, base);
 
+    case 'session_messages_deleted':
+      return [];
+
     case 'session_rewound':
       return normalizeSessionRewound(event, base);
 

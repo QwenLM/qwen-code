@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -26,6 +27,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -68,6 +70,44 @@ class WorkspaceCsiRetirementStoreTest {
         assertThat(store.inspect(registration).phase()).isEqualTo("DRAINING");
         assertThat(jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class))
                 .isEqualTo(original.getBindingId());
+    }
+
+    @Test
+    void retainedIdentityAcceptsStrictlyEquivalentHandleRepresentationAcrossMappers() throws Exception {
+        var value = new LinkedHashMap<String, Object>();
+        value.put("zeta", 2);
+        value.put("alpha", 1);
+        var seed = original.getProvisionSeed();
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        original = bindings.compareAndSet(original, original.withAttestation(lease,
+                new RuntimeResourceHandle("kubernetes-workspace", 3, value), Instant.now(), Instant.now()));
+        var ordered = new WorkspaceCsiReservationStore(jdbc, new DataSourceTransactionManager(source),
+                new ObjectMapper().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS));
+        var intent = ordered.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString());
+        var sealed = bindings.findById(original.getBindingId());
+        assertThat(intent.resourceHandleJson()).isEqualTo("{\"alpha\":1,\"zeta\":2}");
+        assertThat(new ObjectMapper().writeValueAsString(sealed.getResourceHandle().getValue()))
+                .isEqualTo("{\"zeta\":2,\"alpha\":1}");
+        WorkspaceCsiReservationStore.requireRetainedIdentity(new ObjectMapper(), intent, registration, sealed);
+        var json = new ObjectMapper();
+        var representation = json.valueToTree(intent);
+        ((com.fasterxml.jackson.databind.node.ObjectNode) representation).put("resourceHandleJson", " { \"zeta\" : 2, \"alpha\" : 1 } ");
+        WorkspaceCsiReservationStore.requireRetainedIdentity(json,
+                json.treeToValue(representation, WorkspaceCsiReservationStore.Retirement.class), registration, sealed);
+        for (String invalid : new String[] {"{\"alpha\":1,\"zeta\":3}", "{\"alpha\":1,\"alpha\":1,\"zeta\":2}",
+                "{\"alpha\":1,\"zeta\":2}{}", "[]"}) {
+            var changed = (com.fasterxml.jackson.databind.node.ObjectNode) json.valueToTree(intent);
+            changed.put("resourceHandleJson", invalid);
+            var refused = json.treeToValue(changed, WorkspaceCsiReservationStore.Retirement.class);
+            assertUnavailable(() -> WorkspaceCsiReservationStore.requireRetainedIdentity(json, refused, registration, sealed));
+        }
+        for (String field : new String[] {"resourceHandleKind", "runtimeInstanceId", "leaseId", "leaseDigest"}) {
+            var changed = (com.fasterxml.jackson.databind.node.ObjectNode) json.valueToTree(intent);
+            changed.put(field, "foreign");
+            var refused = json.treeToValue(changed, WorkspaceCsiReservationStore.Retirement.class);
+            assertUnavailable(() -> WorkspaceCsiReservationStore.requireRetainedIdentity(json, refused, registration, sealed));
+        }
     }
 
     @Test

@@ -57,6 +57,12 @@ class WorkspaceCsiRuntimeMainTest {
     }
 
     @Test
+    void retirementCommandReadsTheReviewedRequestBeforeAnyAuthorityLookup() {
+        assertThatThrownBy(() -> WorkspaceCsiRuntimeMain.run(new String[] {"retire", directory.resolve("missing.json").toString(), UUID.randomUUID().toString()}))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("CSI operator request could not be read");
+    }
+
+    @Test
     void refusesInvalidCommandBeforeReadingCredentialsOrStartingServer() {
         for (String[] args : List.of(new String[] {}, new String[] {"create", "missing", "43190"},
                 new String[] {"serve", "missing", "0"}, new String[] {"serve", "missing", "65536"},

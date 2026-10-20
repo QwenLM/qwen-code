@@ -3,9 +3,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationProgress;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiExecutionAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
-import com.alibaba.qwen.code.runtimebroker.JdbcCsiReadyAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
@@ -108,11 +108,11 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
 
     @Override
     public CompletionStage<Void> acquire(RuntimeLease lease, RuntimeSession session) {
-        Admission before = admission(lease, session);
+        Admission before = admission(lease, session, false);
         String operationId = UUID.nameUUIDFromBytes(sessionId.getBytes(StandardCharsets.UTF_8)).toString();
         return delegate.installContext(before.binding(), before.session(), operationId, before.context())
                 .thenAccept(ignored -> {
-                    Admission after = admission(lease, session);
+                    Admission after = admission(lease, session, false);
                     if (before.binding().getVersion() != after.binding().getVersion()
                             || before.session().getVersion() != after.session().getVersion()
                             || before.session().getState() != after.session().getState()
@@ -125,7 +125,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 });
     }
 
-    private Admission admission(RuntimeLease lease, RuntimeSession session) {
+    private Admission admission(RuntimeLease lease, RuntimeSession session, boolean continuation) {
         fresh();
         if (session == null || lease == null || !sessionId.equals(session.getHarnessSessionId())
                 || !sessionId.equals(session.getRuntimeSessionId()) || !"bootstrap".equals(session.getTurnKind())
@@ -141,25 +141,32 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             if (guard == null) {
                 throw unavailable();
             }
-            guard.requireAdmission();
-            var progress = JdbcCsiReadyAdmission.lock(original, guard);
+            if (continuation) {
+                guard.requireContinuation();
+            } else {
+                guard.requireAdmission();
+            }
+            var progress = JdbcCsiApplicationProgress.lock(original, guard);
             storage.verifyRegistration(registration);
             JdbcCsiFilesRetirementGuard.requireSingleSession(original, guard);
             var request = request();
             if (!guard.request().equals(request) || !request.getScope().equals(session.getScope())) {
                 throw unavailable();
             }
-            JdbcRuntimeBindingRepository.requireHarnessAdmission(original, request.getScope(), sessionId, null);
+            if (!continuation) {
+                JdbcRuntimeBindingRepository.requireHarnessAdmission(original, request.getScope(), sessionId, null);
+            }
             var binding = bindings.findByIdForUpdate(original, guard.bindingId());
             if (binding == null || binding.getGeneration() != guard.generation() || binding.getVersion() != guard.version()
                     || !binding.getRequest().equals(request) || !binding.hasSameLease(lease)
-                    || binding.getState() != RuntimeBindingRecord.State.READY || binding.isDrainRequested()) {
+                    || !continuation && (binding.getState() != RuntimeBindingRecord.State.READY || binding.isDrainRequested())) {
                 throw unavailable();
             }
             WorkspaceCsiRuntimeIdentity.verify(binding);
             var saved = sessions.findByIdForUpdate(original, request.getScope(), sessionId);
             guard.requireSession(saved);
-            if (!saved.isAcquirable()) {
+            if (!continuation && !saved.isAcquirable()
+                    || continuation && saved.getState() != RuntimeSessionRecord.State.READY) {
                 throw unavailable();
             }
             var context = managed.findSession(registration.tenantId(), sessionId).orElseThrow(
@@ -195,7 +202,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 throw unavailable();
             }
             guard.requireAdmission();
-            var progress = JdbcCsiReadyAdmission.lock(original, guard);
+            var progress = JdbcCsiApplicationProgress.lock(original, guard);
             storage.verifyRegistration(registration);
             var request = request();
             var binding = bindings.findByIdForUpdate(original, guard.bindingId());
@@ -292,20 +299,21 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 throw unavailable();
             }
             CsiFileHistoryProtocol.operation(operation);
-            Admission before = admission(lease, session);
-            if (before.session().getState() != RuntimeSessionRecord.State.READY) {
+            boolean continuation = "snapshot".equals(operation.get("action"));
+            Admission before = admission(lease, session, continuation);
+            if (!continuation && before.session().getState() != RuntimeSessionRecord.State.READY) {
                 throw unavailable();
             }
             var binding = before.binding();
             var originalBoot = WorkspaceCsiRuntimeIdentity.boot(binding);
             return delegate.csiFileHistory(lease, binding.getRequest(), binding.getProvisionSeed(), originalBoot,
                     before.context(), operation).thenApply(response -> {
-                        Admission after = admission(lease, session);
+                        Admission after = admission(lease, session, continuation);
                         if (!before.context().equals(after.context())
                                 || !binding.getProvisionSeed().equals(after.binding().getProvisionSeed())
                                 || !binding.getResourceHandle().equals(after.binding().getResourceHandle())
                                 || binding.getAttestationGeneration() != after.binding().getAttestationGeneration()
-                                || (binding.getVersion() != after.binding().getVersion()
+                                || !continuation && (binding.getVersion() != after.binding().getVersion()
                                         || before.session().getVersion() != after.session().getVersion())) {
                             throw unavailable();
                         }
@@ -331,7 +339,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                             || "write_file".equals(payload.get("toolName")) || "edit".equals(payload.get("toolName")))) {
                 throw unavailable();
             }
-            Admission before = admission(lease, session);
+            Admission before = admission(lease, session, false);
             var binding = before.binding();
             var boot = WorkspaceCsiRuntimeIdentity.boot(binding);
             var request = CsiNativeReadbackProtocol.executeRequest(boot, binding.getRequest(), before.context(), executionId);
@@ -344,7 +352,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             }
             return delegate.csiFileExecute(lease, binding.getRequest(), binding.getProvisionSeed(), boot,
                     before.context(), executionId).thenApply(result -> {
-                        Admission after = admission(lease, session);
+                        Admission after = admission(lease, session, true);
                         if (!binding.getRequest().equals(after.binding().getRequest())
                                 || binding.getGeneration() != after.binding().getGeneration()
                                 || !binding.getProvisionSeed().equals(after.binding().getProvisionSeed())

@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_AUTHORITY_VERSION;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_FINALIZATION_VERSION;
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.FILES_VERSION;
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.VERSION;
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.bytes;
@@ -182,7 +183,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             var original = admitted(request, seed);
             var reservation = storage.inspect(registration);
             var boot = ManagedCsiFilesProtocol.selects(request) && authority != null
-                    ? ManagedCsiFilesProtocol.boot(request, seed, storageTuple(reservation), authority)
+                    ? ManagedCsiFilesProtocol.finalizationBoot(request, seed, storageTuple(reservation), authority)
                     : WorkspaceCsiRuntimeIdentity.boot(request, seed, storageTuple(reservation));
             require(bytes(boot).length <= 32 * 1024);
             var protection = protection(await(guard.verify()));
@@ -218,12 +219,15 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     boolean files = ManagedCsiFilesProtocol.selects(request);
                     if (files) {
                         value.put("profileIdentity", ManagedCsiFilesProtocol.identity(request));
+                        if (boot.containsKey("finalization")) {
+                            value.put("finalization", boot.get("finalization"));
+                        }
                         if (boot.containsKey("authority")) {
                             value.put("authority", boot.get("authority"));
                         }
                     }
                     value.put("identity", digest(value));
-                    var handle = new RuntimeResourceHandle(kind(), files ? boot.containsKey("authority") ? FILES_AUTHORITY_VERSION : FILES_VERSION : VERSION, value);
+                    var handle = new RuntimeResourceHandle(kind(), files ? boot.containsKey("finalization") ? FILES_FINALIZATION_VERSION : boot.containsKey("authority") ? FILES_AUTHORITY_VERSION : FILES_VERSION : VERSION, value);
                     ownedHandle.set(handle);
                     observe(request, seed, handle, true);
                     admitted(request, seed, original);

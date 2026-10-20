@@ -2854,6 +2854,69 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void releaseSweepsADurableOnlyMonitorRow() throws Exception {
+        // #13889 review R1-47: the durable-only sweep must discover a
+        // Monitor hold row, not just a Shell row. The row is admitted
+        // straight through the repository, so the process-local index the
+        // other monitor tests rely on stays empty.
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            String digest = "sha256:" + "a".repeat(64);
+            Map<String, Object> invocationReference = Map.of("sessionId",
+                    "runtime", "promptId", "prompt", "callId", "call-m",
+                    "argsDigest", digest);
+            ToolExecutionRecord invocation = ToolExecutionRecord.prepared(
+                    "call-m", "key-m", session.getBindingId(),
+                    session.getRuntimeGeneration(), "harness", "runtime",
+                    "prompt", "call-m", digest, invocationReference);
+            ToolExecutionRecord admitted = fixture.bindingRepository
+                    .admitExecution(fixture.sessionRepository,
+                            fixture.executionRepository, invocation);
+            Map<String, Object> detached = new LinkedHashMap<>();
+            detached.put("state", "exited");
+            detached.put("executionStatus", "success");
+            fixture.executionRepository.settlePrepared(admitted, detached,
+                    java.time.Instant.now());
+            Map<String, Object> processReference = Map.of("dispatchMode",
+                    "background_v3_monitor", "processOf", "call-m",
+                    "sessionId", "runtime", "promptId", "prompt", "callId",
+                    "call-m", "argsDigest", digest);
+            ToolExecutionRecord process = ToolExecutionRecord.prepared(
+                    "call-m:process", "call-m:process",
+                    session.getBindingId(), session.getRuntimeGeneration(),
+                    "harness", "runtime", "prompt", "call-m", digest,
+                    processReference);
+            fixture.bindingRepository.admitExecution(fixture.sessionRepository,
+                    fixture.executionRepository, process);
+
+            Map<String, Object> exited = new LinkedHashMap<>();
+            exited.put("operationId", "call-m");
+            exited.put("state", "exited");
+            exited.put("evidence", Map.of("exitCode", 0));
+            fixture.transport.controlHandler = operation -> "monitor-stop"
+                    .equals(operation.get("kind"))
+                            ? CompletableFuture.completedFuture(exited)
+                            : CompletableFuture.completedFuture(
+                                    Map.of("operationId", "call-m",
+                                            "state", "running"));
+            assertEquals("runtime_session_held", failure(fixture.service
+                    .release("harness", "runtime")).getCode());
+            assertTrue(fixture.transport.controls.stream().anyMatch(operation ->
+                    "monitor-status".equals(operation.get("kind"))));
+            assertTrue(fixture.transport.controls.stream().noneMatch(operation ->
+                    "monitor-stop".equals(operation.get("kind"))));
+
+            assertTrue(join(fixture.service.release("harness", "runtime", true)));
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    fixture.executionRepository.findByExecutionCallId(
+                            "call-m:process").getState());
+            assertTrue(fixture.transport.controls.stream().anyMatch(operation ->
+                    "monitor-stop".equals(operation.get("kind"))));
+        }
+    }
+
+    @Test
     void listActiveHoldRuntimeSessionIdsSpansEveryRuntimeOfTheHarness()
             throws Exception {
         // #13930 R1-2: a reloaded Harness restores the close's drain
@@ -3045,6 +3108,88 @@ class RuntimeBrokerServiceTest {
             assertTrue(transport.controls.stream()
                     .noneMatch(operation -> "shell-terminate"
                             .equals(operation.get("kind"))));
+        }
+    }
+
+    @Test
+    void drainReleaseStopsAReacquiredBackgroundHold() throws Exception {
+        // #13889 review R1-48: the backfill that reaches a post-restart hold
+        // was pinned only on the routine arm. A drain must issue the stop
+        // and settle the row, not merely refuse busy.
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-drain");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        FakeTransport transport = new FakeTransport();
+        transport.controlHandler = operation -> "shell-terminate"
+                .equals(operation.get("kind"))
+                        ? CompletableFuture.completedFuture(
+                                Map.of("operationId", processId,
+                                        "state", "exited",
+                                        "evidence", Map.of("exitCode", 0)))
+                        : CompletableFuture.completedFuture(
+                                Map.of("operationId", processId,
+                                        "state", "running"));
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            String harness = recovery.session.getSession()
+                    .getHarnessSessionId();
+            String runtime = recovery.session.getRuntimeSessionId();
+            join(service.acquire(harness, runtime, "bootstrap"));
+            assertTrue(join(service.release(harness, runtime, true)));
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    executions.findByExecutionCallId(processId).getState());
+            assertTrue(transport.controls.stream().anyMatch(operation ->
+                    "shell-status".equals(operation.get("kind"))));
+            assertTrue(transport.controls.stream().anyMatch(operation ->
+                    "shell-terminate".equals(operation.get("kind"))));
+        }
+    }
+
+    @Test
+    void drainKeepsAReacquiredHoldWhoseStopIsUnproven() throws Exception {
+        // #13889 review R1-48: an unproven stop keeps the hold and answers
+        // busy; a speculative settle would tear the Runtime down under a
+        // live run.
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-drain-unknown");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        FakeTransport transport = new FakeTransport();
+        transport.controlHandler = operation -> "shell-terminate"
+                .equals(operation.get("kind"))
+                        ? CompletableFuture.completedFuture(
+                                Map.of("operationId", processId,
+                                        "state", "unknown"))
+                        : CompletableFuture.completedFuture(
+                                Map.of("operationId", processId,
+                                        "state", "running"));
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            String harness = recovery.session.getSession()
+                    .getHarnessSessionId();
+            String runtime = recovery.session.getRuntimeSessionId();
+            join(service.acquire(harness, runtime, "bootstrap"));
+            assertEquals("runtime_session_busy",
+                    failure(service.release(harness, runtime, true)).getCode());
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    executions.findByExecutionCallId(processId).getState());
         }
     }
 
