@@ -179,6 +179,9 @@
       // sites share one declaration — mixing src and dist declarations
       // produces duplicate-private-class errors.
       "@qwen-code/channel-base": ["../packages/channels/base/src/index.ts"],
+      "@qwen-code/channel-base/markdown-chunks": [
+        "../packages/channels/base/src/markdown-chunks.ts"
+      ],
       // cli's channel-registry.ts imports the builtin channel
       // adapters and html.ts imports web-templates; without entries they
       // resolve through their exports maps to dist, leaving the typecheck
