@@ -502,14 +502,13 @@
                                  159 minutes. The FG13f failClosed lost-reply
                                  cell adds 150 s: the healthy sum becomes
                                  8445 s, so the fork moves to 9045 s and the
-                                 Verify step to 161 minutes; the FG11f
-                                 publication cell adds 82 s (2x its measured
-                                 41.1 s), so the fork moves to 9127 s and the
-                                 Verify step to 163 minutes; the FG11f assigning
-                                 arms add 242 s (2x their measured 121.2 s), so
-                                 the fork moves to 9369 s and the Verify step to
-                                 167 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9369</forkedProcessTimeoutInSeconds>
+                                 Verify step to 161 minutes. The FG12d
+                                 forwarded-refusal case added by this PR
+                                 measures 5.8 s and adds 6 s at this ledger's
+                                 granularity: the healthy sum becomes 8451 s,
+                                 so the fork moves to 9051 s and the Verify
+                                 step stays 161 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9375</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
