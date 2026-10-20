@@ -26,13 +26,22 @@ if (skipPrepare) {
 }
 
 run('husky');
-run('npm', ['run', 'build']);
+// prepare re-enters the same root `build` script, so it needs the heap cap
+// that script carries for packages/cli's `tsc --build` (#14823): the
+// per-package build script runs tsc with this process's NODE_OPTIONS, so
+// leaving it uncapped lets prepare OOM where `npm run build` does not.
+run('npm', ['run', 'build'], {
+  NODE_OPTIONS: [process.env.NODE_OPTIONS, '--max-old-space-size=4096']
+    .filter(Boolean)
+    .join(' '),
+});
 run('npm', ['run', 'bundle']);
 
-function run(command, args = []) {
+function run(command, args = [], env = {}) {
   const result = spawnSync(command, args, {
     shell: process.platform === 'win32',
     stdio: 'inherit',
+    env: { ...process.env, ...env },
   });
 
   const label = args.length ? `${command} ${args.join(' ')}` : command;

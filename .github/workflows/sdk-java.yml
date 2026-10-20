@@ -612,12 +612,7 @@ jobs:
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          if ! command -v node >/dev/null 2>&1; then
-            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set MAINTAINER_ECS_RUNNER_DISABLED=true."
-            exit 1
-          fi
-          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+        uses: './.github/actions/self-hosted-node'
 
       - name: 'Build native producer prerequisites'
         run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
