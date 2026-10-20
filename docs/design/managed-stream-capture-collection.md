@@ -322,7 +322,10 @@ operators ask for fleet numbers.
 - P2 (MCP result retention) and P3 (media and shared outputs) are separate
   slices of #13534 with different reference closures: the MCP records' set-once
   ref rules and the omni object store's cross-session content addressing need
-  their own designs.
+  their own designs. After schema consolidation, the current
+  [private SQL media lifecycle](managed-media-retention-boundary.md) is covered
+  by the generic retired-owner collector. Physically shared Hosted/omni media
+  and its complete reference-release lifecycle remain future work.
 - The local file runtime (`LocalToolResultSegmentStore`, filesystem layout
   under the runtime base directory) is unmanaged by this design; its retention
   is a separate host-local problem.
