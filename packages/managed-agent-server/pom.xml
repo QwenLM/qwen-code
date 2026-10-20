@@ -544,8 +544,13 @@
                                  retire-at-intent cell adds 18 s (2x its measured
                                  8.6 s): the healthy sum becomes 9518 s, so the
                                  fork moves to 10118 s and the 179-minute step
-                                 still wraps (10718 s of fork plus wrap). -->
-                            <forkedProcessTimeoutInSeconds>10118</forkedProcessTimeoutInSeconds>
+                                 still wraps (10718 s of fork plus wrap). The
+                                 FG12d cancel-before-dispatch cell adds 18 s
+                                 (2x its measured 9.1 s): the healthy sum
+                                 becomes 9536 s, so the fork moves to 10136 s
+                                 and the 179-minute step still wraps (10736 s
+                                 of fork plus wrap). -->
+                            <forkedProcessTimeoutInSeconds>10136</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

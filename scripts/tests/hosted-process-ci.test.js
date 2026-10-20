@@ -702,12 +702,14 @@ describe('Hosted real-process gates', () => {
       // the step to 169 minutes; the FG11d cancel cell adds 15 s (2x its
       // measured 7.4 s), so the fork moves to 10080 and the step to 179
       // minutes; the FG11d retire-at-intent cell adds 18 s (2x its measured
-      // 8.6 s), so the fork moves to 10098 and the step stays 179 minutes):
+      // 8.6 s), so the fork moves to 10098 and the step stays 179 minutes;
+      // the FG12d cancel-before-dispatch cell adds 18 s (2x its measured
+      // 9.1 s), so the fork moves to 10136 and the step stays 179 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10118);
+        expect(forkSeconds).toBe(10136);
       }
     },
   );
@@ -784,13 +786,15 @@ describe('Hosted real-process gates', () => {
   // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s; the
   // FG12f delivery entry moves from 30s to 50s at 2x (four cases, 24.16s
   // measured), so it becomes 9500s; the FG11d retire-at-intent cell adds 18s
-  // (2x its measured 8.6s), so it becomes 9518s. The
+  // (2x its measured 8.6s), so it becomes 9518s; the FG12d
+  // cancel-before-dispatch cell adds 18s (2x its measured 9.1s), so it
+  // becomes 9536s. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9518;
+  const hostedForkHealthySeconds = 9536;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

@@ -54,3 +54,30 @@ Measured on JDK 21 after the held reply was added: the six-case class is 32–37
 ## Open questions
 
 - A kill **before** the release dispatch reaches the Runtime would exercise the re-dispatch branch (same operation id, no lookup hit). This gate deliberately lets the original dispatch land so the lookup path is pinned; the pre-dispatch variant is a candidate follow-up.
+
+## Follow-up cell: cancel before dispatch
+
+#14880 item 2 asked for a pre-dispatch cancel: an `mcp_operation` at `run.execution = intent` when the cancel arrives, settling `not_started_proven` with zero effects. It recorded the window as unreachable without a row-seeding helper, because the public route starts the dispatch. The window is reachable through the supported routes: `invoke()` commits `intent`, then acquires the owner (`POST …/tool-sessions:acquire`), and only then commits `dispatch_started`. The cancel route is not gated by the in-flight invoke (`mcpBusy`), and the pre-dispatch cancel branch never contacts the Broker.
+
+| Case                     | Injection                                                                                                                                                                | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancel-before-dispatch` | The proxy parks the first owner acquire that arrives while the target `mcp_operation` is durably at `intent`; the test cancels it through `…/mcp/operations/{id}/cancel` | The cancel answers `settled` with `managed_mcp_cancelled` while the invoke is still parked; the record is `cancelled`/`not_started_proven`, `cancelRequested: true`, no `resultRef`. After the acquire is released the original invoke answers the same view, as do a same-id retry and a status read. No MCP control (`mcp-invoke`, `mcp-cancel`, `mcp-status`) reaches the Broker after the parked acquire, the fixture records no effect, and no second server starts. |
+
+Decisions:
+
+1. **Park an acquire, not a seeded row.** A seeded `intent` row would bypass the record writer and the authority's revision chain, which is the code under test. The acquire hold leaves every write to the Harness; the proxy only reads the durable record to choose which acquire to park. The `refresh()` acquire that precedes the intent commit passes, and the hold is one-shot, so an acquire the cancel would need (if the pre-dispatch branch were gone) is forwarded.
+2. **Assert the wire after the parked acquire.** The resumed invoke would still answer `managed_mcp_cancelled` if it ignored the proof and asked the Runtime, because `accept()` re-reads the record first. Only the absence of an `mcp-status` after the parked acquire catches that, so the gate asserts no MCP control at all after it.
+
+Mutation witnesses, each rebuilt into the bundle the case runs (`hosted-mcp-session.ts`):
+
+| Mutant | Change                                                         | Result                                                                                                                                                |
+| ------ | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1     | `cancel()` skips its `intent` branch                           | Red: the cancel acquires, sends a native `mcp-cancel` the Runtime never registered, and answers `outcome_unknown` instead of `managed_mcp_cancelled`. |
+| M2     | `invoke()` does not re-read the record after the owner acquire | Red: the stale `dispatch_started` commit over the cancelled record is refused, and the resumed invoke answers 503.                                    |
+| M3     | `invoke()` re-reads but ignores the local proof                | Red only on the wire: the resumed invoke still answers `managed_mcp_cancelled`, but an `mcp-status` follows the parked acquire.                       |
+
+Each mutant was rebuilt into `dist/cli.js` and run against the single case; the unmutated control rebuilt afterwards is green.
+
+Budget: the case measures 9.1 s inside the eight-case class run (94.5 s) on JDK 21, MySQL 8.4.6 and Linux aarch64. It adds 18 s (2x) to the shared healthy sum (9518 → 9536 s), so the `hosted-harness-mysql` fork moves to 10136 s and the 179-minute Verify step still wraps it (10736 s). The `hosted-mcp-gates` 1200 s profile and the artifact root `target/fg12-cases/fg12d/` are unchanged.
+
+Not covered: a pre-dispatch cancel of a configuration (configurations are cancelled only by `reconcileEffects()` during a close) and an MCP tool call (tool calls ride the ordinary tool lifecycle, not `mcp_operation`).

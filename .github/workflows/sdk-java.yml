@@ -851,7 +851,7 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 10118 s, so the step wraps to fork + 600 s plus margin (179 min).
+        # 10136 s, so the step wraps to fork + 600 s plus margin (179 min).
         timeout-minutes: 179
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
