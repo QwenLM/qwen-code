@@ -531,8 +531,17 @@
                                  to 176 minutes. The FG13b Hook plan-result
                                  store-rejection cell adds 150 s: the healthy
                                  sum becomes 9465 s, so the fork moves to
-                                 10065 s and the Verify step to 178 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10075</forkedProcessTimeoutInSeconds>
+                                 10065 s and the Verify step to 178 minutes;
+                                 the FG11d cancel cell adds 15 s (2x its
+                                 measured 7.4 s), so the fork moves to 10080 s
+                                 and the Verify step to 179 minutes: 10680 s of
+                                 fork plus wrap is exactly 178, so 179 is what
+                                 keeps the margin. The FG12f delivery entry moves from 30 s to
+                                 50 s at 2x (four cases, 24.16 s measured): the
+                                 healthy sum becomes 9500 s, so the fork moves
+                                 to 10100 s and the 179-minute step still wraps
+                                 (10700 s of fork plus wrap). -->
+                            <forkedProcessTimeoutInSeconds>10100</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
