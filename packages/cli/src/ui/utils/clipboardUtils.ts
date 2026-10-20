@@ -633,14 +633,18 @@ async function readStdout(
     child.on('close', (code) => {
       if (code === 0) {
         const bytes = Buffer.concat(chunks);
-        let text = bytes.toString('utf8');
-        // ICCCM STRING is Latin-1 (and TEXT its compound-text sibling): a
-        // UTF-8 decode that produced replacement characters means the owner
-        // sent the legacy encoding, so those offers retry as Latin-1. A
-        // well-formed UTF-8 payload never yields U+FFFD here, so the common
-        // case — xclip answering STRING with raw UTF-8 — never retries.
-        if (latin1Fallback && text.includes('\uFFFD')) {
-          text = bytes.toString('latin1');
+        let text: string;
+        try {
+          // ICCCM STRING is Latin-1 (and TEXT its compound-text sibling), so
+          // an invalid UTF-8 payload means the owner sent the legacy
+          // encoding and those offers retry as Latin-1. Validity, not the
+          // presence of U+FFFD, decides: a well-formed UTF-8 payload may
+          // legitimately contain a replacement character.
+          text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        } catch {
+          text = latin1Fallback
+            ? bytes.toString('latin1')
+            : bytes.toString('utf8');
         }
         done(text);
       } else {

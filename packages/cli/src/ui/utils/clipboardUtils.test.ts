@@ -668,6 +668,26 @@ describe('clipboardUtils', () => {
       expect(requestedTypes()).toEqual(['STRING']);
     });
 
+    it('keeps valid UTF-8 that contains U+FFFD instead of retrying as Latin-1', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        const requested = args[args.indexOf('-t') + 1];
+        if (requested === 'TARGETS') {
+          return createMockChild('STRING\n', 0);
+        }
+        // A genuinely well-formed UTF-8 payload may carry a replacement
+        // character — common when copying terminal output or a log line.
+        // Only invalid bytes justify the Latin-1 retry.
+        return createChunkedMockChild([
+          Buffer.from('caf\u00e9 \uFFFD', 'utf8'),
+        ]);
+      });
+
+      await expect(readClipboardText()).resolves.toBe('caf\u00e9 \uFFFD');
+      expect(requestedTypes()).toEqual(['STRING']);
+    });
+
     it('decodes stdout as one byte stream when a chunk splits a character', async () => {
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
       // The split lands inside the three-byte 中: decoding each chunk on

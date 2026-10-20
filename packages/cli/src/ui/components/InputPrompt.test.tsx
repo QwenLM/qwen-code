@@ -2016,6 +2016,88 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('drops a clipboard read that resolves after a keyboard completion accept', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      let resolveRead: (value: string | null) => void = () => {};
+      vi.mocked(clipboardUtils.readClipboardText).mockImplementation(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveRead = resolve;
+          }),
+      );
+      const acceptSpy = vi.fn(() => mockBuffer.setText('/memory '));
+      mockedUseCommandCompletion.mockReturnValue({
+        ...mockCommandCompletion,
+        showSuggestions: true,
+        suggestions: [{ label: 'memory', value: 'memory', description: '...' }],
+        activeSuggestionIndex: 0,
+        // The keyboard accept rewrites the buffer wholesale, exactly like the
+        // mouse accept the sibling test above drives.
+        handleAutocomplete: acceptSpy,
+      });
+      props.buffer.setText('/mem');
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+      stdin.write('\t');
+      await wait();
+      expect(acceptSpy).toHaveBeenCalledWith(0);
+
+      resolveRead('clipboard payload');
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+        'clipboard payload',
+        expect.anything(),
+      );
+      unmount();
+    });
+
+    it('keeps the latch closed while an image-path promotion is pending', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      vi.mocked(clipboardUtils.readClipboardText).mockResolvedValue(
+        '/tmp/clipboard-one.png',
+      );
+      let copyCalls = 0;
+      let resolveCopy: () => void = () => {};
+      fsPromisesOverride.stat = async () => ({ isFile: () => true });
+      fsPromisesOverride.copyFile = () => {
+        copyCalls += 1;
+        return new Promise<void>((resolve) => {
+          resolveCopy = resolve;
+        });
+      };
+      try {
+        const { stdin, unmount } = renderWithProviders(
+          <InputPrompt {...props} />,
+        );
+        await wait();
+
+        const pasteKey = isWindows ? '\x1Bv' : '\x16';
+        stdin.write(pasteKey);
+        await waitFor(() => expect(copyCalls).toBe(1));
+
+        // The stat/copy loop outlives the keystroke; a second Ctrl+V inside
+        // that window must not start a second read and promotion.
+        stdin.write(pasteKey);
+        await wait();
+        expect(clipboardUtils.readClipboardText).toHaveBeenCalledTimes(1);
+        expect(copyCalls).toBe(1);
+
+        resolveCopy();
+        await wait();
+        unmount();
+      } finally {
+        fsPromisesOverride.stat = undefined;
+        fsPromisesOverride.copyFile = undefined;
+      }
+    });
+
     it('drops a clipboard read that resolves after the prompt was cleared with ESC ESC', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
       let resolveRead: (value: string | null) => void = () => {};

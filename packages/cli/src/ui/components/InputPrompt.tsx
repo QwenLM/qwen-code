@@ -1044,7 +1044,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // path(s) becomes attachment chips exactly like the bracketed route, and
   // anything too large for the buffer collapses into a placeholder.
   const insertClipboardText = useCallback(
-    (text: string) => {
+    (text: string): Promise<void> | void => {
       const pastedImagePaths = classifyPastedImagePaths(text);
       // In shell mode a pasted path is a command argument, not an image to
       // attach: the promotion would turn it into a chip the command line
@@ -1054,8 +1054,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         pastedImagePaths.allImages &&
         pastedImagePaths.imagePaths.length > 0
       ) {
-        void promotePastedImagePaths(pastedImagePaths.imagePaths, text);
-        return;
+        // Returned so the caller can keep the in-flight latch closed until
+        // the stat/copy loop settles, not just until the read resolves.
+        return promotePastedImagePaths(pastedImagePaths.imagePaths, text);
       }
       if (!collapseLargePaste(text)) {
         buffer.insert(text, { paste: true });
@@ -1119,7 +1120,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // key.paste instead.
         const text = await readClipboardText();
         if (text && submitEpochRef.current === submitEpoch) {
-          insertClipboardText(text);
+          await insertClipboardText(text);
         }
       } catch (error) {
         debugLogger.error('Error handling clipboard paste:', error);
@@ -1731,6 +1732,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return false;
         }
 
+        // A completion accept replaces the buffer wholesale; bump the epoch
+        // first so a clipboard read still in flight cannot splice into the
+        // completed token. Mirrors the mouse accept below.
+        submitEpochRef.current += 1;
         completion.handleAutocomplete(targetIndex);
         exportCompletion.navigatedRef.current = false;
         setExpandedSuggestionIndex(-1);
