@@ -2,8 +2,13 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.StoreFaultGate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +24,9 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
@@ -216,6 +224,7 @@ class HostedHookReplyLossFaultGatesIT {
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
+                .sources(StoreFaultConfiguration.class)
                 .run("--server.address=127.0.0.1", "--server.port=" + port,
                         "--spring.datasource.url=" + System.getProperty("mysql.url"),
                         "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -514,6 +523,24 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13bHookIntentStoreRejectionDispatchesNothingOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_INTENT, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_INTENT");
+        // The injection fires inside the real commit transaction; the rejected
+        // intent never reaches the worker.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
+                .until(() -> true);
+        assertThat(events("hook.call")).isEmpty();
+        StoreFaultGate.INSTANCE.clear();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
@@ -760,6 +787,21 @@ class HostedHookReplyLossFaultGatesIT {
             json.writeValue(destination.resolve("hook-executions.json").toFile(),
                     jdbc.queryForList("SELECT record_id, domain, state, runtime_state FROM ma_session_record"
                             + " WHERE tenant_id = ? AND domain = 'hook_execution'", tenant));
+        }
+    }
+
+    // Test-only: replaces the record store bean with the faulting wrapper.
+    // The store's own constructor wiring is unchanged, so every commit still
+    // runs in the real transaction.
+    @Configuration(proxyBeanMethods = false)
+    static class StoreFaultConfiguration {
+        @Bean
+        @Primary
+        ManagedExtensionRecordStore faultingExtensionRecordStore(
+                JdbcTemplate jdbc, AgentStateStore sessions,
+                ManagedTaskEventStore taskEvents) {
+            return new FaultingExtensionRecordStore(jdbc, sessions, taskEvents,
+                    StoreFaultGate.INSTANCE);
         }
     }
 }
