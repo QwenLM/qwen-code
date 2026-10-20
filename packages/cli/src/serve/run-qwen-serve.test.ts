@@ -22071,6 +22071,8 @@ describe('runQwenServe startup observability', () => {
       expect(stderrWrites.join('')).toMatch(
         /qwen serve: startup timing: processToListenMs=\d+ runQwenServeToListenMs=\d+/,
       );
+      expect(stderrWrites.join('')).toMatch(/qwen daemon status\b/);
+      expect(stderrWrites.join('')).not.toMatch(/qwen daemon status --port/);
       expect(stderrWrites.join('')).not.toContain(
         'qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth.',
       );

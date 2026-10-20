@@ -709,17 +709,15 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       );
       const seconds = Number(s.run.match(/flock --wait (\d+) 9/)?.[1]);
       // The fast tier owns the same lock and waits behind these two steps, so
-      // one acquisition budget applies to every lane; run 39239175909 died at
-      // the old 60-minute wait on both attempts before Maven started.
+      // one acquisition budget applies to every lane; run 39229303984 died at
+      // the old 60-minute wait before Maven started.
       expect(seconds, s.name).toBe(90 * 60);
       return seconds;
     });
     // The ceiling must absorb one full lock wait per acquisition — this job
     // takes the lock once per Maven step — plus the ~50 minutes of measured
-    // Maven work and ~30 minutes of uncapped setup. Run 39097018288 held it
-    // for 47m26s, longer than the old 40-minute acquisition budget. Derive
-    // the ceiling from the step count so another locked step cannot silently
-    // overdraw it.
+    // Maven work and ~30 minutes of uncapped setup. Derive it from the step
+    // count so another locked step cannot silently overdraw it.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(
@@ -728,10 +726,10 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
         30 * 60,
     );
     // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured locked work (the sdk-java
-    // suite and the managed-agent H2 suite, 925 s) and setup headroom.
+    // cover one full wait plus its own measured hold (the sdk-java suite plus
+    // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      lockWaits[0] + 925 + 10 * 60,
+      lockWaits[0] + 925 + 11 * 60,
     );
   });
 
