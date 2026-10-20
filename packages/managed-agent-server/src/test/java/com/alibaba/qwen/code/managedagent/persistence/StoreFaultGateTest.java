@@ -55,10 +55,35 @@ class StoreFaultGateTest {
         assertThat(StoreFaultGate.INSTANCE.attempts()).isEqualTo(1);
     }
 
+    @Test
+    void hookPlanSettledPhaseSkipsAnotherEventsMarker() {
+        StoreFaultGate.INSTANCE.arm(
+                StoreFaultGate.Phase.HOOK_PLAN_SETTLED, null);
+        StoreFaultGate.INSTANCE.inspect(
+                EVENT, record("__plan__", "settled", "SessionStart"));
+        assertThat(StoreFaultGate.INSTANCE.attempts()).isZero();
+    }
+
+    @Test
+    void hookPlanSettledPhaseRejectsThePreToolUseMarker() {
+        StoreFaultGate.INSTANCE.arm(
+                StoreFaultGate.Phase.HOOK_PLAN_SETTLED, null);
+        assertThatThrownBy(() -> StoreFaultGate.INSTANCE.inspect(
+                EVENT, record("__plan__", "settled", "PreToolUse")))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(StoreFaultGate.INSTANCE.attempts()).isEqualTo(1);
+    }
+
     private static Function<String, StoredResource> record(
             String hookId, String execution) {
+        return record(hookId, execution, "PreToolUse");
+    }
+
+    private static Function<String, StoredResource> record(
+            String hookId, String execution, String eventName) {
         byte[] bytes = ("{\"hookExecutionId\":\"occ-1\",\"hookId\":\""
-                + hookId + "\",\"run\":{\"execution\":\"" + execution + "\"}}")
+                + hookId + "\",\"eventName\":\"" + eventName
+                + "\",\"run\":{\"execution\":\"" + execution + "\"}}")
                 .getBytes(StandardCharsets.UTF_8);
         return id -> new StoredResource(id, "managed-hook-execution", 1,
                 bytes.length, "sha256:x", bytes);

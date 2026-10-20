@@ -291,6 +291,11 @@ class HostedHookReplyLossFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202).path("turn_id").asText();
     }
 
+    private String turnStatus(String session, String turn) throws Exception {
+        return api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn, null, null, 200)
+                .path("status").asText();
+    }
+
     private JsonNode hookExecution(String session) {
         List<JsonNode> records = hookExecutions(session);
         assertThat(records).as("hook execution records").hasSize(1);
@@ -575,13 +580,18 @@ class HostedHookReplyLossFaultGatesIT {
         StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_SETTLED, null);
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
-        submit(session, "FG13_STORE_SETTLE");
-        // The worker already ran the Hook, so the refused commit leaves the
-        // record un-settled rather than un-dispatched.
+        String turn = submit(session, "FG13_STORE_SETTLE");
+        // The worker already ran the Hook. The store retries the refused
+        // commit, so keep the fault armed until the append has durably
+        // failed: the read below then has to recover rather than watch the
+        // original attempt land late.
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
-        StoreFaultGate.INSTANCE.clear();
+        waitFor(() -> assertThat(turnStatus(session, turn)).isEqualTo("failed"));
         assertThat(events("hook.call")).as("physical calls").hasSize(1);
-        String executionId = hookExecution(session).path("hookExecutionId").asText();
+        JsonNode parked = hookExecution(session);
+        assertThat(parked.path("resultRef").isNull()).as("unsettled record").isTrue();
+        String executionId = parked.path("hookExecutionId").asText();
+        StoreFaultGate.INSTANCE.clear();
         HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         // A later read takes the receipt the worker still holds and commits
@@ -604,17 +614,21 @@ class HostedHookReplyLossFaultGatesIT {
         StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_PLAN_SETTLED, null);
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
-        submit(session, "FG13_STORE_PLAN_SETTLE");
-        // The child settled; only the marker's own commit is refused, so the
-        // marker stays replayable and is rebuilt from the saved receipts.
+        String turn = submit(session, "FG13_STORE_PLAN_SETTLE");
+        // The child settled; only the PreToolUse marker's own commit is
+        // refused. Keep the fault armed until the append has durably failed,
+        // then rebuild the marker from the saved receipts.
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
-        StoreFaultGate.INSTANCE.clear();
+        waitFor(() -> assertThat(turnStatus(session, turn)).isEqualTo("failed"));
         assertThat(events("hook.call")).as("physical calls").hasSize(1);
         JsonNode marker = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
                 .filter(record -> "__plan__".equals(record.path("hookId").asText()))
+                .filter(record -> "PreToolUse".equals(record.path("eventName").asText()))
                 .findFirst()
                 .orElseThrow();
+        assertThat(marker.path("resultRef").isNull()).as("unsettled marker").isTrue();
         String occurrenceId = marker.path("hookExecutionId").asText();
+        StoreFaultGate.INSTANCE.clear();
         HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {

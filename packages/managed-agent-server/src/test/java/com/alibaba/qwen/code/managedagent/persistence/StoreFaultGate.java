@@ -121,7 +121,9 @@ public final class StoreFaultGate {
                     && !"__plan__".equals(record.path("hookId").asText());
             case HOOK_PLAN_SETTLED -> "hook_execution".equals(domain)
                     && "settled".equals(execution)
-                    && "__plan__".equals(record.path("hookId").asText());
+                    && "__plan__".equals(record.path("hookId").asText())
+                    && "PreToolUse".equals(
+                            record.path("eventName").asText());
         };
     }
 
