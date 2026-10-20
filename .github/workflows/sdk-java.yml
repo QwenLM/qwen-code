@@ -1814,7 +1814,12 @@ jobs:
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
+      # prepare would build and bundle here, then the two steps below build and
+      # bundle the same tree again. Keep this an install: the fast-tier lane
+      # that failed (#14861) died inside prepare's build.
       - name: 'Install Node.js dependencies'
+        env:
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
             if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then

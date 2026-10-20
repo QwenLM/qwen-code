@@ -91,6 +91,25 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
+  it('keeps the daemon E2E install from rebuilding what its next steps build', () => {
+    // prepare would build and bundle the tree during install, then the two
+    // explicit steps below repeat both. #14861 failed inside that install-path
+    // build, so the install stays an install and the build steps below stay
+    // the only place this job compiles.
+    const steps = parse(workflow).jobs['daemon-e2e'].steps;
+    const install = steps.find(
+      (s) => s.name === 'Install Node.js dependencies',
+    );
+    expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
+    const names = steps.map((s) => s.name);
+    expect(names.indexOf('Build Qwen Code')).toBeGreaterThan(
+      names.indexOf('Install Node.js dependencies'),
+    );
+    expect(names.indexOf('Bundle Qwen Code')).toBeGreaterThan(
+      names.indexOf('Build Qwen Code'),
+    );
+  });
+
   it('serializes latency-sensitive tests on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
