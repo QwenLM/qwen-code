@@ -159,6 +159,10 @@ export function createJavaManagedAgentProvider(
       list: (sessionId, request) =>
         client.getSessionSkills(sessionId, request.signal),
     },
+    mcp: {
+      list: (sessionId, request) =>
+        client.getSessionMcp(sessionId, request.signal),
+    },
     tasks: {
       list: (sessionId, request) =>
         client.listTasks(

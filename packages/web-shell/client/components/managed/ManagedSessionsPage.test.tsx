@@ -397,7 +397,54 @@ describe('ManagedSessionsPage', () => {
     expect(completion?.items[0]?.autoSubmit).not.toBe(true);
   });
 
-  it('keeps Workspace file references available alongside the pinned Skill catalog', async () => {
+  it('connects MCP independently of file attachments without enabling daemon features', async () => {
+    const list = vi.fn().mockResolvedValue({
+      object: 'agent.mcp_catalog',
+      session_id: 's1',
+      servers: [],
+    });
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    await expect(
+      mocks.editorProps!.fileReferenceActions!.loadMcpStatus!(),
+    ).resolves.toEqual({ servers: [] });
+    expect(list).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+  });
+
+  it('invalidates the composer MCP cache scope when the selected Session changes without file actions', async () => {
+    const list = vi.fn(async (sessionId: string) => ({
+      object: 'agent.mcp_catalog' as const,
+      session_id: sessionId,
+      servers: [],
+    }));
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    const first = mocks.editorProps!.fileReferenceActions!;
+    expect(first.scopeKey).toBeTruthy();
+    await first.loadMcpStatus!();
+
+    await render('s1');
+    expect(mocks.editorProps!.fileReferenceActions!.scopeKey).toBe(
+      first.scopeKey,
+    );
+
+    await render('s2');
+    const second = mocks.editorProps!.fileReferenceActions!;
+    expect(second.scopeKey).not.toBe(first.scopeKey);
+    await second.loadMcpStatus!();
+    expect(list.mock.calls.map(([sessionId]) => sessionId)).toEqual([
+      's1',
+      's2',
+    ]);
+  });
+
+  it('keeps Workspace file references available alongside MCP and the pinned Skill catalog', async () => {
     const skills = [{ name: 'review', description: 'Pinned review.' }];
     const list = vi.fn().mockResolvedValue({ skills });
     const query = vi.fn().mockResolvedValue({
@@ -409,6 +456,9 @@ describe('ManagedSessionsPage', () => {
     provider = {
       ...provider,
       skills: { list },
+      mcp: {
+        list: vi.fn().mockResolvedValue({ session_id: 's1', servers: [] }),
+      },
       workspaceFiles: { query, read: vi.fn() },
     };
     mocks.client.getSession.mockResolvedValue(
@@ -424,6 +474,9 @@ describe('ManagedSessionsPage', () => {
     );
     await render('s1');
     expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(
+      mocks.editorProps?.fileReferenceActions?.loadMcpStatus,
+    ).toBeDefined();
     expect(mocks.editorProps?.persistFileReferences).toBe(true);
     expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
     expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
