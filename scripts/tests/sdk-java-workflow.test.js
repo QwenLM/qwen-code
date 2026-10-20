@@ -131,7 +131,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     const lockedSteps = ['test', 'mysql-integration'].flatMap((name) =>
       jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
     );
-    expect(lockedSteps).toHaveLength(3);
+    // The MariaDB lane's two Maven steps are one step now (#14903), so the
+    // lock-bearing steps are the test job's and this job's single one.
+    expect(lockedSteps).toHaveLength(2);
     for (const s of lockedSteps) {
       const commands = s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm);
       expect(commands?.length, s.name).toBeGreaterThan(0);
@@ -805,7 +807,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       const verify = mysql.steps.find((s) =>
         s.run?.includes('-Pmysql-integration'),
       );
-      const command = verify.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/m)[0];
+      // The step also stages the SDK with `-DskipTests install`, so pick the
+      // integration command rather than the step's first Maven line.
+      const command = verify.run
+        .replace(/\\\n/g, ' ')
+        .match(/^\s*mvn .*-Pmysql-integration.*$/m)[0];
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-mysql-'));
       try {
         const result = spawnSync(
