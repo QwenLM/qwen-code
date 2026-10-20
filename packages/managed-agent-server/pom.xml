@@ -403,12 +403,14 @@
                                  becomes 3874 s and the fork 4484 s,
                                  which the Verify step's 90 minutes
                                  still wrap. The FG12a MCP reply-loss
-                                 letter (HostedMcpReplyLossIT, three
-                                 cases) measures 5.1-7.4 s healthy
+                                 letter (HostedMcpReplyLossIT, eight
+                                 cases) measures 5.1-11.7 s healthy
                                  locally on macOS JDK 21 + MariaDB
-                                 10.11 (~15 s budgeted at 2x): the
-                                 healthy sum becomes 3889 s, so the
-                                 fork moves to 4499 s. The FG12c MCP
+                                 10.11 (15 s budgeted; the latest
+                                 11.66 s run is ~1.3x, so raising the
+                                 ceiling is a follow-up): the healthy
+                                 sum becomes 3889 s, so the fork moves
+                                 to 4499 s. The FG12c MCP
                                  restart matrix (HostedMcpRestartFault
                                  GatesIT, five process-kill cases)
                                  measures ~49 s healthy locally (~98 s
@@ -494,8 +496,14 @@
                                  deny lost-reply cell adds 150 s: the healthy
                                  sum becomes 7959 s, so the fork moves to
                                  8559 s and the Verify step to 153
-                                 minutes. -->
-                            <forkedProcessTimeoutInSeconds>8559</forkedProcessTimeoutInSeconds>
+                                 minutes. The FG11d disabled-span cell adds
+                                 336 s: the healthy sum becomes 8295 s, so the
+                                 fork moves to 8895 s and the Verify step to
+                                 159 minutes. The FG13f failClosed lost-reply
+                                 cell adds 150 s: the healthy sum becomes
+                                 8445 s, so the fork moves to 9045 s and the
+                                 Verify step to 161 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9045</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
