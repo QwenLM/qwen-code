@@ -19,6 +19,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -28,6 +29,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const script = resolve('scripts/rocketmq-lite-broker.sh');
+const chooser = resolve('.github/scripts/choose-rocketmq-ports.mjs');
 const version = '5.5.1';
 const portLookup =
   spawnSync('sh', ['-c', 'command -v lsof || command -v ss']).status === 0;
@@ -119,9 +121,11 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
   let work;
   let ports;
   let env;
+  let holderDir;
   const foreign = [];
 
   beforeEach(async () => {
+    holderDir = undefined;
     work = mkdtempSync(join(tmpdir(), 'rmq-lite-script-'));
     const bin = join(work, `rocketmq-all-${version}-bin-release`, 'bin');
     mkdirSync(bin, { recursive: true });
@@ -165,6 +169,16 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     // names this test's own work dir, so nothing else matches.
     spawnSync('pkill', ['-f', work]);
     for (const child of foreign.splice(0)) child.kill();
+    if (holderDir && existsSync(holderDir)) {
+      for (const file of readdirSync(holderDir)) {
+        try {
+          process.kill(Number(readFileSync(join(holderDir, file), 'utf8')));
+        } catch {
+          // Holder already gone.
+        }
+      }
+      rmSync(holderDir, { recursive: true, force: true });
+    }
     rmSync(work, { recursive: true, force: true });
   });
 
@@ -234,6 +248,48 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     });
     expect(stopped.status).toBe(0);
     for (const port of ports) expect(await isFree(port)).toBe(true);
+    expect(pidFiles()).toEqual([]);
+  }, 200_000);
+
+  it('takes over the ports the chooser parked and releases the rest', async () => {
+    const picked = spawnSync(process.execPath, [chooser], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    expect(picked.status).toBe(0);
+    const chosen = Object.fromEntries(
+      picked.stdout
+        .trim()
+        .split('\n')
+        .map((line) => line.split('=')),
+    );
+    holderDir = chosen.RMQ_HOLDER_DIR;
+    const parked = [
+      'RMQ_NAMESRV_PORT',
+      'RMQ_BROKER_PORT',
+      'RMQ_PROXY_GRPC_PORT',
+      'RMQ_PROXY_REMOTING_PORT',
+    ].map((name) => chosen[name]);
+    expect(existsSync(holderDir)).toBe(true);
+
+    // start consumes the chooser's holder records exactly as the workflow
+    // lane does; a record its `read` cannot parse aborts the start here.
+    const started = run('start', { ...chosen, RMQ_HOLDER_DIR: holderDir });
+
+    expect(started.status).toBe(0);
+    // Every holder this job owned is gone, including the broker companions,
+    // and each parked port now belongs to the component that took it over.
+    expect(existsSync(holderDir)).toBe(false);
+    for (const port of parked.map(Number)) {
+      expect(await isFree(port)).toBe(false);
+    }
+
+    expect(run('stop', { ...chosen, RMQ_HOLDER_DIR: holderDir }).status).toBe(
+      0,
+    );
+    for (const port of parked.map(Number)) {
+      expect(await isFree(port)).toBe(true);
+    }
     expect(pidFiles()).toEqual([]);
   }, 200_000);
 });

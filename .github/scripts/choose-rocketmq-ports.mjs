@@ -37,23 +37,31 @@ const port = Number(process.argv[1]);
 const file = process.argv[2];
 const server = net.createServer();
 server.once('error', () => process.exit(1));
-server.listen(port, '0.0.0.0', () => fs.writeFileSync(file, String(process.pid)));
+server.listen(port, '0.0.0.0', () =>
+  fs.writeFileSync(file, String(process.pid) + '\\n'),
+);
 `;
 
 // Parks one port behind a detached holder and waits for the pid file that
-// proves it owns the bind. Resolves false when the port cannot be held, so
-// the caller picks another.
+// proves it owns the bind. The record is newline-terminated because the
+// broker script reads it with `read` under `set -e`, where a file without a
+// final newline makes the read fail. Any stale pid file must be gone first
+// and the (re)written one must name this spawn's pid, else a previous
+// holder's artifact fakes success. Resolves false when the port cannot be
+// held, so the caller picks another.
 const hold = (port) =>
   new Promise((resolve) => {
     const file = path.join(holderDir, `${port}.pid`);
-    spawn(process.execPath, ['-e', HOLDER, String(port), file], {
+    fs.rmSync(file, { force: true });
+    const child = spawn(process.execPath, ['-e', HOLDER, String(port), file], {
       detached: true,
       stdio: 'ignore',
-    }).unref();
+    });
+    child.unref();
     let waited = 0;
     const timer = setInterval(() => {
       try {
-        if (fs.readFileSync(file, 'utf8').trim()) {
+        if (Number(fs.readFileSync(file, 'utf8').trim()) === child.pid) {
           clearInterval(timer);
           resolve(true);
           return;
@@ -111,14 +119,25 @@ for (const name of [
     if (port === null) continue;
     let kept = true;
     if (name === 'RMQ_BROKER_PORT') {
+      // A companion can repeat a port an earlier role already parked: the
+      // kernel hands out adjacent ephemeral ports, so ±1/±2 repeats are
+      // common. Parking it again would spawn a child that dies on bind while
+      // the live holder's pid file faked success, and the broker's fast
+      // channel or HA listener would then collide with that role. Reject the
+      // candidate, and release only the holders this candidate parked.
+      const reserved = new Set(Object.values(ports));
       const companions = [port - 2, port + 1];
+      const acquired = [];
       for (const companion of companions) {
-        if (!(await hold(companion))) {
+        if (reserved.has(companion) || !(await hold(companion))) {
           kept = false;
           break;
         }
+        acquired.push(companion);
       }
-      if (!kept) for (const p of [port, ...companions]) release(p);
+      if (!kept) {
+        for (const candidate of [port, ...acquired]) release(candidate);
+      }
     }
     if (kept) ports[name] = port;
   }
