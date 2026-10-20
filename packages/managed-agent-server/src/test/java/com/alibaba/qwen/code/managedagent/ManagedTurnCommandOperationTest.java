@@ -1,17 +1,18 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.AcceptanceVerdict;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.CancelEvidence;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -388,6 +389,86 @@ class ManagedTurnCommandOperationTest {
     }
 
     @Test
+    void aCancelOfAnUnknownExecutionParksInsteadOfFailingAlreadySettled() {
+        Admission admitted = admit("submit-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(cancel.commandEffect()).isTrue();
+        assertThat(operation(cancel.operationId()).state()).isEqualTo("PENDING");
+
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "managed_runtime_recovery_blocked",
+                "prior tool execution unknown");
+
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(operation.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(operation.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("cancel_unconfirmed");
+        assertThat(operation.receiptId()).isNull();
+    }
+
+    @Test
+    void aCancelSubmittedAfterAnUnknownFailureFailsAlreadySettled() {
+        Admission admitted = admit("submit-1");
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "managed_runtime_recovery_blocked",
+                "prior tool execution unknown");
+        Admission late = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(late.commandEffect()).isFalse();
+        OperationRecord operation = operation(late.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
+    }
+
+    @Test
+    void aCancelOfAnAttemptedTurnWithoutAnEpochParks() {
+        Admission attempted = submit("submit-1", "digest-1");
+        claim(attempted);
+        store.markSubmissionAttempted(TENANT, sessionId,
+                attempted.turnId(), OWNER);
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", attempted);
+        store.failTurn(TENANT, sessionId, attempted.turnId(), OWNER,
+                "managed_runtime_recovery_blocked",
+                "prior tool execution unknown");
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("cancel_unconfirmed");
+    }
+
+    @Test
+    void aCancelParksWhenItsHarnessReportsAnUnknownExecutionFailure() {
+        Admission admitted = admit("submit-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(cancel.commandEffect()).isTrue();
+        assertThat(store.findTurn(TENANT, sessionId, admitted.turnId())
+                .orElseThrow().status()).isEqualTo("CANCELLING");
+
+        finish(admitted, "turn.failed", "FAILED",
+                "managed_runtime_recovery_blocked");
+
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(operation.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(operation.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("cancel_unconfirmed");
+        assertThat(operation.receiptId()).isNull();
+    }
+
+    @Test
+    void aCancelOfAnAdmittedTurnFailedOtherwiseFailsAlreadySettled() {
+        Admission admitted = admit("submit-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "hosted_harness_unavailable", "gone");
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
+    }
+
+    @Test
     void aCancelOfAnEndedTurnSettlesAtAdmission() {
         Admission completed = admit("submit-1");
         finish(completed, "turn.completed", "COMPLETED");
@@ -430,6 +511,221 @@ class ManagedTurnCommandOperationTest {
         assertThat(store.beginOperation(TENANT, sessionId,
                 OperationKind.CLOSE, "actor", "close-1", "close-digest")
                 .operation().state()).isEqualTo("PENDING");
+    }
+
+    @Test
+    void aParkedCancelSettlesFromItsOriginalPromptsCancelledResult() throws Exception {
+        Admission turn = admit("submit-1");
+        Admission first = cancel("cancel-1", "cancel-digest-1", turn);
+        Admission second = cancel("cancel-2", "cancel-digest-2", turn);
+        claim(turn);
+        store.failTurn(TENANT, sessionId, turn.turnId(), OWNER,
+                "managed_runtime_recovery_blocked", "unknown");
+        seedParkedCancel(first);
+        seedParkedCancel(second);
+        ParkedOperation parked = parkedCancel(first);
+        assertThat(store.findParkedOperations(50)).containsExactlyInAnyOrder(
+                parked, parkedCancel(second));
+        assertThat(cancelEvidence(first)).contains(AcceptanceVerdict.unknown());
+        journalTurnResult(turn, "cancelled");
+        assertThat(cancelEvidence(first)).contains(AcceptanceVerdict.committed());
+        for (Admission cancel : List.of(first, second)) {
+            CancelEvidence evidence = new CancelEvidence(jdbc, new ObjectMapper());
+            assertThat(evidence.settle(store, parkedCancel(cancel),
+                    evidence.read(parkedCancel(cancel)).orElseThrow(), 0)).isTrue();
+            OperationRecord completed = operation(cancel.operationId());
+            assertThat(completed.state()).isEqualTo("COMPLETED");
+            assertThat(completed.admissionStage()).isEqualTo("HARNESS_CONFIRMED");
+            assertThat(completed.deliveryState()).isEqualTo("CONFIRMED");
+            assertThat(completed.receiptId()).startsWith("rcpt_");
+            assertThat(completed.failureCode()).isNull();
+            assertThat(evidence.read(parkedCancel(cancel))).isEmpty();
+            assertThat(evidence.settle(store, parkedCancel(cancel),
+                    AcceptanceVerdict.notCommitted("turn_already_settled"), 0)).isFalse();
+            assertThat(operation(cancel.operationId())).usingRecursiveComparison().isEqualTo(completed);
+        }
+        assertThat(store.findParkedOperations(50)).isEmpty();
+        assertThat(store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow().status())
+                .isEqualTo("FAILED");
+        assertThat(store.findDeliverableOperations(now.get(), 50)).isEmpty();
+        assertThat(store.findDeliverableTaskCancels(50)).isEmpty();
+    }
+
+    @Test
+    void aParkedCancelFailsOnlyFromItsOriginalPromptsNonCancelledResult() throws Exception {
+        for (String outcome : List.of("completed", "error")) {
+            Admission turn = admit("submit-" + outcome);
+            Admission cancel = parkCancel(turn, "cancel-" + outcome);
+            journalTurnResult(turn, outcome);
+            AcceptanceVerdict verdict = cancelEvidence(cancel).orElseThrow();
+            assertThat(verdict).isEqualTo(AcceptanceVerdict.notCommitted("turn_already_settled"));
+            assertThat(store.settleParkedOperation(parkedCancel(cancel), verdict, 0)).isTrue();
+            OperationRecord failed = operation(cancel.operationId());
+            assertThat(failed.state()).isEqualTo("FAILED");
+            assertThat(failed.admissionStage()).isEqualTo("JAVA_DURABLE");
+            assertThat(failed.deliveryState()).isEqualTo("BLOCKED");
+            assertThat(failed.receiptId()).isNull();
+        }
+    }
+
+    @Test
+    void aRequestOrAClosedJournalWithoutTheOriginalResultProvesNoOutcome() throws Exception {
+        Admission turn = admit("submit-1");
+        Admission cancel = parkCancel(turn, "cancel-1");
+        managedHead("ACTIVE", 0);
+        jdbc.update("UPDATE ma_session_head SET workspace_id = 'ws'");
+        for (String state : List.of("ACTIVE", "SEALED", "DELETING", "DELETED")) {
+            jdbc.update("UPDATE ma_session_head SET state = ?", state);
+            assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+        }
+        String prompt = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow().promptId();
+        byte[] bytes = "{}\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        journalBytes("requestCancel", "hosted-cancel:" + prompt, bytes);
+        jdbc.update("UPDATE ma_session_journal_tx SET content_digest = ?"
+                + " WHERE operation = 'requestCancel'", DigestUtils.sha256Hex(prompt));
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+        jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 1");
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+        OperationRecord before = operation(cancel.operationId());
+        assertThat(store.settleParkedOperation(parkedCancel(cancel),
+                cancelEvidence(cancel).orElseThrow(), now.get() + 300_000)).isTrue();
+        OperationRecord after = operation(cancel.operationId());
+        assertThat(after.state()).isEqualTo(before.state());
+        assertThat(after.failureCode()).isEqualTo("cancel_unconfirmed");
+        assertThat(after.receiptId()).isNull();
+    }
+
+    @Test
+    void cancellationEvidenceRequiresTheOriginalScopePromptAndEventIdentity() throws Exception {
+        Admission turn = admit("submit-1");
+        Admission cancel = parkCancel(turn, "cancel-1");
+        Map<String, Object> correct = turnResult(turn, "cancelled");
+        for (String field : List.of("tenantId", "workspaceId", "sessionId")) {
+            Map<String, Object> wrong = new java.util.HashMap<>(correct);
+            Map<String, Object> key = new java.util.HashMap<>(Map.of(
+                    "tenantId", TENANT, "workspaceId", "ws", "sessionId", sessionId));
+            key.put(field, "foreign");
+            wrong.put("sessionKey", key);
+            journalTurnResult(wrong);
+            assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+        }
+        Map<String, Object> wrong = new java.util.HashMap<>(correct);
+        wrong.put("eventId", "turn:another-prompt");
+        journalTurnResult(wrong);
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+        wrong = new java.util.HashMap<>(correct);
+        wrong.put("payload", Map.of("turnId", "another-prompt", "outcome", "cancelled"));
+        journalTurnResult(wrong);
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+        wrong = new java.util.HashMap<>(correct);
+        wrong.put("payload", Map.of("turnId", store.findTurn(TENANT, sessionId, turn.turnId())
+                .orElseThrow().promptId(), "outcome", "unknown"));
+        journalTurnResult(wrong);
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+        journalTurnResult(turn, "cancelled");
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.committed());
+        jdbc.update("UPDATE ma_operation SET target_key = ? WHERE operation_id = ?",
+                "0".repeat(64), cancel.operationId());
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+    }
+
+    @Test
+    void compactedAwayResultsStayUnknownWhileRetainedResultsStillProveCancellation() throws Exception {
+        Admission turn = admit("submit-1");
+        Admission cancel = parkCancel(turn, "cancel-1");
+        journalTurnResult(turn, "cancelled");
+        jdbc.update("UPDATE ma_session_head SET compacted_through_revision = journal_revision");
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.committed());
+        jdbc.update("DELETE FROM ma_session_journal_tx WHERE operation = 'settleTurn'");
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+    }
+
+    @Test
+    void aCorruptTerminalTransactionCannotProveCancellation() throws Exception {
+        Admission turn = admit("submit-1");
+        Admission cancel = parkCancel(turn, "cancel-1");
+        journalTurnResult(turn, "cancelled");
+        jdbc.update("UPDATE ma_session_journal_tx SET record_digest = ?", "0".repeat(64));
+        assertThatThrownBy(() -> cancelEvidence(cancel))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("corrupt");
+        assertThat(operation(cancel.operationId()).state()).isEqualTo("RECOVERY_BLOCKED");
+    }
+
+    @Test
+    void aMissingOriginalTurnRemainsUnknownAndWaitsForARecheck() {
+        Admission turn = admit("submit-1");
+        Admission cancel = parkCancel(turn, "cancel-1");
+        jdbc.update("DELETE FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                TENANT, sessionId, turn.turnId());
+        assertThat(cancelEvidence(cancel)).contains(AcceptanceVerdict.unknown());
+        assertThat(store.settleParkedOperation(parkedCancel(cancel),
+                cancelEvidence(cancel).orElseThrow(), now.get() + 300_000)).isTrue();
+        assertThat(operation(cancel.operationId()).attemptCount()).isEqualTo(1);
+        assertThat(store.findParkedOperations(50)).isEmpty();
+    }
+
+    private Admission parkCancel(Admission turn, String key) {
+        Admission cancel = cancel(key, "digest-" + key, turn);
+        claim(turn);
+        store.failTurn(TENANT, sessionId, turn.turnId(), OWNER,
+                "managed_runtime_recovery_blocked", "unknown");
+        seedParkedCancel(cancel);
+        return cancel;
+    }
+
+    // The parking producer is the separately reviewed #14700 dependency.
+    private void seedParkedCancel(Admission cancel) {
+        jdbc.update("UPDATE ma_operation SET state = 'RECOVERY_BLOCKED', phase = 'RECOVERY_BLOCKED',"
+                        + " admission_stage = 'JAVA_DURABLE', delivery_state = 'BLOCKED',"
+                        + " failure_code = 'cancel_unconfirmed', receipt_id = NULL, completed_at = NULL,"
+                        + " available_at = 0 WHERE tenant_id = ? AND session_id = ? AND operation_id = ?"
+                        + " AND operation_kind = 'CANCEL'",
+                TENANT, sessionId, cancel.operationId());
+    }
+
+    private ParkedOperation parkedCancel(Admission cancel) {
+        return new ParkedOperation(TENANT, sessionId, cancel.operationId(), "CANCEL");
+    }
+
+    private java.util.Optional<AcceptanceVerdict> cancelEvidence(Admission cancel) {
+        return new CancelEvidence(jdbc, new ObjectMapper()).read(parkedCancel(cancel));
+    }
+
+    private Map<String, Object> turnResult(Admission turn, String outcome) {
+        String prompt = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow().promptId();
+        return Map.of("v", 1, "sequence", 1, "eventId", "turn:" + prompt,
+                "kind", "turn.settled", "occurredAt", now.get(),
+                "sessionKey", Map.of("tenantId", TENANT, "workspaceId", "ws", "sessionId", sessionId),
+                "payload", Map.of("turnId", prompt, "outcome", outcome));
+    }
+
+    private void journalTurnResult(Admission turn, String outcome) throws Exception {
+        journalTurnResult(turnResult(turn, outcome));
+    }
+
+    private void journalTurnResult(Map<String, Object> event) throws Exception {
+        byte[] bytes = (new ObjectMapper().writeValueAsString(Map.of(
+                "subtype", "managed_session_event_v1", "managedSession", event)) + "\n")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        journalBytes("settleTurn", "recorder:" + UUID.randomUUID(), bytes);
+    }
+
+    private void journalBytes(String operation, String commandId, byte[] bytes) {
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head", Integer.class) == 0) {
+            managedHead("ACTIVE", 0);
+        }
+        long revision = jdbc.queryForObject("SELECT COALESCE(MAX(journal_revision), 0) + 1"
+                + " FROM ma_session_journal_tx", Long.class);
+        jdbc.update("UPDATE ma_session_head SET workspace_id = 'ws', journal_revision = ?", revision);
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
+                        + " journal_revision, command_key_hash, transaction_id, operation, command_id,"
+                        + " content_digest, first_sequence, last_sequence, event_count, writer_generation,"
+                        + " writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes,"
+                        + " byte_length, record_digest, gmt_create) VALUES (?, 'ws', ?, ?, ?, ?, ?, ?, ?,"
+                        + " 1, 1, 1, 1, 'writer', ?, 0, 'identity', ?, ?, ?, 0)",
+                TENANT, sessionId, revision, DigestUtils.sha256Hex(operation + "\u0000" + commandId),
+                commandId, operation, commandId, DigestUtils.sha256Hex(bytes), "0".repeat(64),
+                bytes, bytes.length, DigestUtils.sha256Hex(bytes));
     }
 
     Admission submit(String key, String digest) {
@@ -508,13 +804,18 @@ class ManagedTurnCommandOperationTest {
     }
 
     private void finish(Admission turn, String type, String status) {
+        finish(turn, type, status, null);
+    }
+
+    private void finish(Admission turn, String type, String status,
+            String errorCode) {
         claim(turn);
         String epoch = store.findTurn(TENANT, sessionId, turn.turnId())
                 .orElseThrow().harnessEventEpoch();
         store.recordHarnessEvents(TENANT, sessionId, turn.turnId(), OWNER,
                 epoch, List.of(new HarnessEvent(1, "boot:" + epoch + ":1",
                         new ProjectedEvent(type, Map.of(), true, status,
-                                null, null))));
+                                errorCode, null))));
     }
 
     OperationRecord operation(String operationId) {
@@ -530,7 +831,7 @@ class ManagedTurnCommandOperationTest {
     private static void refused(Runnable call, HttpStatus status,
             String code) {
         assertThatThrownBy(call::run).isInstanceOfSatisfying(
-                ApiException.class, error -> {
+                ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(status);
                     assertThat(error.getCode()).isEqualTo(code);
                 });

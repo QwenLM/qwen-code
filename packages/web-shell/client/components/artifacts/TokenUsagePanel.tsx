@@ -350,6 +350,23 @@ function ModelCard({
   const share = grandTotal > 0 ? (total / grandTotal) * 100 : 0;
   const avgLatency =
     m.api.totalRequests > 0 ? m.api.totalLatencyMs / m.api.totalRequests : 0;
+  const { generation } = m;
+  const timing =
+    generation && generation.timedRequests > 0
+      ? {
+          ttft: generation.totalTtftMs / generation.timedRequests,
+          // Averaged over the same requests as TTFT so the two add up to
+          // their latency; Avg latency above also counts failed, internal
+          // and non-streamed requests.
+          generation:
+            generation.totalGenerationDurationMs / generation.timedRequests,
+          speed:
+            generation.totalGenerationDurationMs > 0
+              ? generation.totalThroughputOutputTokens /
+                (generation.totalGenerationDurationMs / 1000)
+              : undefined,
+        }
+      : undefined;
   return (
     <div className={styles.modelCard} data-color={(rank - 1) % 5}>
       <div className={styles.modelHeader}>
@@ -382,6 +399,29 @@ function ModelCard({
                 <span>
                   {t('tokenUsage.avgLatency')} {formatDuration(avgLatency)}
                 </span>
+                {timing && (
+                  <>
+                    <span>
+                      {t('tokenUsage.firstTokenLatency', {
+                        duration: formatDuration(timing.ttft),
+                      })}
+                    </span>
+                    {timing.speed !== undefined && (
+                      <>
+                        <span>
+                          {t('tokenUsage.generationTime', {
+                            duration: formatDuration(timing.generation),
+                          })}
+                        </span>
+                        <span>
+                          {t('tokenUsage.outputSpeed', {
+                            rate: timing.speed.toFixed(1),
+                          })}
+                        </span>
+                      </>
+                    )}
+                  </>
+                )}
               </div>
             </TooltipContent>
           </Tooltip>

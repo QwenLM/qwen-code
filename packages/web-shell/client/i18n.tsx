@@ -165,6 +165,10 @@ const EN: Messages = {
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
   'managed.discard': 'Discard this request',
+  'managed.pendingRestoreFailed':
+    'The pending request cannot be restored and may already have been submitted. Check the session before discarding this pending record.',
+  'managed.pendingDiscardFailed':
+    'Could not discard this request. Browser storage is unavailable. Retry or reload the page.',
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
@@ -1867,6 +1871,7 @@ const EN: Messages = {
   'codeReview.failureScenario': 'Failure scenario',
   'codeReview.witness': 'Witness',
   'codeReview.suggestedFix': 'Suggested fix',
+  'codeReview.fixWitness': 'Fix witness',
   'codeReview.outcome': 'Outcome',
   'codeReview.locations': 'Locations',
   'codeReview.evidence': 'Evidence',
@@ -1981,6 +1986,7 @@ const EN: Messages = {
   'turnOutputs.openFileTree': 'Open file tree',
   'turnOutputs.closeFileTree': 'Close file tree',
   'turnOutputs.artifactMissing': 'File not found in the workspace',
+  'turnOutputs.artifactChanged': 'Modified since recorded',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path
       ? `File not found in the workspace · ${v.path}`
@@ -4546,6 +4552,10 @@ const ZH: Messages = {
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
   'managed.discard': '丢弃本次请求',
+  'managed.pendingRestoreFailed':
+    '无法恢复待确认请求，此前的提交可能已成功。请先检查会话，再决定是否丢弃这条待确认记录。',
+  'managed.pendingDiscardFailed':
+    '无法丢弃此请求，浏览器存储不可用。请重试或刷新页面。',
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
@@ -6200,6 +6210,7 @@ const ZH: Messages = {
   'codeReview.failureScenario': '失败场景',
   'codeReview.witness': '实测证据',
   'codeReview.suggestedFix': '建议修复',
+  'codeReview.fixWitness': '修复验收标准',
   'codeReview.outcome': '处理结果',
   'codeReview.locations': '位置',
   'codeReview.evidence': '证据',
@@ -6306,6 +6317,7 @@ const ZH: Messages = {
   'turnOutputs.openFileTree': '打开文件树',
   'turnOutputs.closeFileTree': '关闭文件树',
   'turnOutputs.artifactMissing': '工作区中未找到该文件',
+  'turnOutputs.artifactChanged': '登记后已被修改',
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',

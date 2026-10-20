@@ -12,6 +12,10 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
   'tokenUsage.total': 'Total tokens',
   'tokenUsage.shareTooltip': (v) => `Token share: ${v?.percent ?? '0.0'}%`,
   'tokenUsage.avgLatency': 'Avg latency',
+  'tokenUsage.firstTokenLatency': (v) =>
+    `First-token latency ${v?.duration ?? ''}`,
+  'tokenUsage.generationTime': (v) => `Generation ${v?.duration ?? ''}`,
+  'tokenUsage.outputSpeed': (v) => `Output speed ${v?.rate ?? ''} tok/s`,
   'tokenUsage.modelApiMeta': (v) => `${v?.model ?? ''}: Requests · Avg latency`,
   'tokenUsage.valueWithRate': (v) =>
     `${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
@@ -46,6 +50,9 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
   'tokenUsage.total': '总 Token',
   'tokenUsage.shareTooltip': (v) => `Token 占比：${v?.percent ?? '0.0'}%`,
   'tokenUsage.avgLatency': '平均延迟',
+  'tokenUsage.firstTokenLatency': (v) => `首 token 延迟 ${v?.duration ?? ''}`,
+  'tokenUsage.generationTime': (v) => `生成 ${v?.duration ?? ''}`,
+  'tokenUsage.outputSpeed': (v) => `输出速度 ${v?.rate ?? ''} tok/s`,
   'tokenUsage.modelApiMeta': (v) => `${v?.model ?? ''}：请求 · 平均延迟`,
   'tokenUsage.valueWithRate': (v) =>
     `${v?.count ?? 0}（${v?.percent ?? '0.0'}%）`,

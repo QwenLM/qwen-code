@@ -54,7 +54,15 @@ for (const { width, language, theme } of [
         durationMs: 42000,
         promptCount: 2,
         models: {
-          'qwen3.8-flash': metrics(14000000, 250000, 12320000),
+          'qwen3.8-flash': {
+            ...metrics(14000000, 250000, 12320000),
+            generation: {
+              timedRequests: 4,
+              totalTtftMs: 4800,
+              totalGenerationDurationMs: 2000,
+              totalThroughputOutputTokens: 170,
+            },
+          },
           'qwen3.8-max-0902': metrics(3000000, 750000, 2700000),
           'gpt-6.1-sol': metrics(500000, 100000, 490000),
           'gpt-5.6-sol': metrics(300000, 100000, 294000),
@@ -160,6 +168,22 @@ for (const { width, language, theme } of [
       await expect(page.getByRole('tooltip')).toContainText(
         zh ? '平均延迟 22.9s' : 'Avg latency 22.9s',
       );
+      for (const text of zh
+        ? ['首 token 延迟 1.2s', '生成 500ms', '输出速度 85.0 tok/s']
+        : [
+            'First-token latency 1.2s',
+            'Generation 500ms',
+            'Output speed 85.0 tok/s',
+          ]) {
+        await expect(page.getByRole('tooltip')).toContainText(text);
+        await expect(model).not.toContainText(text);
+      }
+      const timingPath = testInfo.outputPath('token-model-timing.png');
+      await page.screenshot({ path: timingPath, animations: 'disabled' });
+      await testInfo.attach('token-model-timing', {
+        path: timingPath,
+        contentType: 'image/png',
+      });
       await panel.locator('[data-color] button').nth(1).hover();
       await expect(
         page.locator('[data-slot="tooltip-content"][data-state$="open"]'),

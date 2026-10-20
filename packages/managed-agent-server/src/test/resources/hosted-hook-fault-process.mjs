@@ -40,7 +40,10 @@ function record(event, fields = {}) {
   });
 }
 
-const solo = signalMode === 'hook-solo';
+const solo =
+  signalMode === 'hook-solo' ||
+  signalMode === 'hook-deny' ||
+  signalMode === 'hook-fail';
 
 if (mode === 'child') {
   // FG13d: the graceful pass signals every member; this descendant has to
@@ -52,9 +55,16 @@ if (mode === 'child') {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const value = JSON.parse(input);
-  record('hook.call', { input: value });
+  // FG13d: lifecycle events (SessionEnd/SessionDelete) must not answer with a
+  // PreToolUse decision, so the fixture only records their completion. Match
+  // the two names positively: an absent or renamed event must not take this
+  // path and silently exit without a decision.
+  const lifecycle = ['SessionEnd', 'SessionDelete'].includes(
+    value.hook_event_name,
+  );
+  record('hook.call', { eventName: value.hook_event_name, input: value });
   let child;
-  if (!solo) {
+  if (!solo && !lifecycle) {
     child = spawn(
       process.execPath,
       [
@@ -81,13 +91,23 @@ if (mode === 'child') {
     child.kill('SIGKILL');
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  record('hook.allow');
+  const deny = signalMode === 'hook-deny';
+  // FG13f: a failed evaluation is what failClosed wraps. The process exits
+  // without a decision so the receipt is a failure, not a deny.
+  if (signalMode === 'hook-fail') {
+    record('hook.fail', { eventName: value.hook_event_name });
+    process.exit(1);
+  }
+  record(lifecycle ? 'hook.done' : deny ? 'hook.deny' : 'hook.allow', {
+    eventName: value.hook_event_name,
+  });
+  if (lifecycle) process.exit(0);
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
-        permissionDecisionReason: 'FG13_ALLOWED',
+        permissionDecision: deny ? 'deny' : 'allow',
+        permissionDecisionReason: deny ? 'FG13_DENIED' : 'FG13_ALLOWED',
       },
     }),
   );

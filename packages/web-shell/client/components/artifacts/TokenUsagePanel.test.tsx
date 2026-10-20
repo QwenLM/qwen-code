@@ -629,6 +629,95 @@ describe('TokenUsagePanel', () => {
     );
   });
 
+  it('splits timed model latency into first token and generation', async () => {
+    const stats = statsFixture();
+    stats.models['qwen-plus::hybrid'].generation = {
+      timedRequests: 4,
+      totalTtftMs: 4_800,
+      totalGenerationDurationMs: 2_000,
+      totalThroughputOutputTokens: 170,
+    };
+    stats.models['qwen-max::auto'].generation = {
+      timedRequests: 1,
+      totalTtftMs: 900,
+      totalGenerationDurationMs: 0,
+      totalThroughputOutputTokens: 0,
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats));
+    await act(async () => {});
+
+    expect(container.textContent).not.toContain('First-token latency');
+    const models = container.querySelectorAll('[data-color]');
+    await act(async () =>
+      models[0]!.querySelector<HTMLButtonElement>('button')!.focus(),
+    );
+    const popup = () =>
+      document.querySelector('[data-slot="tooltip-content"]')!;
+    expect(
+      Array.from(popup().querySelectorAll(':scope > div > span')).map(
+        (row) => row.textContent,
+      ),
+    ).toEqual([
+      'Requests 4',
+      'Avg latency 800ms',
+      'First-token latency 1.2s',
+      'Generation 500ms',
+      'Output speed 85.0 tok/s',
+    ]);
+    await act(async () =>
+      models[1]!.querySelector<HTMLButtonElement>('button')!.focus(),
+    );
+    expect(popup().textContent).toContain('First-token latency 900ms');
+    expect(popup().textContent).not.toContain('Generation ');
+    expect(popup().textContent).not.toContain('Output speed');
+  });
+
+  it('localizes the model timing line', async () => {
+    const stats = statsFixture();
+    stats.models['qwen-plus::hybrid'].generation = {
+      timedRequests: 2,
+      totalTtftMs: 1_000,
+      totalGenerationDurationMs: 4_000,
+      totalThroughputOutputTokens: 300,
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats), 'zh-CN');
+    await act(async () => {});
+
+    expect(container.textContent).not.toContain('首 token 延迟');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-color] button')!
+        .focus(),
+    );
+    const popup = document.querySelector('[data-slot="tooltip-content"]')!;
+    expect(
+      Array.from(popup.querySelectorAll(':scope > div > span')).map(
+        (row) => row.textContent,
+      ),
+    ).toEqual([
+      '请求 4',
+      '平均延迟 800ms',
+      '首 token 延迟 500ms',
+      '生成 2.0s',
+      '输出速度 75.0 tok/s',
+    ]);
+  });
+
+  it('omits the timing line for models without streamed timing', async () => {
+    const container = renderPanel(vi.fn().mockResolvedValue(statsFixture()));
+    await act(async () => {});
+
+    expect(container.textContent).toContain('qwen-plus::hybrid');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-color] button')!
+        .focus(),
+    );
+    const popup = document.querySelector('[data-slot="tooltip-content"]')!;
+    expect(popup.textContent).toContain('Requests 4');
+    expect(popup.textContent).not.toContain('First-token latency');
+  });
+
   it('promotes compact values that round into the next unit', async () => {
     const stats = statsFixture();
     stats.models = {
