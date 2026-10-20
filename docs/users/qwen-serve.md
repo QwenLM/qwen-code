@@ -124,6 +124,7 @@ The `limits.maxPendingPromptsPerSession` field advertises the active per-session
 `qwen serve` publishes a local discovery record for each live listener, so a second terminal does not have to parse stdout or search `ps`:
 
 ```bash
+qwen daemon start --port 4170      # detached; waits for the discovery record
 qwen daemon status                 # ports, PIDs, workspaces, and health
 qwen daemon status --json          # one JSON object per daemon
 qwen daemon logs --port 4170 -f    # follow the recorded log file
@@ -131,6 +132,8 @@ qwen daemon stop --port 4170       # SIGTERM the recorded process
 ```
 
 Records live under the runtime directory (`$QWEN_RUNTIME_DIR`, `$QWEN_HOME`, or `~/.qwen`) in `daemon/daemon-<port>.json`. They are `0600` on POSIX and never contain the bearer token. A record left by a crashed daemon is reported as `stale`; `status --prune` or `stop` removes it. `stop` sends `SIGTERM` only after the listener answers `/health` or its PID is still alive; `--force` adds `SIGKILL` after the graceful timeout. When more than one daemon is registered, pass `--port`; `stop` also accepts `--all`.
+
+`qwen daemon start` spawns `qwen serve` detached, waits for its discovery record, and prints the bound URL, PID, log path, and stop command. It drops the launching session's identifiers and private capability bindings so the child is a fresh daemon, keeps the operator's model/auth environment, and passes `--no-token-qr` so the startup log cannot contain a token. Workspaces are canonicalized, relative runtime directories are pinned to the launching directory before spawn, and Windows drive-relative roots are resolved against the launching drive. A non-loopback bind requires `QWEN_SERVER_TOKEN`; use `qwen serve` directly if you want an ephemeral token. The startup log is `0600` and is removed after a successful start.
 
 ### Workspace registration capacity
 
