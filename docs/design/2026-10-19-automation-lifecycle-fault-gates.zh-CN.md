@@ -65,8 +65,10 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 - `close-*` 需要工作区支撑的 Session：automation API 拒绝没有工作区的
   Session（`session_not_found`），而在本夹具里关闭工作区 Session 会得到
   `409 workspace_unavailable`，消息为 `Hosted Workspace execution is not
-available.`——由嵌入式 broker 与 action store 抛出，而非 FG11f 故障的
-  那层 store 级授权。
+available.`。公开 close 路由经 `SessionLifecycleService.admit` 的 workspace
+  分支进入 `ManagedAgentStore.beginWorkspaceLifecycle`，由 `beginLifecycle`
+  抛出。该消息由五个类里的十处共享，因此要指名路由而非某个类：它不是 FG11f
+  故障的 store 级授权，后者是非持久 broker 的 `resolveScope` turn 路径。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
   接受。把 wake turn 扣在模型上时发出该取消，并没有停住 run：模型释放后

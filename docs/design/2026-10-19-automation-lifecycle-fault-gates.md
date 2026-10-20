@@ -80,8 +80,12 @@ around it.
 - `close-*` needs a workspace-backed Session: the automation API refuses a
   Session without one (`session_not_found`), while closing a workspace
   Session in this fixture answers `409 workspace_unavailable` with
-  `Hosted Workspace execution is not available.` — raised by the embedded
-  broker and the action store, not by the store-level authority FG11f faults.
+  `Hosted Workspace execution is not available.` The public close route takes
+  `SessionLifecycleService.admit`'s workspace arm into
+  `ManagedAgentStore.beginWorkspaceLifecycle`, and `beginLifecycle` throws
+  there. The message is shared by ten raise sites in five classes, so name the
+  route rather than a class: it is not the store-level authority FG11f faults,
+  whose refusal is the non-durable broker's `resolveScope` turn path.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
   `GET /v1/agents/sessions/{id}/tasks` is accepted. Sent while the wake turn
