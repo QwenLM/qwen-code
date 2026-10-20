@@ -131,12 +131,13 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.compactMode',
   'mcpServers',
   'model.reasoningEffort',
-  'experimental.codeReview',
 ]);
 const LIVE_SETTING_KEYS = new Set([
   'experimental.liveVoice.enabled',
   'experimental.liveVoice.shortcut',
 ]);
+// These controls use account APIs instead of workspace setting descriptors.
+const ACCOUNT_SETTING_KEYS = new Set(['experimental.codeReview']);
 
 type Scope = 'user' | 'workspace';
 
@@ -475,7 +476,8 @@ export function SettingsMessage({
     const visibleSettings = settings.filter(
       (setting) =>
         !HIDDEN_SETTING_KEYS.has(setting.key) &&
-        !LIVE_SETTING_KEYS.has(setting.key),
+        !LIVE_SETTING_KEYS.has(setting.key) &&
+        !ACCOUNT_SETTING_KEYS.has(setting.key),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({

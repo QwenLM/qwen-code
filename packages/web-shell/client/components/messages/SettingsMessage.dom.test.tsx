@@ -1227,14 +1227,16 @@ describe('SettingsMessage account code review setting', () => {
     },
   );
 
-  it('includes the account row without exposing a generic workspace write', () => {
+  it('includes the account row without exposing a generic workspace write', async () => {
+    const setValue = vi.fn();
+    const codeReview = codeReviewState();
     const descriptor = {
       ...boolSetting(),
       key: 'experimental.codeReview',
       category: 'Experimental',
     };
     const container = renderPanel(
-      { ...makeState([descriptor], vi.fn()), codeReview: codeReviewState() },
+      { ...makeState([descriptor], setValue), codeReview },
       {
         initialCategory: 'Experimental',
         presentation: { includeItems: ['setting:code-review'] },
@@ -1244,5 +1246,19 @@ describe('SettingsMessage account code review setting', () => {
     expect(switchButton(container).getAttribute('aria-label')).toBe(
       'Code Review Workbench',
     );
+    await act(async () => switchButton(container).click());
+    expect(codeReview.setEnabled).toHaveBeenCalledExactlyOnceWith(true);
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to a workspace control without the account API', () => {
+    const container = renderPanel(
+      makeState(
+        [{ ...boolSetting(), key: 'experimental.codeReview' }],
+        vi.fn(),
+      ),
+      { presentation: { includeItems: ['setting:code-review'] } },
+    );
+    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(0);
   });
 });

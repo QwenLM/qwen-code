@@ -1279,7 +1279,7 @@ describe('web-shell settings alias drift', () => {
     );
   }
 
-  it('aliases every rendered row and serves every published alias', async () => {
+  it('aliases every rendered row and renders every published alias', async () => {
     const { app } = makeApp();
     const res = await request(app).get('/workspace/settings');
     expect(res.status).toBe(200);
@@ -1287,17 +1287,20 @@ describe('web-shell settings alias drift', () => {
       (setting) => setting.key,
     );
 
-    // The panel drops HIDDEN/LIVE keys before rendering; parse both sets from
-    // the component so a change on either side is caught here.
+    // Account controls render independently of workspace descriptors. Keep
+    // them in the alias check without exposing them through the workspace API.
     const panelSource = readFileSync(
       join(webShellClientDir, 'components/messages/SettingsMessage.tsx'),
       'utf8',
     );
     const hidden = parseKeySet(panelSource, 'HIDDEN_SETTING_KEYS');
     const live = parseKeySet(panelSource, 'LIVE_SETTING_KEYS');
-    const rendered = servedKeys.filter(
-      (key) => !hidden.has(key) && !live.has(key),
-    );
+    const account = parseKeySet(panelSource, 'ACCOUNT_SETTING_KEYS');
+    expect(servedKeys.filter((key) => account.has(key))).toEqual([]);
+    const rendered = [
+      ...servedKeys.filter((key) => !hidden.has(key) && !live.has(key)),
+      ...account,
+    ];
 
     const aliasSource = readFileSync(
       join(webShellClientDir, 'settings.ts'),
@@ -1315,9 +1318,28 @@ describe('web-shell settings alias drift', () => {
     // checks below, and once published it cannot be removed without breaking
     // a host that adopted it.
     expect(aliased.length).toBe(new Set(aliased).size);
+    expect(rendered.length).toBe(new Set(rendered).size);
     expect(rendered.filter((key) => !aliased.includes(key))).toEqual([]);
     expect(aliased.filter((key) => !rendered.includes(key))).toEqual([]);
   });
+  it.each([
+    ['/workspace/settings', 'user'],
+    ['/workspace/settings', 'workspace'],
+    ['/workspaces/primary/settings', 'workspace'],
+  ])(
+    'rejects account code review writes through %s at %s scope',
+    async (path, scope) => {
+      const { app, persistSetting } =
+        path === '/workspace/settings' ? makeApp() : makeQualifiedApp();
+      const response = await request(app)
+        .post(path)
+        .send({ key: 'experimental.codeReview', scope, value: true });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toMatchObject({ code: 'disallowed_key' });
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
   it('persists SSH workflow defaults without pushing disabled workflow controls to live sessions', async () => {
     const {
       app,
