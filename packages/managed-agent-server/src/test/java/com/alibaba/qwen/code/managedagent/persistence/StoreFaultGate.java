@@ -10,15 +10,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /**
- * FG12b (issue #14447): the test-only seam that rejects one step of the MCP
- * record state machine. The wrapper calls it from inside the Session store's
- * commit transaction, before the record is applied, so the whole commit rolls
- * back exactly as a store failure would.
+ * FG12b/FG13b (issues #14447/#14449): the test-only seam that rejects one step
+ * of the MCP or Hook record state machine. The wrapper calls it from inside
+ * the Session store's commit transaction, before the record is applied, so the
+ * whole commit rolls back exactly as a store failure would.
  */
 public final class StoreFaultGate {
     public enum Phase {
         INTENT, CONFIGURE_DISPATCH, OPERATION_DISPATCH, SETTLED, RELEASING,
-        DRAINED, RELEASED
+        DRAINED, RELEASED,
+        HOOK_INTENT, HOOK_DISPATCH_STARTED, HOOK_SETTLED, HOOK_PLAN_SETTLED
     }
 
     public static final StoreFaultGate INSTANCE = new StoreFaultGate();
@@ -65,7 +66,8 @@ public final class StoreFaultGate {
             JsonNode payload = event.path("payload");
             String domain = payload.path("domain").asText();
             if (!"mcp_configuration".equals(domain)
-                    && !"mcp_operation".equals(domain)) {
+                    && !"mcp_operation".equals(domain)
+                    && !"hook_execution".equals(domain)) {
                 continue;
             }
             StoredResource resource = resources.apply(payload.path("recordRef")
@@ -77,14 +79,16 @@ public final class StoreFaultGate {
             }
             attempts.incrementAndGet();
             throw new IllegalStateException(
-                    "FG12b store fault injected: " + expected);
+                    "Store fault injected: " + expected);
         }
     }
 
     private boolean matches(Phase expected, String domain, JsonNode record) {
-        String id = "mcp_configuration".equals(domain)
-                ? record.path("configurationId").asText()
-                : record.path("operationId").asText();
+        String id = switch (domain) {
+            case "mcp_configuration" -> record.path("configurationId").asText();
+            case "mcp_operation" -> record.path("operationId").asText();
+            default -> record.path("hookExecutionId").asText();
+        };
         if (target != null && !target.equals(id)) {
             return false;
         }
@@ -106,6 +110,20 @@ public final class StoreFaultGate {
             case RELEASED -> "mcp_configuration".equals(domain)
                     && "released".equals(
                             record.path("releaseState").asText());
+            case HOOK_INTENT -> "hook_execution".equals(domain)
+                    && "intent".equals(execution)
+                    && !"__plan__".equals(record.path("hookId").asText());
+            case HOOK_DISPATCH_STARTED -> "hook_execution".equals(domain)
+                    && "dispatch_started".equals(execution)
+                    && !"__plan__".equals(record.path("hookId").asText());
+            case HOOK_SETTLED -> "hook_execution".equals(domain)
+                    && "settled".equals(execution)
+                    && !"__plan__".equals(record.path("hookId").asText());
+            case HOOK_PLAN_SETTLED -> "hook_execution".equals(domain)
+                    && "settled".equals(execution)
+                    && "__plan__".equals(record.path("hookId").asText())
+                    && "PreToolUse".equals(
+                            record.path("eventName").asText());
         };
     }
 
