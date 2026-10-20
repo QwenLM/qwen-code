@@ -4,11 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
-import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
+import {
+  DASHSCOPE_REGIONAL_HOSTS,
+  QWENCLOUD_MAAS_HOSTS,
+} from '../core/openaiContentGenerator/provider/dashscope.js';
 import { getDefaultApiKeyEnvVar } from '../models/modelConfigErrors.js';
 import {
   ALL_PROVIDERS,
@@ -174,10 +180,12 @@ export type WebSearchGateResult =
  * DashScope-compatible endpoint check for the search side channel. Accepts
  * the official DashScope regional hosts (the Standard preset regions,
  * including `dashscope-us`), Bailian Token Plan / workspace MaaS endpoints,
- * and internal Alibaba gateways. This overlaps, but is neither a subset nor a
- * superset of, the content provider's DashScope detection: it rejects generic
- * Alibaba Cloud API Gateway and proxy endpoints, but accepts all concrete
- * `*.maas.aliyuncs.com` endpoints for the Responses search side channel.
+ * QwenCloud MaaS hosts (QWENCLOUD_MAAS_HOSTS), and internal Alibaba
+ * gateways. This overlaps, but is neither a subset nor a superset of, the
+ * content provider's DashScope detection: it rejects generic Alibaba Cloud
+ * API Gateway and proxy endpoints, but accepts all concrete
+ * `*.maas.aliyuncs.com` and QwenCloud MaaS endpoints for the Responses
+ * search side channel.
  * This only catches obvious misconfiguration; a host that does not serve the
  * Responses API fails loudly on first use.
  */
@@ -203,6 +211,7 @@ function classifyDashScopeBaseUrl(
   const hostname = url.hostname.toLowerCase();
   const suffixes = [
     ...DASHSCOPE_REGIONAL_HOSTS,
+    ...QWENCLOUD_MAAS_HOSTS,
     'maas.aliyuncs.com',
     'alibaba-inc.com',
     'aliyun-inc.com',
@@ -709,7 +718,11 @@ export const CITATION_RULES: readonly string[] = [
 
 const CITATION_POLICY = `\n\nCitation policy: ${CITATION_RULES.map((rule) => `${rule}.`).join(' ')}`;
 
-function formatLlmContent(query: string, outcome: WebSearchOutcome): string {
+function formatLlmContent(
+  query: string,
+  outcome: WebSearchOutcome,
+  applyLimit = true,
+): string {
   const allOpened = outcome.sources.filter((source) => source.opened);
   const opened = allOpened.slice(0, MAX_OPENED_URLS);
   const omittedOpened = allOpened.length - opened.length;
@@ -751,7 +764,7 @@ function formatLlmContent(query: string, outcome: WebSearchOutcome): string {
 
   const answer = outcome.answerText.trim();
   let body = buildBody(answer);
-  if (body.length > MAX_RESULT_SIZE_CHARS) {
+  if (applyLimit && body.length > MAX_RESULT_SIZE_CHARS) {
     // The URL sections are the citation evidence the policy below demands —
     // an oversized narrated answer must not push them past the limit. Shrink
     // the answer first; the hard slice is only a backstop for the (bounded)
@@ -904,12 +917,31 @@ class WebSearchToolInvocation extends BaseToolInvocation<
     outcome: WebSearchOutcome,
     startedAt: number,
   ): ToolResult {
+    const rawOutputSize = measureToolOutput(
+      formatLlmContent(this.params.query, outcome, false),
+    );
     const llmContent = formatLlmContent(this.params.query, outcome);
+    const processed = measureToolOutput(llmContent);
+    logToolResultSize(
+      this.config,
+      new ToolResultSizeEvent(
+        'web_search',
+        'native',
+        'producer',
+        rawOutputSize.chars,
+        processed.chars,
+        rawOutputSize.estimatedTokens,
+        processed.estimatedTokens,
+        rawOutputSize.chars > processed.chars,
+        MAX_RESULT_SIZE_CHARS,
+        'per_tool',
+      ),
+    );
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     const returnDisplay =
       `Did ${outcome.searchCount} search${outcome.searchCount === 1 ? '' : 'es'} in ${seconds}s` +
       (outcome.partialNote ? ' (partial result)' : '');
-    return { llmContent, returnDisplay };
+    return { llmContent, returnDisplay, rawOutputSize };
   }
 }
 

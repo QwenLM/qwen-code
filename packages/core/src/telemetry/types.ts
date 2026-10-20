@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getToolOutputProvenance,
+  measureToolOutput,
+  type ToolOutputBudgetSource,
+} from '../tools/tool-output-size.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -206,11 +211,20 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   response_id?: string;
   tool_type: 'native' | 'mcp';
   content_length?: number;
+  raw_content_length?: number;
+  raw_estimated_tokens?: number;
+  processed_estimated_tokens?: number;
+  truncated?: boolean;
+  applied_budget?: number;
+  budget_source?: ToolOutputBudgetSource;
   mcp_server_name?: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata?: { [key: string]: any };
 
-  constructor(call: CompletedToolCall) {
+  constructor(
+    call: CompletedToolCall,
+    config?: Pick<Config, 'getChatCompression'>,
+  ) {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
     this.call_id = call.request.callId;
@@ -244,7 +258,21 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this.error = call.response.error?.message;
     this.error_type = call.response.errorType;
     this.prompt_id = call.request.prompt_id;
+    const processed = measureToolOutput(call.response.responseParts, config);
+    const provenance = call.response.responseParts
+      .map(getToolOutputProvenance)
+      .find(Boolean);
+    // content_length keeps the meaning it already ships with on OTLP and RUM;
+    // the new measurement rides processed_estimated_tokens and the size events.
     this.content_length = call.response.contentLength;
+    this.processed_estimated_tokens = processed.estimatedTokens;
+    this.raw_content_length = provenance?.rawSize?.chars;
+    this.raw_estimated_tokens = provenance?.rawSize?.estimatedTokens;
+    this.truncated = provenance?.truncated;
+    this.applied_budget = Number.isFinite(provenance?.budget)
+      ? provenance?.budget
+      : undefined;
+    this.budget_source = provenance?.budgetSource;
     if (
       typeof call.tool !== 'undefined' &&
       call.tool instanceof DiscoveredMCPTool
@@ -282,6 +310,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
 export class ApiRequestEvent implements BaseTelemetryEvent {
   'event.name': 'api_request';
   'event.timestamp': string;
+  execution_id?: string;
   model: string;
   prompt_id: string;
   request_text?: string;
@@ -296,9 +325,11 @@ export class ApiRequestEvent implements BaseTelemetryEvent {
     prompt_id: string,
     request_text?: string,
     subagent_name?: string,
+    execution_id?: string,
   ) {
     this['event.name'] = 'api_request';
     this['event.timestamp'] = new Date().toISOString();
+    this.execution_id = execution_id;
     this.model = model;
     this.prompt_id = prompt_id;
     this.request_text = request_text;
@@ -310,6 +341,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   'event.name': 'api_error';
   'event.timestamp': string; // ISO 8601
   response_id?: string;
+  execution_id?: string;
   model: string;
   duration_ms: number;
   prompt_id: string;
@@ -327,6 +359,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   subagent_name?: string;
 
   constructor(opts: {
+    executionId?: string;
     responseId?: string;
     model: string;
     durationMs: number;
@@ -340,6 +373,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
     this.response_id = opts.responseId;
+    this.execution_id = opts.executionId;
     this.model = opts.model;
     this.duration_ms = opts.durationMs;
     this.prompt_id = opts.promptId;
@@ -382,6 +416,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   'event.name': 'api_response';
   'event.timestamp': string; // ISO 8601
   response_id: string;
+  execution_id?: string;
   model: string;
   status_code?: number | string;
   duration_ms: number;
@@ -395,6 +430,11 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   auth_type?: string;
   /** Time from stream dispatch to first user-visible content. */
   ttft_ms?: number;
+  /**
+   * Time from the first to the last chunk with user-visible content; 0 when
+   * all of it arrived in one chunk.
+   */
+  generation_ms?: number;
   /**
    * Name of the subagent that issued this request, or undefined when the
    * request originates from the main conversation.
@@ -411,10 +451,13 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     response_text?: string,
     subagent_name?: string,
     ttft_ms?: number,
+    execution_id?: string,
+    generation_ms?: number,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
     this.response_id = response_id;
+    this.execution_id = execution_id;
     this.model = model;
     this.duration_ms = duration_ms;
     this.status_code = 200;
@@ -428,6 +471,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.auth_type = auth_type;
     this.subagent_name = subagent_name;
     this.ttft_ms = ttft_ms;
+    this.generation_ms = generation_ms;
   }
 }
 
@@ -993,6 +1037,34 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
   }
 }
 
+export class ToolResultSizeEvent implements BaseTelemetryEvent {
+  readonly 'event.timestamp' = new Date().toISOString();
+  readonly 'event.name': string;
+  constructor(
+    readonly function_name: string,
+    readonly tool_type: 'native' | 'mcp',
+    readonly layer:
+      | 'producer'
+      | 'persistence'
+      | 'per_tool'
+      | 'combined'
+      | 'batch'
+      | 'injection',
+    readonly raw_content_length: number | undefined,
+    readonly injected_content_length: number,
+    readonly raw_estimated_tokens: number | undefined,
+    readonly injected_estimated_tokens: number,
+    readonly truncated: boolean | undefined,
+    readonly applied_budget?: number,
+    readonly budget_source?: ToolOutputBudgetSource,
+    readonly call_id?: string,
+    readonly prompt_id?: string,
+  ) {
+    this['event.name'] =
+      layer === 'injection' ? 'tool_result_injected' : 'tool_result_size';
+  }
+}
+
 export class ToolResultPersistedEvent implements BaseTelemetryEvent {
   readonly eventName = 'tool_result_persisted';
   readonly 'event.timestamp' = new Date().toISOString();
@@ -1334,6 +1406,7 @@ export type TelemetryEvent =
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
+  | ToolResultSizeEvent
   | ToolResultPersistedEvent
   | ModelSlashCommandEvent
   | AuthEvent

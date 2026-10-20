@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type {
   ToolCallConfirmationDetails,
@@ -53,6 +54,7 @@ import {
 } from '../utils/invocation-context.js';
 import {
   generateLegacyMcpToolName,
+  LEGACY_REDUCTION_HEAD_LENGTH,
   normalizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
 import { isImagePart } from '../services/visionBridge/image-part-utils.js';
@@ -379,6 +381,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly onAppResult?: (result: McpAppToolResult) => void,
   ) {
     super(params);
+  }
+
+  /**
+   * The producer-carried identity permission matchers read the server
+   * boundary from; see {@link ToolInvocation.mcpIdentity}.
+   */
+  get mcpIdentity(): { serverName: string; serverToolName: string } {
+    return { serverName: this.serverName, serverToolName: this.serverToolName };
   }
 
   /**
@@ -769,6 +779,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
+        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
         returnDisplay: appDisplay ?? fallbackText,
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
@@ -1012,6 +1023,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
+        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
         returnDisplay: getDisplayFromPartsWithPersistedOutput(
           transformedParts,
           truncated.persistedOutputFiles,
@@ -1035,6 +1047,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     rawResponseParts: Part[],
     functionCall: FunctionCall,
   ): Promise<ToolResult> {
+    // The body is replaced by `error` below and observeProducerOutput
+    // short-circuits on error results, so no raw size is declared here
+    // (#13652 R4-1).
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
@@ -1126,6 +1141,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           // tables) would otherwise truncate while chars remain. Consistent
           // with the shell tool's in-tool truncation.
           {
+            layer: 'producer',
+            source: 'per_tool',
             threshold: 500_000,
             previewChars: 2000,
             lines: Number.POSITIVE_INFINITY,
@@ -1151,6 +1168,23 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 }
 
+/**
+ * A truncated alias keeps 28 characters up front. Require a preserved server
+ * boundary: internal `__` or a trailing `_` can imitate its separator.
+ * Different keys can still share this spelling; grants use the registry guard.
+ */
+function legacyReductionVouchesForServer(serverName: string): boolean {
+  const serverPrefixLength = 'mcp__'.length + serverName.length;
+  if (
+    serverPrefixLength + 2 > LEGACY_REDUCTION_HEAD_LENGTH &&
+    serverPrefixLength !== LEGACY_REDUCTION_HEAD_LENGTH
+  ) {
+    return false;
+  }
+  const legacyServerKey = generateLegacyMcpToolName(serverName);
+  return !legacyServerKey.includes('__') && !legacyServerKey.endsWith('_');
+}
+
 export class DiscoveredMCPTool extends BaseDeclarativeTool<
   ToolParams,
   ToolResult
@@ -1162,12 +1196,32 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     return 500_000;
   }
 
-  /** Keeps pre-normalization permission and disabled-tool entries effective. */
+  /**
+   * Raw identity first; keep truncated legacy aliases only with a preserved
+   * server boundary. The registry checks grants for competing claimants.
+   */
   get permissionAliases(): readonly string[] {
-    const legacyName = generateLegacyMcpToolName(
-      `mcp__${this.serverName}__${this.serverToolName}`,
+    const rawLength = `mcp__${this.serverName}__${this.serverToolName}`.length;
+    return this.disabledToolAliases.filter(
+      (alias) =>
+        alias.length === rawLength ||
+        legacyReductionVouchesForServer(this.serverName),
     );
-    return legacyName === this.name ? [] : [legacyName];
+  }
+
+  /**
+   * Disabled entries retain ungated spellings: withholding a lossy alias
+   * would re-enable a previously disabled tool. Over-matching fails closed.
+   */
+  get disabledToolAliases(): readonly string[] {
+    const rawName = `mcp__${this.serverName}__${this.serverToolName}`;
+    const legacyName = generateLegacyMcpToolName(rawName);
+    return [
+      ...(rawName === this.name ? [] : [rawName]),
+      ...(legacyName === this.name || legacyName === rawName
+        ? []
+        : [legacyName]),
+    ];
   }
 
   constructor(

@@ -905,12 +905,6 @@ export interface SystemPromptLayers {
   /** Context layer: caller-supplied append prompt (e.g. --append-system-prompt). */
   appendPrompt?: string;
   /**
-   * Context layer: repo snapshot (branch + recent commits), computed once
-   * per session. Joined without a `---` separator — it carries its own
-   * heading.
-   */
-  gitStatus?: string | null;
-  /**
    * Volatile layer: the managed auto-memory section, rewritten in-session on
    * every memory save. Always last, so a save invalidates the shortest
    * possible cached prompt prefix.
@@ -924,7 +918,6 @@ export function assembleSystemPrompt(layers: SystemPromptLayers): string {
     buildSystemPromptSuffix(layers.mediaGuidance ?? undefined) +
     buildSystemPromptSuffix(layers.contextFiles) +
     buildSystemPromptSuffix(layers.appendPrompt) +
-    (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
     buildSystemPromptSuffix(layers.autoMemory)
   );
 }

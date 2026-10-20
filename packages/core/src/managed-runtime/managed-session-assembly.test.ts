@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
@@ -17,6 +17,7 @@ import {
   ManagedSessionNotFoundError,
 } from './managed-session-authority.js';
 import {
+  ManagedSessionCloseError,
   openManagedSession,
   type ManagedSession,
 } from './managed-session-assembly.js';
@@ -35,6 +36,8 @@ const sessionKey = { tenantId: 't1', workspaceId: 'w1', sessionId };
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -227,6 +230,7 @@ describe('managed session assembly', () => {
     const session = await open(workspace);
     await session.sink.write(record({ uuid: 'rec-user-1' }));
     await session.close();
+    expect(session.authority.currentActivation?.phase).toBe('released');
 
     await expect(
       SessionWriterLease.acquire({
@@ -235,6 +239,154 @@ describe('managed session assembly', () => {
         transcriptPath: workspace.transcriptPath,
       }),
     ).rejects.toThrow();
+  });
+
+  // Regression for issue #13182 finding 6a: a writer left unsealed because
+  // releasing the activation failed could neither resume nor be taken over.
+  it('still attempts to seal the writer when releasing the activation fails', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const sealAttempted = vi.spyOn(session.authority, 'close');
+    vi.spyOn(session.authority, 'releaseActivation').mockRejectedValue(
+      new Error('activation store unavailable'),
+    );
+
+    await expect(session.close()).rejects.toThrow(
+      'activation store unavailable',
+    );
+    expect(sealAttempted).toHaveBeenCalled();
+  });
+
+  it('rejects with both failures when the seal fails too', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const releaseError = new Error('activation store unavailable');
+    vi.spyOn(session.authority, 'releaseActivation').mockRejectedValue(
+      releaseError,
+    );
+    // The seal's own failures usually carry a cause; it must survive.
+    const sealCause = new Error('ENOSPC: no space left on device');
+    const sealError = new Error('journal seal failed', { cause: sealCause });
+    vi.spyOn(session.authority, 'close').mockRejectedValue(sealError);
+
+    const failure = await session.close().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(ManagedSessionCloseError);
+    expect(failure).toBeInstanceOf(AggregateError);
+    // A caller classifies a close failure on what the seal reported.
+    expect((failure as ManagedSessionCloseError).sealError).toBe(sealError);
+    expect((failure as ManagedSessionCloseError).releaseError).toBe(
+      releaseError,
+    );
+    expect((failure as AggregateError).errors).toEqual([
+      sealError,
+      releaseError,
+    ]);
+    expect((failure as AggregateError).message).toContain(
+      'journal seal failed',
+    );
+    expect((failure as AggregateError).message).toContain(
+      'activation store unavailable',
+    );
+    expect(sealError.cause).toBe(sealCause);
+  });
+
+  // The lease memoizes a seal rejection and hands the same instance to
+  // every later seal, so a close must never annotate it: a later close whose
+  // release succeeded would otherwise report the earlier one's failure.
+  it('leaves a memoized seal rejection untouched for a later close', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    vi.spyOn(session.authority, 'releaseActivation')
+      .mockRejectedValueOnce(new Error('activation store unavailable'))
+      .mockResolvedValue(undefined);
+    const sealError = new Error('journal seal failed');
+    vi.spyOn(session.authority, 'close').mockRejectedValue(sealError);
+
+    await expect(session.close()).rejects.toBeInstanceOf(
+      ManagedSessionCloseError,
+    );
+    const second = await session.close().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(second).toBe(sealError);
+    expect(sealError.cause).toBeUndefined();
+  });
+
+  it('stops renewal and seals an externally fenced writer without appending activation release', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const committed = session.authority.commitProof;
+    const transcript = await fs.readFile(workspace.transcriptPath, 'utf8');
+    let finishRenewal!: () => void;
+    const pendingRenewal = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockImplementation(async () => {
+        await pendingRenewal;
+        return undefined;
+      });
+    const release = vi
+      .spyOn(session.authority, 'releaseActivation')
+      .mockRejectedValue(new Error('journal appends are fenced'));
+
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await session.close({ releaseActivation: false });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      expect(release).not.toHaveBeenCalled();
+      expect(await fs.readFile(workspace.transcriptPath, 'utf8')).toBe(
+        transcript,
+      );
+      expect(session.authority.commitProof).toEqual(committed);
+      expect(session.authority.currentActivation?.phase).toBe('active');
+      const lockPath = path.join(
+        workspace.runtimeBaseDir,
+        'tmp',
+        'session-writer-locks',
+        `${encodeURIComponent(sessionId)}.lock`,
+      );
+      expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+        state: 'sealed',
+        last_commit_sequence: committed.lastCommitSequence,
+        committed_prefix_hash: committed.committedPrefixHash,
+      });
+    } finally {
+      finishRenewal();
+    }
+  });
+
+  it('does not stack activation renewals behind one in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    let finishRenewal!: () => void;
+    const pendingRenewal = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockImplementation(async () => {
+        await pendingRenewal;
+        return undefined;
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+    } finally {
+      finishRenewal();
+      await session.close().catch(() => undefined);
+    }
   });
 
   it('seals with the commit proof and reopens through a certified takeover', async () => {

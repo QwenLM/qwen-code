@@ -424,6 +424,8 @@ describe('buildSystemMessage', () => {
       expect.any(AbortSignal),
       'non_interactive',
       settings,
+      undefined,
+      undefined,
     );
     expect(result).toEqual({
       type: 'system',

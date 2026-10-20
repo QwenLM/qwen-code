@@ -1,0 +1,486 @@
+name: 'Managed Agent Reference Distribution'
+
+run-name: "Managed Agent reference ${{ inputs.version || format('PR #{0} dry run', github.event.pull_request.number) }}"
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release-managed-agent-reference.yml'
+      - 'scripts/package-managed-agent-reference.mjs'
+      - 'scripts/contract-version-utils.js'
+      - 'scripts/flyway-migration-utils.js'
+      - 'scripts/tests/package-managed-agent-reference.test.mjs'
+      - 'packages/sdk-java/qwencode/**'
+      - 'packages/managed-agent-server/**'
+      - 'packages/core/src/managed-runtime/contracts/**'
+      - 'packages/cli/src/serve/capabilities.ts'
+      - 'packages/cli/src/serve/broker-managed-runtime-provider.ts'
+      - 'packages/cli/src/serve/hosted-harness-contract.ts'
+      - 'docs/users/managed-agent-reference-deployment.md'
+      - 'docs/users/managed-agent-reference-deployment.zh-CN.md'
+      - 'docs/users/hosted-workspace-recovery.md'
+      - 'docs/users/hosted-workspace-recovery.zh-CN.md'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Experimental distribution version, for example 0.1.0-alpha.1.'
+        required: true
+        type: 'string'
+      dry_run:
+        description: 'Build and verify without creating a tag or GitHub prerelease.'
+        required: true
+        default: true
+        type: 'boolean'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'managed-agent-reference-${{ github.event.pull_request.number || github.run_id }}'
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 'Build and verify reference distribution'
+    # Only trusted PR dry runs use the persistent pool. A dispatch build feeds
+    # the published release, so it stays on a fresh hosted VM that never runs
+    # PR code.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name == ''pull_request'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 45
+    env:
+      MAVEN_VERSION: '3.9.11'
+      MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
+      MYSQL_CONTAINER: 'qwen-code-reference-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
+    outputs:
+      tag: '${{ steps.version.outputs.tag }}'
+      version: '${{ steps.version.outputs.version }}'
+    steps:
+      - name: 'Resolve experimental version'
+        id: 'version'
+        shell: 'bash'
+        env:
+          INPUT_VERSION: '${{ inputs.version }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          DRY_RUN: '${{ inputs.dry_run }}'
+        run: |-
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == 'pull_request' ]]; then
+            version="0.0.0-pr.${PR_NUMBER}"
+          else
+            version="${INPUT_VERSION#v}"
+          fi
+          invalid_version() {
+            echo '::error::The reference distribution requires an experimental SemVer with a prerelease.'
+            exit 1
+          }
+          if [[ ! "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$ ]]; then
+            invalid_version
+          fi
+          prerelease="${version#*-}"
+          IFS='.' read -r -a identifiers <<< "${prerelease}"
+          for identifier in "${identifiers[@]}"; do
+            if [[ "${identifier}" =~ ^[0-9]+$ && "${#identifier}" -gt 1 && "${identifier:0:1}" == '0' ]]; then
+              invalid_version
+            fi
+          done
+          if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' && "${DRY_RUN}" == 'false' && "${GITHUB_REF}" != 'refs/heads/main' ]]; then
+            echo '::error::Published reference distributions must run from main.'
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=managed-agent-reference-v${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
+      - name: 'Checkout source revision'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'Set up Java 21'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/managed-agent-server/pom.xml
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      - name: 'Set up Maven (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
+          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+
+      - name: 'Set up Node.js 22 (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Check pool disk floor'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
+      # Pool hosts share one host-wide fs.aio-nr budget across concurrent jobs,
+      # and a mysqld that reserves native AIO contexts can exhaust it and fail
+      # to boot with `io_setup() failed with EAGAIN` (#14416). Service
+      # containers cannot take a command, so MySQL starts here instead, with
+      # native AIO disabled: simulated AIO needs no io_setup() contexts.
+      - name: 'Start MySQL without native AIO'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          docker run --detach --name "${MYSQL_CONTAINER}" \
+            --publish '127.0.0.1::3306' \
+            --mount type=tmpfs,destination=/var/lib/mysql \
+            --env MYSQL_DATABASE='qwen_managed_agent' \
+            --env MYSQL_PASSWORD='qwen' \
+            --env MYSQL_ROOT_PASSWORD='root' \
+            --env MYSQL_USER='qwen' \
+            mysql:8.4 --innodb-use-native-aio=0
+          for attempt in {1..60}; do
+            if docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=root --silent >/dev/null 2>&1; then
+              break
+            fi
+            if ! docker inspect --format '{{.State.Running}}' "${MYSQL_CONTAINER}" | grep -qx true; then
+              docker logs "${MYSQL_CONTAINER}" || true
+              exit 1
+            fi
+            if [[ "${attempt}" == '60' ]]; then
+              docker logs "${MYSQL_CONTAINER}" || true
+              exit 1
+            fi
+            sleep 2
+          done
+          MYSQL_PORT="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${MYSQL_CONTAINER}")"
+          echo "MYSQL_PORT=${MYSQL_PORT}" >> "${GITHUB_ENV}"
+
+      - name: 'Grant Flyway probe access'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          docker exec "${MYSQL_CONTAINER}" \
+            mysql -uroot -proot \
+            --execute="GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';"
+
+      - name: 'Test the packager'
+        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs'
+
+      - name: 'Build Java components'
+        run: |-
+          set -euo pipefail
+          export MAVEN_ARGS="--settings ${RUNNER_TEMP}/setup-java-m2/settings.xml --toolchains ${RUNNER_TEMP}/setup-java-m2/toolchains.xml"
+          if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+            # Both in-house artifacts use fixed release coordinates, so this
+            # PR's build must never reach the host-shared ~/.m2.
+            repo="${RUNNER_TEMP}/m2-repo"
+            cp -aln "${HOME}/.m2/repository" "${repo}" 2>/dev/null || true
+            rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/qwen-managed-agent-server"
+            MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
+          fi
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true clean install
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml -DskipTests clean package
+
+      - name: 'Assemble reference distribution'
+        env:
+          RELEASE_VERSION: '${{ steps.version.outputs.version }}'
+        run: |-
+          # A pool runner can keep RUNNER_TEMP across jobs: a leftover
+          # extracted/ fails the verify step's mkdir, and another PR's
+          # archive would match the upload globs.
+          rm -rf -- "${RUNNER_TEMP}/managed-agent-reference"
+          node scripts/package-managed-agent-reference.mjs \
+            --version "${RELEASE_VERSION}" \
+            --source-revision "${GITHUB_SHA}" \
+            --output "${RUNNER_TEMP}/managed-agent-reference"
+
+      - name: 'Verify and boot the exact archive'
+        env:
+          RELEASE_VERSION: '${{ steps.version.outputs.version }}'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          release="${RUNNER_TEMP}/managed-agent-reference"
+          cd "${release}"
+          sha256sum --check SHA256SUMS.txt
+          mkdir extracted
+          tar -xzf "qwen-managed-agent-reference-${RELEASE_VERSION}.tar.gz" -C extracted
+          bundle="${release}/extracted/qwen-managed-agent-reference-${RELEASE_VERSION}"
+          cd "${bundle}"
+          sha256sum --check SHA256SUMS
+          server_port="$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"
+          SERVER_PORT="${server_port}" \
+          SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_managed_agent?allowPublicKeyRetrieval=true&useSSL=false" \
+          SPRING_DATASOURCE_USERNAME='qwen' \
+          SPRING_DATASOURCE_PASSWORD='qwen' \
+            bin/qwen-managed-agent-server > "${RUNNER_TEMP}/managed-agent-reference-boot.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "${server_pid}" 2>/dev/null || true; wait "${server_pid}" 2>/dev/null || true' EXIT
+          for attempt in {1..120}; do
+            if curl --fail --silent --show-error "http://127.0.0.1:${server_port}/actuator/health" > "${RUNNER_TEMP}/managed-agent-reference-health.json"; then
+              break
+            fi
+            if ! kill -0 "${server_pid}" 2>/dev/null; then
+              cat "${RUNNER_TEMP}/managed-agent-reference-boot.log"
+              exit 1
+            fi
+            if [[ "${attempt}" == '120' ]]; then
+              cat "${RUNNER_TEMP}/managed-agent-reference-boot.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          grep -q '"status":"UP"' "${RUNNER_TEMP}/managed-agent-reference-health.json"
+
+      - name: 'Upload verified release assets'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'managed-agent-reference-${{ steps.version.outputs.version }}'
+          path: |-
+            ${{ runner.temp }}/managed-agent-reference/*.tar.gz
+            ${{ runner.temp }}/managed-agent-reference/*.manifest.json
+            ${{ runner.temp }}/managed-agent-reference/SHA256SUMS.txt
+          if-no-files-found: 'error'
+          retention-days: 14
+
+      # The host's docker cleanup service reaps qwen-code-* containers only
+      # after a 24h age gate, so a cancelled job would strand a running mysqld
+      # on the shared pool for up to a day.
+      - name: 'Remove the MySQL container'
+        if: '${{ always() }}'
+        shell: 'bash'
+        run: |-
+          set -uo pipefail
+          if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
+            docker rm --force "${MYSQL_CONTAINER}" ||
+              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it after 24h"
+          fi
+
+  publish:
+    name: 'Publish experimental reference distribution'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && github.repository == 'QwenLM/qwen-code' }}"
+    needs: 'build'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    environment: 'production-release'
+    permissions:
+      contents: 'write'
+    steps:
+      - name: 'Download verified assets'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'managed-agent-reference-${{ needs.build.outputs.version }}'
+          path: 'release-assets'
+
+      - name: 'Create immutable GitHub prerelease'
+        env:
+          GH_REPO: '${{ github.repository }}'
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_TAG: '${{ needs.build.outputs.tag }}'
+          RELEASE_VERSION: '${{ needs.build.outputs.version }}'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          archive="release-assets/qwen-managed-agent-reference-${RELEASE_VERSION}.tar.gz"
+          manifest="release-assets/qwen-managed-agent-reference-${RELEASE_VERSION}.manifest.json"
+          checksums='release-assets/SHA256SUMS.txt'
+          assets=("${archive}" "${manifest}" "${checksums}")
+          for asset in "${assets[@]}"; do
+            test -f "${asset}"
+          done
+
+          # Unanchored notes start at whichever release the API picks, often
+          # another tag family; anchor at the previous reference release.
+          previous_tag="$(
+            gh release list --limit 100 --exclude-drafts --json tagName --jq '.[].tagName' \
+              | grep -x 'managed-agent-reference-v.*' \
+              | grep -vxF "${RELEASE_TAG}" \
+              | head -n1 || true
+          )"
+          release_payload="$(jq -n \
+            --arg tag "${RELEASE_TAG}" \
+            --arg target "${GITHUB_SHA}" \
+            --arg name "Managed Agent reference ${RELEASE_VERSION}" \
+            --arg previous "${previous_tag}" \
+            '{tag_name:$tag,target_commitish:$target,name:$name,draft:true,prerelease:true}
+              + if $previous == "" then {body:("Built from " + $target + ".")}
+                else {generate_release_notes:true,previous_tag_name:$previous} end')"
+          release_json="$(gh api --method POST "repos/${GH_REPO}/releases" --input - <<< "${release_payload}")"
+          release_id="$(jq -er '.id' <<< "${release_json}")"
+
+          gh release upload "${RELEASE_TAG}" "${assets[@]}"
+          release_json="$(gh api "repos/${GH_REPO}/releases/${release_id}")"
+          expected_names="$(printf '%s\n' \
+            'SHA256SUMS.txt' \
+            "qwen-managed-agent-reference-${RELEASE_VERSION}.manifest.json" \
+            "qwen-managed-agent-reference-${RELEASE_VERSION}.tar.gz" | sort)"
+          actual_names="$(jq -r '.assets[].name' <<< "${release_json}" | sort)"
+          if [[ "${actual_names}" != "${expected_names}" ]]; then
+            echo '::error::Draft release assets do not match the verified asset set.'
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            name="$(basename "${asset}")"
+            local_size="$(stat --format='%s' "${asset}")"
+            remote_size="$(jq -er --arg name "${name}" '.assets[] | select(.name == $name) | .size' <<< "${release_json}")"
+            if [[ "${remote_size}" != "${local_size}" ]]; then
+              echo "::error::Uploaded size mismatch for ${name}."
+              exit 1
+            fi
+            local_digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+            remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest // empty' <<< "${release_json}")"
+            if [[ -z "${remote_digest}" ]]; then
+              asset_id="$(jq -er --arg name "${name}" '.assets[] | select(.name == $name) | .id' <<< "${release_json}")"
+              downloaded_asset="$(mktemp)"
+              trap 'rm -f "${downloaded_asset}"' EXIT
+              gh api \
+                -H 'Accept: application/octet-stream' \
+                "repos/${GH_REPO}/releases/assets/${asset_id}" \
+                > "${downloaded_asset}"
+              remote_digest="sha256:$(sha256sum "${downloaded_asset}" | awk '{print $1}')"
+              rm -f "${downloaded_asset}"
+              trap - EXIT
+            fi
+            if [[ "${remote_digest}" != "${local_digest}" ]]; then
+              echo "::error::Uploaded digest mismatch for ${name}."
+              exit 1
+            fi
+          done
+
+          tag_json="$(gh api --method POST "repos/${GH_REPO}/git/refs" \
+            -f ref="refs/tags/${RELEASE_TAG}" \
+            -f sha="${GITHUB_SHA}")"
+          if [[ "$(jq -er '.object.sha' <<< "${tag_json}")" != "${GITHUB_SHA}" ]]; then
+            echo '::error::The created release tag does not point to the verified source revision.'
+            exit 1
+          fi
+
+          published="$(gh api --method PATCH "repos/${GH_REPO}/releases/${release_id}" \
+            -F draft=false \
+            -F prerelease=true)"
+          jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            '.draft == false and .prerelease == true and .tag_name == $tag' \
+            <<< "${published}" >/dev/null

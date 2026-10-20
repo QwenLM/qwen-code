@@ -1,3 +1,4 @@
+import { escapePreviewText } from '../../adapters/transcriptAdapter';
 import type {
   ACPToolCall,
   Message,
@@ -50,6 +51,29 @@ export function toManagedPermissionRequest(
   messages: readonly Message[],
 ): PermissionRequest {
   const tool = findManagedApprovalTool(messages, action);
+  let rawInput = tool?.args;
+  if (
+    !rawInput &&
+    action.toolName === 'exit_plan_mode' &&
+    action.inputPreview &&
+    !action.inputPreview.truncated
+  ) {
+    try {
+      const preview: unknown = JSON.parse(action.inputPreview.text);
+      if (preview && typeof preview === 'object' && !Array.isArray(preview)) {
+        const input = (preview as Record<string, unknown>)['input'];
+        if (
+          input &&
+          typeof input === 'object' &&
+          !Array.isArray(input) &&
+          typeof (input as Record<string, unknown>)['plan'] === 'string'
+        )
+          rawInput = input as Record<string, unknown>;
+      }
+    } catch {
+      /* An incomplete preview remains explicitly marked as such. */
+    }
+  }
   const toolCallId =
     tool?.callId ??
     (action.turnId ? `${action.turnId}:${action.functionCallId}` : undefined);
@@ -58,11 +82,30 @@ export function toManagedPermissionRequest(
     sessionId: action.sessionId,
     ...(toolCallId ? { toolCallId } : {}),
     toolName: action.toolName,
+    ...(action.toolName === 'exit_plan_mode'
+      ? { toolKind: 'switch_mode' as const }
+      : {}),
     title: tool?.title ?? action.toolName,
-    content: tool?.args
-      ? [{ type: 'text', text: JSON.stringify(tool.args, null, 2) }]
-      : [],
-    ...(tool?.args ? { rawInput: tool.args, contentIsInput: true } : {}),
+    content: rawInput
+      ? [
+          {
+            type: 'text',
+            text: escapePreviewText(
+              action.toolName === 'exit_plan_mode' &&
+                typeof rawInput['plan'] === 'string'
+                ? rawInput['plan']
+                : JSON.stringify(rawInput, null, 2),
+            ),
+          },
+        ]
+      : action.inputPreview
+        ? [{ type: 'text', text: escapePreviewText(action.inputPreview.text) }]
+        : [],
+    ...(rawInput
+      ? { rawInput, contentIsInput: true }
+      : action.inputPreview
+        ? { contentIsInput: true }
+        : {}),
     options: action.options.map((option) => ({
       id: option.id,
       label: option.label,

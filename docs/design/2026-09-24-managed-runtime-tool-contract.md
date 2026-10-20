@@ -154,7 +154,7 @@ the mounted worker handlers.
 Run `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts src/serve/managed-runtime-attestation-worker.test.ts src/serve/managed-runtime-tool-worker.test.ts` in
 `packages/cli` and
 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest` in
-`packages/sdk-java/runtime-broker`. The TypeScript suite validates the shared
+`packages/managed-agent-server`. The TypeScript suite validates the shared
 fixtures, schema mutations, exact gate admission, and real tool execution.
 The Java suite consumes the same contract files.
 
@@ -191,7 +191,7 @@ messages identify the operation and applicable limit. Server failures are
 retryable; other HTTP failures are terminal.
 
 Run `mvn test` and `mvn checkstyle:check` in
-`packages/sdk-java/runtime-broker`. HTTP fixture replays verify the canonical
+`packages/managed-agent-server`. HTTP fixture replays verify the canonical
 requests, success and unknown answers, malformed references and responses,
 route-specific request limits, and tool results above 16 KiB through 1 MiB.
 The worker handlers described below serve these routes.
@@ -220,6 +220,8 @@ The merged attestation worker now mounts the four tool routes beside `attest`.
 Its executor admits exactly the first-slice ordinary tools — `read_file`,
 `write_file`, `edit`, and foreground `run_shell_command` — over a real
 `Config` rooted at the attested workspace cwd, with checkpointing disabled.
+The [Hosted search slice](2026-10-01-hosted-workspace-search-profile.md) also
+admits `glob` under the unchanged worker identity, with coordinated rollout.
 Under boot v2 of `managed-context/1`, each new call instead runs in its
 Session's installed effective directory, behind an activation gate; see
 [Managed Context Worker](2026-09-26-managed-context-worker.md).

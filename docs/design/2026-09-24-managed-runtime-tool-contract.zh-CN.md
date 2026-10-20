@@ -65,7 +65,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 ## 4. 验证
 
-在 `packages/cli` 运行 `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts src/serve/managed-runtime-attestation-worker.test.ts src/serve/managed-runtime-tool-worker.test.ts`，并在 `packages/sdk-java/runtime-broker` 运行 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`。TypeScript suite 校验共享 fixtures、schema 变异用例、gate 精确放行与真实工具执行；Java suite 消费同一批契约文件。
+在 `packages/cli` 运行 `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts src/serve/managed-runtime-attestation-worker.test.ts src/serve/managed-runtime-tool-worker.test.ts`，并在 `packages/managed-agent-server` 运行 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest`。TypeScript suite 校验共享 fixtures、schema 变异用例、gate 精确放行与真实工具执行；Java suite 消费同一批契约文件。
 
 ### 4.1 Java transport
 
@@ -77,7 +77,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 超过对应路由上限的请求在发送前被拒绝：`execute` 为 256 KiB，`status` 与 `cancel` 为 16 KiB。响应上限为 1 MiB，且必须带 `no-store` 与 JSON 响应头。解析强制信封、result、error 为封闭对象，协议版本为 2，状态与执行结局属于契约枚举，错误字符串非空，且仅在 settled 时必须携带 result。`lastSequence` 为可选非负整数，仅允许出现在 `status`。`execute` 要求结算并返回 result map；`status` 与 `cancel` 返回校验后的线上 map。共享错误码保持不变，错误消息标明操作与适用上限。服务端失败可重试，其他 HTTP 失败为终态。
 
-在 `packages/sdk-java/runtime-broker` 运行 `mvn test` 和 `mvn checkstyle:check`。HTTP fixture 回放验证 canonical 请求、成功与 unknown 应答、畸形 reference 和响应、逐路由请求上限，以及超过 16 KiB 直至 1 MiB 的工具结果。下文描述的 worker 处理器已提供这些路由。
+在 `packages/managed-agent-server` 运行 `mvn test` 和 `mvn checkstyle:check`。HTTP fixture 回放验证 canonical 请求、成功与 unknown 应答、畸形 reference 和响应、逐路由请求上限，以及超过 16 KiB 直至 1 MiB 的工具结果。下文描述的 worker 处理器已提供这些路由。
 
 ## 5. 后续工作
 
@@ -87,7 +87,7 @@ reference 是 harness 分配的原始调用身份；Runtime 不会得知任何 B
 
 ## 6. Worker 实现
 
-合入的 attestation worker 现在在 `attest` 旁边挂载了这四个工具路由。其执行器恰好准入首版的普通工具——`read_file`、`write_file`、`edit` 与前台 `run_shell_command`——运行在以已证明的工作区 cwd 为根的真实 `Config` 之上，checkpointing 关闭。在 `managed-context/1` 的 boot v2 下，每个新调用改为在其 Session 已安装的实际目录中运行，并须先通过激活 gate；见 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)。准入发生在 Harness 侧；worker 执行时不再有审批门。Harness 准入必须包含工作区边界判定：worker 不会将工具路径或 shell 命令限制在工作区内。调用日志按构造只在内存中：worker 进程就是 Runtime 代数，重启即是新代数而非延续，对该进程从未见过的请求，`unknown` 才是诚实的应答。worker 禁用依赖对话的文件读取缓存：它没有内容仍在对话历史中的证据，且可能服务多个 Runtime 会话。任何先读后写要求由 Harness 准入负责。
+合入的 attestation worker 现在在 `attest` 旁边挂载了这四个工具路由。其执行器恰好准入首版的普通工具——`read_file`、`write_file`、`edit` 与前台 `run_shell_command`——运行在以已证明的工作区 cwd 为根的真实 `Config` 之上，checkpointing 关闭。[Hosted 搜索切片](2026-10-01-hosted-workspace-search-profile.zh-CN.md)还在不变的 worker 身份下准入 `glob`，需协调升级。在 `managed-context/1` 的 boot v2 下，每个新调用改为在其 Session 已安装的实际目录中运行，并须先通过激活 gate；见 [Managed Context Worker](2026-09-26-managed-context-worker.zh-CN.md)。准入发生在 Harness 侧；worker 执行时不再有审批门。Harness 准入必须包含工作区边界判定：worker 不会将工具路径或 shell 命令限制在工作区内。调用日志按构造只在内存中：worker 进程就是 Runtime 代数，重启即是新代数而非延续，对该进程从未见过的请求，`unknown` 才是诚实的应答。worker 禁用依赖对话的文件读取缓存：它没有内容仍在对话历史中的证据，且可能服务多个 Runtime 会话。任何先读后写要求由 Harness 准入负责。
 
 契约之上的语义：
 

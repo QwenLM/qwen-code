@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  attachToolOutputProvenance,
+  measureToolOutput,
+} from '../tools/tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
 import type {
@@ -17,6 +22,10 @@ import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
 import {
   LlmChat,
+  LlmRequestPreparationError,
+  llmPreparedProviderPin,
+  type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
   InvalidStreamError,
   approvedPlanRedactionText,
   redactApprovedPlansInHistory,
@@ -50,7 +59,11 @@ import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGe
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
 import { APIConnectionTimeoutError } from 'openai';
 import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
-import type { Config } from '../config/config.js';
+import {
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  type Config,
+} from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
@@ -63,6 +76,7 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
@@ -137,6 +151,7 @@ const {
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
+  logToolResultSize: vi.fn(),
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
   logProtocolTagSanitized: mockLogProtocolTagSanitized,
@@ -270,6 +285,9 @@ describe('LlmChat', async () => {
     // Pass-through for tests that don't care about retry logic.
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
     mockConfig = {
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getSessionId: () => 'test-session-id',
       getTelemetryLogPromptsEnabled: () => true,
       getUsageStatisticsEnabled: () => true,
@@ -710,7 +728,10 @@ describe('LlmChat', async () => {
     expect(syncReviewedDeclarations).toHaveBeenCalledOnce();
     expect(syncReviewedDeclarations).toHaveBeenCalledWith(
       expect.arrayContaining([
-        expect.objectContaining({ role: 'user', parts: [searchResponse] }),
+        expect.objectContaining({
+          role: 'user',
+          parts: [expect.objectContaining(searchResponse)],
+        }),
       ]),
       chat,
     );
@@ -726,7 +747,15 @@ describe('LlmChat', async () => {
       syncedShapes.push({
         length: history.length,
         hasSearchResponse: history.some((entry) =>
-          (entry.parts ?? []).some((part) => part === searchResponse),
+          (entry.parts ?? []).some(
+            (part) =>
+              part.functionResponse?.id ===
+                searchResponse.functionResponse?.id &&
+              part.functionResponse?.name ===
+                searchResponse.functionResponse?.name &&
+              part.functionResponse?.response?.['output'] ===
+                searchResponse.functionResponse?.response?.['output'],
+          ),
         ),
       });
     });
@@ -836,6 +865,406 @@ describe('LlmChat', async () => {
       );
       expect(instruction).toContain('Legitimate content');
       expect(instruction).toContain(block('Ctx1'));
+    });
+  });
+
+  describe('prepared model request recovery', () => {
+    it('awaits durability after normalization and before the first provider call', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const preparedReady = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let saved: LlmPreparedRequest | undefined;
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      const response = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: 'original',
+          config: {
+            abortSignal: new AbortController().signal,
+            httpOptions: { headers: { Authorization: 'secret-test' } },
+          },
+        },
+        'prompt',
+        undefined,
+        {
+          onPreparedRequest: async (prepared) => {
+            saved = prepared;
+            entered();
+            await gate;
+          },
+        },
+      );
+      const done = drain(response);
+      await preparedReady;
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(saved!.history.at(-1)?.parts).toEqual([{ text: 'original' }]);
+      expect(saved!.request.config.maxOutputTokens).toBeGreaterThan(0);
+      expect(saved!.request.config).not.toHaveProperty('abortSignal');
+      expect(saved!.request.config).not.toHaveProperty('httpOptions');
+      expect(JSON.stringify(saved)).not.toContain('secret-test');
+      release();
+      await done;
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
+    it('avoids snapshot copies above the capture budget while sending live', async () => {
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      let copiedDuringCapture = -1;
+      const clone = vi.spyOn(globalThis, 'structuredClone');
+      const callback: LlmPreparedRequestCallback = async (prepared) => {
+        copiedDuringCapture = clone.mock.calls.length;
+        expect(JSON.stringify(prepared).length).toBeGreaterThan(64 * 1024);
+      };
+      callback.maxSnapshotBytes = 64 * 1024;
+      const response = await chat.sendMessageStream(
+        'test-model',
+        { message: 'x'.repeat(100_000) },
+        'large-prompt',
+        undefined,
+        { onPreparedRequest: callback },
+      );
+      clone.mockClear();
+      await drain(response);
+      expect(copiedDuringCapture).toBe(0);
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
+    it('does not send, retry or fall back after a failed durability barrier', async () => {
+      const callback = vi
+        .fn()
+        .mockRejectedValue(new Error('Store unavailable'));
+      const response = await chat.sendMessageStream(
+        'test-model',
+        { message: 'original' },
+        'prompt',
+        undefined,
+        { onPreparedRequest: callback },
+      );
+      await expect(drain(response)).rejects.toBeInstanceOf(
+        LlmRequestPreparationError,
+      );
+      expect(callback).toHaveBeenCalledOnce();
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
+    it('reissues saved normalized history without another push, compaction or clamp', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+        samplingParams: { temperature: 0.3 },
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: {
+            maxOutputTokens: 77,
+            systemInstruction: 'original context',
+          },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const originalConfig = chat['generationConfig'];
+      const compression = vi.spyOn(chat, 'tryCompress');
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'recovered' }])),
+      );
+      const prepared = vi.fn();
+      await drain(
+        await chat.sendPreparedMessageStream(
+          saved,
+          'original-prompt',
+          new AbortController().signal,
+          prepared,
+        ),
+      );
+      expect(chat['generationConfig']).toBe(originalConfig);
+      expect(compression).not.toHaveBeenCalled();
+      expect(streamMock().mock.calls[0][0]).toMatchObject(saved.request);
+      expect(prepared.mock.calls[0][0]).toMatchObject(saved);
+      expect(
+        chat.getHistory().filter((item) => item.role === 'user'),
+      ).toHaveLength(1);
+      expect(chat.getHistory().at(-1)?.parts).toContainEqual({
+        text: 'recovered',
+      });
+    });
+
+    it('refuses a saved request whose model no longer matches the route', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'other-model',
+          contents: [userText('normalized request')],
+          config: { maxOutputTokens: 77 },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const failure = await chat
+        .sendPreparedMessageStream(
+          saved,
+          'route-drift',
+          new AbortController().signal,
+        )
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(LlmRequestPreparationError);
+      expect((failure as LlmRequestPreparationError).cause).toBe(
+        'Saved model route changed.',
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
+    it('refuses a saved request whose provider pin changed', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: { maxOutputTokens: 77 },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: 'stale-provider-pin',
+        promptTokensForClamp: 15,
+      };
+      const failure = await chat
+        .sendPreparedMessageStream(
+          saved,
+          'pin-drift',
+          new AbortController().signal,
+        )
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(LlmRequestPreparationError);
+      expect((failure as LlmRequestPreparationError).cause).toBe(
+        'Saved model route changed.',
+      );
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
+    it('preserves primary persistent retry intent through prepared replay', async () => {
+      vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');
+      try {
+        const routeConfig = {
+          model: 'test-model',
+          authType: AuthType.USE_GEMINI,
+        };
+        mockGeneratorConfig();
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            model: 'test-model',
+            contentGenerator: mockContentGenerator,
+            contentGeneratorConfig: routeConfig,
+          }),
+        } as unknown as ReturnType<Config['getBaseLlmClient']>);
+        let saved: LlmPreparedRequest | undefined;
+        streamMock().mockImplementation(async () => textStream('answer'));
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'original' },
+            'primary-replay',
+            undefined,
+            {
+              onPreparedRequest: async (prepared) => {
+                saved = prepared;
+              },
+            },
+          ),
+        );
+        expect(saved!.allowPersistentRetry).toBe(true);
+        expect(mockRetryWithBackoff.mock.calls.at(-1)?.[1]).toMatchObject({
+          persistentMode: true,
+          heartbeatFn: expect.any(Function),
+        });
+        mockRetryWithBackoff.mockClear();
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            saved!,
+            'primary-replay',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff).toHaveBeenCalledOnce();
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1]).toMatchObject({
+          persistentMode: true,
+          heartbeatFn: expect.any(Function),
+        });
+        vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'false');
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            saved!,
+            'primary-replay-without-opt-in',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff.mock.calls.at(-1)?.[1].persistentMode).toBe(
+          false,
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('keeps externalized images live while refusing lossy prepared replay', async () => {
+      mockGeneratorConfig();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: mockConfig.getContentGeneratorConfig(),
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        imagePayloadThreshold: 1,
+        maxRecentImagesToRetain: 1,
+      });
+      chat.setHistory([
+        content('user', {
+          inlineData: { mimeType: 'image/png', data: 'earlier-image' },
+        }),
+        modelText('I saw the image'),
+      ]);
+      streamMock().mockImplementation(async () => textStream('answer'));
+      const prepared = vi.fn();
+      for (const message of ['first question', 'next question']) {
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message },
+            message,
+            undefined,
+            { onPreparedRequest: prepared },
+          ),
+        );
+      }
+      expect(prepared).toHaveBeenCalledTimes(2);
+      for (const [saved, captureUnsupported] of prepared.mock.calls) {
+        expect(captureUnsupported).toBe(true);
+        expect(JSON.stringify(saved.history)).toContain('[Image #');
+        expect(JSON.stringify(saved.history)).not.toContain('"inlineData"');
+      }
+      for (const [request] of streamMock().mock.calls) {
+        expect(
+          (request.contents as Content[])
+            .flatMap((entry) => entry.parts ?? [])
+            .filter((part) => part.inlineData),
+        ).toEqual([
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'earlier-image',
+              displayName: undefined,
+            },
+          },
+        ]);
+      }
+      streamMock().mockClear();
+      mockRetryWithBackoff.mockClear();
+      const fresh = newChat();
+      await expect(
+        fresh.sendPreparedMessageStream(
+          prepared.mock.calls[0]![0],
+          'old-image-snapshot',
+          new AbortController().signal,
+        ),
+      ).rejects.toBeInstanceOf(LlmRequestPreparationError);
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+      expect(fresh.getHistory()).toEqual([]);
+      await drain(
+        await fresh.sendPreparedMessageStream(
+          {
+            ...prepared.mock.calls[0]![0],
+            history: [content('user', { text: 'original' })],
+          },
+          'safe-image-control',
+          new AbortController().signal,
+        ),
+      );
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
+    it('pins provider semantics while excluding credential rotation', () => {
+      const base = {
+        model: 'test',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://example.test',
+        samplingParams: { temperature: 0.3 },
+      };
+      expect(llmPreparedProviderPin({ ...base, apiKey: 'first' })).toBe(
+        llmPreparedProviderPin({ ...base, apiKey: 'second' }),
+      );
+      for (const changed of [
+        { customHeaders: { 'X-Route': 'other' } },
+        { proxy: 'http://other-proxy.test' },
+      ]) {
+        expect(llmPreparedProviderPin({ ...base, ...changed })).not.toBe(
+          llmPreparedProviderPin(base),
+        );
+      }
+      expect(llmPreparedProviderPin(base)).not.toBe(
+        llmPreparedProviderPin({
+          ...base,
+          samplingParams: { temperature: 0.4 },
+        }),
+      );
     });
   });
 
@@ -2403,6 +2832,36 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('sends the latest memory catalog without persisting it to history', async () => {
+      // The catalog part carries the volatile-boundary marker so the provider
+      // cache passes anchor their per-turn breakpoint before it.
+      const catalogPart = (text: string) => ({
+        text,
+        partMetadata: { 'qwen-code:reattach-boundary': true },
+      });
+      let catalog = 'first catalog';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(textStream('response'));
+      await sendDrain('first question', 'memory-tail-1');
+      expect(
+        (requestAt(0).contents as Content[]).at(-1)?.parts?.at(-1),
+      ).toEqual(catalogPart('first catalog'));
+      expect(JSON.stringify(chat.getHistory())).not.toContain('first catalog');
+      const firstHistory = chat.getHistory();
+      catalog = 'updated catalog';
+      mockStream(textStream('done'));
+      await sendDrain('second question', 'memory-tail-2');
+      const second = requestAt(1).contents as Content[];
+      expect(second.slice(0, firstHistory.length)).toEqual(firstHistory);
+      expect(second.at(-1)?.parts?.at(-1)).toEqual(
+        catalogPart('updated catalog'),
+      );
+      expect(JSON.stringify(second)).not.toContain('first catalog');
+      expect(JSON.stringify(chat.getHistory())).not.toContain(
+        'updated catalog',
+      );
+    });
+
     it('caps function responses at the provider send boundary without changing user text', async () => {
       (
         mockConfig as Config & {
@@ -2425,7 +2884,9 @@ describe('LlmChat', async () => {
       const output = sentParts[1].functionResponse?.response?.['output'];
       expect(typeof output).toBe('string');
       expect((output as string).length).toBeLessThanOrEqual(100);
-      expect(chat.getHistory()[0].parts).toEqual(sentParts);
+      expect(chat.getHistory()[0].parts).toEqual(
+        JSON.parse(JSON.stringify(sentParts)),
+      );
     });
 
     const retainOneImage = () =>
@@ -3476,6 +3937,21 @@ describe('LlmChat', async () => {
       expect(reactiveOpts.trigger).toBe('auto');
       expect(reactiveOpts.originalTokenCount).toBe(135_000);
       expect(reactiveOpts.precomputedEffectiveTokens).toBe(135_000);
+      // The ceiling is the error's FIRST number (`limitTokens`), not the
+      // actual count: this is the only assertion covering the
+      // producer→`tryCompress`→`compress()` hops, so dropping either forward
+      // or swapping in `actualTokens` must turn it red (#13432).
+      expect(reactiveOpts.observedServerCeiling).toBe(128_000);
+      // The kind travels on the same producer→`tryCompress`→`compress()`
+      // hops: an input-bound ceiling must not size an output budget
+      // downstream (#13876).
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
+      // The route that reported the ceiling must travel with it, or the
+      // service cannot tell a retry on that route from a side-query on another
+      // one (#13876). Same producer→tryCompress→compress() hop.
+      expect(reactiveOpts.requestRouteKey).toBe(
+        mockConfig.getModelRouteIdentity(mockConfig.getModel()),
+      );
       expectStreamCalls(2);
       expect(requestAt(1).contents).toEqual(expectedRequestContents);
       expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
@@ -5411,6 +5887,66 @@ describe('LlmChat', async () => {
         'prompt-rollback-transient',
         5_000,
       );
+    });
+
+    it('keeps a captured fallback request outside persistent retry on replay', async () => {
+      const fallbackGenerate = vi
+        .fn()
+        .mockImplementation(async () => textStream('fallback answer'));
+      const fallbackConfig = {
+        model: 'fallback-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      const resolver = wireFallbacks(
+        ['fallback-model'],
+        vi
+          .fn()
+          .mockResolvedValue(
+            fallbackRoute('fallback-model', fallbackGenerate, fallbackConfig),
+          ),
+      );
+      streamMock().mockRejectedValue(tpmCapacityError());
+      const saved: LlmPreparedRequest[] = [];
+      vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'false');
+      try {
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'original' },
+            'fallback-replay',
+            undefined,
+            {
+              onPreparedRequest: async (prepared) => {
+                saved.push(prepared);
+              },
+            },
+          ),
+        );
+        const fallback = saved.find(
+          (prepared) => prepared.request.model === 'fallback-model',
+        );
+        expect(fallback).toBeDefined();
+        expect(fallback!.allowPersistentRetry).toBe(false);
+        vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');
+        mockRetryWithBackoff.mockClear();
+        resolver.mockClear();
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            fallback!,
+            'fallback-replay',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff).toHaveBeenCalledOnce();
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1].persistentMode).toBe(
+          false,
+        );
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1]).not.toHaveProperty(
+          'heartbeatFn',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
 
     it('does not enter the fallback chain in unattended retry mode', async () => {
@@ -9793,6 +10329,14 @@ describe('LlmChat', async () => {
 
     const reminder = (body: string) =>
       userText(`${SYSTEM_REMINDER_OPEN}\n${body}\n</system-reminder>`);
+    const AGENT_PAYLOAD = {
+      displayText: 'done',
+      author: { agentId: 'agent-1', name: 'claude-B' },
+      runId: 'run-1',
+      status: 'completed' as const,
+    };
+    const agentEnvelope = () =>
+      userText(formatAgentMessageModelText(AGENT_PAYLOAD));
 
     it.each<[string, Content[], Content[]]>([
       [
@@ -9821,6 +10365,25 @@ describe('LlmChat', async () => {
             {
               text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n</system-reminder>`,
             },
+            { text: 'the actual user prompt' },
+          ),
+        ],
+        earlier(),
+      ],
+      // A resumed agent_message record is its own user entry; a later
+      // failed prompt must not take it along.
+      [
+        'preserves a trailing session agent envelope entry',
+        [...earlier(), agentEnvelope(), userText('failed prompt')],
+        [...earlier(), agentEnvelope()],
+      ],
+      [
+        'pops a failed prompt that carried a spliced agent envelope',
+        [
+          ...earlier(),
+          content(
+            'user',
+            { text: formatAgentMessageModelText(AGENT_PAYLOAD) },
             { text: 'the actual user prompt' },
           ),
         ],
@@ -10305,6 +10868,38 @@ describe('LlmChat', async () => {
       streamMock().mockImplementation(async () => streams[served.calls++]!);
       return served;
     }
+
+    it.each([false, true])(
+      'marks prefix continuations and propagates a durability refusal (%s)',
+      async (refuse) => {
+        const served = serveStreams(
+          truncated('discarded'),
+          truncated('kept prefix'),
+          streamOf(stopResponse([{ text: 'suffix' }])),
+        );
+        const flags: boolean[] = [];
+        const response = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'original' },
+          'prepared-continuation',
+          undefined,
+          {
+            onPreparedRequest: async (_request, continuing) => {
+              flags.push(continuing === true);
+              if (refuse && continuing)
+                throw new Error('Store unavailable during continuation');
+            },
+          },
+        );
+        if (refuse)
+          await expect(drain(response)).rejects.toBeInstanceOf(
+            LlmRequestPreparationError,
+          );
+        else await drain(response);
+        expect(flags).toEqual([false, false, true]);
+        expect(served.calls).toBe(refuse ? 2 : 3);
+      },
+    );
 
     const sendOn = (
       model: string,
@@ -11824,6 +12419,201 @@ describe('LlmChat', async () => {
   // #9454: API counts describe the serialization of the route (model + auth
   // + endpoint) that produced them. /model keeps this LlmChat, so the old
   // route's counts must not anchor admission, clamp or compression.
+  describe('tool result injection accounting', () => {
+    beforeEach(() => {
+      mockConfig.getToolOutputBatchBudget = () => 200000;
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'test-model',
+        contextWindowSize: 1000000,
+      });
+      vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+        compressionStatus: CompressionStatus.NOOP,
+        originalTokenCount: 0,
+        newTokenCount: 0,
+      });
+    });
+    const result = () =>
+      attachToolOutputProvenance(
+        [
+          fnResponse(
+            'shell',
+            { output: 'x'.repeat(20000) },
+            'anonymous-result',
+          ),
+        ],
+        {
+          callId: 'anonymous-result',
+          toolName: 'shell',
+          toolType: 'native',
+          promptId: 'p',
+          rawSize: { chars: 20000, estimatedTokens: 5000 },
+          truncated: false,
+        },
+      );
+    const injected = (index: number) => requestAt(index).contents as Content[];
+    const resultChars = (index: number) =>
+      measureToolOutput(
+        injected(index)
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.functionResponse),
+      ).chars;
+
+    it('records the submitted result once per tool call', async () => {
+      mockStreamsOnce(textStream('done'), textStream('again'));
+      await sendDrain(result(), 'first');
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(1);
+      const event = vi
+        .mocked(logToolResultSize)
+        .mock.calls.find(([, entry]) => entry.layer === 'injection')![1];
+      expect(event.raw_content_length).toBe(20000);
+      expect(event.injected_content_length).toBe(resultChars(0));
+      await sendDrain('next', 'second');
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, entry]) => entry.layer === 'injection'),
+      ).toHaveLength(1);
+    });
+
+    it.each(['constructor', 'setHistory'] as const)(
+      'does not recount %s history while counting new fork results',
+      async (load) => {
+        const inherited = result();
+        const history = [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'shell',
+                  args: {},
+                  id: 'anonymous-result',
+                },
+              },
+            ],
+          },
+          { role: 'user', parts: inherited },
+          modelText('parent complete'),
+        ];
+        if (load === 'constructor') chat = new LlmChat(mockConfig, {}, history);
+        else chat.setHistory(history);
+        vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+          compressionStatus: CompressionStatus.NOOP,
+          originalTokenCount: 0,
+          newTokenCount: 0,
+        });
+        const fresh = attachToolOutputProvenance(
+          [fnResponse('shell', { output: 'fresh' }, 'fork-result')],
+          {
+            callId: 'fork-result',
+            toolName: 'shell',
+            toolType: 'native',
+            promptId: 'fork',
+            truncated: false,
+          },
+        );
+        mockStreamsOnce(textStream('done'), textStream('again'));
+        await sendDrain(fresh, 'fork');
+        await sendDrain('next', 'replay');
+        const events = vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection')
+          .map(([, event]) => event);
+        expect(events).toHaveLength(1);
+        expect(events[0].call_id).toBe('fork-result');
+        expect(events[0].prompt_id).toBe('fork');
+      },
+    );
+
+    // A result parked through addHistory has not been submitted to the
+    // generator yet, so its one owed injection event must survive until the
+    // turn that actually carries it.
+    it('counts a parked result once on the turn that submits it', async () => {
+      chat.addHistory({ role: 'user', parts: result() });
+      mockStreamsOnce(textStream('done'), textStream('again'));
+      await sendDrain('next', 'parked');
+      await sendDrain('next', 'again');
+      const events = vi
+        .mocked(logToolResultSize)
+        .mock.calls.filter(([, event]) => event.layer === 'injection')
+        .map(([, event]) => event);
+      expect(events).toHaveLength(1);
+      expect(events[0].call_id).toBe('anonymous-result');
+      expect(events[0].prompt_id).toBe('p');
+    });
+
+    it('records each parallel result and preserves user steering', async () => {
+      const second = attachToolOutputProvenance(
+        [fnResponse('read_file', { output: 'y'.repeat(20000) }, 'second')],
+        {
+          callId: 'second',
+          toolName: 'read_file',
+          toolType: 'native',
+          promptId: 'p',
+          rawSize: { chars: 20000, estimatedTokens: 5000 },
+          truncated: false,
+        },
+      );
+      mockStreamsOnce(textStream('done'));
+      await sendDrain(
+        [...result(), ...second, { text: 'Preserve this user instruction.' }],
+        'first',
+      );
+      expect(
+        injected(0)
+          .flatMap((entry) => entry.parts ?? [])
+          .some((part) => part.text === 'Preserve this user instruction.'),
+      ).toBe(true);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(2);
+    });
+
+    it('counts a retried generator request once', async () => {
+      mockRetryWithBackoff.mockImplementation(async (apiCall) => {
+        try {
+          return await apiCall();
+        } catch {
+          return apiCall();
+        }
+      });
+      streamMock()
+        .mockRejectedValueOnce(new Error('temporary transport failure'))
+        .mockResolvedValueOnce(textStream('done'));
+      await sendDrain(result(), 'retry');
+      expect(streamMock()).toHaveBeenCalledTimes(2);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(1);
+    });
+
+    it('does not count a request cancelled before generator dispatch', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: result(), config: { abortSignal: controller.signal } },
+        'cancelled',
+      );
+      await expect(drain(stream)).rejects.toThrow();
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(0);
+    });
+  });
+
   describe('route-scoped token counts (#9454)', () => {
     const switchRoute = (routeKey: string) => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(routeKey);
@@ -12381,6 +13171,8 @@ describe('LlmChat', async () => {
   describe('XML tool call fallback integration', () => {
     const XML =
       '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+    const TAUGHT_XML =
+      '<tool_call><function=read_file><parameter=file_path>a.ts</parameter></function></tool_call>';
 
     /**
      * Stream one STOP chunk of `parts` (or `chunks`) for `message` on
@@ -12494,6 +13286,35 @@ describe('LlmChat', async () => {
       // History holds the recovered functionCall parts, not raw XML.
       expect(parts.some((p) => p.functionCall)).toBe(true);
       expect(hasRawXml(parts)).toBe(false);
+    });
+
+    it('recovers a split taught-dialect call once and stores the call instead of XML (#10692)', async () => {
+      const { chunks, parts } = await runXml('taught-xml', [], {
+        chunks: [
+          textChunk(TAUGHT_XML.slice(0, 30)),
+          textChunk(TAUGHT_XML.slice(30), 'STOP'),
+        ],
+      });
+      const calls = chunks.flatMap((chunk) => chunk.functionCalls ?? []);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        name: 'read_file',
+        args: { file_path: 'a.ts' },
+      });
+      expect(parts).toEqual([{ functionCall: calls[0] }]);
+    });
+
+    it('keeps a native call authoritative when taught-dialect text is also present (#10692)', async () => {
+      const native = fnCall('read_file', { file_path: 'b.ts' }, 'native-call');
+      const { chunks, parts } = await runXml('native-with-taught-xml', [
+        { text: TAUGHT_XML },
+        native,
+      ]);
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        native.functionCall,
+      ]);
+      expect(recoveredChunk(chunks)).toBeUndefined();
+      expect(parts.some((part) => part.text === TAUGHT_XML)).toBe(true);
     });
 
     it('preserves a preceding reasoning episode (text + signature) when XML tool call recovery fires on the same turn', async () => {
@@ -12707,33 +13528,36 @@ describe('LlmChat', async () => {
       expect(parts.some((p) => p.inlineData)).toBe(true);
     });
 
-    it('does not recover XML tool calls when the stream lacks a finish reason', async () => {
-      vi.useFakeTimers();
-      mockStream(streamOf(textChunk(XML))); // no finishReason
-      const stream = await chat.sendMessageStream(
-        'gemini-pro',
-        { message: 'read the file' },
-        'prompt-xml-fallback-no-finish',
-      );
+    it.each([XML, TAUGHT_XML])(
+      'does not recover XML without a finish reason: %s',
+      async (xml) => {
+        vi.useFakeTimers();
+        mockStream(streamOf(textChunk(xml))); // no finishReason
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'read the file' },
+          'prompt-xml-fallback-no-finish',
+        );
 
-      // The recovery gate must not fire; stream validation throws
-      // NO_FINISH_REASON so the retry path handles the truncated stream.
-      const chunks: GenerateContentResponse[] = [];
-      const collecting = (async () => {
-        for await (const event of stream) {
-          if (event.type === StreamEventType.CHUNK) chunks.push(event.value);
-        }
-      })();
-      const resultPromise = (async () => {
-        await expect(collecting).rejects.toThrow('finish reason');
-      })();
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(35_000);
-      await resultPromise;
+        // The recovery gate must not fire; stream validation throws
+        // NO_FINISH_REASON so the retry path handles the truncated stream.
+        const chunks: GenerateContentResponse[] = [];
+        const collecting = (async () => {
+          for await (const event of stream) {
+            if (event.type === StreamEventType.CHUNK) chunks.push(event.value);
+          }
+        })();
+        const resultPromise = (async () => {
+          await expect(collecting).rejects.toThrow('finish reason');
+        })();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await resultPromise;
 
-      // No synthetic tool-call chunk may be dispatched.
-      expect(recoveredChunk(chunks)).toBeUndefined();
-    });
+        // No synthetic tool-call chunk may be dispatched.
+        expect(recoveredChunk(chunks)).toBeUndefined();
+      },
+    );
     describe('issue #10380: HTTP 413 request-body overflow recovery', () => {
       // A reverse proxy can reject the serialized body (HTTP 413) below the
       // auto-compaction threshold; the send must recover via the same one-shot
@@ -12937,4 +13761,22 @@ describe('LlmChat', async () => {
       });
     });
   });
+});
+
+it('pins the reasoning registry route independently of credentials', () => {
+  const config = {
+    model: 'fixture',
+    authType: AuthType.USE_OPENAI,
+    baseUrl: 'https://fixture.invalid',
+    reasoningRouteBaseUrl: 'https://route-a.invalid',
+  };
+  expect(llmPreparedProviderPin(config)).not.toBe(
+    llmPreparedProviderPin({
+      ...config,
+      reasoningRouteBaseUrl: 'https://route-b.invalid',
+    }),
+  );
+  expect(llmPreparedProviderPin(config)).toBe(
+    llmPreparedProviderPin({ ...config, apiKey: 'rotated' }),
+  );
 });

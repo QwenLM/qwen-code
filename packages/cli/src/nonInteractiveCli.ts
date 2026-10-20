@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
   BackgroundTaskStatus,
@@ -20,6 +22,7 @@ import type {
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
   ServerLlmStreamEvent,
+  UserPromptAdmission,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
@@ -59,6 +62,7 @@ import {
   recordHandledToolCall,
   isToolCallConcurrencySafe,
   canonicalToolName,
+  Kind,
   parsePositiveIntegerEnv,
   partitionByConcurrencySafety,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
@@ -91,6 +95,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import { ModSession } from './services/mod-session.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -451,6 +456,7 @@ async function emitNonInteractiveFinalMessage(params: {
  * @param controlService - Optional control service for future permission handling.
  */
 export interface RunNonInteractiveOptions {
+  modSession?: ModSession;
   abortController?: AbortController;
   adapter?: JsonOutputAdapterInterface;
   userMessage?: CLIUserMessage;
@@ -500,13 +506,28 @@ function partitionHeadlessToolCalls(
   requests: ToolCallRequestInfo[],
   config: Config,
 ): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
+  // A PreToolUse or PermissionRequest hook can replace a read-only command
+  // after this check, so such a shell call runs alone. A skill earlier in
+  // the batch may register those hooks before the call runs.
+  let skillBefore = false;
   return partitionByConcurrencySafety(requests, (request) => {
     const executionRequest = getHeadlessExecutionRequest(request, config);
-    return isToolCallConcurrencySafe(
-      executionRequest.name,
-      config.getToolRegistry().getTool(canonicalToolName(executionRequest.name))
-        ?.kind,
-      executionRequest.args,
+    const canonicalName = canonicalToolName(executionRequest.name);
+    const kind = config.getToolRegistry().getTool(canonicalName)?.kind;
+    const inputMayChange =
+      kind === Kind.Execute &&
+      (skillBefore ||
+        (!config.getDisableAllHooks() &&
+          (config.hasHooksForEvent('PreToolUse') ||
+            config.hasHooksForEvent('PermissionRequest'))));
+    skillBefore ||= canonicalName === ToolNames.SKILL;
+    return (
+      !inputMayChange &&
+      isToolCallConcurrencySafe(
+        executionRequest.name,
+        kind,
+        executionRequest.args,
+      )
     );
   });
 }
@@ -576,14 +597,19 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    const modSession =
+      options.modSession ?? ModSession.create(config, settings, adapter);
+    const ownsModSession = options.modSession === undefined;
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
     let chatRecordingSettlement: Promise<void> | undefined;
     const settleBeforeTerminalOutput = (): Promise<void> => {
-      chatRecordingSettlement ??= settleChatRecording(config, {
-        finalize: ownsAdapter,
-      }).then(() => undefined);
+      chatRecordingSettlement ??= (async () => {
+        if (ownsModSession) await modSession?.close();
+        modSession?.flushLogs();
+        await settleChatRecording(config, { finalize: ownsAdapter });
+      })();
       return chatRecordingSettlement;
     };
     const emitResult = async (
@@ -596,6 +622,7 @@ export async function runNonInteractive(
       // the error still surfaces instead of losing both result and error.
       adapter.emitResult(result);
       options.onResultEmitted?.();
+      await modSession?.flushOutput();
     };
 
     // Get readonly values once at the start
@@ -1103,6 +1130,16 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      try {
+        await modSession?.initialize(abortController.signal);
+      } catch (error) {
+        adapter.emitMessage(
+          await buildSystemMessage(config, sessionId, permissionMode, settings),
+        );
+        modSession?.flushLogs();
+        throw error;
+      }
+
       if (options.controlService) {
         config
           .getWorkflowRunRegistry()
@@ -1133,8 +1170,10 @@ export async function runNonInteractive(
         sessionId,
         permissionMode,
         settings,
+        modSession,
       );
       adapter.emitMessage(systemMessage);
+      modSession?.flushLogs();
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
@@ -1164,15 +1203,21 @@ export async function runNonInteractive(
       // slash command; seeds the loop-scoped `modelOverride` below so the
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
+      let promptAdmission: UserPromptAdmission | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
         // client.ts strips the ENTIRE trailing user run, so detection must
         // re-submit exactly that run or the oldest orphans get dropped. This
         // runs once per (rare) continue request, so the full clone is fine.
+        const history = llmClient.getChat().getHistory();
+        const cancellation = getLastApiPromptCancellation(
+          llmClient.getChat().getHistoryShallow(),
+          await config.getChatRecordingService()!.readActiveTranscriptChain(),
+        );
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: llmClient.getChat().getHistory(),
+          apiHistory: cancellation ? [] : history,
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
@@ -1222,6 +1267,27 @@ export async function runNonInteractive(
             abortController,
             config,
             settings,
+            undefined,
+            undefined,
+            modSession,
+            // Core runs no UserPromptSubmit for a notification batch.
+            (options.sendMessageType ?? SendMessageType.UserQuery) ===
+              SendMessageType.UserQuery
+              ? async () => {
+                  if (abortController.signal.aborted) await routeAbort();
+                  promptAdmission = await llmClient.admitUserPrompt(
+                    input,
+                    prompt_id,
+                  );
+                  if (abortController.signal.aborted) await routeAbort();
+                  return !promptAdmission.blocked;
+                }
+              : undefined,
+          );
+          await modSession?.syncSession(
+            slashCommandResult.resolvedCommand?.name === 'clear'
+              ? 'clear'
+              : 'resume',
           );
           switch (slashCommandResult.type) {
             case 'submit_prompt':
@@ -1303,7 +1369,10 @@ export async function runNonInteractive(
                 );
               }
               markGoalTurnDelivered(activeGoalTurn);
-              initialPartList = buildGoalContinuationParts(activeGoalTurn);
+              initialPartList = buildGoalContinuationParts(
+                activeGoalTurn,
+                config.getToolRegistry?.(),
+              );
               slashHandled = true;
               break;
             }
@@ -2029,10 +2098,12 @@ export async function runNonInteractive(
         // finalised (emitted, recorded, appended to `toolResponseParts`)
         // strictly in original request order, so the model and the event
         // log always see a deterministic sequence.
-        const toolBatches = partitionHeadlessToolCalls(
-          requestsToExecute,
-          config,
-        );
+        const toolBatches = modSession?.hasToolHooks
+          ? requestsToExecute.map((request) => ({
+              concurrent: false,
+              calls: [request],
+            }))
+          : partitionHeadlessToolCalls(requestsToExecute, config);
 
         // Tick BEFORE the call so that --max-tool-calls=N caps the run
         // at exactly N executions: the (N+1)th tick aborts before the
@@ -2115,6 +2186,9 @@ export async function runNonInteractive(
               : abortController.signal,
             {
               recordToolResult: false,
+              modToolCall: modSession?.toolCall(() =>
+                budgetEnforcer.tickToolCall(),
+              ),
               onToolResultFullTurnModel: (model) => {
                 if (inlineModelOverrideActive) return false;
                 return setModelOverride(model);
@@ -2545,6 +2619,7 @@ export async function runNonInteractive(
               sendType === SendMessageType.UserQuery &&
               !options.continueInterrupted &&
               submittedPrompt.trim().length > 0 && { submittedPrompt }),
+            ...(isFirstTurn && promptAdmission && { promptAdmission }),
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
@@ -2721,7 +2796,10 @@ export async function runNonInteractive(
               currentMessages = [
                 {
                   role: 'user',
-                  parts: buildGoalContinuationParts(nextGoalTurn),
+                  parts: buildGoalContinuationParts(
+                    nextGoalTurn,
+                    config.getToolRegistry?.(),
+                  ),
                 },
               ];
               hasUnsentToolResponse = false;
@@ -2752,7 +2830,10 @@ export async function runNonInteractive(
               currentMessages = [
                 {
                   role: 'user',
-                  parts: buildGoalContinuationParts(nextGoalTurn),
+                  parts: buildGoalContinuationParts(
+                    nextGoalTurn,
+                    config.getToolRegistry?.(),
+                  ),
                 },
               ];
               hasUnsentToolResponse = false;
@@ -3383,6 +3464,8 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      if (ownsModSession) await modSession?.close();
+      await modSession?.flushOutput();
       await failClosedActiveGoalTurn(
         'Headless Goal host stopped before its permit was released',
       );

@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { sessionIdContext } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
@@ -28,11 +29,13 @@ import {
 import {
   createManagedToolSet,
   ManagedToolExecutor,
+  realpathDeepestExisting,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
 import { ManagedChildRunSupervisor } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
+import type { ManagedRuntimeLedger } from './managed-runtime-ledger.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
 import {
@@ -45,6 +48,7 @@ import {
   WORKSPACE_ACTIVATION_ROUTE,
   WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CONTEXT_CONFIG_REF,
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
 import {
   ManagedHookRuntime,
@@ -110,7 +114,10 @@ export class ManagedContextMount {
   readonly #mountRoot: string;
   #root: { readonly dev: bigint; readonly ino: bigint } | undefined;
 
-  constructor(mountRoot: string) {
+  constructor(
+    mountRoot: string,
+    private readonly verifyStorage?: () => Promise<void>,
+  ) {
     this.#mountRoot = mountRoot;
   }
 
@@ -130,6 +137,7 @@ export class ManagedContextMount {
     let rootStats: BigIntStats;
     let directory: string;
     try {
+      await this.verifyStorage?.();
       const root = await fs.realpath(this.#mountRoot);
       rootStats = await fs.stat(root, { bigint: true });
       directory = path.join(root, ...cwdRelative.split('/'));
@@ -150,6 +158,56 @@ export class ManagedContextMount {
       return undefined;
     }
     return directory;
+  }
+
+  /**
+   * The canonical mount root, or undefined when it is unreadable or its
+   * device and inode no longer match the pinned ones. A binding whose own
+   * directory stopped resolving is still judged against the location it
+   * occupied, which needs the same root `resolve` would have joined onto.
+   */
+  async rootDirectory(): Promise<string | undefined> {
+    if (!isHostAbsolute(this.#mountRoot)) {
+      return undefined;
+    }
+    try {
+      await this.verifyStorage?.();
+      const root = await fs.realpath(this.#mountRoot);
+      const stats = await fs.stat(root, { bigint: true });
+      const pinned = this.#root;
+      if (
+        pinned !== undefined &&
+        (pinned.dev !== stats.dev || pinned.ino !== stats.ino)
+      ) {
+        return undefined;
+      }
+      return root;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * Where an installed sibling Session's directory is now. `mount.resolve`
+ * answers only for a canonical, readable directory; a binding that was
+ * removed, or replaced by a symlink, still has a knowable location. A
+ * resolvable redirect retains ownership of its target; a resolution error
+ * retains the occupied path without vetoing unrelated shared reads.
+ */
+async function siblingDirectory(
+  mount: ManagedContextMount,
+  cwdRelative: string,
+): Promise<string | undefined> {
+  const resolved = await mount.resolve(cwdRelative);
+  if (resolved !== undefined) return resolved;
+  const root = await mount.rootDirectory();
+  if (root === undefined) return undefined;
+  const occupied = path.join(root, ...cwdRelative.split('/'));
+  try {
+    return await realpathDeepestExisting(occupied);
+  } catch {
+    return occupied;
   }
 }
 
@@ -229,15 +287,23 @@ export function registerManagedContextRoutes(
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
   mount = new ManagedContextMount(bootDocument.mountRoot),
+  ledger?: ManagedRuntimeLedger,
+  sshForegroundOnly = false,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
+  if (boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
+    throw new Error('Private CSI file profile requires its dedicated worker.');
   const installations = new ManagedContextInstallations(boot);
   const activations = new WorkspaceActivations();
+  const resident =
+    boot.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  if (resident && boot.isolationClass !== 'workspace')
+    throw new Error('Resident Workspace requires Workspace isolation.');
   const requiresActivation =
-    boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST;
+    boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST || resident;
   const admissionOpen = (): boolean => executor.isAdmissionOpen;
   const remotePublisher =
-    !capturePublisher && requiresActivation
+    !capturePublisher && requiresActivation && !resident
       ? new RemoteShellResultPublisher()
       : undefined;
   const publisher: ManagedShellCapturePublisher | undefined =
@@ -277,55 +343,70 @@ export function registerManagedContextRoutes(
     handleManagedRuntimeJsonError,
   );
 
-  const mcp = new ManagedMcpRuntime(
-    boot,
-    async (runtimeSessionId) => {
-      if (
-        !admissionOpen() ||
-        !mount.isAvailable ||
-        !requiresActivation ||
-        !activations.isActive(runtimeSessionId)
-      )
-        return undefined;
-      const binding = installations.installed(runtimeSessionId);
-      const directory = binding && (await mount.resolve(binding.cwdRelative));
-      return admissionOpen() &&
-        mount.isAvailable &&
-        activations.isActive(runtimeSessionId)
-        ? directory
-        : undefined;
-    },
-    loadManagedMcpManifest(process.env['QWEN_MANAGED_MCP_CONFIG']),
-  );
-  registerManagedMcpRoutes(app, boot, mcp);
-  const hooks = new ManagedHookRuntime(
-    boot,
-    async (runtimeSessionId) => {
-      if (
-        !admissionOpen() ||
-        !mount.isAvailable ||
-        !requiresActivation ||
-        !activations.isActive(runtimeSessionId)
-      )
-        return undefined;
-      const binding = installations.installed(runtimeSessionId);
-      const directory = binding && (await mount.resolve(binding.cwdRelative));
-      return admissionOpen() &&
-        mount.isAvailable &&
-        activations.isActive(runtimeSessionId)
-        ? directory
-        : undefined;
-    },
-    loadManagedHookManifest(process.env['QWEN_MANAGED_HOOK_CONFIG']),
-  );
-  registerManagedHookRoutes(app, boot, hooks);
+  const mcp = sshForegroundOnly
+    ? undefined
+    : new ManagedMcpRuntime(
+        boot,
+        async (runtimeSessionId) => {
+          if (
+            !admissionOpen() ||
+            !mount.isAvailable ||
+            resident ||
+            !requiresActivation ||
+            !activations.isActive(runtimeSessionId)
+          )
+            return undefined;
+          const binding = installations.installed(runtimeSessionId);
+          const directory =
+            binding && (await mount.resolve(binding.cwdRelative));
+          return admissionOpen() &&
+            mount.isAvailable &&
+            activations.isActive(runtimeSessionId)
+            ? directory
+            : undefined;
+        },
+        loadManagedMcpManifest(
+          resident ? undefined : process.env['QWEN_MANAGED_MCP_CONFIG'],
+        ),
+      );
+  if (mcp) registerManagedMcpRoutes(app, boot, mcp);
+  const hooks = sshForegroundOnly
+    ? undefined
+    : new ManagedHookRuntime(
+        boot,
+        async (runtimeSessionId) => {
+          if (
+            !admissionOpen() ||
+            !mount.isAvailable ||
+            resident ||
+            !requiresActivation ||
+            !activations.isActive(runtimeSessionId)
+          )
+            return undefined;
+          const binding = installations.installed(runtimeSessionId);
+          const directory =
+            binding && (await mount.resolve(binding.cwdRelative));
+          return admissionOpen() &&
+            mount.isAvailable &&
+            activations.isActive(runtimeSessionId)
+            ? directory
+            : undefined;
+        },
+        loadManagedHookManifest(
+          resident ? undefined : process.env['QWEN_MANAGED_HOOK_CONFIG'],
+        ),
+      );
+  if (hooks) registerManagedHookRoutes(app, boot, hooks);
   // H3 background Shells share the delegation the Hook commands already use;
   // unset or empty both mean no delegation, and the executor keeps its
   // committed refusal then.
-  const cgroupRoot = process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
-  const backgroundSupervisor = cgroupRoot
-    ? ManagedChildRunSupervisor.create({ cgroupRoot })
-    : undefined;
+  const cgroupRoot = resident
+    ? undefined
+    : process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+  const backgroundSupervisor =
+    !sshForegroundOnly && cgroupRoot
+      ? ManagedChildRunSupervisor.create({ cgroupRoot })
+      : undefined;
   const backgroundRegistry = new ManagedBackgroundShellRegistry();
   // One monitor registry shared by executor and maintenance routes: a
   // private second instance could only ever answer unknown.
@@ -351,34 +432,115 @@ export function registerManagedContextRoutes(
         boot.runtimeInstanceId,
         reference.sessionId,
       );
-      return {
-        ...sessionIdContext.run(sessionId, () =>
-          createManagedToolSet(
-            directory,
-            sessionId,
-            requiresActivation ? boot.mountRoot : directory,
-          ),
+      const toolSet = sessionIdContext.run(sessionId, () =>
+        createManagedToolSet(
+          directory,
+          sessionId,
+          requiresActivation ? boot.mountRoot : directory,
         ),
+      );
+      return {
+        ...toolSet,
+        tools: resident
+          ? new Map(
+              [...toolSet.tools].filter(([name]) =>
+                ['read_file', 'write_file', 'edit'].includes(name),
+              ),
+            )
+          : toolSet.tools,
         isActive,
       };
     },
     publisher,
     mcp,
     hooks,
+    async (sessionId, realPath, ownDirectory) => {
+      // A stale binding still owns its missing or symlinked location, but
+      // must not veto targets in unrelated shared directories.
+      const contains = (directory: string, target: string): boolean => {
+        const relative = path.relative(directory, target);
+        return (
+          relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative)
+        );
+      };
+      const root = await mount.rootDirectory();
+      // A target inside the caller's own directory is the caller's business
+      // only when that directory is private: a Session bound at the mount
+      // root (`'.'`, a Workspace selection without `cwd_relative`) delimits
+      // no private area, so its targets stay subject to sibling ownership.
+      const ownEstate =
+        contains(ownDirectory, realPath) &&
+        root !== undefined &&
+        ownDirectory !== root;
+      for (const [otherId, binding] of installations.bindings()) {
+        if (otherId === sessionId) continue;
+        if (resident && !activations.isActive(otherId)) continue;
+        const directory = await siblingDirectory(mount, binding.cwdRelative);
+        // A binding that cannot be located at all cannot prove the outside
+        // target is shared — and it cannot veto the caller's own estate
+        // either, which is the caller's business by the test above. The
+        // exemption holds only while the root that granted it is still the
+        // live one: a mount that fenced between the read above and this
+        // sibling's resolution made the sibling unlocatable, and excusing it
+        // then would flip the veto from deny to allow.
+        if (directory === undefined) {
+          if (ownEstate && (await mount.rootDirectory()) === root) continue;
+          return true;
+        }
+        // Only a binding AT the mount root exempts: the shared Workspace
+        // itself owns nothing. One bound at a non-root ancestor of the
+        // caller still owns its whole subtree, including what spills past
+        // the caller's directory.
+        if (root !== undefined && directory === root) continue;
+        if (!contains(directory, realPath)) continue;
+        // Ownership runs in both directions. Inside the caller's own estate
+        // only a Session installed strictly below it owns the target: one at
+        // the same directory shares it, and one above it leaves it intact, or
+        // the caller could not read its own files.
+        if (
+          !ownEstate ||
+          (directory !== ownDirectory && contains(ownDirectory, directory))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
     backgroundSupervisor,
     backgroundRegistry,
     monitorRegistry,
+    { ledger, sshForegroundOnly },
   );
-  registerManagedShellRoutes(
-    app,
-    boot,
-    new ManagedShellRuntime(backgroundRegistry),
-  );
-  registerManagedMonitorRoutes(
-    app,
-    boot,
-    new ManagedMonitorRuntime(monitorRegistry),
-  );
+  if (!sshForegroundOnly) {
+    registerManagedShellRoutes(
+      app,
+      boot,
+      new ManagedShellRuntime(backgroundRegistry),
+    );
+    registerManagedMonitorRoutes(
+      app,
+      boot,
+      new ManagedMonitorRuntime(monitorRegistry),
+    );
+  } else {
+    for (const route of [
+      MANAGED_MCP_WORKER_ROUTE,
+      MANAGED_HOOK_WORKER_ROUTE,
+      MANAGED_SHELL_WORKER_ROUTE,
+      MANAGED_MONITOR_WORKER_ROUTE,
+    ]) {
+      app.post(
+        route.path,
+        managedRuntimeNoStore,
+        authorizeManagedRuntime(boot),
+        (_req, res) => {
+          res.status(501).json({ code: 'managed_runtime_profile_unsupported' });
+        },
+      );
+    }
+  }
   registerManagedRuntimeProviderRoute(
     app,
     boot,
@@ -408,9 +570,11 @@ export function registerManagedContextRoutes(
             directory,
             workspaceRoot: boot.mountRoot,
             preapproved: true,
+            filesOnly: resident,
             isActive,
           };
     },
+    sshForegroundOnly,
   );
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);

@@ -191,6 +191,13 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionLiveConversation: 'qwen/control/session/live-conversation',
   sessionLiveTranscript: 'qwen/control/session/live-transcript',
   sessionBackgroundNotification: 'qwen/control/session/background_notification',
+  /**
+   * Session multi-agent: write an `agent_mention` / `agent_message` record
+   * into the chat session (durable record + main-model history, no turn).
+   * Params/result: `SessionExternalRecordRequest` / `SessionExternalRecordResponse`
+   * (core `agents/session-agents/contract.ts`).
+   */
+  sessionExternalRecord: 'qwen/control/session/external_record',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
@@ -647,6 +654,7 @@ export interface ServeSessionContextStatus {
       | 'interrupted_turn'
       | 'degraded_history';
     canContinue: boolean;
+    cancellationConfirmationId?: string;
   };
   state: {
     models?: unknown;
@@ -1060,6 +1068,8 @@ export interface ServeSessionWorkflowTaskStatus {
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Chat that owns the workflow dispatch transcripts. */
+  parentSessionId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
   /**
@@ -1177,6 +1187,19 @@ export interface ServeSessionStatsModelMetrics {
     cached: number;
     /** Reasoning tokens, shown as a subset of generated output. */
     thoughts: number;
+  };
+  /** Streaming timing; absent until a streamed request records its TTFT. */
+  generation?: {
+    /** Streamed requests with a recorded time to first token. */
+    timedRequests: number;
+    totalTtftMs: number;
+    /**
+     * Time from the first to the last visible output, summed over requests
+     * whose output arrived in more than one chunk.
+     */
+    totalGenerationDurationMs: number;
+    /** Output tokens of the requests in `totalGenerationDurationMs`. */
+    totalThroughputOutputTokens: number;
   };
 }
 

@@ -53,6 +53,7 @@ import {
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
   managedRuntimeProviderLimit,
   type ManagedRuntimeProviderSession,
 } from './managed-runtime-provider-protocol.js';
@@ -679,6 +680,66 @@ describe('Managed Runtime provider worker', () => {
     expect((await post({ kind: 'manifest' })).status).toBe(409);
   });
 
+  it('refuses a PreToolUse replacement over HTTP without running either input', async () => {
+    const original = path.join(workspace, 'original.txt');
+    const replaced = path.join(workspace, 'replaced.txt');
+    // A test MessageBus stands in for a deployed command hook.
+    const request = vi.fn(async (hookRequest: { eventName: string }) => ({
+      success: true,
+      output:
+        hookRequest.eventName === 'PreToolUse'
+          ? {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                updatedInput: { file_path: replaced, content: 'B' },
+              },
+            }
+          : {},
+    }));
+    vi.spyOn(Config.prototype, 'getDisableAllHooks').mockReturnValue(false);
+    vi.spyOn(Config.prototype, 'getMessageBus').mockReturnValue({
+      request,
+    } as unknown as ReturnType<Config['getMessageBus']>);
+    await begin();
+    const ref = reference(
+      await prepare('write_file', { file_path: original, content: 'A' }),
+    );
+    await control({ kind: 'confirmation', reference: ref });
+    await control({
+      kind: 'confirm',
+      reference: ref,
+      outcome: ToolConfirmationOutcome.ProceedOnce,
+    });
+
+    const refused = await control({ kind: 'preflight', reference: ref });
+    expect(refused).toEqual({
+      shouldProceed: false,
+      blockType: 'denied',
+      blockReason: expect.stringContaining('not supported'),
+    });
+    expect(await control({ kind: 'preflight', reference: ref })).toEqual(
+      refused,
+    );
+    expect(
+      (
+        await post({
+          kind: 'confirm',
+          reference: ref,
+          outcome: ToolConfirmationOutcome.ProceedOnce,
+          phase: 'preflight',
+        })
+      ).status,
+    ).toBe(409);
+    expect((await post({ kind: 'execute', reference: ref })).status).toBe(409);
+    expect(
+      request.mock.calls.filter(
+        ([hookRequest]) => hookRequest.eventName === 'PreToolUse',
+      ),
+    ).toHaveLength(1);
+    expect(fs.existsSync(original)).toBe(false);
+    expect(fs.existsSync(replaced)).toBe(false);
+  });
+
   it('fences Session identity, changed prepared input and legacy raw execution', async () => {
     await begin();
     expect(await control({ kind: 'acquire' })).toBe(true);
@@ -887,6 +948,95 @@ describe('Managed Runtime provider worker', () => {
     expect(backgroundShell.status).toBe(409);
     expect(await backgroundShell.json()).toMatchObject({
       code: 'managed_runtime_provider_operation_failed',
+    });
+  });
+
+  it.each([false, true])(
+    'reads Workspace context without a provider Session, confined to the Workspace (linked root: %s)',
+    async (linkedRoot) => {
+      if (linkedRoot) {
+        await worker.close();
+        const linkedWorkspace = path.join(storage, 'workspace-link');
+        fs.symlinkSync(workspace, linkedWorkspace, 'dir');
+        worker = await startManagedRuntimeAttestationWorker({
+          ...BOOT,
+          workspaceCwd: linkedWorkspace,
+        });
+      }
+      fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+      const outside = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-provider-outside-'),
+      );
+      try {
+        // A planted symlink must not promote a host file into the system
+        // instruction.
+        fs.writeFileSync(path.join(outside, 'secret.txt'), 'host-secret');
+        fs.symlinkSync(
+          path.join(outside, 'secret.txt'),
+          path.join(workspace, 'AGENTS.md'),
+        );
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
+
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.writeFileSync(
+          path.join(workspace, 'AGENTS.md'),
+          'x'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS + 10),
+        );
+        const { files } = await control<{
+          files: Array<{ name: string; text: string }>;
+        }>({ kind: 'workspace-context' });
+        expect(files.map((file) => file.name)).toEqual([
+          'QWEN.md',
+          'AGENTS.md',
+        ]);
+        expect(files[1].text).toHaveLength(
+          MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+        );
+        expect(files[1].text).toContain('[Truncated');
+
+        // An astral character at the cut must not leave a lone surrogate:
+        // one of the two offsets splits a pair whatever the note's length.
+        for (const prefix of ['', 'x']) {
+          fs.writeFileSync(
+            path.join(workspace, 'AGENTS.md'),
+            prefix + '😀'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS),
+          );
+          const astral = await control<{
+            files: Array<{ name: string; text: string }>;
+          }>({ kind: 'workspace-context' });
+          expect(astral.files[1].text).not.toMatch(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+          );
+          expect(astral.files[1].text).toContain('[Truncated');
+        }
+
+        // One file under both names is injected once.
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.symlinkSync('QWEN.md', path.join(workspace, 'AGENTS.md'));
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+      // The read claimed no provider Session, so the legacy protocol is intact.
+      await acquire();
+    },
+  );
+
+  it('reads Workspace context for an already-claimed provider Session', async () => {
+    // The production ordering: the Harness reads from inside acquire(), after
+    // the acquire control claimed this Session. Refusing that state answered
+    // 409 managed_runtime_identity_conflict, which the best-effort catch
+    // swallowed — every Hosted turn ran without instructions and looked
+    // healthy.
+    fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+    await acquire();
+
+    expect(await control({ kind: 'workspace-context' })).toEqual({
+      files: [{ name: 'QWEN.md', text: 'project rules' }],
     });
   });
 
@@ -1377,6 +1527,68 @@ const timer = setInterval(() => {
     expect(JSON.parse(body)).toEqual({ ...envelope, result: manifest });
   });
 
+  it.each([0, 1])(
+    'enforces the 8 MiB history response budget with an envelope %i bytes over',
+    async (extraBytes) => {
+      await begin();
+      const history = await control<ManagedToolFileHistoryState>({
+        kind: 'history',
+      });
+      const snapshot = history.snapshots[0];
+      const backup = {
+        backupFileName: null,
+        version: 1,
+        backupTime: snapshot.timestamp,
+      };
+      const files = Array.from({ length: 2048 }, (_, i) => `file-${i}`);
+      snapshot.trackedFileBackups = Object.fromEntries(
+        files.map((file) => [file, backup]),
+      );
+      const envelope = {
+        protocolVersion: 1,
+        providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+        session: SESSION,
+        result: history,
+      };
+      const limit = 8 * 1024 * 1024;
+      const padding =
+        limit + extraBytes - Buffer.byteLength(JSON.stringify(envelope));
+      // Spread padding across valid history paths (at most 4096 characters).
+      snapshot.trackedFileBackups = Object.fromEntries(
+        files.map((file, i) => [
+          file +
+            'x'.repeat(
+              Math.floor(padding / files.length) +
+                (i < padding % files.length ? 1 : 0),
+            ),
+          backup,
+        ]),
+      );
+      expect(Buffer.byteLength(JSON.stringify(envelope))).toBe(
+        limit + extraBytes,
+      );
+      expect(Buffer.byteLength(JSON.stringify(history))).toBeLessThan(limit);
+      vi.spyOn(ManagedToolFileHistory.prototype, 'state').mockReturnValue(
+        history,
+      );
+
+      const response = await post({ kind: 'history' });
+      if (extraBytes === 0) {
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(Buffer.byteLength(body)).toBe(limit);
+        expect(JSON.parse(body)).toEqual(envelope);
+      } else {
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual({
+          code: 'managed_runtime_provider_too_large',
+          error:
+            'Managed Runtime provider response exceeds its body size limit.',
+        });
+      }
+    },
+  );
+
   it('fits a status whose envelope is one byte over the wire limit', async () => {
     await begin();
     const ref = reference(
@@ -1460,7 +1672,7 @@ const timer = setInterval(() => {
       state: 'prepared',
     });
     expect(await refused.json()).toEqual({
-      code: 'managed_runtime_provider_operation_failed',
+      code: 'managed_runtime_owner_hold_pending',
       error: 'Managed Runtime Session still owns unfinished work.',
     });
     drain.release();
@@ -1488,7 +1700,7 @@ const timer = setInterval(() => {
     const refused = await releasing;
     expect(refused.status).toBe(409);
     expect(await refused.json()).toEqual({
-      code: 'managed_runtime_identity_conflict',
+      code: 'managed_runtime_owner_hold_pending',
       error: 'Managed Runtime Session still owns unfinished work.',
     });
     // Preparation already cancelled pending work before this late refusal.
@@ -2110,5 +2322,56 @@ const timer = setInterval(() => {
     expect(response.status).toBe(409);
     expect(fs.existsSync(marker)).toBe(false);
     await control({ kind: 'release' });
+  });
+});
+
+describe('Managed Runtime provider release deadline', () => {
+  let workspace: string;
+  let storage: string;
+  let executor: ManagedToolExecutor;
+  let provider: ManagedRuntimeProviderWorker;
+
+  beforeEach(() => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-provider-release-')),
+    );
+    storage = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-provider-release-storage-'),
+    );
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(storage);
+    executor = new ManagedToolExecutor(async () => undefined);
+    provider = new ManagedRuntimeProviderWorker(
+      executor,
+      async () => ({
+        directory: workspace,
+        workspaceRoot: workspace,
+        preapproved: true,
+      }),
+      50,
+    );
+    executor.attachProvider(provider);
+  });
+
+  afterEach(async () => {
+    await executor.close();
+    vi.restoreAllMocks();
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(storage, { recursive: true, force: true });
+  });
+
+  it('abandons a release that outlives its deadline and retries it', async () => {
+    await expect(provider.control(SESSION, { kind: 'acquire' })).resolves.toBe(
+      true,
+    );
+    const stuck = vi
+      .spyOn(ManagedToolRuntime.prototype, 'releasePrepared')
+      .mockImplementation(() => new Promise(() => {}));
+    await expect(
+      provider.control(SESSION, { kind: 'release' }),
+    ).rejects.toMatchObject({ code: 'managed_runtime_release_timeout' });
+    stuck.mockRestore();
+    await expect(provider.control(SESSION, { kind: 'release' })).resolves.toBe(
+      true,
+    );
   });
 });

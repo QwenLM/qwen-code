@@ -6,6 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 import { isSystemReminderContent } from './environmentContext.js';
+import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 
 /**
  * Classification of how a session's last turn ended, computed from persisted
@@ -240,7 +241,18 @@ export function effectiveHistoryEnd(
     trailingSystemNotifications === undefined
       ? -Infinity
       : history.length - trailingSystemNotifications;
-  while (end > 0 && isSystemNotificationContent(history[end - 1]!)) {
+  while (end > 0) {
+    const entry = history[end - 1]!;
+    // A session multi-agent record (agent reply or @-mention) is durable
+    // conversation the main model was never asked to answer, so a trailing
+    // one is not an unfinished turn.
+    // TODO(multi-agent): an agent entry after trailing notifications shifts
+    // the authoritative notification window below; revisit if that mixes.
+    if (isAgentEnvelopeContent(entry)) {
+      end--;
+      continue;
+    }
+    if (!isSystemNotificationContent(entry)) break;
     // Shape says notification, but the record's own provenance says this is
     // real user input that merely looks like an envelope. Trimming it would
     // expose the previous model turn as the tail, certify `clean` for a prompt
@@ -306,7 +318,8 @@ export function detectTurnInterruption(
       }
       // Structural reminder entries are not orphaned turns; the strip pass
       // refuses to pop them, so re-submitting would duplicate the prompt.
-      if (isSystemReminderContent(entry)) {
+      // The same holds for session multi-agent envelope entries.
+      if (isSystemReminderContent(entry) || isAgentEnvelopeContent(entry)) {
         break;
       }
       trailingUserEntries.unshift(entry);

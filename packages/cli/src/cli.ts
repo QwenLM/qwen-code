@@ -41,11 +41,13 @@ type BootstrapRoute =
   | 'serve'
   | 'mcp'
   | 'managed-runtime-worker'
+  | 'session-send-mcp'
   | 'help'
   | 'version'
   | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
+  ['agents <command>', 'Session agents: join a coordinator as a runtime'],
   ['auth', 'Configure authentication (removed)'],
   [
     'batch <command>',
@@ -68,6 +70,7 @@ export const TOP_LEVEL_COMMANDS = [
     'serve',
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   ],
+  ['daemon <command>', 'Inspect and control local qwen serve daemons'],
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
@@ -394,6 +397,11 @@ export function resolveBootstrapRoute(
   if (firstArg === 'managed-runtime-worker') {
     return 'managed-runtime-worker';
   }
+  // The daemon spawns `agents session-send-mcp --url <endpoint>` per agent
+  // run; its stdout is an MCP stream, so it skips normal startup entirely.
+  if (firstArg === 'agents' && argv[1] === 'session-send-mcp') {
+    return 'session-send-mcp';
+  }
 
   return 'default';
 }
@@ -519,6 +527,26 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  if (
+    rawArgv[0] === 'managed-runtime-bootstrap' &&
+    (rawArgv.length === 1 || (rawArgv.length === 2 && rawArgv[1] === '--help'))
+  ) {
+    const { runManagedRuntimeBootstrap } = await import(
+      './serve/managed-runtime-bootstrap.js'
+    );
+    await runManagedRuntimeBootstrap(rawArgv[1] === '--help');
+    return;
+  }
+  if (
+    rawArgv.length === 2 &&
+    rawArgv[0] === 'managed-runtime-bootstrap-worker'
+  ) {
+    const { runManagedRuntimeBootstrapWorker } = await import(
+      './serve/managed-runtime-ssh-worker.js'
+    );
+    await runManagedRuntimeBootstrapWorker(rawArgv[1]!);
+    return;
+  }
   // Bundles enter here directly; the npm wrapper dispatches before loading CLI.
   if (rawArgv.length === 1 && rawArgv[0] === '--workspace-recovery-worker') {
     const { runWorkspaceRecoveryWorker } = await import(
@@ -586,6 +614,23 @@ export async function runCliEntry(
       './serve/managed-runtime-attestation-worker.js'
     );
     await runManagedRuntimeAttestationWorker(containerBoot);
+    return;
+  } else if (route === 'session-send-mcp') {
+    // Nothing on this path may write to stdout (the MCP stream) or read
+    // settings: Codex starts MCP servers with a minimal environment.
+    const { readSessionSendMcpUrl } = await import(
+      './commands/agents/session-send-mcp.js'
+    );
+    const url = readSessionSendMcpUrl(argv.slice(2));
+    if (!url) {
+      writeStderrLine('Usage: qwen agents session-send-mcp --url <endpoint>');
+      process.exitCode = 1;
+      return;
+    }
+    const { runSessionSendMcp } = await import(
+      './commands/agents/session-send-mcp-server.js'
+    );
+    await runSessionSendMcp(url);
     return;
   } else if (route === 'help') {
     await printTopLevelHelp();
