@@ -1087,7 +1087,9 @@ async function shutdown(removeSessionTmpDir = false) {
   try {
     await untrustedContext?.cua?.[Symbol.asyncDispose]?.();
   } catch (error) {
-    process.stderr.write(`Computer Use cleanup failed: ${error?.message ?? String(error)}\n`);
+    process.stderr.write(
+      `Computer Use cleanup failed: ${error?.message ?? String(error)}\n`,
+    );
   }
   if (removeSessionTmpDir) {
     try {
