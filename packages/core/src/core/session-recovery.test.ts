@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { Content } from '@google/genai';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import type { ConversationRecord } from '../services/sessionService.js';
+import { CompressionStatus } from './turn.js';
 import {
   buildSessionRecoveryPlan,
   buildSessionRecoveryPlanFromApiHistory,
@@ -368,5 +369,113 @@ describe('buildSessionRecoveryPlan with unanswered notifications', () => {
     expect(cold.kind).toBe('clean');
     expect(cold.canContinue).toBe(false);
     expect(cold.visibleNotice).toBeUndefined();
+  });
+});
+
+/**
+ * A completed /compress settles the session: the tail the compression swaps
+ * in is the state the user chose to summarize (a pending tool result, or an
+ * ack with a folded functionCall), not an unfinished turn. The projection
+ * reports that boundary as `compressedTailLength`; the plan must honor it
+ * (#14325) without blinding detection to a real interruption AFTER the
+ * compression.
+ */
+describe('buildSessionRecoveryPlan with a completed compression boundary', () => {
+  const pendingToolResultTail = (): Content[] => [
+    {
+      role: 'model',
+      parts: [{ functionCall: { id: 'call-1', name: 'read_file' } }],
+    },
+    {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'contents' },
+          },
+        },
+      ],
+    },
+  ];
+
+  it('reports clean when the api history sits exactly at the compression boundary', () => {
+    // The same tail without the boundary is the pre-fix false banner.
+    const without = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: 'session-1',
+      apiHistory: pendingToolResultTail(),
+    });
+    expect(without.kind).toBe('interrupted_prompt');
+
+    const plan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: 'session-1',
+      apiHistory: pendingToolResultTail(),
+      compressedTailLength: 2,
+    });
+    expect(plan.kind).toBe('clean');
+    expect(plan.canContinue).toBe(false);
+    expect(plan.continuation).toBeUndefined();
+    expect(plan.visibleNotice).toBeUndefined();
+  });
+
+  it('still recovers a real prompt appended after the compression', () => {
+    const plan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: 'session-1',
+      apiHistory: [...pendingToolResultTail(), userText('next request')],
+      compressedTailLength: 2,
+    });
+    expect(plan.kind).toBe('interrupted_prompt');
+    expect(plan.continuation).toMatchObject({
+      mode: 'retry_user_parts',
+      parts: [{ text: 'next request' }],
+    });
+  });
+
+  it('treats a null boundary (no compression) as absent', () => {
+    const plan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: 'session-1',
+      apiHistory: pendingToolResultTail(),
+      compressedTailLength: null,
+    });
+    expect(plan.kind).toBe('interrupted_prompt');
+  });
+
+  it('carries the boundary through the conversation projection', () => {
+    const call: Content = {
+      role: 'model',
+      parts: [{ functionCall: { id: 'call-1', name: 'read_file' } }],
+    };
+    const result: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'contents' },
+          },
+        },
+      ],
+    };
+    const compression: ChatRecord = {
+      ...record(2, modelText('unused')),
+      type: 'system',
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [call, result],
+      },
+    };
+    const plan = planFor(
+      conversationFromRecords([record(0, call), record(1, result), compression]),
+    );
+    expect(plan.kind).toBe('clean');
+    expect(plan.canContinue).toBe(false);
+    expect(plan.continuation).toBeUndefined();
   });
 });

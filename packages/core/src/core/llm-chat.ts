@@ -2407,6 +2407,20 @@ export class LlmChat {
   private manualPlanExitNoticesEnabled = false;
   private completedToolCallIds: string[] = [];
 
+  /**
+   * Length of the leading prefix of the live history that derives from the
+   * last completed compression's payload (`newHistory.length` of the
+   * `setHistory` call that applied it). `undefined` = no compression boundary
+   * applies to the current array. A completed compression is an explicit
+   * clean boundary for `detectTurnInterruption` (#14325): the tail it leaves
+   * behind is the state the user chose to summarize, not an unfinished turn.
+   * Armed AFTER `setHistory` (which clears the slot) in the compression
+   * paths; clamped by `truncateHistory` (head-preserving slice); dropped by
+   * structural rewrites that can shift leading indices;
+   * `setCompressedTailLength` seeds it when restoring from a transcript.
+   */
+  private compressedTailLength: number | undefined;
+
   setCompletedToolCallIds(toolCallIds: readonly string[] | undefined): void {
     this.completedToolCallIds = [...new Set(toolCallIds)].filter(
       (id) => completedToolCallBoundary(this.history, [id]) > 0,
@@ -2415,6 +2429,20 @@ export class LlmChat {
 
   getCompletedToolCallIds(): readonly string[] {
     return [...this.completedToolCallIds];
+  }
+
+  getCompressedTailLength(): number | undefined {
+    return this.compressedTailLength;
+  }
+
+  /**
+   * Seeds the compression boundary on a freshly restored chat. Must run
+   * AFTER `setHistory` (which clears the slot); the value is measured on
+   * the non-curated live history, the same basis `getHistoryShallow()`
+   * reports.
+   */
+  setCompressedTailLength(length: number | undefined): void {
+    this.compressedTailLength = length;
   }
 
   getHistoryForRecovery(): Content[] {
@@ -2871,6 +2899,9 @@ export class LlmChat {
         });
       }
       this.setHistory(newHistory, this.completedToolCallIds);
+      // setHistory cleared the boundary; arm it on the LIVE history (the
+      // recorded snapshot may carry the pending user message).
+      this.compressedTailLength = newHistory.length;
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       try {
@@ -3019,6 +3050,9 @@ export class LlmChat {
       }),
     );
     this.setHistory(newHistory, this.completedToolCallIds);
+    // setHistory cleared the boundary; arm it on the live history, mirroring
+    // the full-compression path (this path records chat_compression too).
+    this.compressedTailLength = newHistory.length;
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
     this.lastCachedContentTokenCount = 0;
@@ -5785,6 +5819,7 @@ export class LlmChat {
   clearHistory(): void {
     this.history = [];
     this.completedToolCallIds = [];
+    this.compressedTailLength = undefined;
     if (!this.isForkedChat) {
       this.config.getToolRegistry()?.clearReviewedDeclarations?.();
     }
@@ -5958,6 +5993,10 @@ export class LlmChat {
     completedToolCallIds?: readonly string[],
   ): void {
     this.history = history;
+    // A replaced array only ends at the compression point for the callers
+    // that re-arm the slot immediately after (the compression paths, the
+    // restore seed in client.ts) — clear it for everyone else.
+    this.compressedTailLength = undefined;
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
@@ -5984,6 +6023,12 @@ export class LlmChat {
   truncateHistory(keepCount: number): void {
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
+    // A head-preserving slice keeps the compression-derived leading entries
+    // exactly, so clamp the boundary to the surviving prefix (never an
+    // overestimate).
+    if (this.compressedTailLength !== undefined) {
+      this.compressedTailLength = Math.min(this.compressedTailLength, keepCount);
+    }
     this.setCompletedToolCallIds(this.completedToolCallIds);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
@@ -6009,6 +6054,11 @@ export class LlmChat {
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
+    // The filter can drop leading entries, shifting the boundary's index
+    // basis — drop the boundary rather than guess the shift (safe direction:
+    // a lost boundary keeps the pre-fix classification and can never hide a
+    // real interruption).
+    this.compressedTailLength = undefined;
     this.setCompletedToolCallIds(this.completedToolCallIds);
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
@@ -6025,12 +6075,18 @@ export class LlmChat {
    */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
-    const boundary = completedToolCallBoundary(
+    const toolBoundary = completedToolCallBoundary(
       this.history,
       this.completedToolCallIds,
     );
+    // A completed compression's payload is settled state the user chose to
+    // summarize — not orphaned leftovers, so the walk stops there. The
+    // detector's `parts` walk (`detectTurnInterruption`) uses the same floor,
+    // keeping the reported re-submission exactly equal to what was stripped.
+    // A stale boundary only pops less, never more (safe direction).
+    const floor = Math.max(toolBoundary, this.compressedTailLength ?? 0);
     while (
-      this.history.length > boundary &&
+      this.history.length > floor &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
       // Never pop a *pure* system-reminder user entry. These are structural,

@@ -274,6 +274,14 @@ export interface SessionRestoreReplayPage {
 export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
   completedToolCallIds?: string[];
+  /**
+   * Length of the leading prefix of `apiHistory` that derives from the last
+   * completed `chat_compression` payload recorded in this transcript (omitted
+   * when the transcript holds no such record). The restore seed in client.ts
+   * re-arms it on the live chat so the recovery classifier keeps the
+   * compression clean boundary across a restart (#14325).
+   */
+  compressedTailLength?: number;
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
   attributionSnapshot?: AttributionSnapshot;
@@ -401,8 +409,12 @@ function buildManagedSessionRestoreProjection(
   const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
   const restoredTokenCounts = resumeTokenCounts.finish();
   const restoredFileHistory = fileHistory.finish();
+  const finishedApiHistory = apiHistory.finishSession();
   const runtime: SessionRuntimeResumeState = {
-    apiHistory: apiHistory.finish(),
+    apiHistory: finishedApiHistory.apiHistory,
+    ...(finishedApiHistory.compressedTailLength !== null
+      ? { compressedTailLength: finishedApiHistory.compressedTailLength }
+      : {}),
     ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
     uiTelemetryEvents,
     ...(attributionSnapshot ? { attributionSnapshot } : {}),
@@ -3509,8 +3521,12 @@ export class SessionTranscriptReader {
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
     const completedToolCallIds = apiHistory.getCompletedToolCallIds();
+    const finishedApiHistory = apiHistory.finishSession();
     const runtime: SessionRuntimeResumeState = {
-      apiHistory: apiHistory.finish(),
+      apiHistory: finishedApiHistory.apiHistory,
+      ...(finishedApiHistory.compressedTailLength !== null
+        ? { compressedTailLength: finishedApiHistory.compressedTailLength }
+        : {}),
       ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }

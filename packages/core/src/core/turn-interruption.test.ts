@@ -471,6 +471,160 @@ describe('detectTurnInterruption with authoritative notification provenance', ()
   });
 });
 
+describe('detectTurnInterruption with a completed compression boundary', () => {
+  // The tail a completed /compress leaves behind (#14325): the swapped-in
+  // compressedHistory ends with the pending tool result the user chose to
+  // summarize, or an ack with a folded functionCall. Both are shape-
+  // indistinguishable from an unfinished turn — only the compression record
+  // carries the intent, so the boundary is passed in explicitly.
+
+  const pendingToolResultTail = (): Content[] => [
+    {
+      role: 'model',
+      parts: [{ functionCall: { id: 'call-1', name: 'read_file' } }],
+    },
+    {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'contents' },
+          },
+        },
+      ],
+    },
+  ];
+
+  const ackWithFoldedCallTail = (): Content[] => [
+    { role: 'user', parts: [{ text: 'summary of the conversation' }] },
+    {
+      role: 'model',
+      parts: [
+        { text: 'Got it, continuing with the summary.' },
+        { functionCall: { id: 'call-2', name: 'shell' } },
+      ],
+    },
+  ];
+
+  it('classifies the pending-tool-result tail as clean at the compression boundary', () => {
+    // The same tail without the boundary is the pre-fix false banner.
+    expect(detectTurnInterruption(pendingToolResultTail()).kind).toBe(
+      'interrupted_prompt',
+    );
+    expect(
+      detectTurnInterruption(pendingToolResultTail(), undefined, undefined, 2),
+    ).toEqual({ kind: 'none' });
+  });
+
+  it('classifies the ack-with-folded-functionCall tail as clean at the boundary', () => {
+    expect(detectTurnInterruption(ackWithFoldedCallTail()).kind).toBe(
+      'interrupted_turn',
+    );
+    expect(
+      detectTurnInterruption(ackWithFoldedCallTail(), undefined, undefined, 2),
+    ).toEqual({ kind: 'none' });
+  });
+
+  it('still classifies a real prompt appended after the compressed tail', () => {
+    const history = [
+      ...pendingToolResultTail(),
+      { role: 'user', parts: [{ text: 'next request' }] },
+    ];
+    expect(detectTurnInterruption(history, undefined, undefined, 2)).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [{ text: 'next request' }],
+    });
+  });
+
+  it('still classifies a turn interrupted after the compression', () => {
+    const history = [
+      ...ackWithFoldedCallTail(),
+      { role: 'user', parts: [{ text: 'go' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'late-1', name: 'shell' } }],
+      },
+    ];
+    expect(detectTurnInterruption(history, undefined, undefined, 2)).toEqual({
+      kind: 'interrupted_turn',
+      danglingCalls: [{ callId: 'late-1', name: 'shell' }],
+    });
+  });
+
+  it('treats a boundary shorter than the tail run as absent', () => {
+    // Only the first entry is compression-derived: the `none` short-circuit
+    // must not fire (the tail postdates the compression), and the walk floor
+    // IS the boundary, so the post-compression tool result AND the prompt
+    // are both carried.
+    const history = [
+      ...pendingToolResultTail(),
+      { role: 'user', parts: [{ text: 'next request' }] },
+    ];
+    expect(detectTurnInterruption(history, undefined, undefined, 1)).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'contents' },
+          },
+        },
+        { text: 'next request' },
+      ],
+    });
+  });
+
+  it('covers a compressed tail whose last entry is an envelope-shaped record', () => {
+    // The payload itself can end in a notification-shaped entry (a background
+    // task completed before the user compressed). Without the boundary the
+    // shape trim exposes the summary entry underneath and re-opens the false
+    // `interrupted_prompt`; the boundary settles it as clean.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'summary of the conversation' }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            text:
+              '<task-notification><task-id>agent-1</task-id>' +
+              '<status>completed</status><summary>Agent done.</summary>' +
+              '</task-notification>',
+          },
+        ],
+      },
+    ];
+    expect(detectTurnInterruption(history).kind).toBe('interrupted_prompt');
+    expect(detectTurnInterruption(history, undefined, undefined, 2)).toEqual({
+      kind: 'none',
+    });
+  });
+
+  it('keeps the pre-boundary contract for callers that pass nothing', () => {
+    expect(
+      detectTurnInterruption(
+        pendingToolResultTail(),
+        undefined,
+        undefined,
+        undefined,
+      ),
+    ).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'contents' },
+          },
+        },
+      ],
+    });
+  });
+});
+
 describe('detectTurnInterruption with session agent records', () => {
   const agentEntry: Content = {
     role: 'user',

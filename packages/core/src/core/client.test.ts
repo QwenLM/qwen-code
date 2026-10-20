@@ -1151,6 +1151,33 @@ describe('Gemini Client (client.ts)', () => {
       expectToolBoundaryKept(resumedClient, result);
     });
 
+    it('carries the restored compression boundary across the startup prelude', async () => {
+      // The runtime reports the boundary on the apiHistory basis;
+      // startChat() prepends the mocked startup prelude, shifting every
+      // live index by one. The seed must carry the shift so the recovery
+      // classifier sees the same clean boundary as before the restart
+      // (#14325) — the apiHistory-basis seed would point one entry short
+      // and misclassify the settled tail as an interruption.
+      const apiHistory = [
+        userText('summary'),
+        modelText('ack'),
+        content('user', { text: 'settled tail' }),
+      ];
+      restoreFromRuntime({
+        apiHistory,
+        uiTelemetryEvents: [],
+        compressedTailLength: 3,
+      });
+      const resumedClient = await initializedClient();
+      expect(resumedClient.getHistory()).toEqual([
+        userText('<system-reminder>\nMocked env context\n</system-reminder>'),
+        ...apiHistory,
+      ]);
+      expect(resumedClient.getChat().getCompressedTailLength()).toBe(
+        apiHistory.length + 1,
+      );
+    });
+
     it('restores a completed tool boundary from the legacy transcript', async () => {
       const base = {
         sessionId: 'session',
@@ -5331,6 +5358,14 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       expect(client.getChat().getHistoryForRecovery()).toEqual([]);
       expect(client['forceFullIdeContext']).toBe(true);
+      // startChat() rebuilds the chat through getInitialChatHistory, which
+      // prepends the mocked startup prelude shown above, and the boundary
+      // armed inside the discarded chat's tryCompress() does not survive the
+      // swap. The fresh chat must re-arm it to cover everything it holds —
+      // prelude + payload — as settled state (#14325).
+      expect(client.getChat().getCompressedTailLength()).toBe(
+        compressedHistory.length + 1,
+      );
     });
 
     it('preserves Compact SessionStart additionalContext on the new chat', async () => {

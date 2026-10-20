@@ -302,6 +302,20 @@ export class SessionApiHistoryAccumulator {
   private compressionCandidate: unknown;
   private completedToolCallIds = new Set<string>();
   private lastMaterialRecord?: ChatRecord;
+  /**
+   * Length of {@link history} at the moment the LAST completed
+   * `chat_compression` record landed: every entry below this index derives
+   * from that compression's `compressedHistory` payload, everything at/above
+   * it was appended afterwards. `null` until a compression record lands.
+   *
+   * A completed compression is an explicit clean boundary — the tail it
+   * leaves behind (a pending tool result the user chose to summarize, or an
+   * ack with a folded `functionCall`) must not classify as an unfinished
+   * turn (#14325). {@link finishSession} exposes the value so the recovery
+   * plan can hand it to `detectTurnInterruption` (which indexes it into the
+   * passed history array).
+   */
+  private compressedTailLength: number | null = null;
 
   add(record: ChatRecord): void {
     // Internal calls have no model-emitted function-call partner.
@@ -386,6 +400,10 @@ export class SessionApiHistoryAccumulator {
           : [],
       );
       this.lastMaterialRecord = undefined;
+      // The swapped-in history IS the compression boundary: everything below
+      // this length derives from the payload, everything appended later
+      // postdates the user's explicit compress action (#14325).
+      this.compressedTailLength = this.history.length;
       return;
     }
 
@@ -446,28 +464,45 @@ export class SessionApiHistoryAccumulator {
   finishSession(options: BuildApiHistoryOptions = {}): {
     apiHistory: Content[];
     trailingSystemNotifications: number;
+    compressedTailLength: number | null;
   } {
     if (
       this.compressionCandidate !== undefined &&
       !Array.isArray(this.compressionCandidate)
     ) {
+      const apiHistory = (this.compressionCandidate as Content[]).map(
+        copyContentForApiHistory,
+      );
       return {
-        apiHistory: (this.compressionCandidate as Content[]).map(
-          copyContentForApiHistory,
-        ),
+        apiHistory,
         trailingSystemNotifications: 0,
+        // The whole fallback projection derives from the compression payload,
+        // so the boundary is its full length.
+        compressedTailLength: apiHistory.length,
       };
     }
     let apiHistory = this.history;
     let flags = this.systemNotificationFlags;
+    let compressedTailLength = this.compressedTailLength;
     if (options.stripThoughtsFromHistory) {
       const keptHistory: Content[] = [];
       const keptFlags: boolean[] = [];
+      let keptCompressionPrefix = 0;
       for (let i = 0; i < apiHistory.length; i++) {
         const stripped = stripThoughtsFromContent(apiHistory[i]!);
         if (stripped === null) continue;
+        if (compressedTailLength !== null && i < compressedTailLength) {
+          keptCompressionPrefix++;
+        }
         keptHistory.push(stripped);
         keptFlags.push(flags[i] === true);
+      }
+      // Strip can drop entries, so re-measure the boundary on the kept
+      // prefix: the compression-derived entries are exactly the kept entries
+      // whose pre-strip index sat below it (same invariant as the trailing
+      // notification count above).
+      if (compressedTailLength !== null) {
+        compressedTailLength = keptCompressionPrefix;
       }
       apiHistory = keptHistory;
       flags = keptFlags;
@@ -476,7 +511,11 @@ export class SessionApiHistoryAccumulator {
     for (let i = flags.length - 1; i >= 0 && flags[i]; i--) {
       trailingSystemNotifications++;
     }
-    return { apiHistory, trailingSystemNotifications };
+    return {
+      apiHistory,
+      trailingSystemNotifications,
+      compressedTailLength,
+    };
   }
 }
 
@@ -504,10 +543,11 @@ export function buildSessionHistoryFromConversation(
   apiHistory: Content[];
   completedToolCallIds?: string[];
   trailingSystemNotifications: number;
+  compressedTailLength: number | null;
 } {
   const accumulator = new SessionApiHistoryAccumulator();
   for (const record of conversation.messages) accumulator.add(record);
-  const { apiHistory, trailingSystemNotifications } =
+  const { apiHistory, trailingSystemNotifications, compressedTailLength } =
     accumulator.finishSession(options);
   const completedToolCallIds = accumulator
     .getCompletedToolCallIds()
@@ -521,5 +561,12 @@ export function buildSessionHistoryFromConversation(
     // envelope-shaped real prompt from being trimmed. Omitting it would drop
     // the consumer back to shape-only guessing.
     trailingSystemNotifications,
+    // Length of the compressed-history prefix of `apiHistory` at the moment
+    // the LAST completed `chat_compression` record landed, or `null` when the
+    // conversation holds no such record. `null` is the affirmative "no
+    // compression" signal, mirroring `trailingSystemNotifications` above:
+    // the recovery plan treats a tail that still sits at this boundary as a
+    // clean boundary instead of an interrupted turn (#14325).
+    compressedTailLength,
   };
 }
