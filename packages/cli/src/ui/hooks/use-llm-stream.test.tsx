@@ -12773,10 +12773,79 @@ describe('useLlmStream', () => {
       // content before cancel; that's covered by a separate test below.)
       expect(info?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
-        text: '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
+        // #11553: the envelope stays in the model prompt but not in the
+        // recorded user text the cancel handler restores.
+        text: 'what time is it?',
         submittedPrompt: 'what time is it?',
+        modelText:
+          '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
       });
       expect(info?.canUndoLastLoggedUserMessage).toBe(true);
+    });
+
+    it('strips the envelope from the row when the submit carries no provenance', async () => {
+      // #11553: without `submittedPrompt` the strip is the only thing keeping
+      // the injected notice out of the row, so pin the row, the cancel
+      // identity and the model text in one case — an echo of metadata can no
+      // longer stand in for the strip.
+      const envelopeQuery =
+        '<system-reminder>managed</system-reminder>\n\nFirst query';
+      const cancelSubmitSpy = vi.fn();
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {});
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        cancelSubmitSpy,
+      );
+
+      await act(async () => {
+        result.current.submitQuery(envelopeQuery, SendMessageType.UserQuery);
+      });
+
+      expect(mockSendMessageStream.mock.calls[0][0]).toBe(envelopeQuery);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'user', text: 'First query' }),
+        expect.any(Number),
+      );
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      const info = cancelSubmitSpy.mock.calls[0][0];
+      expect(info?.lastTurnUserItem).toEqual({
+        id: expect.any(Number),
+        text: 'First query',
+        modelText: envelopeQuery,
+      });
+      expect(info?.lastTurnUserItem).not.toHaveProperty('submittedPrompt');
+    });
+
+    it('keeps an envelope-shaped slash argument in the recall log', async () => {
+      // A command's arguments may legitimately start with an envelope-shaped
+      // block, so the strip is skipped for slash commands on purpose.
+      const slashQuery = '/cmd <system-reminder>\narg\n</system-reminder>';
+      const mockLogMessage = vi.fn();
+      mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+      const { result } = renderTestHook([], undefined, undefined, undefined, {
+        logMessage: mockLogMessage,
+      } as any);
+
+      await act(async () => {
+        await result.current.submitQuery(slashQuery, SendMessageType.UserQuery);
+      });
+
+      expect(mockLogMessage).toHaveBeenCalledWith(
+        MessageSenderType.USER,
+        slashQuery,
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
 
     it('emits lastTurnUserItem: null for paths that do NOT add a user history item (Notification)', async () => {
@@ -18618,8 +18687,10 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
           submittedPrompt: 'First query',
+          modelText:
+            '<system-reminder>managed</system-reminder>\n\nFirst query',
         });
         expect(
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.canUndoLastLoggedUserMessage,
@@ -18712,8 +18783,10 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
           submittedPrompt: 'First query',
+          modelText:
+            '<system-reminder>managed</system-reminder>\n\nFirst query',
         });
       } finally {
         resolveFirstCall();
