@@ -68,7 +68,9 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 available.`。公开 close 路由经 `SessionLifecycleService.admit` 的 workspace
   分支进入 `ManagedAgentStore.beginWorkspaceLifecycle`，由 `beginLifecycle`
   抛出。该消息由五个类里的十处共享，因此要指名路由而非某个类：它不是 FG11f
-  故障的 store 级授权，后者是非持久 broker 的 `resolveScope` turn 路径。
+  故障的 store 级授权。那一片记录了两种拒绝——非持久 broker 在 `resolveScope`
+  的 409，以及切到持久 broker 后 `WorkspaceExecutionStore` 的
+  `Workspace execution authority is unavailable.`——两者都不是本条生命周期抛错。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
   接受。把 wake turn 扣在模型上时发出该取消，并没有停住 run：模型释放后

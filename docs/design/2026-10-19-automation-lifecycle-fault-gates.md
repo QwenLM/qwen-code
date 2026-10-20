@@ -84,8 +84,11 @@ around it.
   `SessionLifecycleService.admit`'s workspace arm into
   `ManagedAgentStore.beginWorkspaceLifecycle`, and `beginLifecycle` throws
   there. The message is shared by ten raise sites in five classes, so name the
-  route rather than a class: it is not the store-level authority FG11f faults,
-  whose refusal is the non-durable broker's `resolveScope` turn path.
+  route rather than a class: it is not the store-level authority FG11f faults.
+  That slice records two refusals — the non-durable broker's 409 from
+  `resolveScope`, and, under the durable broker, `WorkspaceExecutionStore`'s
+  `Workspace execution authority is unavailable.` — so neither is this
+  lifecycle throw.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
   `GET /v1/agents/sessions/{id}/tasks` is accepted. Sent while the wake turn
