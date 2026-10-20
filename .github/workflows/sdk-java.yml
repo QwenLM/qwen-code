@@ -898,6 +898,7 @@ jobs:
             packages/managed-agent-server/target/fg10-cases/
             packages/managed-agent-server/target/fg11-cases/
             packages/managed-agent-server/target/fg12-cases/
+            packages/managed-agent-server/target/fg13-cases/
             packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
 

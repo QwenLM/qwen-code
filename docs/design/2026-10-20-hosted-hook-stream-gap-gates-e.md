@@ -77,6 +77,7 @@ result. The cursor machinery is shared; the Hook lane is the new subject.
 ## Validation
 
 The `hosted-harness-mysql` lane on Linux with MySQL 8.4 and a delegated
-cgroup v2 root is the evidence. The base is `main`, so the lane fires on
-`pull_request`. A skipped cell is not a passing gate. The cell adds 150 s to
-the shared fork: healthy 9630 s, fork 10230 s, Verify 181 minutes.
+cgroup v2 root is the evidence. `managed-agent-gate.yml` selects the `fast`
+tier on `pull_request`; the full suite runs on the first maintainer approval
+of the head commit, so a skipped lane is not a passing gate. The cell adds
+150 s to the shared fork: healthy 9630 s, fork 10230 s, Verify 181 minutes.

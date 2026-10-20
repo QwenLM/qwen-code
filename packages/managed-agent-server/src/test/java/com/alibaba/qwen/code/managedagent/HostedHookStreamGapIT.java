@@ -63,9 +63,9 @@ class HostedHookStreamGapIT {
     private static final String TOKEN = "hook-stream-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private static final String PROOF = "FG13E_TOOL_PROOF";
-    // The Hook holds longer than both readers need to see the tool call and
-    // be cut, so the deny lands while neither client is connected.
-    private static final String HOOK_HOLD_MS = "20000";
+    // The Hook is released by the test only after both clients are cut, so
+    // the deny cannot land before the cut the way a fixed sleep could.
+    private static final String HOOK_HOLD_MS = "0";
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
@@ -136,7 +136,7 @@ class HostedHookStreamGapIT {
         hook.put("config", Map.of("type", "command", "command",
                 quote(node) + " " + quote(program.toString()) + " hook "
                         + quote(evidence.toString()) + " "
-                        + quote(HOOK_HOLD_MS) + " " + quote("hook-deny"),
+                        + quote(HOOK_HOLD_MS) + " " + quote("hook-release"),
                 "timeout", 60000));
         hook.put("onceKey", null);
         json.writeValue(temporary.resolve("hooks.json").toFile(),
@@ -197,6 +197,8 @@ class HostedHookStreamGapIT {
         // resume and redden the union as a duplicate.
         long publicCutAt = publicCut.lastSequence();
         long webShellCutAt = webShellCut.lastSequence();
+        // Release only now, so the deny cannot land before the cut.
+        releaseHook();
         awaitDenied();
         awaitCompleted(session, turn);
         List<JsonNode> publicView = new Observer("public", session,
@@ -247,18 +249,36 @@ class HostedHookStreamGapIT {
     /**
      * The resumed view closed the gap the cut opened and carries one
      * completion. The byte-for-byte ledger check lives in {@code
-     * continueFrom}; this names what the Hook-held turn put there, so a
-     * resumed view that lost the frames written during the cut, or replayed
-     * the Turn's end, reddens here too.
+     * continueFrom}; this names what the Hook-held turn put there: the
+     * denied call's single failed terminal, after the cut, and one
+     * completion, so a ledger that lost the deny or duplicated it reddens
+     * even when transport matches it.
      */
     private void assertResumedView(List<JsonNode> union, long cutAt) {
         assertThat(union.size())
                 .as("frames landed after the cut and the resume served them")
                 .isGreaterThan((int) cutAt);
+        List<JsonNode> denied = union.stream()
+                .filter(frame -> "item.tool_call.updated".equals(
+                        frame.path("type").asText()))
+                .filter(frame -> "call_FG13E_HOLD".equals(frame.path("data")
+                        .path("toolCallId").asText()))
+                .filter(frame -> "failed".equals(frame.path("data")
+                        .path("status").asText()))
+                .toList();
+        assertThat(denied).as("one failed terminal for the denied call: %s",
+                union).hasSize(1);
+        assertThat(denied.getFirst().path("sequence").asLong())
+                .as("the deny landed after the cut, not before it")
+                .isGreaterThan(cutAt);
         assertThat(union.stream().filter(frame -> "turn.completed".equals(
                 frame.path("type").asText())).toList())
                 .as("one completion, not one per reconnect: %s", union)
                 .hasSize(1);
+    }
+
+    private void releaseHook() throws IOException {
+        Files.writeString(Path.of(evidence + ".release"), "release");
     }
 
     private void awaitCompleted(String session, String turn) {

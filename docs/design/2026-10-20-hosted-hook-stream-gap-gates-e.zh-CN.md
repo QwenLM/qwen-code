@@ -66,5 +66,6 @@ Hook 状态本身不在公共流上，所以这一格钉的是台账与断流，
 ## 验证
 
 证据来自 Linux 上的 `hosted-harness-mysql` 车道，MySQL 8.4 与委派的 cgroup v2
-根。base 是 `main`，因此车道在 `pull_request` 上触发。跳过的用例不算通过。
+根。`managed-agent-gate.yml` 在 `pull_request` 上只选 `fast` 档；完整套件由维护者
+对 head 提交的首次批准触发，因此被跳过的车道不算通过。
 本格给共享 fork 增加 150 s：healthy 9630 s、fork 10230 s、Verify 181 分钟。

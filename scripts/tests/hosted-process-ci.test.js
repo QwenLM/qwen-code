@@ -428,6 +428,10 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg12-cases/',
     );
+    // FG13e's Hook stream-gap evidence lives in target/fg13-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg13-cases/',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag. The arms
     // that write it run in the failover job, so the upload lives there.
