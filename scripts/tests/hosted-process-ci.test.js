@@ -319,14 +319,24 @@ describe('Hosted real-process gates', () => {
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
     expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
     const isolationProfile = hosted.split('</profile>')[0];
-    expect(isolationProfile).toContain('<forkCount>1</forkCount>');
-    expect(isolationProfile).toContain(
+    // Scope the parameter assertions to the failsafe plugin itself: a
+    // <properties> block hoisted above the plugin would keep the profile
+    // slice matching while never reaching the fork.
+    const failsafeStart = isolationProfile.indexOf(
+      '<artifactId>maven-failsafe-plugin</artifactId>',
+    );
+    expect(failsafeStart).toBeGreaterThan(-1);
+    const failsafeEnd = isolationProfile.indexOf('</plugin>', failsafeStart);
+    expect(failsafeEnd).toBeGreaterThan(failsafeStart);
+    const failsafeBlock = isolationProfile.slice(failsafeStart, failsafeEnd);
+    expect(failsafeBlock).toContain('<forkCount>1</forkCount>');
+    expect(failsafeBlock).toContain(
       'junit.jupiter.extensions.autodetection.enabled = true',
     );
-    expect(isolationProfile).toContain(
+    expect(failsafeBlock).toContain(
       'junit.jupiter.execution.parallel.enabled = false',
     );
-    expect(isolationProfile).toContain('qwen.hosted.mysql.isolation = true');
+    expect(failsafeBlock).toContain('qwen.hosted.mysql.isolation = true');
     expect(pom.match(/qwen\.hosted\.mysql\.isolation = true/g)).toHaveLength(1);
     expect(
       read(

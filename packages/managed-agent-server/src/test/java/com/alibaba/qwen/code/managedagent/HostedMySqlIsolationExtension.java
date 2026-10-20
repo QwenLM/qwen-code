@@ -19,11 +19,13 @@ public final class HostedMySqlIsolationExtension implements BeforeAllCallback {
             return;
         }
         String url = System.getProperty("mysql.url");
-        if (url == null || !url.startsWith("jdbc:mysql:")) {
-            throw new IllegalArgumentException("Hosted isolation requires a disposable mysql.url");
+        String user = System.getProperty("mysql.user");
+        if (url == null || user == null || !url.startsWith("jdbc:mysql://")) {
+            throw new IllegalArgumentException(
+                    "Hosted isolation requires a disposable mysql.url and mysql.user");
         }
         try (var connection = DriverManager.getConnection(url,
-                System.getProperty("mysql.user"), System.getProperty("mysql.password", ""))) {
+                user, System.getProperty("mysql.password", ""))) {
             ManagedSchema.requireApplicationCatalog(connection);
             var tables = new ArrayList<String>();
             try (var statement = connection.createStatement();
