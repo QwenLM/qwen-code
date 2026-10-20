@@ -166,6 +166,10 @@ class HostedMcpResultDeliveryIT {
         wire.clear();
         int catalog = configuration(session.id()).path("catalogRevision")
                 .asInt();
+        long discoversBefore = fixtureEvents("mcp.request").stream()
+                .filter(event -> "tools/list".equals(
+                        event.path("method").asText()))
+                .count();
         JsonNode answer = privateRequest("POST", "/session/" + session.id()
                 + "/mcp/operations", Map.of("operationId", uuid(),
                         "serverId", "fixture", "request", Map.of("kind",
@@ -181,6 +185,21 @@ class HostedMcpResultDeliveryIT {
         assertThat(operations(session.id()).getLast().path("catalogRevision")
                 .asInt()).as("the call keeps the catalog it started on")
                 .isEqualTo(catalog);
+        // The next operation reads through the session's refreshed catalog, so
+        // its committed revision proves the notification was processed rather
+        // than merely ignored.
+        JsonNode follower = privateRequest("POST", "/session/" + session.id()
+                + "/mcp/operations", Map.of("operationId", uuid(),
+                        "serverId", "fixture", "request", Map.of("kind",
+                                "resource_read", "uri", "ext://proof")),
+                session, 202);
+        assertThat(follower.path("state").asText()).isEqualTo("settled");
+        long discoversAfter = fixtureEvents("mcp.request").stream()
+                .filter(event -> "tools/list".equals(
+                        event.path("method").asText()))
+                .count();
+        assertThat(discoversAfter).as("the notification forced a re-discovery")
+                .isGreaterThan(discoversBefore);
     }
 
     private Map<String, Object> mcpPin(int revision) {
