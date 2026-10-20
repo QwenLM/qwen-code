@@ -13,6 +13,13 @@ export const TRAJECTORY_EXECUTION_MESSAGES_EN: Record<
   ExecutionMessage
 > = {
   'trajectory.executions.title': 'Recent executions',
+  'trajectory.executions.following': 'Following',
+  'trajectory.executions.paused': 'Paused',
+  'trajectory.executions.waiting': 'Waiting for live updates',
+  'trajectory.executions.returning': 'Refreshing history…',
+  'trajectory.executions.updated': 'Execution list updated',
+  'trajectory.executions.pause': 'Pause',
+  'trajectory.executions.return': 'Return to latest',
   'trajectory.executions.scope':
     'Bounded lifecycle records; history filters apply below.',
   'trajectory.executions.outside': (v) =>
@@ -45,6 +52,13 @@ export const TRAJECTORY_EXECUTION_MESSAGES_ZH: Record<
   ExecutionMessage
 > = {
   'trajectory.executions.title': '近期执行',
+  'trajectory.executions.following': '跟随中',
+  'trajectory.executions.paused': '已暂停',
+  'trajectory.executions.waiting': '等待实时更新',
+  'trajectory.executions.returning': '正在刷新历史…',
+  'trajectory.executions.updated': '执行列表有更新',
+  'trajectory.executions.pause': '暂停',
+  'trajectory.executions.return': '回到最新',
   'trajectory.executions.scope': '有界生命周期记录；下方筛选仅作用于历史窗口。',
   'trajectory.executions.outside': (v) =>
     `${v?.count ?? 0} 条执行未关联当前历史行`,

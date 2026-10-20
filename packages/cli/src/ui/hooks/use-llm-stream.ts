@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   useState,
   useRef,
@@ -93,6 +94,7 @@ import type {
   HistoryItemToolGroup,
   HistoryItemLlm,
   InlineImageData,
+  LoopDetectionConfirmationRequest,
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
@@ -144,6 +146,15 @@ import {
   type QueuedGoalTurn,
 } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
+import {
+  describeLoopStop,
+  formatInteractiveLoopDetectedMessage,
+} from '../../utils/loop-detected-message.js';
+import type { LoopStop } from '../../utils/loop-detected-message.js';
+import {
+  LoopReason,
+  LoopType,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import {
   getInlineImageData,
@@ -1161,6 +1172,12 @@ export const useLlmStream = (
       getPreferredEditor,
       onEditorClose,
       canUseToolResultFullTurnModel,
+      (call) =>
+        observeInteractiveModTool(
+          config,
+          call,
+          refreshContextFilesOnWriteRef.current,
+        ),
     );
 
   const pendingToolCallGroupDisplay = useMemo(() => {
@@ -1185,12 +1202,13 @@ export const useLlmStream = (
   }, [toolCalls]);
 
   const loopDetectedRef = useRef(false);
+  // Type and reason of the stop behind loopDetectedRef, for the dialog and
+  // the message after it.
+  const loopStopRef = useRef<LoopStop | undefined>(undefined);
   const [
     loopDetectionConfirmationRequest,
     setLoopDetectionConfirmationRequest,
-  ] = useState<{
-    onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
-  } | null>(null);
+  ] = useState<LoopDetectionConfirmationRequest | null>(null);
 
   const stopRetryCountdownTimer = useCallback(() => {
     if (retryCountdownTimerRef.current) {
@@ -2537,7 +2555,10 @@ export const useLlmStream = (
   );
 
   const handleLoopDetectionConfirmation = useCallback(
-    (result: { userSelection: 'disable' | 'keep' }) => {
+    (
+      result: { userSelection: 'disable' | 'keep' },
+      stop: LoopStop | undefined,
+    ) => {
       setLoopDetectionConfirmationRequest(null);
 
       if (result.userSelection === 'disable') {
@@ -2553,7 +2574,7 @@ export const useLlmStream = (
         addItem(
           {
             type: 'info',
-            text: `A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.`,
+            text: formatInteractiveLoopDetectedMessage(stop),
           },
           Date.now(),
         );
@@ -2562,12 +2583,16 @@ export const useLlmStream = (
     [config, addItem],
   );
 
-  const handleLoopDetectedEvent = useCallback(() => {
-    // Show the confirmation dialog to choose whether to disable loop detection
-    setLoopDetectionConfirmationRequest({
-      onComplete: handleLoopDetectionConfirmation,
-    });
-  }, [handleLoopDetectionConfirmation]);
+  const handleLoopDetectedEvent = useCallback(
+    (stop: LoopStop | undefined) => {
+      // Show the confirmation dialog to choose whether to disable loop detection
+      setLoopDetectionConfirmationRequest({
+        cause: describeLoopStop(stop),
+        onComplete: (result) => handleLoopDetectionConfirmation(result, stop),
+      });
+    },
+    [handleLoopDetectionConfirmation],
+  );
 
   const handleUserPromptSubmitBlockedEvent = useCallback(
     (
@@ -2965,6 +2990,7 @@ export const useLlmStream = (
               // handle later because we want to move pending history to history
               // before we add loop detected message to history
               loopDetectedRef.current = true;
+              loopStopRef.current = event.value;
               break;
             case ServerLlmEventType.Retry:
               // On fresh restart (escalation / rate-limit / invalid stream),
@@ -3180,6 +3206,10 @@ export const useLlmStream = (
             `[processLlmStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
           );
           loopDetectedRef.current = true;
+          loopStopRef.current = {
+            loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+            loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+          };
           return {
             status: StreamProcessingStatus.Completed,
             scheduledToolContinuation: false,
@@ -3700,6 +3730,7 @@ export const useLlmStream = (
       // continuation never carries a pending loop (a detected loop schedules
       // nothing), so clearing it here is a no-op for those paths.
       loopDetectedRef.current = false;
+      loopStopRef.current = undefined;
 
       // Reset turn-local ownership trackers at the very top of every
       // top-level submit (UserQuery, Retry, Cron, Notification, etc.).
@@ -4288,7 +4319,9 @@ export const useLlmStream = (
           if (loopDetected) {
             cleanupReviewLease = true;
             loopDetectedRef.current = false;
-            handleLoopDetectedEvent();
+            const loopStop = loopStopRef.current;
+            loopStopRef.current = undefined;
+            handleLoopDetectedEvent(loopStop);
           }
 
           if (
@@ -4973,7 +5006,7 @@ export const useLlmStream = (
         // never-executed skill-write).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled') continue;
+          if (tc.status === 'cancelled' || tc.nativeAttemptsObserved) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -5063,6 +5096,7 @@ export const useLlmStream = (
       // Identify new, successful save_memory calls that we haven't processed yet.
       const newSuccessfulMemorySaves = completedAndReadyToSubmitTools.filter(
         (t) =>
+          !t.nativeAttemptsObserved &&
           t.request.name === 'save_memory' &&
           t.status === 'success' &&
           !processedMemoryToolsRef.current.has(t.request.callId),
@@ -5129,7 +5163,10 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (toolCall.status !== 'cancelled') {
+        if (
+          toolCall.status !== 'cancelled' &&
+          !toolCall.nativeAttemptsObserved
+        ) {
           llmClient?.recordCompletedToolCall(
             toolCall.request.name,
             toolCall.request.args as Record<string, unknown>,
@@ -5341,13 +5378,13 @@ export const useLlmStream = (
             'runtime',
           );
       }
-      const memoryWriteCandidates = completedAndReadyToSubmitTools.map(
-        (toolCall) => ({
+      const memoryWriteCandidates = completedAndReadyToSubmitTools
+        .filter((call) => !call.nativeAttemptsObserved)
+        .map((toolCall) => ({
           toolName: toolCall.request.name,
           args: toolCall.request.args as Record<string, unknown>,
           status: toolCall.status,
-        }),
-      );
+        }));
       const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
         config,
         memoryWriteCandidates,
@@ -5417,6 +5454,7 @@ export const useLlmStream = (
       }
 
       for (const toolCall of llmTools) {
+        if (toolCall.nativeAttemptsObserved) continue;
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
