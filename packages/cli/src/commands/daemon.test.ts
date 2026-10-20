@@ -198,6 +198,27 @@ describe('qwen daemon command', () => {
     }
   });
 
+  it('reports auth-required and HTTP failures as detail text', async () => {
+    const responses = [
+      new Response(null, { status: 401 }),
+      new Response(null, { status: 500 }),
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => responses.shift()!),
+    );
+    try {
+      await expect(fetchDaemonDetail(entry(4170).record)).resolves.toBe(
+        'auth required; set QWEN_SERVER_TOKEN',
+      );
+      await expect(fetchDaemonDetail(entry(4170).record)).resolves.toBe(
+        'status endpoint returned HTTP 500',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('drops parent session bindings from the child environment', () => {
     const env = buildDaemonStartEnv(
       {
