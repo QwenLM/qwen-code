@@ -31,10 +31,15 @@
   （ConPTY 在 Bun 下未验证），并给出如实的 `loadError`。**Node 路径与
   之前逐字节一致**（`@lydell/node-pty` → `node-pty` 回退，原样保留），
   Node 行为之上没有新增代码。
-- 后端**直接驱动同一份锁定的原生 addon**：
-  `require('@lydell/node-pty-<platform>-<arch>')` → `pty.fork` /
-  `pty.resize` / `pty.process`。不 fork `@lydell/node-pty`、不新增原生
-  产物、不扩大 ABI 面。
+- 后端复用**同一份锁定的原生产物**，但按路径加载其私有 addon。
+  先用 `require.resolve('@lydell/node-pty-<platform>-<arch>')` 定位包入口，
+  取 `dirname(dirname(entry))`，再加载
+  `prebuilds/<platform>-<arch>/pty.node`，而不是 require 包入口。
+  macOS 还会检查相邻的 `spawn-helper`，并把其路径传给 `pty.fork`。
+  虽然没有 fork 原包或新增原生产物，后端直接依赖了锁定 addon 的
+  私有 `fork` / `resize` / `process` API 及 prebuild 目录布局。
+  包能解析并不证明预编译文件可用或 ABI 兼容；安装和暂存目录布局、
+  各受支持运行时与平台仍需验证。
 - 输出由**主线程异步 `fs.read` 调用**泵取 master fd。原生 fork 返回的 fd
   本就是非阻塞模式，无数据可读时返回 `EAGAIN`，由一个较短（4 ms）的定时
   器重试；一次返回了数据的读取会直接链入下一次读取。**任一时刻至多一个
