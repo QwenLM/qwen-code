@@ -111,9 +111,11 @@ public final class StoreFaultGate {
                     && "released".equals(
                             record.path("releaseState").asText());
             case HOOK_INTENT -> "hook_execution".equals(domain)
-                    && "intent".equals(execution);
+                    && "intent".equals(execution)
+                    && !"__plan__".equals(record.path("hookId").asText());
             case HOOK_DISPATCH_STARTED -> "hook_execution".equals(domain)
-                    && "dispatch_started".equals(execution);
+                    && "dispatch_started".equals(execution)
+                    && !"__plan__".equals(record.path("hookId").asText());
             case HOOK_SETTLED -> "hook_execution".equals(domain)
                     && "settled".equals(execution)
                     && !"__plan__".equals(record.path("hookId").asText());
