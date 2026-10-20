@@ -98,6 +98,8 @@ Everything saved is plain markdown — you can open, edit, or delete any file at
 
 `MEMORY.md` is a compact index, rather than the full memory store. Its generated body and the portion loaded into prompts share a limit of 200 lines and 25,000 UTF-16 code units; truncation notices are added separately. Line endings are normalized before prompt budgeting. Under size pressure, complete ordinary entries (up to 150 code units) get space before longer entries, and retained entries keep their original order. An entry that cannot fit is skipped whole, so its Markdown link is never cut in the middle. Keep detail in the linked topic files.
 
+When rebuilding omits entries, the saved warning reports the dropped count and up to three names for each limit: the topic-file scan cap and the index-body budget. It distinguishes too many entries from overlong entries, and the warning remains visible when the index is loaded into a prompt. Omission from the index does not delete the linked topic files; prune or merge entries to reduce the catalog.
+
 #### Pinned memory
 
 Put hand-curated documents that automatic memory maintenance should preserve

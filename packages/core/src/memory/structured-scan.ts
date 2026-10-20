@@ -617,6 +617,24 @@ export async function scanAllAutoMemoryTopicDocumentsFromRoot(
   return scanAutoMemoryDocumentsFromRoot(root, { scope, uncapped: true });
 }
 
+export async function scanAutoMemoryIndexDocumentsFromRoot(
+  root: string,
+  scope: AutoMemoryScope,
+): Promise<{
+  docs: ScannedAutoMemoryDocument[];
+  omitted: ScannedAutoMemoryDocument[];
+}> {
+  const docs = await scanAutoMemoryDocumentsFromRoot(root, {
+    scope,
+    deterministic: scope === 'team',
+    uncapped: true,
+  });
+  return {
+    docs: docs.slice(0, MAX_SCANNED_MEMORY_FILES),
+    omitted: docs.slice(MAX_SCANNED_MEMORY_FILES),
+  };
+}
+
 function dedupeScannedDocuments(
   docs: ScannedAutoMemoryDocument[],
 ): ScannedAutoMemoryDocument[] {

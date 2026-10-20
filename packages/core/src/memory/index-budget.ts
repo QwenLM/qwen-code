@@ -8,9 +8,49 @@ export const MAX_INDEX_LINE_CHARS = 150;
 export const MAX_INDEX_LINES = 200;
 // Keep the existing UTF-16 code-unit budget; the warning is appended separately.
 export const MAX_INDEX_CHARS = 25_000;
+export const INDEX_TRUNCATION_NOTICE_START =
+  '\n\n> WARNING: MEMORY.md is too large; only part of it was written.';
 export const INDEX_TRUNCATION_WARNING =
   '> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.';
 export const INDEX_TRUNCATION_NOTICE = `\n\n${INDEX_TRUNCATION_WARNING}`;
+
+const MAX_NAMED_DROPPED_ENTRIES = 3;
+const MAX_DROPPED_ENTRY_NAME_CHARS = 60;
+const INDEX_ENTRY_TITLE = /^\s*-\s*\[([^\]]+)\]/;
+
+function droppedEntryName(line: string): string {
+  const title = INDEX_ENTRY_TITLE.exec(line)?.[1]?.trim();
+  const text = title || line.trim();
+  if (text.length <= MAX_DROPPED_ENTRY_NAME_CHARS) {
+    return text;
+  }
+  let head = text.slice(0, MAX_DROPPED_ENTRY_NAME_CHARS - 1);
+  // Do not split an astral character at the diagnostic's name limit.
+  const lastUnit = head.charCodeAt(head.length - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) {
+    head = head.slice(0, -1);
+  }
+  return `${head}…`;
+}
+
+export function describeDroppedIndexEntries(
+  dropped: readonly string[],
+  total: number,
+  unit: 'entries' | 'topic files' = 'entries',
+): string {
+  const removed = dropped.filter((line) => line.trim().length > 0);
+  if (removed.length === 0) {
+    return '';
+  }
+  const names = removed
+    .slice(0, MAX_NAMED_DROPPED_ENTRIES)
+    .map((line) => `"${droppedEntryName(line)}"`)
+    .join(', ');
+  const rest = removed.length - MAX_NAMED_DROPPED_ENTRIES;
+  return ` Dropped ${removed.length} of ${total} ${unit}: ${names}${
+    rest > 0 ? `, +${rest} more` : ''
+  }.`;
+}
 
 export interface IndexTrimResult {
   /** Surviving entries, in index order. */

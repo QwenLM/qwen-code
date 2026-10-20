@@ -13,6 +13,7 @@ import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
+  getAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
@@ -23,18 +24,18 @@ import {
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
   scanAllAutoMemoryTopicDocumentsFromRoot,
-  scanAutoMemoryTopicDocuments,
-  scanTeamAutoMemoryTopicDocuments,
-  scanUserAutoMemoryTopicDocuments,
+  scanAutoMemoryIndexDocumentsFromRoot,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 import {
-  INDEX_TRUNCATION_NOTICE,
+  describeDroppedIndexEntries,
+  INDEX_TRUNCATION_NOTICE_START,
+  MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
   MAX_INDEX_LINES,
-  trimIndexToBudget,
+  trimIndexToBudgetDetailed,
 } from './index-budget.js';
 
 const MAX_INDEX_FIELD_CHARS = 120;
@@ -223,16 +224,53 @@ function docIndexLine(
  * line-count and character caps and appending a truncation warning when either
  * trips. Each entry is exactly one line (descriptions are single-line).
  */
-function assembleIndex(lines: string[]): string {
-  const raw = lines.join('\n');
-  const wasLineTruncated = lines.length > MAX_INDEX_LINES;
-  const truncated = trimIndexToBudget(lines);
-
-  if (!wasLineTruncated && truncated.length === raw.length) {
-    return truncated;
+function assembleIndex(
+  lines: string[],
+  scanNotice = '',
+  scanOmitted = 0,
+): string {
+  const { content, dropped } = trimIndexToBudgetDetailed(lines);
+  if (dropped.length === 0 && !scanNotice) {
+    return content;
   }
+  const reasons: string[] = [];
+  if (lines.length > MAX_INDEX_LINES) {
+    reasons.push(`${lines.length} entries (limit: ${MAX_INDEX_LINES})`);
+  }
+  const charCount = lines.slice(0, MAX_INDEX_LINES).join('\n').length;
+  const hasOverlongEntry = lines.some(
+    (line) => line.length > MAX_INDEX_LINE_CHARS,
+  );
+  if (charCount > MAX_INDEX_CHARS) {
+    reasons.push(
+      `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
+        hasOverlongEntry
+          ? 'index entries are too long'
+          : 'too many index entries'
+      }`,
+    );
+  }
+  const reason = reasons.length > 0 ? ` ${reasons.join('; ')}.` : '';
+  const lever = hasOverlongEntry
+    ? ` Keep index entries to at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if still over budget.`
+    : ' Prune or merge entries to reduce the index.';
+  const total =
+    dropped.length > 0 && scanOmitted > 0
+      ? ` Dropped ${dropped.length + scanOmitted} in total across both limits.`
+      : '';
+  return `${content}${INDEX_TRUNCATION_NOTICE_START}${reason}${describeDroppedIndexEntries(dropped, lines.length)}${scanNotice}${total}${lever}`;
+}
 
-  return `${truncated}${INDEX_TRUNCATION_NOTICE}`;
+function describeScanOmissions(
+  docs: readonly ScannedAutoMemoryDocument[],
+  omitted: readonly ScannedAutoMemoryDocument[],
+): string {
+  if (omitted.length === 0) return '';
+  return `${describeDroppedIndexEntries(
+    omitted.map((doc) => docIndexLine(doc)),
+    docs.length + omitted.length,
+    'topic files',
+  )} Scan limit: ${docs.length} files.`;
 }
 
 export function buildManagedAutoMemoryIndex(
@@ -241,8 +279,13 @@ export function buildManagedAutoMemoryIndex(
     AutoMemoryMetadata,
     'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
   >,
+  omitted: readonly ScannedAutoMemoryDocument[] = [],
 ): string {
-  return assembleIndex(docs.map((doc) => docIndexLine(doc)));
+  return assembleIndex(
+    docs.map((doc) => docIndexLine(doc)),
+    describeScanOmissions(docs, omitted),
+    omitted.length,
+  );
 }
 
 /**
@@ -302,11 +345,14 @@ function groupTeamDocsByDescription(
  */
 export function buildTeamAutoMemoryIndex(
   docs: ScannedAutoMemoryDocument[],
+  omitted: readonly ScannedAutoMemoryDocument[] = [],
 ): string {
   return assembleIndex(
     groupTeamDocsByDescription(docs).map(({ primary, others }) =>
       docIndexLine(primary, others),
     ),
+    describeScanOmissions(docs, omitted),
+    omitted.length,
   );
 }
 
@@ -327,11 +373,14 @@ async function readAutoMemoryMetadata(
 export async function rebuildManagedAutoMemoryIndex(
   projectRoot: string,
 ): Promise<string> {
-  const [docs, metadata] = await Promise.all([
-    scanAutoMemoryTopicDocuments(projectRoot),
+  const [{ docs, omitted }, metadata] = await Promise.all([
+    scanAutoMemoryIndexDocumentsFromRoot(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+    ),
     readAutoMemoryMetadata(projectRoot),
   ]);
-  const content = buildManagedAutoMemoryIndex(docs, metadata);
+  const content = buildManagedAutoMemoryIndex(docs, metadata, omitted);
   await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
     encoding: 'utf-8',
     noFollow: true,
@@ -361,8 +410,11 @@ export async function rebuildAutoMemoryIndexAtRoot(
  */
 export async function rebuildUserAutoMemoryIndex(): Promise<string> {
   if (!existsSync(getUserAutoMemoryRoot())) return '';
-  const docs = await scanUserAutoMemoryTopicDocuments();
-  const content = buildManagedAutoMemoryIndex(docs);
+  const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
+    getUserAutoMemoryRoot(),
+    'user',
+  );
+  const content = buildManagedAutoMemoryIndex(docs, undefined, omitted);
   await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
     encoding: 'utf-8',
     noFollow: true,
@@ -434,7 +486,10 @@ export async function rebuildTeamAutoMemoryIndex(
         `may be redirecting it.`,
     );
   }
-  const docs = await scanTeamAutoMemoryTopicDocuments(projectRoot);
+  const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
+    teamRoot,
+    'team',
+  );
   // Code-unit comparison, NOT localeCompare: the index is committed and pushed,
   // so its ordering must be byte-identical across machines/locales — otherwise
   // two collaborators churn MEMORY.md back and forth and the ff-only sync wedges.
@@ -445,7 +500,7 @@ export async function rebuildTeamAutoMemoryIndex(
         ? 1
         : 0,
   );
-  const content = buildTeamAutoMemoryIndex(ordered);
+  const content = buildTeamAutoMemoryIndex(ordered, omitted);
   const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
   // Skip a byte-identical rewrite: regenerating MEMORY.md every run would churn
   // its mtime and produce no-op commits that ping-pong between collaborators.
