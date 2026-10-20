@@ -328,6 +328,14 @@
                                 <include>**/Hosted*IT.java</include>
                             </includes>
                             <failIfNoTests>true</failIfNoTests>
+                            <forkCount>1</forkCount>
+                            <properties>
+                                <configurationParameters>
+                                    junit.jupiter.extensions.autodetection.enabled = true
+                                    junit.jupiter.execution.parallel.enabled = false
+                                    qwen.hosted.mysql.isolation = true
+                                </configurationParameters>
+                            </properties>
                             <!-- The Hosted*IT classes share one fork; the file
                                  history control calls roughly doubled the
                                  ToolTurn driver's runtime. The channel fault
@@ -544,8 +552,12 @@
                                  retire-at-intent cell adds 18 s (2x its measured
                                  8.6 s): the healthy sum becomes 9518 s, so the
                                  fork moves to 10118 s and the 179-minute step
-                                 still wraps (10718 s of fork plus wrap). -->
-                            <forkedProcessTimeoutInSeconds>10118</forkedProcessTimeoutInSeconds>
+                                 still wraps (10718 s of fork plus wrap). Class-boundary
+                                 cleanup and its regression add 60 s:
+                                 healthy 9578 s, fork 10178 s, Verify 180
+                                 minutes with margin above the 10778-second
+                                 fork-plus-wrap sum. -->
+                            <forkedProcessTimeoutInSeconds>10178</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

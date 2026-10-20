@@ -318,6 +318,21 @@ describe('Hosted real-process gates', () => {
     expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
     expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
+    const isolationProfile = hosted.split('</profile>')[0];
+    expect(isolationProfile).toContain('<forkCount>1</forkCount>');
+    expect(isolationProfile).toContain(
+      'junit.jupiter.extensions.autodetection.enabled = true',
+    );
+    expect(isolationProfile).toContain(
+      'junit.jupiter.execution.parallel.enabled = false',
+    );
+    expect(isolationProfile).toContain('qwen.hosted.mysql.isolation = true');
+    expect(pom.match(/qwen\.hosted\.mysql\.isolation = true/g)).toHaveLength(1);
+    expect(
+      read(
+        'packages/managed-agent-server/src/test/resources/META-INF/services/org.junit.jupiter.api.extension.Extension',
+      ).trim(),
+    ).toBe('com.alibaba.qwen.code.managedagent.HostedMySqlIsolationExtension');
     // The MariaDB job must not narrow its selection either, or an IT outside
     // the Hosted family would silently run nowhere.
     const mariadbRun = java.jobs['mysql-integration'].steps.find(
@@ -475,9 +490,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (179 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (180 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 269, 282],
+    ['hosted-harness-mysql', 270, 283],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -702,7 +717,7 @@ describe('Hosted real-process gates', () => {
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10118);
+        expect(forkSeconds).toBe(10178);
       }
     },
   );
@@ -779,13 +794,13 @@ describe('Hosted real-process gates', () => {
   // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s; the
   // FG12f delivery entry moves from 30s to 50s at 2x (four cases, 24.16s
   // measured), so it becomes 9500s; the FG11d retire-at-intent cell adds 18s
-  // (2x its measured 8.6s), so it becomes 9518s. The
-  // largest
+  // (2x its measured 8.6s), so it becomes 9518s.
+  // Class-boundary cleanup adds 60s for 9578s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9518;
+  const hostedForkHealthySeconds = 9578;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -863,6 +878,7 @@ describe('Hosted real-process gates', () => {
       'HostedMcpStoreFaultGatesIT',
       'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',
+      'HostedMySqlIsolationIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',
       'HostedSessionRelayFaultGatesIT',
