@@ -356,7 +356,7 @@ for (const { width, language, theme } of [
           await expect(popup).toHaveAttribute('data-state', /open$/);
           await expect(popup).toHaveCSS('opacity', '1');
           const metricPath = testInfo.outputPath(
-            `token-metrics-touch-${await row.locator('dd').first().textContent()}.png`,
+            `token-metrics-touch-${values[0]}.png`,
           );
           await page.screenshot({ path: metricPath, animations: 'disabled' });
           await expect(popup).toHaveAttribute('data-state', /open$/);
