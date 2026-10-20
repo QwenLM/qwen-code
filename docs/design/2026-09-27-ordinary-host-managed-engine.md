@@ -575,13 +575,13 @@ The first condition that applies decides the result:
 | The workspace is not trusted                                                                                                                 | deferred   |
 | The session or workspace directory cannot be resolved                                                                                        | unknown    |
 | The session directory is not the runtime workspace                                                                                           | deferred   |
-| The runtime's sessions resolve LSP on (`--experimental-lsp`, `tools.lspEnabled` or the `QWEN_CODE_ENABLE_LSP` pair; the disable switch wins) | deferred   |
 | `--restore-ask-user-question` is forwarded                                                                                                   | deferred   |
 | Another argument is forwarded; a forwarded `--experimental-lsp` is known                                                                     | unknown    |
 | The running workspace holds MCP servers outside its files                                                                                    | deferred   |
 | The home directory or the environment cannot be read                                                                                         | unknown    |
 | A settings location in the environment depends on the working directory                                                                      | unknown    |
 | A settings layer cannot be read                                                                                                              | unknown    |
+| The runtime's sessions resolve LSP on (`--experimental-lsp`, `tools.lspEnabled` or the `QWEN_CODE_ENABLE_LSP` pair; the disable switch wins) | deferred   |
 | MCP servers in any settings layer, or `mcp.serverCommand`                                                                                    | deferred   |
 | `tools.discoveryCommand` or `tools.callCommand`                                                                                              | deferred   |
 | Hooks in the system, user or trusted project layer                                                                                           | deferred   |

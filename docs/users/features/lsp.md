@@ -25,7 +25,7 @@ LSP is an experimental feature in Qwen Code. To enable it, set `tools.lspEnabled
 }
 ```
 
-Hosts that take command line flags can use `--experimental-lsp` instead — the two are equivalent, and `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override both (disable wins). The setting is read at startup only, so changing it needs a restart; it is honored from the user, system and system-defaults scopes, never from a workspace `.qwen/settings.json`, because enabling it lets a session spawn language servers with your own permissions. Declaring servers stays a workspace/extension decision.
+Hosts that take command line flags can use `--experimental-lsp` instead — the two are equivalent, and `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override both (disable wins). Only the operator's environment or a home-scoped `.env` can set those two variables; a project `.env` or a `settings.env` value is ignored silently. The setting is read at startup only, so changing it needs a restart; it is honored from the user, system and system-defaults scopes, never from a workspace `.qwen/settings.json`, because enabling it lets a session spawn language servers with your own permissions. LSP is refused outright in safe mode (`--safe-mode` / `QWEN_CODE_SAFE_MODE=1`), bare mode, a read-only agent host, an SSH workspace and a provisional workspace, because those modes distrust the workspace content that declares the servers. Declaring servers stays a workspace/extension decision.
 
 LSP servers are configuration-driven. You must define them in `.lsp.json` (or via extensions) for Qwen Code to start them.
 
@@ -346,10 +346,10 @@ You can override trust requirements for specific servers in their configuration:
 
 ### Server Not Starting
 
-1. **Verify LSP is enabled**: Use the `tools.lspEnabled` setting (user, system or system-defaults scope) or the `--experimental-lsp` flag; `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override both (disable wins)
+1. **Verify LSP is enabled**: Use the `tools.lspEnabled` setting (user, system or system-defaults scope) or the `--experimental-lsp` flag; `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override both (disable wins). Safe mode (`--safe-mode`, `QWEN_CODE_SAFE_MODE=1`) and `--bare` refuse LSP, and `/lsp` is not registered there
 2. **Check if the server is installed**: Run the command manually (e.g. `clangd --version`) to verify
 3. **Check the command**: The server binary must be in your system `PATH`, or specified as an absolute path (e.g. `/opt/llvm/bin/clangd`). Relative paths that escape the workspace are blocked
-4. **Check workspace trust**: With `security.folderTrust.enabled` on, the workspace must be trusted for LSP (use `/trust`); with it off — the default — an untrusted folder's servers are still admitted
+4. **Check workspace trust**: A workspace-declared server requires a trusted folder. It is skipped when `security.folderTrust.enabled` is on and the folder is untrusted (use `/trust`), or when a connected IDE reports the workspace as untrusted (VS Code Restricted Mode); the IDE check is re-evaluated when `.lsp.json` changes, and the skip appears only in the `--debug` log as `requires trusted workspace, skipping`
 5. **Check logs**: Start Qwen Code with `--debug`, then search for LSP-related entries in the debug log (see Debugging section below)
 6. **Check the process**: Run `ps aux | grep <server-name>` to verify the server process is running
 

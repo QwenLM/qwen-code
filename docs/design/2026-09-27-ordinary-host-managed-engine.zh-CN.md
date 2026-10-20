@@ -437,13 +437,13 @@ M3 把 B2d 设计中的配置兼容契约实现为 CLI 配置层中的一个函�
 | 工作区不受信                                                                                                                 | deferred   |
 | 无法解析会话目录或工作区目录                                                                                                 | unknown    |
 | 会话目录不是 runtime 的工作区                                                                                                | deferred   |
-| runtime 的会话解析出 LSP 开启（`--experimental-lsp`、`tools.lspEnabled` 或 `QWEN_CODE_ENABLE_LSP` 环境变量对；禁用开关优先） | deferred   |
 | 转发了 `--restore-ask-user-question`                                                                                         | deferred   |
 | 转发了其他参数；转发的 `--experimental-lsp` 属已知参数                                                                       | unknown    |
 | 运行中的工作区持有配置文件之外的 MCP 服务器                                                                                  | deferred   |
 | 无法读取 home 目录或环境                                                                                                     | unknown    |
 | 环境中的某个 settings 位置依赖工作目录                                                                                       | unknown    |
 | 某一层 settings 无法读取                                                                                                     | unknown    |
+| runtime 的会话解析出 LSP 开启（`--experimental-lsp`、`tools.lspEnabled` 或 `QWEN_CODE_ENABLE_LSP` 环境变量对；禁用开关优先） | deferred   |
 | 任何一层 settings 中有 MCP 服务器，或配置了 `mcp.serverCommand`                                                              | deferred   |
 | 配置了 `tools.discoveryCommand` 或 `tools.callCommand`                                                                       | deferred   |
 | system、user 或受信 project 层中配置了 hooks                                                                                 | deferred   |

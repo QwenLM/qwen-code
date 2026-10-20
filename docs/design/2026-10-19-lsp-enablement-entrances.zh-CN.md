@@ -52,11 +52,9 @@
 
 ## 守护进程兼容性
 
-`ManagedCompatibilityRuntime.lspEnabledForSessions` 把解析函数的结果带入 `evaluateManagedCompatibility`，因此将会启动语言服务器的会话永远不会被认证为可运行于配对的托管引擎宿主。该值在兄弟字段 `workflowsEnabledBySettings` 被重算的地方重算，且位于运行环境替换之后——被 spawn 的会话会从磁盘重新读取设置，启动时快照会把子进程答案不同的会话认证通过。
+`evaluateManagedCompatibility` 在**做出决定的地方**解析 LSP：在它已经为其余规则读取的设置快照与有效环境之后，并把转发的 `--experimental-lsp` 参数作为 flag 入口传入。没有任何按 runtime 缓存的字段，因此设置写入、运行环境替换与 model-provider 重载都会进入下一次评估，也不存在启动时冻结的值。运维者禁用开关由同一个解析函数应用，所以转发的 flag 不会压过 `QWEN_CODE_DISABLE_LSP=1`。
 
-该字段是运行时级的保守过近似：守护进程不知道每个宿主自身的宿主模式项（只读 agent host、SSH 工作区、临时工作区、bare 与 safe 模式），因此在那里会被拒绝 LSP 的运行时仍报告为开。过度上报只会延期一个本可运行的会话，绝不会认证一个会启动进程的会话。
-
-`forwardedArgs.includes('--experimental-lsp')` 不是第二个信号。该字段已包含它（含禁用开关），因此转发的该参数被当作已知参数，而不是无法归类的参数。
+相对子进程，解析仍可能过度上报：某个会话宿主以自身条件拒绝 LSP（只读 agent host、SSH 工作区、临时工作区、bare 或 safe 模式）时，它并不会启动服务器，却仍被延期。这是安全方向——失去一次卸载，绝不认证一个会启动进程的会话。设置层无法读取时返回 `unknown`，同样绝不会选择托管引擎。
 
 ## 会话侧宿主模式
 
@@ -65,7 +63,7 @@
 ## 验证
 
 - 单元：解析函数优先级；仅有设置项而无参数时启用服务；禁用开关压过参数、环境变量与设置项；宿主拒绝压过设置项与 `QWEN_CODE_ENABLE_LSP=1`；safe 模式拒绝设置项入口；工作区取值被剥离并给出警告。
-- 接线：每个受守卫的宿主自有 Config 断言其 `hostPolicy` 实参；守护进程在设置重载时重算 `lspEnabledForSessions`。
+- 接线：`src/` 下每个受守卫的宿主自有 Config 断言其 `hostPolicy` 实参；`scripts/opentui-command-parity.ts` 是手工运行的探针，没有测试。LSP 启用状态在评估器内部由它所读取的快照解析，因此上述单元用例覆盖了 runtime 构造完成之后才到达的设置写入。
 - 手工：以设置开启、不带参数创建守护进程会话，然后读取 `GET /session/:id/lsp`。
 
 ## 后续项

@@ -81,23 +81,21 @@ If it exists to run no tools, it owes the guard.
 
 ## Daemon compatibility
 
-`ManagedCompatibilityRuntime.lspEnabledForSessions` carries the resolver's
-answer into `evaluateManagedCompatibility`, so a session that will start
-language servers is never certified for a paired managed engine host. The
-value is recomputed where the sibling `workflowsEnabledBySettings` flag is
-recomputed, after the runtime environment is replaced, because a spawned
-session re-reads settings from disk and a boot-time snapshot would certify a
-session that the child resolves differently.
+`evaluateManagedCompatibility` resolves LSP where the decision is made: after
+it reads the settings snapshot and the effective environment it already uses
+for the other rules, and with the forwarded `--experimental-lsp` argument
+supplied as the flag entrance. No per-runtime field caches the answer, so a
+settings write, a runtime-environment swap and a model-provider reload all
+reach the next evaluation, and there is no boot-time value to freeze. The
+operator kill switch is applied by the same resolver, so a forwarded flag does
+not outrank `QWEN_CODE_DISABLE_LSP=1`.
 
-The field is a conservative runtime-level over-approximation: the daemon does
-not know each host's own host-mode terms (read-only agent host, SSH workspace,
-provisional workspace, bare and safe mode), so a runtime that would refuse LSP
-there still reports on. Over-reporting defers a session that could have run; it
-never certifies one that starts processes.
-
-`forwardedArgs.includes('--experimental-lsp')` is not a second signal. The
-field subsumes it, including the kill switch, so a forwarded flag is treated as
-a known argument rather than an unclassifiable one.
+The resolver can still over-report relative to the child: a session host that
+refuses LSP on its own terms (read-only agent host, SSH workspace, provisional
+workspace, bare or safe mode) is deferred even though it would not start
+servers. That is the fail-safe direction — it loses an offload, never certifies
+a session that starts processes. An unreadable settings layer returns `unknown`,
+which likewise never selects the managed engine.
 
 ## Session-side host modes
 
@@ -112,8 +110,11 @@ a workspace `.lsp.json` is exactly that.
   the kill switch beating flag, env and setting; the host refusal beating both
   the setting and `QWEN_CODE_ENABLE_LSP=1`; safe mode refusing the setting
   entrance; the workspace value being stripped with a warning.
-- Wiring: each guarded host-owned Config asserts its `hostPolicy` argument;
-  the daemon recomputes `lspEnabledForSessions` on settings reload.
+- Wiring: each guarded host-owned Config under `src/` asserts its `hostPolicy`
+  argument; `scripts/opentui-command-parity.ts` is a manually run probe and has
+  no test. LSP enablement is resolved inside the evaluator from the snapshot it
+  reads, so the unit cases cover a settings write that arrives after the
+  runtime was constructed.
 - Manual: create a daemon session with the setting on and no flag, then read
   `GET /session/:id/lsp`.
 
