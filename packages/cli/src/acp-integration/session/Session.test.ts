@@ -12223,35 +12223,66 @@ describe('Session', () => {
         expect(payload.resultTruncated).toBeUndefined();
       });
 
-      it('caps resultText at TURN_RESULT_TEXT_MAX_CHARS and flags truncation', async () => {
-        const longText = 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100);
-        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                candidates: [{ content: { parts: [{ text: longText }] } }],
+      it.each([
+        {
+          name: 'BMP overflow',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100),
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS),
+          truncated: true,
+        },
+        {
+          name: 'surrogate pair crossing the cap',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 1) + '🙂y',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 1),
+          truncated: true,
+        },
+        {
+          name: 'surrogate pair ending at the cap',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          truncated: false,
+        },
+        {
+          name: 'complete surrogate pair before overflow',
+          text: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂y',
+          expected: 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+          truncated: true,
+        },
+      ])(
+        'caps recorded turn text at TURN_RESULT_TEXT_MAX_CHARS ($name)',
+        async ({ text, expected, truncated }) => {
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text }] } }],
+                },
               },
+            ]),
+          );
+
+          await session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text }],
             },
-          ]),
-        );
+            trustedContext,
+          );
 
-        await session.prompt(
-          {
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'long' }],
-          },
-          trustedContext,
-        );
-
-        const payload =
-          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
-        expect(payload.resultText).toHaveLength(
-          core.TURN_RESULT_TEXT_MAX_CHARS,
-        );
-        expect(payload.resultTruncated).toBe(true);
-        expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
-      });
+          const payload =
+            mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+          expect(payload.promptText).toBe(expected);
+          expect(payload.promptTextTruncated).toBe(
+            truncated ? true : undefined,
+          );
+          expect(payload.resultText).toBe(expected);
+          expect(payload.resultTruncated).toBe(truncated ? true : undefined);
+          expect(payload.resultCode).toBe(
+            truncated ? 'RESULT_TEXT_TRUNCATED' : undefined,
+          );
+        },
+      );
 
       it('keeps the same surface contract when many chunks exceed the cap', async () => {
         const chunk = 'a'.repeat(
