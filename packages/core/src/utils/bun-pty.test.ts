@@ -193,6 +193,43 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
     expect(exit!.signal).toBe(1);
   }, 20_000);
 
+  it('reports a throwing exit listener and continues delivery after a real child exit', async () => {
+    const baseline = getPtyBudgetStats();
+    const live = [spawn('/bin/sh', ['-c', 'exit 0'])];
+    try {
+      const pty = live[0]!;
+      const first = vi.fn(() => {
+        throw new Error('native exit listener boom');
+      });
+      const diagnostic = vi.fn((error: Error) => {
+        throw error;
+      });
+      const second = vi.fn();
+      pty.onExit(first);
+      pty.on('error', diagnostic);
+      pty.onExit(second);
+
+      expect(await waitFor(() => second.mock.calls.length > 0, 5_000)).toBe(
+        true,
+      );
+      expect(first).toHaveBeenCalledExactlyOnceWith({
+        exitCode: 0,
+        signal: 0,
+      });
+      expect(second).toHaveBeenCalledExactlyOnceWith({
+        exitCode: 0,
+        signal: 0,
+      });
+      expect(diagnostic).toHaveBeenCalledTimes(1);
+      expect(diagnostic.mock.calls[0]![0].message).toBe(
+        'pty exit listener threw: native exit listener boom',
+      );
+      expectFdClosed(pty);
+    } finally {
+      await cleanupPtys(live, baseline);
+    }
+  });
+
   it('resumes output after pause/resume', async () => {
     const pty = spawn('/bin/sh', []);
     let output = '';
