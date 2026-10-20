@@ -56,31 +56,34 @@ const pty = result.impl.module.spawn('/bin/sh', [], {
 let output = '';
 pty.onData((data) => { output += data; });
 pty.write('echo BUN_ROUNDTRIP_OK\\n');
-const deadline = Date.now() + 15_000;
-while (!output.includes('BUN_ROUNDTRIP_OK') && Date.now() < deadline) {
+
+const outputDeadline = Date.now() + 15_000;
+while (!output.includes('BUN_ROUNDTRIP_OK') && Date.now() < outputDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 if (!output.includes('BUN_ROUNDTRIP_OK')) {
-  console.error('no output ever arrived from the child');
+  console.error('timed out waiting for child output');
   process.exit(1);
 }
 pty.resize(100, 40);
 pty.write('stty size\\n');
-while (!output.includes('40 100') && Date.now() < deadline) {
+const resizeDeadline = Date.now() + 15_000;
+while (!output.includes('40 100') && Date.now() < resizeDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 if (!output.includes('40 100')) {
-  console.error('resize did not reach the child terminal');
+  console.error('timed out waiting for resized child geometry');
   process.exit(1);
 }
 let exit = null;
 pty.onExit((e) => { exit = e; });
 pty.kill('SIGHUP');
-while (exit === null && Date.now() < deadline) {
+const exitDeadline = Date.now() + 15_000;
+while (exit === null && Date.now() < exitDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 if (!exit) {
-  console.error('no exit event after kill');
+  console.error('timed out waiting for native exit after kill');
   process.exit(1);
 }
 console.log(
@@ -141,9 +144,14 @@ let exits = 0;
 pty.onData((data) => { output += data; });
 pty.onExit(() => { exits += 1; });
 pty.pause();
-const deadline = Date.now() + 20_000;
-while (errors.length === 0 && Date.now() < deadline) {
+
+const errorDeadline = Date.now() + 20_000;
+while (errors.length === 0 && Date.now() < errorDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (errors.length === 0) {
+  console.error('timed out waiting for the resource-limit error');
+  process.exit(1);
 }
 if (errors.length !== 1) {
   console.error('expected exactly one limit error, got ' + errors.length);
@@ -176,7 +184,8 @@ if (fdState !== 'closed(EBADF)') {
   process.exit(1);
 }
 let childGone = false;
-while (!childGone && Date.now() < deadline) {
+const reapDeadline = Date.now() + 20_000;
+while (!childGone && Date.now() < reapDeadline) {
   try {
     process.kill(pty.pid, 0);
   } catch {
@@ -185,7 +194,7 @@ while (!childGone && Date.now() < deadline) {
   if (!childGone) await new Promise((resolve) => setTimeout(resolve, 25));
 }
 if (!childGone) {
-  console.error('child process tree survived the limit termination');
+  console.error('timed out waiting for the owned PTY leader to be reaped');
   process.exit(1);
 }
 const before = output;
@@ -219,7 +228,7 @@ if (result.impl.name !== 'qwen-bun-pty') {
   console.error('unexpected backend: ' + result.impl.name);
   process.exit(1);
 }
-const LIMIT = 4096;
+const LIMIT = 64 * 1024;
 const errors = [];
 const pty = result.impl.module.spawn('/bin/sh', ['-c', 'sleep 30'], {
   cols: 80,
@@ -240,10 +249,21 @@ pty.on('error', (e) => {
 });
 let exits = 0;
 pty.onExit(() => { exits += 1; });
-pty.write(Buffer.alloc(8192, 0x57));
-const deadline = Date.now() + 20_000;
-while (errors.length === 0 && Date.now() < deadline) {
+let beforeFailure = null;
+const chunk = Buffer.alloc(4096, 0x57);
+for (let i = 0; i < 40 && errors.length === 0; i += 1) {
+  beforeFailure = { queued: pty.stats.writeQueuedBytes, active: pty.stats.writeActive };
+  pty.write(chunk);
+}
+
+
+const errorDeadline = Date.now() + 20_000;
+while (errors.length === 0 && Date.now() < errorDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (errors.length === 0) {
+  console.error('timed out waiting for the resource-limit error');
+  process.exit(1);
 }
 if (errors.length !== 1) {
   console.error('expected exactly one limit error, got ' + errors.length);
@@ -254,10 +274,14 @@ if (
   failure.code !== 'QWEN_PTY_WRITE_LIMIT' ||
   failure.limitKind !== 'write-queue-per-pty' ||
   failure.limit !== LIMIT ||
-  failure.acceptedBytes !== 0 ||
-  failure.hasUndeliveredData !== false
+  failure.acceptedBytes !== LIMIT ||
+  failure.hasUndeliveredData !== true
 ) {
   console.error('unexpected limit error: ' + JSON.stringify(failure));
+  process.exit(1);
+}
+if (!beforeFailure?.active || beforeFailure.queued !== LIMIT) {
+  console.error('no real in-flight queued-write witness: ' + JSON.stringify(beforeFailure));
   process.exit(1);
 }
 if (pty.stats.writeQueuedBytes !== 0) {
@@ -280,7 +304,8 @@ if (fdState !== 'closed(EBADF)') {
   process.exit(1);
 }
 let childGone = false;
-while (!childGone && Date.now() < deadline) {
+const reapDeadline = Date.now() + 20_000;
+while (!childGone && Date.now() < reapDeadline) {
   try {
     process.kill(pty.pid, 0);
   } catch {
@@ -289,7 +314,7 @@ while (!childGone && Date.now() < deadline) {
   if (!childGone) await new Promise((resolve) => setTimeout(resolve, 25));
 }
 if (!childGone) {
-  console.error('child process tree survived the limit termination');
+  console.error('timed out waiting for the owned PTY leader to be reaped');
   process.exit(1);
 }
 console.log(
@@ -300,6 +325,7 @@ console.log(
     childGone,
     fd: fdState,
     writeQueuedBytes: pty.stats.writeQueuedBytes,
+    beforeFailure,
   }),
 );
 `;
@@ -310,8 +336,8 @@ console.log(
 // process.exit on its success path — leave the host event loop free to
 // drain. The same fixture runs under both interpreters: under Bun through
 // the qwen-bun-pty backend, under Node through the wrapper it must match.
-// No CI lane provisions a Bun binary today, so the Bun leg only runs where
-// one is installed (BUN_TEST_BIN); the Node leg runs everywhere.
+// Bun rows run only where an interpreter is installed (BUN_TEST_BIN).
+// The Node leg runs everywhere; a skipped Bun row is not compatibility evidence.
 const pausedExitFixtureSource = `
 import * as fs from 'node:fs';
 import { loadPty } from ${JSON.stringify(getPtyDistPath)};
@@ -331,17 +357,23 @@ let exits = 0;
 let lastExit = null;
 pty.onData((data) => { output += data; });
 pty.onExit((e) => { exits += 1; lastExit = e; });
-const deadline = Date.now() + 15_000;
-while (!output.includes('READY') && Date.now() < deadline) {
+
+const readyDeadline = Date.now() + 15_000;
+while (!output.includes('READY') && Date.now() < readyDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
 }
 if (!output.includes('READY')) {
-  console.error('never saw READY before the deadline — cannot pause in time');
+  console.error('timed out waiting for READY before pause');
   process.exit(1);
 }
 pty.pause();
-while (exits === 0 && Date.now() < deadline) {
+const exitDeadline = Date.now() + 15_000;
+while (exits === 0 && Date.now() < exitDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (exits === 0) {
+  console.error('timed out waiting for the paused child exit');
+  process.exit(1);
 }
 if (exits !== 1) {
   console.error('expected exactly one exit event, got ' + exits);
@@ -389,9 +421,16 @@ const pty = result.impl.module.spawn(
 );
 let output = '';
 pty.onData((data) => { output += data; });
-const deadline = Date.now() + 20_000;
-while (output.length === 0 && Date.now() < deadline) {
+
+const readyDeadline = Date.now() + 20_000;
+while (output.length === 0 && Date.now() < readyDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (output.length === 0) {
+  console.error('timed out waiting for initial toggle output');
+  pty.kill();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  process.exit(1);
 }
 for (let i = 0; i < 300; i += 1) {
   pty.pause();
@@ -399,8 +438,15 @@ for (let i = 0; i < 300; i += 1) {
 }
 const expected =
   Array.from({ length: LINES }, (_, i) => 'LINE ' + i).join('\\r\\n') + '\\r\\n';
-while (!output.includes('LINE ' + (LINES - 1)) && Date.now() < deadline) {
+const streamDeadline = Date.now() + 20_000;
+while (!output.includes('LINE ' + (LINES - 1)) && Date.now() < streamDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (!output.includes('LINE ' + (LINES - 1))) {
+  console.error('timed out waiting for the complete toggled stream');
+  pty.kill();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  process.exit(1);
 }
 pty.kill();
 await new Promise((resolve) => setTimeout(resolve, 200));

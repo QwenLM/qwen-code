@@ -16,7 +16,7 @@
  */
 
 import * as fs from 'node:fs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_CONCURRENT_WEB_TERMINALS } from '../services/web-terminal-registry.js';
 import { cleanupPtys, waitFor } from './bun-pty-test-utils.js';
 import {
@@ -108,8 +108,20 @@ const expectFdClosed = (pty: unknown): void => {
 };
 
 describe.skipIf(!POSIX)('BunPtyProcess', () => {
+  const live: Array<ReturnType<typeof spawn>> = [];
+  let baseline = getPtyBudgetStats();
+  beforeEach(() => {
+    baseline = getPtyBudgetStats();
+  });
+  const ownedSpawn: typeof spawn = (...args) => {
+    const pty = spawn(...args);
+    live.push(pty);
+    return pty;
+  };
+  afterEach(() => cleanupPtys(live, baseline));
+
   it('streams child output through onData and reports the exit', async () => {
-    const pty = spawn('/bin/sh', ['-c', 'echo BUN_PTY_ECHO_OK']);
+    const pty = ownedSpawn('/bin/sh', ['-c', 'echo BUN_PTY_ECHO_OK']);
     let output = '';
     const disposables = [pty.onData((data) => (output += data))];
     let exit: { exitCode: number; signal?: number } | undefined;
@@ -123,7 +135,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 20_000);
 
   it('forwards writes to the child', async () => {
-    const pty = spawn('/bin/sh', []);
+    const pty = ownedSpawn('/bin/sh', []);
     let output = '';
     pty.onData((data) => (output += data));
     await waitFor(() => output.length > 0);
@@ -133,38 +145,70 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 20_000);
 
   it('sanitizes the inherited environment only when it comes from process.env', async () => {
-    process.env['TMUX'] = '/tmp/tmux-1000/default,1234,0';
-    try {
-      // No env option: the resolved env IS process.env, so the wrapper's
-      // sanitization applies and the child must not see TMUX.
-      const pty = spawn('/bin/sh', [
-        '-c',
-        'printf "TMUX=[%s]" "${TMUX-unset}"',
-      ]);
+    const keys = [
+      'TMUX',
+      'TMUX_PANE',
+      'STY',
+      'WINDOW',
+      'WINDOWID',
+      'TERMCAP',
+      'COLUMNS',
+      'LINES',
+    ] as const;
+    const original = new Map(keys.map((key) => [key, process.env[key]]));
+    for (const key of keys) process.env[key] = `QWEN_SENTINEL_${key}`;
+    const command =
+      'printf "ENV=[%s|%s|%s|%s|%s|%s|%s|%s] TERM=[%s] PWD=[%s]" "$TMUX" "$TMUX_PANE" "$STY" "$WINDOW" "$WINDOWID" "$TERMCAP" "$COLUMNS" "$LINES" "$TERM" "$PWD"';
+    const check = async (
+      env: typeof process.env | undefined,
+      expected: string,
+    ) => {
+      const pty = ownedSpawn('/bin/sh', ['-c', command], {
+        ...(env === undefined ? {} : { env }),
+        cwd: '/',
+        name: 'xterm-qwen-sentinel',
+      });
       let output = '';
       pty.onData((data) => (output += data));
-      expect(await waitFor(() => output.includes('TMUX=[unset]'))).toBe(true);
-      pty.kill();
-
-      // A caller-built env object is passed through untouched.
-      const custom = spawn(
-        '/bin/sh',
-        ['-c', 'printf "TMUX=[%s]" "${TMUX-unset}"'],
-        { env: { ...process.env, TMUX: 'kept' } },
+      expect(await waitFor(() => output.includes(expected), 5000)).toBe(true);
+      expect(output).toContain('TERM=[xterm-qwen-sentinel] PWD=[/]');
+    };
+    try {
+      await check(undefined, 'ENV=[|||||||]');
+      // Reference identity, not a spread copy, must exercise this branch.
+      await check(process.env, 'ENV=[|||||||]');
+      await check(
+        { ...process.env },
+        'ENV=[' + keys.map((key) => process.env[key]).join('|') + ']',
       );
-      let customOutput = '';
-      custom.onData((data) => (customOutput += data));
-      expect(await waitFor(() => customOutput.includes('TMUX=[kept]'))).toBe(
-        true,
-      );
-      custom.kill();
     } finally {
-      delete process.env['TMUX'];
+      for (const key of keys) {
+        const value = original.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   }, 20_000);
 
+  it('passes spawn-time geometry and cwd to the child before any resize', async () => {
+    // Root differs from this test process cwd and has a stable physical path.
+    expect(process.cwd()).not.toBe('/');
+    const pty = ownedSpawn('/bin/sh', ['-c', 'stty size; pwd -P'], {
+      cols: 103,
+      rows: 37,
+      cwd: '/',
+    });
+    let output = '';
+    pty.onData((data) => (output += data));
+    expect(await waitFor(() => output.includes('37 103\r\n/\r\n'), 5000)).toBe(
+      true,
+    );
+    expect(pty.cols).toBe(103);
+    expect(pty.rows).toBe(37);
+  });
+
   it('resizes the terminal the child observes', async () => {
-    const pty = spawn('/bin/sh', []);
+    const pty = ownedSpawn('/bin/sh', []);
     let output = '';
     pty.onData((data) => (output += data));
     await waitFor(() => output.length > 0);
@@ -180,7 +224,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 20_000);
 
   it('delivers the exit event after kill and reaps the child', async () => {
-    const pty = spawn('/bin/sh', ['-c', 'echo READY; read x']);
+    const pty = ownedSpawn('/bin/sh', ['-c', 'echo READY; read x']);
     let output = '';
     pty.onData((data) => (output += data));
     expect(await waitFor(() => output.includes('READY'))).toBe(true);
@@ -195,7 +239,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
 
   it('reports a throwing exit listener and continues delivery after a real child exit', async () => {
     const baseline = getPtyBudgetStats();
-    const live = [spawn('/bin/sh', ['-c', 'exit 0'])];
+    const live = [ownedSpawn('/bin/sh', ['-c', 'exit 0'])];
     try {
       const pty = live[0]!;
       const first = vi.fn(() => {
@@ -231,7 +275,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   });
 
   it('resumes output after pause/resume', async () => {
-    const pty = spawn('/bin/sh', []);
+    const pty = ownedSpawn('/bin/sh', []);
     let output = '';
     pty.onData((data) => (output += data));
     await waitFor(() => output.length > 0);
@@ -249,7 +293,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   it('delivers exit exactly once and closes the fd when the child exits while paused', async () => {
     const baseline = getPtyBudgetStats();
     const live = [
-      spawn('/bin/sh', [
+      ownedSpawn('/bin/sh', [
         '-c',
         'echo READY; read x; echo TAIL_AFTER_PAUSE; exit 7',
       ]),
@@ -285,9 +329,13 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
     // The raw flood is 3 MB and reaches the master as ~4.5 MB (ONLCR), so the
     // hold cap is sized explicitly to keep this a pause-hold exercise rather
     // than a limit-termination exercise.
-    const pty = spawn('/bin/sh', ['-c', 'yes X | head -c 3000000; exit 0'], {
-      limits: { pausedHoldBytes: 16 * 1024 * 1024 },
-    });
+    const pty = ownedSpawn(
+      '/bin/sh',
+      ['-c', 'yes X | head -c 3000000; exit 0'],
+      {
+        limits: { pausedHoldBytes: 16 * 1024 * 1024 },
+      },
+    );
     pty.pause();
     let exits = 0;
     pty.onExit(() => {
@@ -302,7 +350,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
 
   it('delivers a byte-exact stream across rapid no-gap pause/resume toggles', async () => {
     const LINES = 20_000;
-    const pty = spawn('/bin/sh', [
+    const pty = ownedSpawn('/bin/sh', [
       '-c',
       `awk 'BEGIN{for(i=0;i<${LINES};i++)print "LINE " i}'; sleep 30`,
     ]);
@@ -338,7 +386,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
 
   it('holds the entire flood while paused and resumes byte-exact', async () => {
     const LINES = 200_000;
-    const pty = spawn('/bin/sh', [
+    const pty = ownedSpawn('/bin/sh', [
       '-c',
       `awk 'BEGIN{for(i=0;i<${LINES};i++)print "X" i}'; sleep 30`,
     ]);
@@ -371,7 +419,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   it('releases the fd when flow-control pause is followed by cancel', async () => {
     const baseline = getPtyBudgetStats();
     const live = [
-      spawn(
+      ownedSpawn(
         '/bin/sh',
         ['-c', 'echo READY; read x; echo HELD_AFTER_XOFF; read y'],
         { handleFlowControl: true },
@@ -414,7 +462,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 20_000);
 
   it('intercepts flow-control messages when handleFlowControl is on', async () => {
-    const pty = spawn('/bin/sh', [], { handleFlowControl: true });
+    const pty = ownedSpawn('/bin/sh', [], { handleFlowControl: true });
     let output = '';
     pty.onData((data) => (output += data));
     await waitFor(() => output.length > 0);
@@ -430,7 +478,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 20_000);
 
   it('passes raw buffers through with encoding null', async () => {
-    const pty = spawn('/bin/sh', ['-c', 'echo RAW_BUFFER_OK'], {
+    const pty = ownedSpawn('/bin/sh', ['-c', 'echo RAW_BUFFER_OK'], {
       encoding: null,
     });
     let chunk: string | Buffer | undefined;
@@ -444,7 +492,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 20_000);
 
   it('exposes a process title', () => {
-    const pty = spawn('/bin/sh', ['-c', 'read x']);
+    const pty = ownedSpawn('/bin/sh', ['-c', 'read x']);
     expect(typeof pty.process).toBe('string');
     expect(pty.process.length).toBeGreaterThan(0);
     expect(() => pty.clear()).not.toThrow();
