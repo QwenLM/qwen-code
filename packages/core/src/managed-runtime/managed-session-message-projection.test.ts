@@ -1049,7 +1049,7 @@ describe('managed session message projection', () => {
         damage === 'digest'
           ? /digest/
           : damage === 'length'
-            ? /bytes where/
+            ? /on disk where/
             : /not present/;
       const before = await fs.readFile(harness.transcriptPath);
       await expect(
