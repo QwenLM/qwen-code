@@ -369,7 +369,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '启用 Workflow 工具：模型可以编写并运行一个编排多个子代理并行工作的脚本。默认关闭；一次运行可能派发大量子代理并相应消耗 token。QWEN_CODE_ENABLE_WORKFLOWS=1 和 QWEN_CODE_DISABLE_WORKFLOWS=1 环境变量会覆盖此设置（禁用时优先）。与 Session Workflow 的计划并审阅视图无关；要阻止“workflow”关键词引导对话走向，见“禁用 Workflow 关键词触发”。',
   'settings.label.tools.lspEnabled': 'LSP 代码智能',
   'settings.description.tools.lspEnabled':
-    '实验性。无需 `--experimental-lsp` 参数即可启用 LSP（Language Server Protocol）代码智能服务：跳转定义、查找引用、悬浮提示、符号、诊断与代码操作。默认关闭。服务器以你的用户权限运行，且只由工作区 `.lsp.json` 或已启用的扩展声明。工作区声明的服务器要求受信任文件夹：当 `security.folderTrust.enabled` 开启且文件夹不受信任，或已连接的 IDE 报告该工作区不受信任（VS Code Restricted Mode）时会被跳过；IDE 判定会在 `.lsp.json` 变更时重新评估，被跳过的服务器只出现在调试日志中（`requires trusted workspace, skipping`）。运维配置的 `tools.executionSandbox` 会在启动时拒绝此设置；`--safe-mode`、`QWEN_CODE_SAFE_MODE=1` 或 `--bare` 可在不启用 LSP 的情况下启动。QWEN_CODE_ENABLE_LSP=1 与 QWEN_CODE_DISABLE_LSP=1 环境变量会覆盖此设置（禁用优先）；只有运维环境或 home 作用域的 `.env` 能设置它们——项目 `.env` 或 `settings.env` 中的值会被静默忽略。',
+    '实验性。无需 `--experimental-lsp` 参数即可启用 LSP 代码智能服务：跳转定义、查找引用、悬浮提示、符号、诊断与代码操作。默认关闭。服务器来自工作区 `.lsp.json` 或已启用的扩展，并以你的权限运行；在不受信任的文件夹中（folder trust，或 IDE 报告 Restricted Mode），工作区声明的服务器会被跳过。配置了 `tools.executionSandbox` 时会在启动时拒绝；`--safe-mode`、`QWEN_CODE_SAFE_MODE=1` 与 `--bare` 可在不启用 LSP 的情况下启动。QWEN_CODE_ENABLE_LSP=1 / QWEN_CODE_DISABLE_LSP=1 会覆盖该设置（禁用优先）；项目 `.env` 或 `settings.env` 无法设置它们。',
   'settings.label.tools.workflowSizeGuideline': '动态 Workflow 规模',
   'settings.description.tools.workflowSizeGuideline':
     '模型编写的动态 workflow 的建议规模指引：“small”目标少于 5 个 agent，“medium”（默认）少于 15 个，“large”少于 50 个，“unrestricted”不下发指引。这是建议而非强制限制。它同时决定运行中的 workflow 被标记为大型的 agent 数量（可用 QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS 覆盖该阈值）。修改从下一条消息起生效。',
