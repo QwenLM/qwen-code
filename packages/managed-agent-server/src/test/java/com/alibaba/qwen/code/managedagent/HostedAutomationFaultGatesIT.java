@@ -632,17 +632,21 @@ class HostedAutomationFaultGatesIT {
 
     // Retries the same request, under the same key, until the reloaded Session answers it: the
     // dead writer's lease lapses first, and every attempt before that is the same operation.
-    // Until it lapses the cold Harness's load is refused, and the public route passes that
-    // through as 409 managed_session_writer_conflict (see the design's Findings); any other
-    // refusal fails the case.
+    // Until it lapses the cold Harness's load is refused, and the public route answers that as
+    // the retryable 503 managed_session_writer_conflict (see the design's Findings). A 409
+    // would tell the caller to stop, so only 202 or 503 is accepted; a 503 that names a code
+    // must name the writer conflict or the lost-answer code, which the cold restart can answer
+    // before the dead writer's lease is observable. Any other coded 503 fails at once.
     private JsonNode retryUntilAccepted(String method, String path, Object body, String key) throws Exception {
         AtomicReference<HttpResponse<String>> accepted = new AtomicReference<>();
         waiting().atMost(Duration.ofSeconds(90)).pollInterval(Duration.ofSeconds(1)).until(() -> {
             HttpResponse<String> response = send(method, path, body, key);
-            if (response.statusCode() == 409) {
-                assertThat(response.body()).contains("managed_session_writer_conflict");
-            } else {
-                assertThat(response.statusCode()).as(response.body()).isIn(202, 503);
+            assertThat(response.statusCode()).as(response.body()).isIn(202, 503);
+            if (response.statusCode() == 503
+                    && response.body().contains("\"code\":\"")) {
+                assertThat(response.body()).containsAnyOf(
+                        "managed_session_writer_conflict",
+                        "automation_operation_unknown");
             }
             accepted.set(response);
             return response.statusCode() == 202;
