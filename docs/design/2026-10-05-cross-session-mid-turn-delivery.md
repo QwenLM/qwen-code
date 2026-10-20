@@ -53,8 +53,10 @@ Two new settings, both tighten-only for workspaces:
 to off).
 
 At each tool-round boundary in `use-llm-stream.ts`, after steer and teammate
-drains, the peer drain takes at most one envelope (`drainPeers(1)`). The
-envelope passes the same recipient re-check as the idle drain
+drains, the boundary calls the peer drain with no batch size and takes at most
+one envelope — one per boundary is the drain's own rule, not a number the
+caller chooses. The envelope passes the same recipient re-check as the idle
+drain
 (`drainQueuedFrame`, which settles stale pins with a `misaddressed` receipt)
 and joins the tool-result submission, so `function_response` blocks still
 lead the user content. Four gates exclude it — null drain (off, or no inbox),
@@ -66,14 +68,17 @@ envelope never overtakes it — applied at each path's own strength. On the idle
 path, where every waiting envelope drains, `popNextSubmission` stops at the
 first peer entry. At the boundary, `drainQueue` stops only at the envelope the
 mid-turn drain could take right here: the first `"now"` that this boundary's
-own steer drain leaves at the head, with an allowance left to pay for it. That
+own steer drain leaves at the head, with an allowance left to pay for it and a
+recipient pin this boundary can satisfy. That
 drain runs first, and its removals are what promote an envelope, so the scan
 passes over entries it takes and stops at any entry it cannot — such an entry
 is a wall the pop breaks on, and nothing behind it is this boundary's to
 deliver. Judging the barrier against the queue as it stands, rather than as the
 pop will find it, releases user text that then overtakes the envelope inside
 the same submission. An envelope this boundary cannot deliver is not a
-barrier, because the alternative would hold the user's
+barrier (a stale-pinned `"now"` is the concrete case: the pop still consumes
+it and settles it with a `misaddressed` receipt, but it delivers nothing
+here), because the alternative would hold the user's
 own input for the rest of the turn to preserve the place of a delivery that is
 not going to happen. Peer text never enters the raw-string steer channel: it
 would lose attribution and reach user preprocessing.
@@ -102,16 +107,20 @@ dropped on change.
 - **Off by default, consent per receiver.** Mid-turn steering moves the
   delivery point from a watched boundary to an unattended one; the operator's
   yes belongs to the receiving session, not the sender. The documented
-  consent covers any accepted `"now"` frame: another session, a trusted
-  controller, and a process this session started with its child token.
+  consent covers any accepted `"now"` frame: another session of this
+  session's own review class (what the mode-parity default delivers without
+  review), a trusted controller, a process this session started with its
+  child token, and a same-user process that claims this session's own review
+  class — a claim nothing authenticates.
 - **One envelope per boundary.** A chatty peer may slow a turn, never own it:
   at most one peer message per tool round regardless of the budget.
-- **Budget 3 per 5-minute window.** Symmetric with the hold ceiling; a peer
-  costs real model work even when handled well. Constants live in
-  `peerMessaging/mid-turn-constants.ts`, a dependency-free leaf module, so
-  the settings schema can use the default without a runtime edge from the
-  config graph into core (three CLI suites partially mock that graph; a direct
-  import broke them at collection).
+- **Budget 3 per 5-minute window.** Deliberately far below the 50-envelope
+  hold ceiling: a held message costs storage the session already spends,
+  while a steered one costs real model work even when handled well. Constants
+  live in `peerMessaging/mid-turn-constants.ts`, a dependency-free leaf
+  module, so the settings schema can use the default without a runtime edge
+  from the config graph into core (three CLI suites partially mock that
+  graph; a direct import broke them at collection).
 - **Unreadable budget = default, not unlimited.** The ceiling exists because
   peers spend this session's model work, so nothing that fails to parse may
   mean "no ceiling"; `0` is the explicit off and is documented as such on
@@ -134,7 +143,8 @@ dropped on change.
   an exact trailing suffix, and per-batch strips silently no-op when the
   other batch is the tail.
 - `drainQueue`'s rest computation is identity-based, because the barrier
-  leaves drainable entries in the queue.
+  leaves drainable entries in the queue; a predicate-based filter would
+  drop them.
 - The generated `packages/vscode-ide-companion/schemas/settings.schema.json`
   is regenerated and diffed by CI; schema edits ship with their regeneration.
 - Workspace overrides of both settings are tighten-only
@@ -148,8 +158,10 @@ dropped on change.
   steer a running turn once opted in; they keep the envelope and authority
   notice, inbound review policy still gates them before this point, and Goal
   turns are excluded.
-- **Own-process injections are review-free under mode parity and now
-  steer-running-turns** — deliberate (the build-hook use case), documented on
+- **Own-process injections are review-free and now steer running turns** —
+  deliberate (the build-hook use case): the gate accepts this session's own
+  processes and controller-granted programs unconditionally, before parity is
+  ever consulted; parity governs only ordinary peer sessions. Documented on
   the setting, in `settings.md`, and in `commands.md` §6.
 
 ## Validation plan
@@ -169,8 +181,9 @@ gates in `use-llm-stream.test.tsx`; barrier and mid-turn drains in
 - With `agents.crossSessionMidTurn` off (default), boundary behavior is
   byte-for-byte the pre-feature behavior: envelopes wait for Idle.
 - On, an accepted `"now"` envelope can reach the model at a tool-round
-  boundary, once per boundary, ≤3 per five-minute window, after the receiver's
-  queued user input, never during a Goal turn.
+  boundary, once per boundary, ≤3 per five-minute window — a budget of `0`
+  keeps it off entirely (the drain is null) — after the receiver's queued
+  user input, never during a Goal turn.
 - No path loses or double-delivers an envelope: exactly-once settlement with
   refund on restore; a restored entry re-enters tagged `peer` and its
   notification renders with the peer marker after `/resume`.
