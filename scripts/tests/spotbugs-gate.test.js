@@ -46,7 +46,7 @@ describe('SpotBugs gate witness', () => {
     );
     const byName = (name) => steps.filter((step) => step.name === name);
 
-    // Hosted MySQL, MariaDB and both EventTransport gate jobs each stage the
+    // Hosted MySQL, non-Hosted MySQL and both EventTransport gate jobs each stage the
     // sibling modules before their own verify; the Hosted failover job
     // stages them before packaging the jar its arms run.
     const staging = byName('Install Managed Agent dependencies');

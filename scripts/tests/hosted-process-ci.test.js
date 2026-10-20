@@ -260,14 +260,16 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  it('keeps real MySQL separate from the existing MariaDB slice and fails on missing tests', () => {
+  it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
-    expect(java.jobs['mysql-integration'].services.mariadb.image).toMatch(
-      /^mariadb:/,
-    );
+    expect(
+      java.jobs['mysql-integration'].steps.find(
+        (step) => step.name === 'Start MySQL without native AIO',
+      ).run,
+    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
@@ -313,22 +315,22 @@ describe('Hosted real-process gates', () => {
     const selection = /it\.test|includesFile|excludesFile|<test>/;
     expect(read('.github/workflows/sdk-java.yml')).not.toMatch(selection);
     expect(pom).not.toMatch(selection);
-    const [mariadb, hosted] = pom.split('<id>hosted-harness-mysql</id>');
-    expect(mariadb).toContain('<id>mysql-integration</id>');
-    expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
+    const [nonHosted, hosted] = pom.split('<id>hosted-harness-mysql</id>');
+    expect(nonHosted).toContain('<id>mysql-integration</id>');
+    expect(nonHosted).toContain('<exclude>**/Hosted*IT.java</exclude>');
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
     expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
-    // The MariaDB job must not narrow its selection either, or an IT outside
+    // The non-Hosted MySQL job must not narrow its selection either, or an IT outside
     // the Hosted family would silently run nowhere.
-    const mariadbRun = java.jobs['mysql-integration'].steps.find(
+    const mysqlRun = java.jobs['mysql-integration'].steps.find(
       (step) =>
         step.name ===
         'Run Managed Agent tests, Checkstyle, and MySQL integration',
     );
-    expect(mariadbRun.run).toContain('-Pmysql-integration');
-    expect(mariadbRun.run).not.toContain('-Dit.test');
-    // The H2 unit suite runs once, in the MariaDB job: the Hosted job's three
-    // Maven steps would each repeat it, and the MariaDB job must keep it.
+    expect(mysqlRun.run).toContain('-Pmysql-integration');
+    expect(mysqlRun.run).not.toContain('-Dit.test');
+    // The H2 unit suite runs once, in the non-Hosted MySQL job: the Hosted job's three
+    // Maven steps would each repeat it, and the non-Hosted MySQL job must keep it.
     const profile = (id) =>
       pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
     const skipsUnits =
@@ -341,14 +343,14 @@ describe('Hosted real-process gates', () => {
       expect(profile(id), id).toMatch(skipsUnits);
     }
     expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
-    expect(mariadbRun.run).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
+    expect(mysqlRun.run).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
     // Those checks read only the command lines, so each job also compares
     // the reports of its run with the source tree, right after its last
     // integration-test step.
     for (const [name, after, check] of [
       [
         'mysql-integration',
-        mariadbRun.name,
+        mysqlRun.name,
         'non-hosted packages/managed-agent-server',
       ],
       [
@@ -366,7 +368,7 @@ describe('Hosted real-process gates', () => {
       expect(steps[index]['continue-on-error'], name).toBeUndefined();
     }
     // Keep the existing integration tests in their families: a renamed Hosted
-    // test would move to MariaDB, a renamed MariaDB test to the Hosted job.
+    // test would move to non-Hosted MySQL, a renamed non-Hosted test to the Hosted job.
     const its = readdirSync(
       new URL(
         '../../packages/managed-agent-server/src/test/java/',
