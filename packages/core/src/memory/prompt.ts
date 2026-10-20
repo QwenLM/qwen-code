@@ -169,9 +169,18 @@ const INDEX_ENTRY_TITLE = /^\s*-\s*\[([^\]]+)\]/;
 function droppedEntryName(line: string): string {
   const title = INDEX_ENTRY_TITLE.exec(line)?.[1]?.trim();
   const text = title || line.trim();
-  return text.length > MAX_DROPPED_ENTRY_NAME_CHARS
-    ? `${text.slice(0, MAX_DROPPED_ENTRY_NAME_CHARS - 1)}…`
-    : text;
+  if (text.length <= MAX_DROPPED_ENTRY_NAME_CHARS) {
+    return text;
+  }
+  let head = text.slice(0, MAX_DROPPED_ENTRY_NAME_CHARS - 1);
+  // Back off one unit when the cut lands inside a surrogate pair, the same
+  // guard truncateIndexField() applies: a lone surrogate on the wire breaks
+  // strict codecs on the receiving side.
+  const lastUnit = head.charCodeAt(head.length - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) {
+    head = head.slice(0, -1);
+  }
+  return `${head}…`;
 }
 
 function describeDroppedEntries(

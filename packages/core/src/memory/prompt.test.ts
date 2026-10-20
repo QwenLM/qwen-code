@@ -454,6 +454,38 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).toContain('Dropped 1 of 2 entries: "Oversized".');
   });
 
+  it('counts line-cap removals in the drop note when both budgets overflow', () => {
+    const entry = (i: number) => {
+      const prefix = `- [Note ${i}](notes/${i}.md) — `;
+      return `${prefix}${'h'.repeat(MAX_INDEX_LINE_CHARS - prefix.length)}`;
+    };
+    const lines = Array.from({ length: 250 }, (_, i) => entry(i));
+
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+
+    // 35 evicted by the character budget + 50 by the 200-line cap.
+    expect(result).toContain('Dropped 85 of 250 entries');
+  });
+
+  it('does not cut a surrogate pair when naming a dropped entry', () => {
+    // Title is 61 UTF-16 units and the 60-unit cut lands inside the emoji;
+    // pad the line to the per-line cap so the greedy fill drops it.
+    const title = `${'a'.repeat(58)}😀b`;
+    const prefix = `- [${title}](notes/emoji.md) — `;
+    const emojiLine = `${prefix}${'h'.repeat(MAX_INDEX_LINE_CHARS - prefix.length)}`;
+    const lines = [...uniformOverBudgetIndex().slice(0, 165), emojiLine];
+
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+
+    expect(result).toContain(`"${'a'.repeat(58)}…"`);
+  });
+
   it('emits full prompt when at least one index has content', () => {
     const prompt = buildManagedAutoMemoryPrompt(
       '/tmp/project/.qwen/memory',
