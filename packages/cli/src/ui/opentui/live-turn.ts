@@ -374,6 +374,14 @@ export function useOpenTuiLiveTurn(
             apply({
               type: 'user',
               text: entry.options?.displayText ?? entry.text,
+              ...(entry.options?.pasteExpansions?.size
+                ? {
+                    recallText: expandPendingPastePlaceholders(
+                      entry.options.displayText ?? entry.text,
+                      entry.options.pasteExpansions,
+                    ),
+                  }
+                : {}),
             });
             // ink keeps provenance for a queued submission, and the raw text
             // is what the stream layer expands `@path` mentions from.
@@ -458,6 +466,14 @@ export function useOpenTuiLiveTurn(
         apply({
           type: 'user',
           text: options?.displayText ?? text,
+          ...(options?.pasteExpansions?.size
+            ? {
+                recallText: expandPendingPastePlaceholders(
+                  options.displayText ?? text,
+                  options.pasteExpansions,
+                ),
+              }
+            : {}),
           promptId,
           sentToModel: true,
         });

@@ -49,6 +49,7 @@ describe.skipIf(process.platform === 'win32')(
     let server: FakeOpenAIServer;
     let daemon: SpawnedDaemon;
     let sessions: DaemonSession[];
+    let busySettingsGate: Promise<void> | undefined;
 
     beforeAll(async () => {
       root = await fs.realpath(
@@ -83,7 +84,10 @@ describe.skipIf(process.platform === 'win32')(
         JSON.stringify({ [a]: 'TRUST_FOLDER', [b]: 'TRUST_FOLDER' }),
       );
       await fs.writeFile(path.join(root, 'system.json'), '{}');
-      server = await startFakeOpenAIServer(({ body }) => {
+      server = await startFakeOpenAIServer(async ({ body }) => {
+        if (currentTurnText(body, 'DW03_SETTINGS_BUSY')) {
+          await busySettingsGate;
+        }
         const messages = body['messages'] as Array<{
           role: string;
           content: unknown;
@@ -257,5 +261,78 @@ describe.skipIf(process.platform === 'win32')(
         expect(JSON.stringify(toolResult.content)).toContain('DW03 fixture');
       }
     }, 60_000);
+
+    function sendHuman(session: DaemonSession, marker: string) {
+      return send(session, marker, {
+        'qwen.submittedPrompt': `${marker} workflow ultracode: inspect`,
+      });
+    }
+
+    it('applies ordinary settings writes to existing owner sessions without reload', async () => {
+      const key = 'ui.disableWorkflowKeywordTrigger';
+      const setUser = (value: boolean) =>
+        daemon.client.setWorkspaceSetting('user', key, value);
+      const a = daemon.client.workspaceByCwd(path.join(root, 'a'));
+      const b = daemon.client.workspaceByCwd(path.join(root, 'b'));
+      await setUser(false);
+      expect(await sendHuman(sessions[0], 'DW03_SETTING_A_INITIAL')).toBe(1);
+      expect(await sendHuman(sessions[1], 'DW03_SETTING_B_INITIAL')).toBe(1);
+
+      const update = await a.setWorkspaceSetting('workspace', key, true);
+      expect(update).toMatchObject({ value: true, requiresRestart: false });
+      expect(await sendHuman(sessions[0], 'DW03_SETTING_A_OFF')).toBe(0);
+      expect(await sendHuman(sessions[1], 'DW03_SETTING_B_UNCHANGED')).toBe(1);
+
+      expect(await setUser(true)).toMatchObject({ requiresRestart: false });
+      expect(await sendHuman(sessions[0], 'DW03_SETTING_A_USER_OFF')).toBe(0);
+      expect(await sendHuman(sessions[1], 'DW03_SETTING_B_USER_OFF')).toBe(0);
+
+      await b.setWorkspaceSetting('workspace', key, false);
+      expect(await sendHuman(sessions[1], 'DW03_SETTING_B_OVERRIDE')).toBe(1);
+      expect(await sendHuman(sessions[0], 'DW03_SETTING_A_STILL_OFF')).toBe(0);
+      await a.setWorkspaceSetting('workspace', key, false);
+      await setUser(false);
+    }, 120_000);
+
+    it('uses a setting saved during a busy turn on the next fresh turn without reload', async () => {
+      const key = 'ui.disableWorkflowKeywordTrigger';
+      let release!: () => void;
+      busySettingsGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const from = server.requests.length;
+      const pending = sendHuman(sessions[0], 'DW03_SETTINGS_BUSY');
+      try {
+        await vi.waitFor(
+          () => {
+            expect(
+              server.requests
+                .slice(from)
+                .some(({ body }) =>
+                  currentTurnText(body, 'DW03_SETTINGS_BUSY'),
+                ),
+            ).toBe(true);
+          },
+          { timeout: 15_000, interval: 50 },
+        );
+        const a = daemon.client.workspaceByCwd(path.join(root, 'a'));
+        const update = await a.setWorkspaceSetting('workspace', key, true);
+        expect(update).toMatchObject({ value: true, requiresRestart: false });
+        release();
+        expect(await pending).toBe(1);
+        expect(await sendHuman(sessions[0], 'DW03_SETTING_AFTER_BUSY')).toBe(0);
+        expect(await sendHuman(sessions[1], 'DW03_SETTING_B_AFTER_BUSY')).toBe(
+          1,
+        );
+        await a.setWorkspaceSetting('workspace', key, false);
+        expect(await sendHuman(sessions[0], 'DW03_SETTING_A_REENABLED')).toBe(
+          1,
+        );
+      } finally {
+        release();
+        await pending;
+        busySettingsGate = undefined;
+      }
+    }, 90_000);
   },
 );

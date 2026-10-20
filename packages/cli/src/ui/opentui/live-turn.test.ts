@@ -148,6 +148,42 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     (live.turns[turn - 1].options as LivePromptOptions).onWaitingCall?.(call);
   }
 
+  it.each([false, true])(
+    'retains editable paste content independently from display after completion (queued: %s)',
+    async (queued) => {
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'workflow pasted body'.padEnd(1200, 'x');
+      const literal = '<system-reminder>literal</system-reminder>';
+      const displayText = `${literal}\n${placeholder}`;
+      const recallText = `${literal}\n${body}`;
+      if (queued) act(() => result.current.submit('active turn'));
+      act(() => {
+        result.current.submit(
+          `managed model-only notice\n${recallText}`,
+          undefined,
+          {
+            displayText,
+            humanInput: { text: displayText },
+            pasteExpansions: new Map([[placeholder, body]]),
+          },
+        );
+      });
+      await act(async () => {
+        for (const wake of live.waiters.splice(0)) wake();
+      });
+      await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+      const users = result.current.items.filter((item) => item.kind === 'user');
+      expect(users.at(-1)).toMatchObject({ text: displayText, recallText });
+      expect(users.at(-1)?.text).not.toContain(body);
+      expect(users.at(-1)?.recallText).not.toContain(
+        'managed model-only notice',
+      );
+    },
+  );
+
   it.each(['error', 'abort'])(
     'clears terminal approval state without another key after %s',
     async (kind) => {

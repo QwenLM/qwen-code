@@ -342,6 +342,8 @@ describe('InputPrompt suggestion mouse routing', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/skills', {
       deferUntilIdle: false,
       submittedPrompt: '/skills',
+      displayText: '/skills',
+      humanInput: { text: '/skills' },
     });
     unmount();
   });

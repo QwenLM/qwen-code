@@ -870,6 +870,145 @@ describe('AppContainer State Management', () => {
     },
   );
 
+  it.each([
+    ['workflow', 'Please use a workflow.', true, false, true, false],
+    ['ultracode', 'ultracode: audit', true, false, true, false],
+    ['ordinary', 'Run the tests', true, false, true, true],
+    ['unknown', 'workflow inspect', false, false, true, true],
+    ['opt-out', 'workflow inspect', true, true, true, true],
+    ['missing tool', 'workflow inspect', true, false, false, true],
+  ] as const)(
+    'accepts completed speculation only without a current workflow intent: %s',
+    async (_label, text, human, optOut, reachable, acceptCached) => {
+      vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getSdkMode').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isWorkflowNameOnly').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => (reachable ? [ToolNames.WORKFLOW] : []),
+        getTool: () => undefined,
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      const addHistory = vi.fn().mockResolvedValue(undefined);
+      const markToolResultsInjected = vi.fn();
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: () => false,
+        getHistoryTail: () => [],
+        addHistory,
+        markToolResultsInjected,
+      } as unknown as LlmClient);
+      mockSettings.merged.ui!.enableSpeculation = true;
+      mockSettings.merged.ui!.disableWorkflowKeywordTrigger = optOut;
+      generatePromptSuggestionMock.mockResolvedValue({ suggestion: text });
+      const controller = new AbortController();
+      const speculation = {
+        status: 'completed',
+        suggestion: text,
+        messages: [{ role: 'model', parts: [{ text: 'cached result' }] }],
+        overlayFs: null,
+        abortController: controller,
+        startTime: Date.now(),
+        toolUseCount: 0,
+      };
+      startSpeculationMock.mockResolvedValue(speculation);
+      const queue = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      let setStreaming!: (state: StreamingState) => void;
+      mockedUseLlmStream.mockImplementation(() => {
+        const [streamingState, setState] = useState(StreamingState.Responding);
+        setStreaming = setState;
+        return {
+          streamingState,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        };
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushConfigInitialization();
+      await act(async () => setStreaming(StreamingState.Idle));
+      await vi.waitFor(() =>
+        expect(startSpeculationMock).toHaveBeenCalledOnce(),
+      );
+      await act(async () => {
+        capturedUIActions.handleFinalSubmit(text, {
+          submittedPrompt: text,
+          displayText: text,
+          ...(human ? { humanInput: { text } } : {}),
+        });
+      });
+      if (acceptCached) {
+        expect(markToolResultsInjected).toHaveBeenCalledOnce();
+        expect(addHistory).toHaveBeenCalledOnce();
+        expect(queue).not.toHaveBeenCalled();
+        expect(controller.signal.aborted).toBe(false);
+      } else {
+        expect(markToolResultsInjected).not.toHaveBeenCalled();
+        expect(addHistory).not.toHaveBeenCalled();
+        expect(queue).toHaveBeenCalledWith(text, false, text, false, {
+          displayText: text,
+          humanInput: { text },
+        });
+        expect(controller.signal.aborted).toBe(true);
+      }
+    },
+  );
+
+  it('does not forward composer human intent when dispatching a slash command', () => {
+    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+    const submitQuery = vi.fn();
+    mockedUseLlmStream.mockReturnValue({
+      ...mockedUseLlmStream(),
+      streamingState: StreamingState.Idle,
+      submitQuery,
+    });
+    render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    const text = '/skills workflow';
+    act(() => {
+      capturedUIActions.handleFinalSubmit(text, {
+        submittedPrompt: text,
+        displayText: text,
+        humanInput: { text },
+      });
+    });
+    expect(submitQuery).toHaveBeenCalledWith(
+      text,
+      SendMessageType.UserQuery,
+      undefined,
+      { submittedPrompt: text, displayText: text },
+    );
+  });
+
   describe('speculative tool results', () => {
     it('renders error envelopes as failed tools', () => {
       expect(

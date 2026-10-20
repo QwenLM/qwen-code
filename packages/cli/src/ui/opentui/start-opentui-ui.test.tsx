@@ -348,8 +348,15 @@ describe('startOpenTuiUI fallback contract', () => {
   it('threads the parked call and the args setting into the transcript', async () => {
     mocks.state.waitingCalls = [{ callId: 'q1' }, { callId: 'q2' }];
     const raw = '<system-reminder>literal user text</system-reminder> workflow';
+    const recalledPaste = `${raw}\npasted body`;
     mocks.state.items = [
       { kind: 'user', id: 'user', text: raw },
+      {
+        kind: 'user',
+        id: 'pasted-user',
+        text: '[Pasted Content 1200 chars]',
+        recallText: recalledPaste,
+      },
       { kind: 'info', id: 'info', text: 'machine context' },
     ];
     const started = await startOpenTuiUI(
@@ -386,7 +393,7 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(props?.['awaitingCallId']).toBe('q1');
     expect(props?.['showToolCallArgs']).toBe(true);
     expect(props?.['mouseTracking']).toBe(false);
-    expect(mocks.state.appProps?.userMessages).toEqual([raw]);
+    expect(mocks.state.appProps?.userMessages).toEqual([raw, recalledPaste]);
     // The renderer takes no pointer events when the setting is off.
     expect(createCliRenderer).toHaveBeenLastCalledWith(
       expect.objectContaining({ useMouse: false }),

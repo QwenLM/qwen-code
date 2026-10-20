@@ -64,6 +64,7 @@ import {
   runWithAgentContext,
 } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import { SettingScope } from '../../config/settings.js';
+import * as settingsModule from '../../config/settings.js';
 import type {
   AgentSideConnection,
   PermissionOption,
@@ -100,6 +101,7 @@ import { createRepeatedToolFailureGuardState } from './repeated-tool-failure-gua
 import type { DaemonTodoStopGuard } from './daemon-todo-stop-guard.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const readActualSettingsSnapshot = settingsModule.readSettingsSnapshot;
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 const bridgeToolResultImagesSpy = vi.hoisted(() => vi.fn());
@@ -1603,10 +1605,18 @@ describe('Session', () => {
 
   describe('single-turn workflow intent', () => {
     beforeEach(() => {
+      vi.spyOn(settingsModule, 'readSettingsSnapshot').mockReturnValue(
+        mockSettings,
+      );
       mockConfig.isWorkflowsEnabled = vi.fn().mockReturnValue(true);
-      mockConfig.getWorkflowKeywordTriggerEnabled = vi
-        .fn()
-        .mockReturnValue(true);
+      let keywordEnabled = true;
+      mockConfig.getWorkflowKeywordTriggerEnabled = vi.fn(() => keywordEnabled);
+      mockConfig.setWorkflowKeywordTriggerEnabled = vi.fn(
+        (enabled: boolean) => {
+          keywordEnabled = enabled;
+        },
+      );
+      mockConfig.storage.getProjectRoot = vi.fn().mockReturnValue('/repo');
       mockConfig.isWorkflowNameOnly = vi.fn().mockReturnValue(true);
       mockToolRegistry.getAllToolNames.mockReturnValue([
         core.ToolNames.WORKFLOW,
@@ -1691,9 +1701,7 @@ describe('Session', () => {
     });
 
     it('applies the live opt-out on the next declared turn', async () => {
-      mockConfig.getWorkflowKeywordTriggerEnabled = vi
-        .fn()
-        .mockReturnValue(false);
+      mockSettings.merged.ui = { disableWorkflowKeywordTrigger: true };
 
       await session.prompt({
         sessionId: 'test-session-id',
@@ -1702,6 +1710,104 @@ describe('Session', () => {
       });
 
       expect(intentParts(firstSentMessage())).toHaveLength(0);
+    });
+
+    it('keeps ordinary prompting available when the setting snapshot cannot be read', async () => {
+      vi.mocked(settingsModule.readSettingsSnapshot).mockImplementation(() => {
+        throw new Error('unreadable workspace settings');
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ultracode' }],
+        _meta: { 'qwen.daemon.submittedPrompt': 'ultracode' },
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(intentParts(firstSentMessage())).toHaveLength(0);
+      expect(mockConfig.getWorkflowKeywordTriggerEnabled()).toBe(false);
+    });
+
+    async function withLiveSettings(
+      test: (root: string, userFile: string) => Promise<void>,
+    ) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dw03-settings-'));
+      const home = path.join(root, 'home');
+      const systemFile = path.join(root, 'system.json');
+      await fs.mkdir(home);
+      await fs.writeFile(systemFile, '{}');
+      vi.stubEnv('QWEN_HOME', home);
+      vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', systemFile);
+      vi.stubEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', systemFile);
+      vi.mocked(settingsModule.readSettingsSnapshot).mockImplementation(
+        readActualSettingsSnapshot,
+      );
+      try {
+        await test(root, path.join(home, 'settings.json'));
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }
+
+    async function currentIntentCount() {
+      vi.mocked(mockChat.sendMessageStream).mockClear();
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ultracode' }],
+        _meta: { 'qwen.daemon.submittedPrompt': 'ultracode' },
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      return intentParts(firstSentMessage()).length;
+    }
+
+    it('reads normal persisted opt-out writes on the next turn without reloading the session', async () => {
+      await withLiveSettings(async (root, userFile) => {
+        const workspace = path.join(root, 'workspace');
+        await fs.mkdir(workspace);
+        vi.mocked(mockConfig.storage.getProjectRoot).mockReturnValue(workspace);
+        const counts = [];
+        for (const disabled of [false, true, false]) {
+          await fs.writeFile(
+            userFile,
+            JSON.stringify({ ui: { disableWorkflowKeywordTrigger: disabled } }),
+          );
+          counts.push(await currentIntentCount());
+        }
+        expect(counts).toEqual([1, 0, 1]);
+        expect(mockSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+      });
+    });
+
+    it('uses the admission workspace and its current trust rather than the live cwd', async () => {
+      await withLiveSettings(async (root, userFile) => {
+        const first = path.join(root, 'first');
+        const second = path.join(root, 'second');
+        await Promise.all(
+          [first, second].map((workspace) =>
+            fs.mkdir(path.join(workspace, '.qwen'), { recursive: true }),
+          ),
+        );
+        await fs.writeFile(
+          userFile,
+          JSON.stringify({ ui: { disableWorkflowKeywordTrigger: true } }),
+        );
+        await fs.writeFile(
+          path.join(first, '.qwen/settings.json'),
+          JSON.stringify({ ui: { disableWorkflowKeywordTrigger: false } }),
+        );
+        await fs.writeFile(
+          path.join(second, '.qwen/settings.json'),
+          JSON.stringify({ ui: { disableWorkflowKeywordTrigger: true } }),
+        );
+        vi.mocked(mockConfig.getProjectRoot).mockReturnValue(second);
+        vi.mocked(mockConfig.storage.getProjectRoot).mockReturnValue(first);
+        expect(await currentIntentCount()).toBe(1);
+        vi.mocked(mockConfig.storage.getProjectRoot).mockReturnValue(second);
+        expect(await currentIntentCount()).toBe(0);
+        vi.mocked(mockConfig.storage.getProjectRoot).mockReturnValue(first);
+        vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+        expect(await currentIntentCount()).toBe(0);
+      });
     });
 
     it('does not create a model request when an eligible prompt is blocked by a hook', async () => {

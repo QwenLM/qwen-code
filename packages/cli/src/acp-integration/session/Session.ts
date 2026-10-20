@@ -8,13 +8,15 @@ import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { logWorkflowKeyword } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
-import { WorkflowKeywordEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
+  WorkflowKeywordEvent,
+  LoopReason,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import { getTurnToolCallCapHalt } from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
-import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -382,7 +384,11 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  readSettingsSnapshot,
+  SettingScope,
+  type LoadedSettings,
+} from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
@@ -7016,15 +7022,40 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
-            const workflowIntent =
+            const workflowHumanInput =
               isUserSubmissionTurn &&
               !isSlashInput &&
               !isSlashCommand(submittedPrompt) &&
               !goalTurn &&
               !pendingSend.signal.aborted &&
               submittedPrompt.trim().length > 0
-                ? resolveWorkflowIntent(this.config, { text: submittedPrompt })
-                : null;
+                ? { text: submittedPrompt }
+                : undefined;
+            if (workflowHumanInput && this.config.isWorkflowsEnabled?.()) {
+              try {
+                const liveSettings = readSettingsSnapshot(
+                  this.config.storage.getProjectRoot(),
+                  {
+                    environment: process.env,
+                    workspaceTrusted: this.config.isTrustedFolder(),
+                  },
+                );
+                this.config.setWorkflowKeywordTriggerEnabled(
+                  liveSettings.merged.ui?.disableWorkflowKeywordTrigger !==
+                    true,
+                );
+              } catch (error) {
+                this.config.setWorkflowKeywordTriggerEnabled(false);
+                debugLogger.warn(
+                  'Unable to read the live workflow keyword setting:',
+                  error,
+                );
+              }
+            }
+            const workflowIntent = resolveWorkflowIntent(
+              this.config,
+              workflowHumanInput,
+            );
             if (workflowIntent) {
               systemReminders.push({ text: workflowIntent.reminder });
               logWorkflowKeyword(this.config, new WorkflowKeywordEvent());

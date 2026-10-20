@@ -351,6 +351,66 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
     mocks.state.liveWaiters.length = 0;
   });
 
+  it('recalls a completed pasted turn as editable full text without granting human origin', async () => {
+    const config = {} as Config;
+    const body = 'workflow pasted body'.padEnd(1200, 'x');
+    const placeholder = '[Pasted Content 1200 chars]';
+    let currentLive: OpenTuiLiveTurn = null!;
+    const pendingSubmits: Array<() => void> = [];
+    function Harness() {
+      const live = useOpenTuiLiveTurn({ config });
+      currentLive = live;
+      return (
+        <OpenTuiInputPrompt
+          onSubmit={(text, images, metadata) => {
+            pendingSubmits.push(() => live.submit(text, images, metadata));
+          }}
+          userMessages={live.items.flatMap((item) =>
+            item.kind === 'user' ? [item.recallText ?? item.text] : [],
+          )}
+          streaming={live.streaming}
+        />
+      );
+    }
+    const press = async (name: string, sequence: string) => {
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name, sequence }));
+      });
+      await act(async () => {
+        for (const submit of pendingSubmits.splice(0)) submit();
+      });
+    };
+    render(<Harness />);
+    const paste = mocks.state.pasteHandlers.at(-1);
+    if (!paste) throw new Error('no paste handler registered');
+    await act(async () => {
+      paste({ bytes: new TextEncoder().encode(body), preventDefault: vi.fn() });
+    });
+    expect(currentEditor().plainText).toBe(placeholder);
+    await press('return', '\r');
+    expect(mocks.state.liveTurns[0]?.prompt).toBe(body);
+    expect(mocks.state.liveTurns[0]?.options['humanInput']).toEqual({
+      text: placeholder,
+    });
+    await act(async () => {
+      for (const wake of mocks.state.liveWaiters.splice(0)) wake();
+    });
+    expect(currentLive.streaming).toBe(false);
+    expect(currentLive.items).toContainEqual(
+      expect.objectContaining({ kind: 'user', text: placeholder }),
+    );
+    await press('up', '\x1b[A');
+    expect(currentEditor().plainText).toBe(body);
+    await typeText('edited instruction ');
+    const edited = currentEditor().plainText;
+    expect(edited).toBe(`edited instruction ${body}`);
+    await press('return', '\r');
+    expect(mocks.state.liveTurns[1]?.prompt).toBe(edited);
+    expect(edited).toContain(body);
+    expect(edited).not.toContain(placeholder);
+    expect(mocks.state.liveTurns[1]?.options['humanInput']).toBeUndefined();
+  });
+
   it.each([
     ['unknown', 'edit'],
     ['mixed', 'edit'],

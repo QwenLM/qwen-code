@@ -193,7 +193,10 @@ import {
   isContextFilesAnnouncement,
   isSlashCommand,
 } from './utils/commandUtils.js';
-import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  resolveWorkflowIntent,
+  type HumanPromptInput,
+} from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
   expandPendingPastePlaceholders,
   restorePasteDraft,
@@ -3457,10 +3460,15 @@ export const AppContainer = (props: AppContainerProps) => {
 
       // Check if speculation has results for this submission
       const spec = speculationRef.current;
+      const needsWorkflowIntent =
+        spec.status === 'completed' &&
+        spec.suggestion === submittedValue &&
+        resolveWorkflowIntent(config, humanInput) !== null;
       if (
         spec.status !== 'idle' &&
         spec.suggestion === submittedValue &&
-        spec.status === 'completed'
+        spec.status === 'completed' &&
+        !needsWorkflowIntent
       ) {
         // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, llmClient)
@@ -3556,8 +3564,8 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      // Abort any running speculation since we're submitting something different
-      if (spec.status === 'running') {
+      // Automatic speculation never received the current human intent.
+      if (spec.status === 'running' || needsWorkflowIntent) {
         abortSpeculation(spec).catch(() => {});
         speculationRef.current = IDLE_SPECULATION;
       }
