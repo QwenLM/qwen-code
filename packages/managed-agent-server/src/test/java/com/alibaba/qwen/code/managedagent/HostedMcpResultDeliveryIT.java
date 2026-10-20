@@ -49,8 +49,10 @@ import static org.awaitility.Awaitility.await;
 // FG12f (issues #14054/#14447): result and catalog delivery on the Hosted
 // MCP path. A settled result must replay from the committed record without
 // a second Runtime call, an oversized result must settle at the output
-// limit without leaving a hold, and a catalog change announced while a call
-// is in flight must not resend that call. The fixture counts physical
+// limit without leaving a hold, a catalog change announced while a call is
+// in flight must not resend that call, and a late conclusive reply after an
+// unknown outcome must settle from the receipt rather than call again. The
+// fixture counts physical
 // effects; the Broker-proxy wire counts controls.
 // Real packaged Harness, durable worker, real stdio MCP server on MySQL.
 class HostedMcpResultDeliveryIT {
