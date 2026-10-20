@@ -46,10 +46,16 @@ describe('SpotBugs gate witness', () => {
     );
     const byName = (name) => steps.filter((step) => step.name === name);
 
-    // Hosted MySQL, MariaDB and both EventTransport gate jobs each stage the
-    // sibling modules before their own verify; the Hosted failover job
-    // stages them before packaging the jar its arms run.
-    const staging = byName('Install Managed Agent dependencies');
+    // Hosted MySQL, the MariaDB job's combined install-and-verify step and
+    // both EventTransport gate jobs each stage the sibling modules before
+    // their own verify; the Hosted failover job stages them before packaging
+    // the jar its arms run.
+    const mergedStep =
+      'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration';
+    const staging = [
+      ...byName('Install Managed Agent dependencies'),
+      ...byName(mergedStep),
+    ];
     expect(staging.length).toBe(5);
     for (const step of staging) {
       expect(step.run).toContain('packages/sdk-java/qwencode/pom.xml');
@@ -57,7 +63,7 @@ describe('SpotBugs gate witness', () => {
     }
 
     const enforcing = [
-      ...byName('Run Managed Agent tests, Checkstyle, and MySQL integration'),
+      ...byName(mergedStep),
       ...byName('Verify Hosted Java, Spring and MySQL processes'),
       ...byName('Verify the EventTransport broker gates'),
       ...byName('Verify the EventTransport multi-node gates'),
