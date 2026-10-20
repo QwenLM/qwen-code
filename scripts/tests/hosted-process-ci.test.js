@@ -109,6 +109,18 @@ const failoverArms = [
     ],
   ],
   [
+    'Run approval result-commit crash E2E',
+    'test:e2e:managed-harness-restart-approval-after-result',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'after-result',
+    ],
+  ],
+  [
     'Run approval decision reply-loss E2E',
     'test:e2e:managed-harness-restart-approval-decision-reply-lost',
     [
@@ -463,11 +475,11 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (151 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (178 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 231, 244],
-    // Nineteen failover arms at 10 each.
-    ['hosted-failover-e2e', 190, 205],
+    ['hosted-harness-mysql', 268, 281],
+    // Twenty failover arms at 10 each.
+    ['hosted-failover-e2e', 200, 215],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {
@@ -598,8 +610,10 @@ describe('Hosted real-process gates', () => {
   it.each([
     ['Verify Hosted Java, Spring and MySQL processes', 'hosted-harness-mysql'],
     ['Verify O4 filesystem process and capacity gates', 'o4-mysql-gates'],
+    ['Run Runtime Broker fault gates', 'fault-gates'],
+    ['Verify Hosted admission gates', 'hosted-harness-gates'],
   ])(
-    'keeps the %s step ceiling above its failsafe fork timeout',
+    'keeps the %s step ceiling above its fork timeout',
     (stepName, profile) => {
       const run = java.jobs['hosted-harness-mysql'].steps.find(
         (step) => step.name === stepName,
@@ -615,9 +629,9 @@ describe('Hosted real-process gates', () => {
       // A step killed before its fork leaves no per-test failure lines, so
       // the main-CI failure analyzer can only file an undiagnosable
       // per-commit issue (#13503 for the Hosted verify step, #13684 for the
-      // O4 gates). The ceiling must cover the fork plus the wrapped
-      // compile/spotbugs/checkstyle work — 600 s is the wrap both
-      // steps actually carry, so a step trim or fork bump reddens this row.
+      // O4 gates). Reserve 600 s beyond the fork for compilation and report
+      // teardown, plus spotbugs/checkstyle on the verify steps, so a step
+      // trim or fork bump reddens this row.
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
       );
@@ -667,12 +681,25 @@ describe('Hosted real-process gates', () => {
       // 2x) moves the fork to 8109; the FG13a catalog lost-reply cell adds
       // 150 s, so the fork moves to 8259 and the Verify step to 148 minutes;
       // the FG13a HTTP lost-reply cell adds 150 s, so the fork moves to 8409
-      // and the Verify step to 151 minutes):
+      // and the Verify step to 151 minutes; the FG13f deny lost-reply cell
+      // adds 150 s, so the fork moves to 8559 and the Verify step to 153
+      // minutes; the FG11d disabled-span cell adds 336 s, so the fork moves
+      // to 8895 and the Verify step to 159 minutes; the FG13f failClosed
+      // lost-reply cell adds 150 s, so the fork moves to 9045 and the Verify
+      // step to 161 minutes; the FG12d refused-release cell adds 6 s, so the
+      // fork moves to 9051 and the Verify step stays 161 minutes; cleanup
+      // retention adds 60 s, moving the fork to 9111 and the Verify step to
+      // 162 minutes; the FG13b Hook intent store-rejection cell adds 150 s,
+      // so the fork moves to 9261 and the Verify step to 165 minutes; the
+      // FG13b Hook dispatch store-rejection cell adds 150 s, so the fork
+      // moves to 9411 and the Verify step to 167 minutes; the FG11f publication
+      // cell adds 82 s (2x its measured 41.1 s), so the fork moves to 9493 and
+      // the step to 169 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(8409);
+        expect(forkSeconds).toBe(10065);
       }
     },
   );
@@ -733,12 +760,25 @@ describe('Hosted real-process gates', () => {
   // cell adds 150s, so it becomes 6985s; the FG11c Spring-crash class
   // (262.0s measured, ~524s budgeted at 2x) becomes 7509s; the FG13a
   // catalog lost-reply cell adds 150s, so it becomes 7659s; the FG13a HTTP
-  // lost-reply cell adds 150s, so it becomes 7809s. The largest
+  // lost-reply cell adds 150s, so it becomes 7809s; the FG13f deny lost-reply
+  // cell adds 150s, so it becomes 7959s; the FG11d disabled-span cell adds
+  // 336s (2x its measured 168.1s), so it becomes 8295s; the FG13f failClosed
+  // lost-reply cell adds 150s, so it becomes 8445s; the FG12d refused-release
+  // cell adds 6s, so it becomes 8451s. The cleanup-retention MySQL class
+  // measures 22.2s on JDK 21 + MySQL 8.4.11, budgeted at 60s, so it becomes
+  // 8511s; the FG13b Hook intent store-rejection cell adds 150s, so it
+  // becomes 8661s; the FG13b Hook dispatch store-rejection cell adds 150s,
+  // so it becomes 8811s; the FG11f publication cell adds 82s, so it becomes
+  // 8893s; the FG12f delivery cell adds 30s, so it becomes 8923s; the FG11f
+  // refusing-arms cells add 242s, so it becomes 9165s; the FG13b Hook result
+  // store-rejection cell adds 150s, so it becomes 9315s; the FG13b Hook
+  // plan-result store-rejection cell adds 150s, so it becomes 9465s. The
+  // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 7809;
+  const hostedForkHealthySeconds = 9465;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -801,6 +841,7 @@ describe('Hosted real-process gates', () => {
       'HostedAutomationSpringCrashIT',
       'HostedChannelFaultGatesIT',
       'HostedChannelProcessCrashIT',
+      'HostedCleanupRetentionMySqlIT',
       'HostedCommittedEventLineReplayIT',
       'HostedConcurrentTurnBurstMySqlIT',
       'HostedEventStreamLivenessIT',
@@ -811,6 +852,7 @@ describe('Hosted real-process gates', () => {
       'HostedHookReplyLossFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
+      'HostedMcpResultDeliveryIT',
       'HostedMcpStoreFaultGatesIT',
       'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',
@@ -873,6 +915,27 @@ describe('Hosted real-process gates', () => {
       // so pin the guard itself, not the exact `await().failFast` prefix.
       expect(read(hostedTestPath(className))).toContain(
         '.failFast("The case\'s @Timeout interrupted it"',
+      );
+    },
+  );
+
+  // Awaitility replaces, rather than composes, the exception predicate each
+  // ignore* call installs. A helper that polls a child JVM's readiness must
+  // therefore keep ConnectException in the same predicate as the deadlock it
+  // newly ignores, or the first refused connection aborts the case.
+  it.each(['HostedExtensionsIT', 'HostedHookFaultGatesIT'])(
+    'keeps %s waiting through a refused connection and a deadlock',
+    (className) => {
+      const chain = hostedTestSource(className).match(
+        /await\(\)[\s\S]*?\.untilAsserted\(/,
+      );
+      expect(chain, className).not.toBeNull();
+      expect(chain[0], className).toContain('.ignoreExceptionsMatching(');
+      expect(chain[0], className).toContain(
+        'e instanceof java.net.ConnectException',
+      );
+      expect(chain[0], className).toContain(
+        'e instanceof CannotAcquireLockException',
       );
     },
   );

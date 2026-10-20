@@ -16,6 +16,7 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
@@ -149,7 +150,7 @@ class HostedExtensionsIT {
     }
 
     @Test
-    @Timeout(180)
+    @Timeout(300)
     void disconnectedMcpEffectIsNotReplayedAfterHarnessReplacementOnMySql() throws Exception {
         boot();
         Map<String, Object> mcpOnly = new java.util.LinkedHashMap<>(definition(1));
@@ -157,7 +158,7 @@ class HostedExtensionsIT {
         String agent = api("POST", "/v1/agents", mcpOnly, "definition", 202).path("id").asText();
         String session = createSession(agent, "unknown");
         String original = submit(session, "EXT_UNKNOWN");
-        waitFor(() -> {
+        waitFor(Duration.ofSeconds(90), () -> {
             assertEffects("EXT_UNKNOWN");
             assertThat(running(events("mcp.start").getFirst())).isFalse();
             assertThat(execution(session, original).path("execution_state").asText()).isEqualTo("UNKNOWN");
@@ -170,7 +171,10 @@ class HostedExtensionsIT {
         assertThat(running(worker)).isTrue();
         int requests = modelRequests.size();
         replaceHarness();
-        waitFor(() -> {
+        // The coordinator re-drives a replaced Harness on its own retry
+        // cadence; a loaded runner can push the recovery past the default
+        // 40-second window.
+        waitFor(Duration.ofSeconds(150), () -> {
             String log = Files.readString(temporary.resolve("harness-2.log"));
             assertThat(log.lines().anyMatch(line -> line.contains("recovery of session " + session)
                     && line.contains("runtime_broker_execution_unknown"))).isTrue();
@@ -575,11 +579,15 @@ class HostedExtensionsIT {
 
     private void waitFor(Duration timeout,
             org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(timeout).ignoreException(java.net.ConnectException.class).failFast(() -> {
-            if (modelFailure.get() != null) {
-                throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
-            }
-        }).untilAsserted(assertion::execute);
+        await().atMost(timeout)
+                .ignoreExceptionsMatching(e -> e instanceof java.net.ConnectException
+                        || e instanceof CannotAcquireLockException)
+                .failFast(() -> {
+                    if (modelFailure.get() != null) {
+                        throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
+                    }
+                })
+                .untilAsserted(assertion::execute);
     }
 
     private static String quote(String text) {

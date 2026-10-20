@@ -86,28 +86,31 @@ describe('writeClipboardText (issue #9485)', () => {
     expect(copiedValue).toBe('hello fallback');
   });
 
-  it('appends the fallback textarea inside a focused Radix layer', async () => {
-    delete (navigator as { clipboard?: unknown }).clipboard;
-    const dialog = document.createElement('div');
-    dialog.setAttribute('role', 'dialog');
-    const copyButton = document.createElement('button');
-    dialog.appendChild(copyButton);
-    document.body.appendChild(dialog);
-    copyButton.focus();
+  it.each(['dialog', 'menu'])(
+    'appends the fallback textarea inside a focused %s',
+    async (role) => {
+      delete (navigator as { clipboard?: unknown }).clipboard;
+      const dialog = document.createElement('div');
+      dialog.setAttribute('role', role);
+      const copyButton = document.createElement('button');
+      dialog.appendChild(copyButton);
+      document.body.appendChild(dialog);
+      copyButton.focus();
 
-    let textareaParent: string | null = null;
-    originalExecCommand = document.execCommand;
-    document.execCommand = vi.fn().mockImplementation((command: string) => {
-      const textarea = document.querySelector('textarea');
-      textareaParent = textarea?.parentElement?.getAttribute('role') ?? null;
-      return command === 'copy' && textarea !== null;
-    });
+      let textareaParent: string | null = null;
+      originalExecCommand = document.execCommand;
+      document.execCommand = vi.fn().mockImplementation((command: string) => {
+        const textarea = document.querySelector('textarea');
+        textareaParent = textarea?.parentElement?.getAttribute('role') ?? null;
+        return command === 'copy' && textarea !== null;
+      });
 
-    await writeClipboardText('inside dialog');
+      await writeClipboardText('inside dialog');
 
-    expect(textareaParent).toBe('dialog');
-    expect(document.querySelector('textarea')).toBeNull();
-  });
+      expect(textareaParent).toBe(role);
+      expect(document.querySelector('textarea')).toBeNull();
+    },
+  );
 
   it('restores focus to the previously focused element after the fallback', async () => {
     delete (navigator as { clipboard?: unknown }).clipboard;
@@ -121,33 +124,38 @@ describe('writeClipboardText (issue #9485)', () => {
 
     expect(document.activeElement).toBe(composer);
   });
-  it('keeps the fallback inside a focused ShadowRoot Radix layer', async () => {
-    delete (navigator as { clipboard?: unknown }).clipboard;
-    const host = document.createElement('div');
-    document.body.append(host);
-    const shadow = host.attachShadow({ mode: 'open' });
-    const dialog = document.createElement('div');
-    dialog.setAttribute('role', 'dialog');
-    const button = document.createElement('button');
-    dialog.append(button);
-    shadow.append(dialog);
-    button.focus();
-    let parent: HTMLElement | null = null;
-    originalExecCommand = document.execCommand;
-    document.execCommand = vi.fn(() => {
-      const textarea = shadow.querySelector('textarea');
-      parent = textarea?.parentElement ?? null;
-      copiedValue =
-        textarea?.value.slice(textarea.selectionStart, textarea.selectionEnd) ??
-        null;
-      return !!textarea;
-    });
-    await writeClipboardText('shadow copy');
-    expect(parent).toBe(dialog);
-    expect(copiedValue).toBe('shadow copy');
-    expect(shadow.activeElement).toBe(button);
-    expect(shadow.querySelector('textarea')).toBeNull();
-  });
+  it.each(['dialog', 'menu'])(
+    'keeps the fallback inside a focused ShadowRoot %s',
+    async (role) => {
+      delete (navigator as { clipboard?: unknown }).clipboard;
+      const host = document.createElement('div');
+      document.body.append(host);
+      const shadow = host.attachShadow({ mode: 'open' });
+      const dialog = document.createElement('div');
+      dialog.setAttribute('role', role);
+      const button = document.createElement('button');
+      dialog.append(button);
+      shadow.append(dialog);
+      button.focus();
+      let parent: HTMLElement | null = null;
+      originalExecCommand = document.execCommand;
+      document.execCommand = vi.fn(() => {
+        const textarea = shadow.querySelector('textarea');
+        parent = textarea?.parentElement ?? null;
+        copiedValue =
+          textarea?.value.slice(
+            textarea.selectionStart,
+            textarea.selectionEnd,
+          ) ?? null;
+        return !!textarea;
+      });
+      await writeClipboardText('shadow copy');
+      expect(parent).toBe(dialog);
+      expect(copiedValue).toBe('shadow copy');
+      expect(shadow.activeElement).toBe(button);
+      expect(shadow.querySelector('textarea')).toBeNull();
+    },
+  );
 
   it('cleans up the temporary textarea after a fallback copy', async () => {
     delete (navigator as { clipboard?: unknown }).clipboard;

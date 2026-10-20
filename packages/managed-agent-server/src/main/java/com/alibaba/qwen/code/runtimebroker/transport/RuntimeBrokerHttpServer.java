@@ -109,6 +109,51 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         server.start();
     }
 
+    public void registerCsiApplicationAuthority(String tenantId, String sessionId,
+            BiFunction<String, byte[], Map<String, Object>> readback) {
+        String tenant = BrokerValues.requireId(tenantId, "tenantId");
+        if (!java.util.UUID.fromString(sessionId).toString().equals(sessionId) || readback == null) {
+            throw new IllegalArgumentException("One original CSI Session authority is required");
+        }
+        String path = "/internal/managed-session-store/v1/sessions/" + sessionId + "/csi-retirement:worker-authority";
+        server.createContext(path, exchange -> {
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            try {
+                if (!"POST".equals(exchange.getRequestMethod()) || exchange.getRequestURI().getRawQuery() != null
+                        || !path.equals(exchange.getRequestURI().getRawPath())) {
+                    throw notFound();
+                }
+                var headers = exchange.getRequestHeaders();
+                List<String> authorization = headers.get("Authorization");
+                List<String> tenants = headers.get("X-Qwen-Tenant-Id");
+                if (authorization == null || authorization.size() != 1 || authorization.getFirst().length() > 519
+                        || !authorization.getFirst().matches("Bearer [A-Za-z0-9._~+/-]{1,512}=*")) {
+                    throw new RuntimeBrokerException(401, "csi_application_authority_unauthorized", "Original Runtime authentication failed.", false);
+                }
+                String contentType = headers.getFirst("Content-Type");
+                if (tenants == null || tenants.size() != 1 || !tenant.equals(tenants.getFirst())
+                        || contentType == null || !"application/json".equals(contentType.split(";", 2)[0].trim())
+                        || !"no-store".equals(headers.getFirst("Cache-Control"))) {
+                    throw new IllegalArgumentException("Invalid original CSI authority headers");
+                }
+                String length = headers.getFirst("Content-Length");
+                if (length != null && (!length.matches("0|[1-9][0-9]{0,9}") || Long.parseLong(length) > CsiFileFinalizeProtocol.REQUEST_LIMIT)) {
+                    throw tooLarge();
+                }
+                byte[] body;
+                try (var input = exchange.getRequestBody()) {
+                    body = input.readNBytes(CsiFileFinalizeProtocol.REQUEST_LIMIT + 1);
+                }
+                if (body.length > CsiFileFinalizeProtocol.REQUEST_LIMIT) {
+                    throw tooLarge();
+                }
+                sendJson(exchange, 200, readback.apply(authorization.getFirst().substring(7), body));
+            } catch (Throwable error) {
+                sendError(exchange, error);
+            }
+        });
+    }
+
     private static void handleNative(HttpExchange exchange,
             BiFunction<String, Map<String, Object>, Map<String, Object>> readback) {
         exchange.getResponseHeaders().set("Cache-Control", "no-store");

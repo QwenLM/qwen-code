@@ -90,6 +90,25 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
+  it('keeps the daemon E2E install from rebuilding what its next steps build', () => {
+    // prepare would build and bundle the tree during install, then the two
+    // explicit steps below repeat both. #14861 failed inside that install-path
+    // build, so the install stays an install and the build steps below stay
+    // the only place this job compiles.
+    const steps = parse(workflow).jobs['daemon-e2e'].steps;
+    const install = steps.find(
+      (s) => s.name === 'Install Node.js dependencies',
+    );
+    expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
+    const names = steps.map((s) => s.name);
+    expect(names.indexOf('Build Qwen Code')).toBeGreaterThan(
+      names.indexOf('Install Node.js dependencies'),
+    );
+    expect(names.indexOf('Bundle Qwen Code')).toBeGreaterThan(
+      names.indexOf('Build Qwen Code'),
+    );
+  });
+
   it('serializes latency-sensitive tests on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
@@ -98,9 +117,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
     );
-    expect(block).toContain('flock --wait 3600 9');
+    expect(block).toContain('flock --wait 5400 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 60 minutes',
+      '::error::sdk-java host lock not acquired within 90 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -708,25 +727,28 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
         'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
       );
       const seconds = Number(s.run.match(/flock --wait (\d+) 9/)?.[1]);
-      expect(seconds, s.name).toBeGreaterThanOrEqual(50 * 60);
+      // The fast tier owns the same lock and waits behind these two steps, so
+      // one acquisition budget applies to every lane; run 39229303984 died at
+      // the old 60-minute wait before Maven started.
+      expect(seconds, s.name).toBe(90 * 60);
       return seconds;
     });
     // The ceiling must absorb one full lock wait per acquisition — this job
     // takes the lock once per Maven step — plus the ~50 minutes of measured
-    // Maven work. Run 39097018288 held it for 47m26s, longer than the old
-    // 40-minute acquisition budget. Derive the ceiling from the step count
-    // so another locked step cannot silently overdraw it.
+    // Maven work and ~30 minutes of uncapped setup. Derive it from the step
+    // count so another locked step cannot silently overdraw it.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(
-      lockWaits.reduce((total, seconds) => total + seconds, 0) + 50 * 60,
+      lockWaits.reduce((total, seconds) => total + seconds, 0) +
+        50 * 60 +
+        30 * 60,
     );
     // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured locked work (~5 minutes on
-    // the Java 21 leg of run 37743332082) and setup headroom. This job's holds
-    // now consume part of that wait budget.
+    // cover one full wait plus its own measured hold (the sdk-java suite plus
+    // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      3600 + 10 * 60,
+      lockWaits[0] + 925 + 11 * 60,
     );
   });
 
@@ -1042,4 +1064,103 @@ describe('setup-java Maven cache stays on hosted runners', () => {
   it.each(poolCapable)('%s caches Maven only on hosted runners', (_, step) => {
     expect(step.with?.cache).toBe(hostedOnly);
   });
+});
+
+// A bare `corepack pnpm install` has no retry. Run 39348512071's daemon E2E
+// lane died in that step before any test ran, inside the workspace build the
+// install's `prepare` re-enters: packages/cli's `tsc --build` exhausted V8's
+// heap. The network class of that failure is what e2e.yml, repo-hygiene.yml
+// and qwen-autofix.yml already absorb (#11726); the heap class is capped in
+// pnpm-workspace.yaml, and a retry only offers it a quieter host. Pin the
+// recipe on every install so a new bare step fails here instead of on main.
+// Each attempt re-runs prepare's build (~4m32s observed), not just backoff.
+describe('SDK Java install-transient retry', () => {
+  const installs = Object.entries(parse(workflow).jobs).flatMap(
+    ([jobName, job]) =>
+      (job.steps ?? [])
+        .filter(
+          (s) => typeof s.run === 'string' && s.run.includes('pnpm install'),
+        )
+        .map((s) => [jobName, s]),
+  );
+
+  it('finds every install step', () => {
+    expect(installs.map(([jobName]) => jobName).sort()).toEqual([
+      'daemon-e2e',
+      'event-transport-multi-node',
+      'hosted-failover-e2e',
+      'hosted-harness-mysql',
+      'mysql-integration',
+      'test',
+    ]);
+  });
+
+  it.each(installs)('%s retries a transient install', (jobName, step) => {
+    for (const fragment of [
+      'for attempt in 1 2 3; do',
+      'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+      'if [[ "${attempt}" != "1" ]]; then',
+      'echo "::warning::corepack pnpm install',
+      'break',
+      'if [[ "${attempt}" == "3" ]]; then',
+      'exit 1',
+      'sleep $((attempt * 15))',
+    ]) {
+      expect(step.run, jobName).toContain(fragment);
+    }
+    expect(step.run, jobName).not.toMatch(/^\s*corepack pnpm install/m);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'retries a failed install and exits 1 only after the third attempt',
+    () => {
+      const [, installStep] = installs.find(
+        ([jobName]) => jobName === 'daemon-e2e',
+      );
+      const runInstall = (failures) =>
+        spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            [
+              'attempts=0',
+              `corepack() {
+                attempts=$((attempts + 1))
+                echo "ATTEMPT $attempts"
+                if (( attempts < ${failures} )); then return 1; fi
+                return 0
+              }`,
+              'sleep() { echo "SLEEP $1"; }',
+              installStep.run,
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        );
+
+      const absorbed = runInstall(2);
+      expect(absorbed.error).toBeUndefined();
+      expect(absorbed.status, absorbed.stderr).toBe(0);
+      expect(absorbed.stdout.match(/ATTEMPT/g)).toHaveLength(2);
+      expect(absorbed.stdout).toContain('SLEEP 15');
+      expect(absorbed.stdout).toContain('failed 1 time(s)');
+
+      const firstTry = runInstall(1);
+      expect(firstTry.status, firstTry.stderr).toBe(0);
+      expect(firstTry.stdout.match(/ATTEMPT/g)).toHaveLength(1);
+      expect(firstTry.stdout).not.toContain('::warning::');
+      expect(firstTry.stdout).not.toContain('SLEEP');
+
+      const exhausted = runInstall(4);
+      expect(exhausted.error).toBeUndefined();
+      expect(exhausted.status, exhausted.stderr).toBe(1);
+      expect(exhausted.stdout.match(/ATTEMPT/g)).toHaveLength(3);
+      expect(exhausted.stdout).toContain('SLEEP 30');
+      expect(exhausted.stdout).not.toContain('::warning::');
+    },
+  );
 });
