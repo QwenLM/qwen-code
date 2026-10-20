@@ -601,6 +601,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-mcp/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read the selected Session's sanitized, committed MCP catalog. Requires a trusted actor and Workspace read access. Discovery states describe the published snapshot, not live Runtime health. Does not configure servers, discover capabilities or execute tools, resources or prompts. */
+        post: operations["queryWebShellSessionMcp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/session-skills/query": {
         parameters: {
             query?: never;
@@ -678,6 +695,54 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        PublicMcpCatalog: {
+            /** @constant */
+            object: "agent.mcp_catalog";
+            /** Format: uuid */
+            session_id: string;
+            servers: components["schemas"]["PublicMcpServerCatalog"][];
+        };
+        PublicMcpServerCatalog: {
+            server_id: string;
+            server_revision: number;
+            /** @description The pinned catalog revision; null while no catalog has been published. */
+            catalog_revision: number | null;
+            tools: components["schemas"]["PublicMcpTool"][];
+            resources: components["schemas"]["PublicMcpResource"][];
+            prompts: components["schemas"]["PublicMcpPrompt"][];
+            discovery: components["schemas"]["PublicMcpDiscovery"];
+        };
+        PublicMcpTool: {
+            name: string;
+            description?: string;
+            input_schema: {
+                [key: string]: unknown;
+            };
+        };
+        PublicMcpResource: {
+            name: string;
+            uri: string;
+            description?: string;
+            mime_type?: string;
+        };
+        PublicMcpPrompt: {
+            name: string;
+            description?: string;
+            arguments?: components["schemas"]["PublicMcpPromptArgument"][];
+        };
+        PublicMcpPromptArgument: {
+            name: string;
+            description?: string;
+            required?: boolean;
+        };
+        PublicMcpDiscovery: {
+            /** @enum {string} */
+            tools: "complete" | "partial" | "failed" | "stale";
+            /** @enum {string} */
+            resources: "complete" | "partial" | "failed" | "stale";
+            /** @enum {string} */
+            prompts: "complete" | "partial" | "failed" | "stale";
+        };
         InputBlock: components["schemas"]["InputTextBlock"] | components["schemas"]["InputFileBlock"] | components["schemas"]["InputImageBlock"];
         PublicArtifact: {
             /** @constant */
@@ -2945,6 +3010,35 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    queryWebShellSessionMcp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session MCP catalog snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicMcpCatalog"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     queryWebShellSessionSkills: {
