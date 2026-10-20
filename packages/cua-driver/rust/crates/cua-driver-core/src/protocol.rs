@@ -630,13 +630,24 @@ mod agent_instruction_tests {
     fn compact_instructions_match_app_desktop_and_pixel_consumers() {
         let instructions = computer_use_instructions();
         for required in [
-            "get_app(app)", "get_ax_state(app)", "short `element` ID",
-            "window screenshot pixels", "primary-display screenshot pixels",
-            "scope:\"desktop\"", "key_down/key_up", "Never replay uncertain input",
+            "get_app(app)",
+            "get_ax_state(app)",
+            "short `element` ID",
+            "window screenshot pixels",
+            "primary-display screenshot pixels",
+            "scope:\"desktop\"",
+            "key_down/key_up",
+            "Never replay uncertain input",
         ] {
             assert!(instructions.contains(required), "missing {required}");
         }
-        for obsolete in ["element_index", "get_window_state", "verify_state", "0-1000", "SKILL.md"] {
+        for obsolete in [
+            "element_index",
+            "get_window_state",
+            "verify_state",
+            "0-1000",
+            "SKILL.md",
+        ] {
             assert!(!instructions.contains(obsolete), "obsolete {obsolete}");
         }
         assert!(instructions.split_whitespace().count() <= 200);

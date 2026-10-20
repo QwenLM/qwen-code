@@ -629,72 +629,25 @@ fn post_focus_preparation(
     window_id: u32,
     preparation: super::app_focus::Preparation,
 ) -> anyhow::Result<()> {
-    let point = if preparation == super::app_focus::Preparation::Activate {
-        window_activation_point(pid, window_id)
-    } else {
-        None
-    };
-    let events = super::app_pointer::focus_events(preparation, window_id, point)?;
+    let post = post_event_record_to_fn()
+        .ok_or_else(|| anyhow::anyhow!("background key-window record transport unavailable"))?;
+    let mut target_psn = [0u8; 8];
+    if !get_process_psn_for_window(window_id, pid, &mut target_psn) {
+        anyhow::bail!("background key-window target PSN unavailable");
+    }
+    let events = super::app_pointer::focus_events(preparation, window_id)?;
     for event in &events {
         super::app_pointer::post(pid, event);
     }
-    Ok(())
-}
-
-fn window_activation_point(pid: pid_t, window_id: u32) -> Option<((f64, f64), (f64, f64))> {
-    use crate::ax::bindings::*;
-    use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType};
-    use core_foundation::string::CFString;
-    unsafe {
-        let app = AXUIElementCreateApplication(pid);
-        if app.is_null() {
-            return None;
+    // AppKit activation alone leaves keyWindow unset. Address only the native
+    // target window; changing WindowServer's front process would take user input.
+    for kind in [0x01, 0x02] {
+        let record = make_key_window_record(window_id, kind);
+        if unsafe { post(target_psn.as_ptr() as *const c_void, record.as_ptr()) } != 0 {
+            anyhow::bail!("background key-window record was rejected");
         }
-        let mut target = None;
-        for candidate in copy_ax_windows(app) {
-            if target.is_none() && ax_get_window_id(candidate) == Some(window_id) {
-                target = Some(candidate);
-            } else {
-                CFRelease(candidate as CFTypeRef);
-            }
-        }
-        CFRelease(app as CFTypeRef);
-        let window = target?;
-        let frame = element_screen_rect(window);
-        let mut value: CFTypeRef = std::ptr::null();
-        let status = AXUIElementCopyAttributeValue(
-            window,
-            CFString::new("AXActivationPoint").as_concrete_TypeRef(),
-            &mut value,
-        );
-        CFRelease(window as CFTypeRef);
-        if value.is_null() {
-            return None;
-        }
-        let mut point = core_graphics::geometry::CGPoint::new(0.0, 0.0);
-        let valid = status == kAXErrorSuccess
-            && CFGetTypeID(value) == AXValueGetTypeID()
-            && AXValueGetType(value as AXValueRef) == kAXValueCGPointType
-            && AXValueGetValue(
-                value as AXValueRef,
-                kAXValueCGPointType,
-                &mut point as *mut _ as *mut c_void,
-            );
-        CFRelease(value);
-        let [x, y, width, height] = frame?;
-        if !valid
-            || ![point.x, point.y, x, y, width, height]
-                .iter()
-                .all(|v| v.is_finite())
-            || point.x < x
-            || point.x > x + width
-            || point.y < y
-            || point.y > y + height
-        {
-            return None;
-        }
-        Some(((point.x, point.y), (point.x - x, point.y - y)))
     }
+    Ok(())
 }
 
 /// Make `target_pid` and `target_wid` WindowServer-frontmost and leave them
@@ -1054,6 +1007,48 @@ mod tests {
         assert!(!preserves_exact_existing_focus(
             true, target, target, None, 42
         ));
+    }
+}
+
+type HwCaptureWindowListFn = unsafe extern "C" fn(c_int, *mut u32, c_int, u32) -> *const c_void;
+
+fn hw_capture_window_list_fn() -> Option<HwCaptureWindowListFn> {
+    static SYM: OnceLock<Option<HwCaptureWindowListFn>> = OnceLock::new();
+    *SYM.get_or_init(|| {
+        find_sym(b"SLSHWCaptureWindowList\0")
+            .or_else(|| find_sym(b"CGSHWCaptureWindowList\0"))
+            .map(|p| unsafe { as_fn(p) })
+    })
+}
+
+pub(crate) fn hw_capture_window(window_id: u32) -> Option<core_graphics::image::CGImage> {
+    use core_foundation::{
+        array::CFArray,
+        base::{CFGetTypeID, CFRetain, CFTypeRef, TCFType},
+    };
+    use foreign_types::ForeignType;
+
+    extern "C" {
+        fn CGImageGetTypeID() -> core_foundation::base::CFTypeID;
+    }
+
+    let capture = hw_capture_window_list_fn()?;
+    let cid = c_int::try_from(main_connection_id()?).ok()?;
+    let mut window = window_id;
+    // Ignore global Space clipping and request backing-store (Retina) pixels.
+    let images = unsafe { capture(cid, &mut window, 1, (1 << 11) | (1 << 8)) };
+    if images.is_null() {
+        return None;
+    }
+    let images: CFArray<CFTypeRef> = unsafe { CFArray::wrap_under_create_rule(images as _) };
+    let image = *images.get(0)?;
+    if image.is_null() || unsafe { CFGetTypeID(image) } != unsafe { CGImageGetTypeID() } {
+        return None;
+    }
+    // The returned array owns the image; keep an independent retain.
+    unsafe {
+        CFRetain(image);
+        Some(core_graphics::image::CGImage::from_ptr(image as *mut _))
     }
 }
 

@@ -16,6 +16,7 @@ use super::window_scope::{decide_window_scope, TopLevelCandidate, WindowScope};
 use core_foundation::base::{CFEqual, CFHash, CFRelease, CFRetain, CFTypeRef};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 
 /// Default maximum depth for AX tree walks. Deep menus and complex web views
 /// can nest deeply; 25 covers realistic app chrome without exploding on
@@ -42,8 +43,29 @@ pub const DEFAULT_MAX_ELEMENTS: usize = 2_000;
 /// indefinitely.
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 2.0;
 
-unsafe fn set_messaging_timeout(element: AXUIElementRef) {
-    let _ = AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECONDS);
+#[derive(Default)]
+struct ObservationWalkBudget {
+    started: Option<Instant>,
+    exhausted: bool,
+}
+
+impl ObservationWalkBudget {
+    fn admit(&mut self) -> bool {
+        let started = self.started.get_or_insert_with(Instant::now);
+        self.exhausted |= started.elapsed() >= Duration::from_secs(1);
+        !self.exhausted
+    }
+}
+
+unsafe fn set_messaging_timeout(element: AXUIElementRef, deadline: Option<Instant>) {
+    let timeout = deadline.map_or(AX_MESSAGING_TIMEOUT_SECONDS, |deadline| {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs_f32()
+            .min(AX_MESSAGING_TIMEOUT_SECONDS)
+            .max(0.001)
+    });
+    let _ = AXUIElementSetMessagingTimeout(element, timeout);
 }
 
 #[derive(Debug)]
@@ -222,7 +244,7 @@ pub struct TreeWalkResult {
     /// Bounded trace naming why `complete` is false (attribute + AX error),
     /// drained from the walk's thread-local recorder. Empty on complete walks.
     pub incomplete_notes: Vec<String>,
-    /// True when the walk was cut short by the node or depth cap.
+    /// True when the walk was cut short by a node, depth or time budget.
     pub truncated: bool,
     /// Whether the requested `window_id` actually resolved to an AX surface,
     /// and if not, why. `None` when no `window_id` was requested.
@@ -274,7 +296,17 @@ pub fn walk_tree_bounded(
     max_elements: usize,
     max_depth: usize,
 ) -> TreeWalkResult {
-    walk_tree_with_context(pid, window_id, query, max_elements, max_depth, false)
+    walk_tree_with_deadline(
+        pid,
+        window_id,
+        query,
+        max_elements,
+        max_depth,
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -300,6 +332,49 @@ pub(crate) fn walk_tree_with_context(
     max_elements: usize,
     max_depth: usize,
     app_context: bool,
+    readiness_deadline: Option<Instant>,
+) -> TreeWalkResult {
+    walk_tree_with_deadline(
+        pid,
+        window_id,
+        query,
+        max_elements,
+        max_depth,
+        app_context,
+        readiness_deadline,
+        None,
+        Some(ObservationWalkBudget::default()),
+    )
+}
+
+pub(crate) fn walk_tree_for_recording(
+    pid: i32,
+    window_id: u32,
+    budget: Duration,
+) -> TreeWalkResult {
+    walk_tree_with_deadline(
+        pid,
+        Some(window_id),
+        None,
+        DEFAULT_MAX_ELEMENTS,
+        DEFAULT_MAX_DEPTH,
+        false,
+        None,
+        Some(Instant::now() + budget),
+        None,
+    )
+}
+
+fn walk_tree_with_deadline(
+    pid: i32,
+    window_id: Option<u32>,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    app_context: bool,
+    readiness_deadline: Option<Instant>,
+    deadline: Option<Instant>,
+    mut observation_budget: Option<ObservationWalkBudget>,
 ) -> TreeWalkResult {
     let mut nodes: Vec<AXNode> = Vec::new();
     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
@@ -309,7 +384,8 @@ pub(crate) fn walk_tree_with_context(
     // Set to true only when walk_element actually stops early due to the cap —
     // avoids a false-positive when the tree naturally ends on exactly the cap.
     let mut truncated = false;
-    let mut complete = true;
+    let mut complete: bool;
+    let mut web_area_seen = false;
     let mut window_scope: Option<WindowScope> = None;
     super::bindings::reset_incomplete_notes();
 
@@ -329,145 +405,200 @@ pub(crate) fn walk_tree_with_context(
                 window_scope: window_id.map(|_| WindowScope::AxUnresolved { ax_window_count: 0 }),
             };
         }
-        set_messaging_timeout(app_elem);
+        set_messaging_timeout(app_elem, deadline);
 
         // Chromium/Electron apps (Arc, VS Code, Electron shells) ship their
         // web-content AX tree OFF and only build it once an assistive client
         // asks for it. Without this, the first walk of such an app returns an
         // empty/title-bar-only tree (#1616). Flip the enablement attribute,
-        // then — only when the flip actually took and only the first time we
-        // see this process lifetime — let the asynchronously-built tree settle
-        // before we read it. Native Cocoa apps reject the attribute, so they
-        // pay no settle cost. This relies on the MAX_ELEMENTS node cap to keep
-        // the now-materialized (potentially large) tree bounded.
-        super::enablement::ensure_chromium_ax_enabled(pid, app_elem);
+        // then let an explicit AX observation wait within its shared readiness
+        // deadline. Recording and action/fact readers never wait for a WebArea.
+        // The materialized tree remains subject to the existing traversal caps.
+        let readiness =
+            super::enablement::ensure_chromium_ax_enabled(pid, app_elem, readiness_deadline);
+        set_messaging_timeout(app_elem, deadline);
 
-        // Union AXChildren + AXWindows — the only way to see background windows.
-        // AXChildren omits windows when the app isn't frontmost (AppKit limitation).
-        // AXWindows returns the window list regardless of activation state.
-        let from_children = copy_children_with_status(app_elem);
-        let from_windows = copy_ax_windows_with_status(app_elem);
-        complete &= from_children.complete && from_windows.complete;
+        let launch_deadline = super::launch::lookup_deadline(readiness_deadline);
+        let mut remote_probe_attempted = false;
+        let (mut walk_these, top_level) = 'resolve: loop {
+            let attempt_started = Instant::now();
+            complete = true;
+            super::bindings::reset_incomplete_notes();
+            // Union AXChildren + AXWindows — the only way to see background windows.
+            // AXChildren omits windows when the app isn't frontmost (AppKit limitation).
+            // AXWindows returns the window list regardless of activation state.
+            let from_children = copy_children_with_status(app_elem);
+            let from_windows = copy_ax_windows_with_status(app_elem);
+            complete &= from_children.complete && from_windows.complete;
 
-        let mut top_level = from_children.elements;
-        for w in from_windows.elements {
-            // AXChildren and AXWindows can return different proxy pointers for
-            // the same native window. CFEqual compares their AX identity;
-            // pointer equality alone duplicates the whole subtree and can turn
-            // one exact dialog action into a false ambiguity.
-            if !top_level
-                .iter()
-                .any(|&e| CFEqual(e as CFTypeRef, w as CFTypeRef) != 0)
-            {
-                top_level.push(w);
-            } else {
-                // Already present — release the extra retain from copy_ax_windows.
-                CFRelease(w as CFTypeRef);
-            }
-        }
-
-        // Scope: keep non-window children (menu bar) + the target window —
-        // but ONLY once the target window has actually been identified. When
-        // nothing claims the requested id, `decide_window_scope` reports why
-        // and walks nothing; it must never fall back to "everything that isn't
-        // a window", which is how issue #2237 returned menu bars as panels.
-        let mut walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
-            let describe = |child, complete: &mut bool| {
-                set_messaging_timeout(child);
-                let role_read = copy_string_attr_with_status(child, "AXRole");
-                if role_read.complete && role_read.value.is_none() {
-                    super::bindings::note_incomplete(
-                        "AXRole",
-                        "top-level element with no role value",
-                    );
-                }
-                *complete &= role_read.complete && role_read.value.is_some();
-                let role = role_read.value.unwrap_or_default();
-                let subrole_read = copy_string_attr_with_status(child, "AXSubrole");
-                *complete &= subrole_read.complete;
-                let identifier_read = copy_string_attr_with_status(child, "AXIdentifier");
-                *complete &= identifier_read.complete;
-                // Match AX window element → CGWindowID via private SPI.
-                // Only windows carry one, so skip the round-trip elsewhere.
-                let ax_window_id = if matches!(role.as_str(), "AXWindow" | "AXSheet") {
-                    ax_get_window_id(child)
+            let mut top_level = from_children.elements;
+            for w in from_windows.elements {
+                // AXChildren and AXWindows can return different proxy pointers for
+                // the same native window. CFEqual compares their AX identity;
+                // pointer equality alone duplicates the whole subtree and can turn
+                // one exact dialog action into a false ambiguity.
+                if !top_level
+                    .iter()
+                    .any(|&e| CFEqual(e as CFTypeRef, w as CFTypeRef) != 0)
+                {
+                    top_level.push(w);
                 } else {
-                    None
-                };
-                TopLevelCandidate {
-                    role,
-                    subrole: subrole_read.value,
-                    identifier: identifier_read.value,
-                    ax_window_id,
+                    // Already present — release the extra retain from copy_ax_windows.
+                    CFRelease(w as CFTypeRef);
                 }
-            };
-            let mut candidates: Vec<TopLevelCandidate> = top_level
-                .iter()
-                .map(|&child| describe(child, &mut complete))
-                .collect();
-            let mut decision = decide_window_scope(&candidates, wid, || {
-                crate::windows::resolve_window_owner(pid, wid)
-            });
-            if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
-                // AppKit can omit every window from both arrays while these
-                // references still resolve to the requested window.
-                for attribute in ["AXFocusedWindow", "AXMainWindow"] {
-                    let selection = copy_element_attr_with_status(app_elem, attribute);
-                    complete &= selection.complete;
-                    let Some(window) = selection.value else {
-                        continue;
-                    };
-                    let mut owner = 0;
-                    if AXUIElementGetPid(window, &mut owner) == kAXErrorSuccess
-                        && owner == pid
-                        && !top_level
-                            .iter()
-                            .any(|&seen| CFEqual(seen as CFTypeRef, window as CFTypeRef) != 0)
-                    {
-                        let candidate = describe(window, &mut complete);
-                        if matches!(candidate.role.as_str(), "AXWindow" | "AXSheet")
-                            && candidate.ax_window_id == Some(wid)
-                        {
-                            top_level.push(window);
-                            candidates.push(candidate);
-                            continue;
-                        }
+            }
+
+            // Scope: keep non-window children (menu bar) + the target window —
+            // but ONLY once the target window has actually been identified. When
+            // nothing claims the requested id, `decide_window_scope` reports why
+            // and walks nothing; it must never fall back to "everything that isn't
+            // a window", which is how issue #2237 returned menu bars as panels.
+            let walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
+                let describe = |child, complete: &mut bool, proven_window_id: Option<u32>| {
+                    set_messaging_timeout(child, deadline);
+                    let role_read = copy_string_attr_with_status(child, "AXRole");
+                    if role_read.complete && role_read.value.is_none() {
+                        super::bindings::note_incomplete(
+                            "AXRole",
+                            "top-level element with no role value",
+                        );
                     }
-                    CFRelease(window as CFTypeRef);
-                }
-                decision = decide_window_scope(&candidates, wid, || {
+                    *complete &= role_read.complete && role_read.value.is_some();
+                    let role = role_read.value.unwrap_or_default();
+                    let subrole_read = copy_string_attr_with_status(child, "AXSubrole");
+                    *complete &= subrole_read.complete;
+                    let identifier_read = copy_string_attr_with_status(child, "AXIdentifier");
+                    *complete &= identifier_read.complete;
+                    // Match AX window element → CGWindowID via private SPI.
+                    // Only windows carry one, so skip the round-trip elsewhere.
+                    let ax_window_id = if matches!(role.as_str(), "AXWindow" | "AXSheet") {
+                        proven_window_id.or_else(|| ax_get_window_id(child))
+                    } else {
+                        None
+                    };
+                    TopLevelCandidate {
+                        role,
+                        subrole: subrole_read.value,
+                        identifier: identifier_read.value,
+                        ax_window_id,
+                    }
+                };
+                let mut candidates: Vec<TopLevelCandidate> = top_level
+                    .iter()
+                    .map(|&child| describe(child, &mut complete, None))
+                    .collect();
+                let mut decision = decide_window_scope(&candidates, wid, || {
                     crate::windows::resolve_window_owner(pid, wid)
                 });
-            }
-            if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
-                let (sheets, discovery_complete) = super::sheets::copy_attached_sheets(&top_level);
-                complete &= discovery_complete;
-                if discovery_complete {
-                    for sheet in sheets {
-                        let element = sheet.element.as_ptr() as AXUIElementRef;
-                        if !top_level
-                            .iter()
-                            .any(|&seen| CFEqual(seen as CFTypeRef, element as CFTypeRef) != 0)
+                if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                    // AppKit can omit every window from both arrays while these
+                    // references still resolve to the requested window.
+                    for attribute in ["AXFocusedWindow", "AXMainWindow"] {
+                        let selection = copy_element_attr_with_status(app_elem, attribute);
+                        complete &= selection.complete;
+                        let Some(window) = selection.value else {
+                            continue;
+                        };
+                        let mut owner = 0;
+                        if AXUIElementGetPid(window, &mut owner) == kAXErrorSuccess
+                            && owner == pid
+                            && !top_level
+                                .iter()
+                                .any(|&seen| CFEqual(seen as CFTypeRef, window as CFTypeRef) != 0)
                         {
-                            CFRetain(element as CFTypeRef);
-                            top_level.push(element);
-                            candidates.push(TopLevelCandidate::new("AXSheet", sheet.window_id));
+                            let candidate = describe(window, &mut complete, None);
+                            if matches!(candidate.role.as_str(), "AXWindow" | "AXSheet")
+                                && candidate.ax_window_id == Some(wid)
+                            {
+                                top_level.push(window);
+                                candidates.push(candidate);
+                                continue;
+                            }
                         }
+                        CFRelease(window as CFTypeRef);
                     }
                     decision = decide_window_scope(&candidates, wid, || {
                         crate::windows::resolve_window_owner(pid, wid)
                     });
                 }
-            }
-            let walk = decision
-                .walk
-                .iter()
-                .map(|&index| top_level[index])
-                .collect();
-            window_scope = Some(decision.scope);
-            walk
-        } else {
-            top_level.to_vec()
+                if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                    let (sheets, discovery_complete) =
+                        super::sheets::copy_attached_sheets(&top_level);
+                    complete &= discovery_complete;
+                    if discovery_complete {
+                        for sheet in sheets {
+                            let element = sheet.element.as_ptr() as AXUIElementRef;
+                            if !top_level
+                                .iter()
+                                .any(|&seen| CFEqual(seen as CFTypeRef, element as CFTypeRef) != 0)
+                            {
+                                CFRetain(element as CFTypeRef);
+                                top_level.push(element);
+                                candidates.push(TopLevelCandidate::new("AXSheet", sheet.window_id));
+                            }
+                        }
+                        decision = decide_window_scope(&candidates, wid, || {
+                            crate::windows::resolve_window_owner(pid, wid)
+                        });
+                    }
+                }
+                if !remote_probe_attempted
+                    && complete
+                    && matches!(decision.scope, WindowScope::AxUnresolved { .. })
+                {
+                    remote_probe_attempted = true;
+                    if let Some(window) = copy_remote_window_for_id(pid, wid, deadline) {
+                        let candidate = describe(window, &mut complete, Some(wid));
+                        if complete && candidate.role == "AXWindow" {
+                            top_level.push(window);
+                            candidates.push(candidate);
+                            decision = decide_window_scope(&candidates, wid, || {
+                                crate::windows::resolve_window_owner(pid, wid)
+                            });
+                        } else {
+                            CFRelease(window as CFTypeRef);
+                        }
+                    }
+                }
+                if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                    if let Some(pause) =
+                        super::launch::retry_pause(pid, launch_deadline, attempt_started)
+                    {
+                        for child in top_level {
+                            CFRelease(child as CFTypeRef);
+                        }
+                        std::thread::sleep(pause);
+                        if launch_deadline.is_some_and(|limit| Instant::now() >= limit) {
+                            window_scope = Some(decision.scope);
+                            complete = false;
+                            super::bindings::note_incomplete(
+                                "AXWindow",
+                                "application launch lookup exhausted its retry budget",
+                            );
+                            break 'resolve (Vec::new(), Vec::new());
+                        }
+                        continue 'resolve;
+                    }
+                    if launch_deadline.is_some() && super::launch::is_still_launching(pid) {
+                        complete = false;
+                        super::bindings::note_incomplete(
+                            "AXWindow",
+                            "application is still launching; exact window is unavailable",
+                        );
+                    }
+                }
+                let walk = decision
+                    .walk
+                    .iter()
+                    .map(|&index| top_level[index])
+                    .collect();
+                window_scope = Some(decision.scope);
+                walk
+            } else {
+                top_level.to_vec()
+            };
+
+            break (walk_these, top_level);
         };
 
         let mut mode = if app_context {
@@ -509,7 +640,15 @@ pub(crate) fn walk_tree_with_context(
                 &mut complete,
                 max_elements,
                 max_depth,
+                deadline,
+                &mut observation_budget,
+                &mut web_area_seen,
             );
+        }
+
+        if !super::enablement::complete_chromium_observation(pid, readiness, web_area_seen) {
+            complete = false;
+            super::bindings::note_incomplete("Chromium accessibility", "web content is not ready");
         }
 
         if let Some(menu) = open_menu {
@@ -549,7 +688,14 @@ pub(crate) fn walk_tree_with_context(
         raw_markdown
     };
 
-    if truncated_flag {
+    if observation_budget.is_some_and(|budget| budget.exhausted) {
+        tree_markdown.push_str(
+            "\n⚠️  AX tree truncated by the 1-second observation time budget. \
+             Listed elements remain valid; missing elements were not observed.",
+        );
+    } else if truncated_flag && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        tree_markdown.push_str("\n⚠️  AX tree truncated by the recording time budget.");
+    } else if truncated_flag {
         tree_markdown.push_str(&format!(
             "\n⚠️  AX tree truncated by traversal limits ({max_elements} nodes, depth {max_depth}) \
              (app has a very large accessibility tree — Arc, Electron, or similar). \
@@ -585,12 +731,29 @@ unsafe fn walk_element(
     complete: &mut bool,
     max_elements: usize,
     max_depth: usize,
+    deadline: Option<Instant>,
+    observation_budget: &mut Option<ObservationWalkBudget>,
+    web_area_seen: &mut bool,
 ) {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        super::bindings::note_incomplete("walk", "recording time budget exhausted");
+        *truncated = true;
+        *complete = false;
+        return;
+    }
     let identity = AXIdentity::retained(element);
     if visited_identities.contains(&identity) {
         return;
     }
     if depth <= max_depth && *visited_count < max_elements {
+        if observation_budget
+            .as_mut()
+            .is_some_and(|budget| !budget.admit())
+        {
+            super::bindings::note_incomplete("walk", "observation time budget exhausted");
+            *truncated = true;
+            return;
+        }
         visited_identities.insert(identity);
     }
     walk_element_contents(
@@ -608,6 +771,9 @@ unsafe fn walk_element(
         complete,
         max_elements,
         max_depth,
+        deadline,
+        observation_budget,
+        web_area_seen,
     );
 }
 
@@ -627,6 +793,9 @@ unsafe fn walk_element_contents(
     complete: &mut bool,
     max_elements: usize,
     max_depth: usize,
+    deadline: Option<Instant>,
+    observation_budget: &mut Option<ObservationWalkBudget>,
+    web_area_seen: &mut bool,
 ) {
     if depth > max_depth {
         super::bindings::note_incomplete("walk", "max_depth exceeded");
@@ -644,7 +813,7 @@ unsafe fn walk_element_contents(
 
     // Messaging timeouts are per AX object, not inherited from the application
     // element, so every descendant must be bounded before any attribute read.
-    set_messaging_timeout(element);
+    set_messaging_timeout(element, deadline);
 
     let role_read = copy_string_attr_with_status(element, "AXRole");
     if role_read.complete
@@ -658,6 +827,7 @@ unsafe fn walk_element_contents(
     }
     *complete &= role_read.complete && role_read.value.is_some();
     let role = role_read.value.unwrap_or_else(|| "AXUnknown".into());
+    *web_area_seen |= role == "AXWebArea";
 
     let in_web_content = in_web_content || is_web_content_role(&role);
 
@@ -684,6 +854,9 @@ unsafe fn walk_element_contents(
                 complete,
                 max_elements,
                 max_depth,
+                deadline,
+                observation_budget,
+                web_area_seen,
             );
             CFRelease(child as CFTypeRef);
         }
@@ -855,6 +1028,9 @@ unsafe fn walk_element_contents(
                 complete,
                 max_elements,
                 max_depth,
+                deadline,
+                observation_budget,
+                web_area_seen,
             );
             CFRelease(child as CFTypeRef);
         }
@@ -1026,6 +1202,9 @@ unsafe fn walk_element_contents(
             complete,
             max_elements,
             max_depth,
+            deadline,
+            observation_budget,
+            web_area_seen,
         );
         CFRelease(child as CFTypeRef);
     }
@@ -1264,6 +1443,101 @@ fn leading_indent_depth(line: &str) -> usize {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn observation_deadline_preserves_completed_prefix_and_read_status() {
+        use super::*;
+        unsafe {
+            let element = AXUIElementCreateApplication(std::process::id() as i32);
+            assert!(!element.is_null());
+            for reads_ok in [true, false] {
+                let mut nodes = vec![AXNode {
+                    role: "AXButton".into(),
+                    ..Default::default()
+                }];
+                let mut lines = vec![(0, "completed prefix".into())];
+                let mut visited = 1;
+                let mut truncated = false;
+                let mut complete = reads_ok;
+                let mut budget = Some(ObservationWalkBudget {
+                    started: Some(Instant::now() - Duration::from_secs(2)),
+                    exhausted: false,
+                });
+                super::super::bindings::reset_incomplete_notes();
+                walk_element(
+                    element,
+                    0,
+                    None,
+                    false,
+                    WalkMode::Legacy,
+                    &mut HashSet::new(),
+                    &mut nodes,
+                    &mut lines,
+                    &mut 0,
+                    &mut visited,
+                    &mut truncated,
+                    &mut complete,
+                    2000,
+                    25,
+                    None,
+                    &mut budget,
+                    &mut false,
+                );
+                assert!(truncated);
+                assert_eq!(complete, reads_ok);
+                assert_eq!(visited, 1);
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(lines, vec![(0, "completed prefix".into())]);
+                assert!(super::super::bindings::take_incomplete_notes()
+                    .iter()
+                    .any(|note| note.contains("observation time budget exhausted")));
+            }
+            CFRelease(element as CFTypeRef);
+        }
+    }
+
+    #[test]
+    fn recording_deadline_stops_before_native_read_and_preserves_partial_tree() {
+        use super::*;
+        let mut nodes = vec![AXNode {
+            role: "AXButton".into(),
+            ..Default::default()
+        }];
+        let mut lines = vec![(0, "completed prefix".into())];
+        let mut visited = 1;
+        let mut truncated = false;
+        let mut complete = true;
+        super::super::bindings::reset_incomplete_notes();
+        unsafe {
+            walk_element(
+                std::ptr::null_mut(),
+                0,
+                None,
+                false,
+                WalkMode::Legacy,
+                &mut HashSet::new(),
+                &mut nodes,
+                &mut lines,
+                &mut 0,
+                &mut visited,
+                &mut truncated,
+                &mut complete,
+                2000,
+                25,
+                Some(Instant::now()),
+                &mut None,
+                &mut false,
+            );
+        }
+        assert!(truncated);
+        assert!(!complete);
+        assert_eq!(visited, 1);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(lines, vec![(0, "completed prefix".into())]);
+        assert!(super::super::bindings::take_incomplete_notes()
+            .iter()
+            .any(|note| note.contains("recording time budget exhausted")));
+    }
+
+    #[test]
     fn traversal_limits_do_not_hide_read_failures() {
         for (depth, visited) in [(26, 0), (0, 2000)] {
             for reads_ok in [true, false] {
@@ -1286,6 +1560,9 @@ mod tests {
                         &mut complete,
                         2000,
                         25,
+                        None,
+                        &mut None,
+                        &mut false,
                     );
                 }
                 assert!(truncated);

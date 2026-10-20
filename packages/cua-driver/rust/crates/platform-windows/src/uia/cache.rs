@@ -1,36 +1,15 @@
-//! Accessibility element cache for Windows.
-//!
-//! Mirrors the macOS ElementCache design: per-(pid, window_id) snapshots of
-//! retained COM pointers (either `IUIAutomationElement` for the UIA primary
-//! path, or `IAccessible` for the MSAA fallback used on SAL/VCL targets).
-//!
-//! Memory contract: `UiaNode::element_ptr` is a raw COM vtable pointer with
-//! an extra AddRef from `clone()+forget()` in the walker. `CachedSnapshot::Drop`
-//! calls `Release()` via the kind-appropriate vtable to balance.
-//!
-//! The locked-HashMap plumbing lives in `cua_driver_core::element_cache` — see
-//! `docs/dedup-audit.md` item #3. This module owns the Windows-specific
-//! `CacheKey`, `CachedSnapshot`, and the `Drop` impl that fires COM `Release`
-//! when an entry is replaced or removed.
+//! Immutable UIA/MSAA snapshots owned by element-token bindings. The latest
+//! target directory contains weak references, so invalidation releases native
+//! pointers when the final in-flight action drops its bound snapshot.
 
 use super::UiaNode;
 use cua_driver_core::element_cache::ElementCacheCore;
+use cua_driver_core::element_token::{ResolvedElement, SnapshotBinding};
+use std::sync::{Arc, Weak};
 use windows::core::Interface;
 use windows::Win32::UI::Accessibility::{IAccessible, IUIAutomationElement};
 
-/// A cached element pointer borrowed out of the cache with an extra COM
-/// `AddRef`, so it stays alive for the duration of a UIA/MSAA action even if a
-/// concurrent `get_window_state` (→ [`ElementCache::update`]) replaces and
-/// drops the snapshot it came from. Without this, the snapshot's `Drop` could
-/// `Release` the element to zero while an in-flight click / SetValue was still
-/// dereferencing the raw COM vtable pointer — a use-after-free. This is the
-/// Windows analogue of the macOS AX-element crash fixed in #1796
-/// (`EXC_BREAKPOINT` in `AXUIElementCopyActionNames`); here the same shape
-/// would fault inside `IUIAutomation*::Invoke` / `ValuePattern::SetValue`.
-///
-/// The `AddRef` is taken **under the cache lock** (see
-/// [`ElementCache::get_element_retained`]); the matching `Release` fires on
-/// drop, via the `kind`-appropriate interface — mirroring `CachedSnapshot::drop`.
+/// An extra COM reference for an action that can outlive its snapshot view.
 pub struct RetainedElement {
     ptr: usize,
     kind: SnapshotKind,
@@ -140,7 +119,7 @@ impl Drop for CachedSnapshot {
 }
 
 pub struct ElementCache {
-    core: ElementCacheCore<CacheKey, CachedSnapshot>,
+    core: ElementCacheCore<CacheKey, Weak<CachedSnapshot>>,
 }
 
 impl ElementCache {
@@ -152,18 +131,25 @@ impl ElementCache {
 
     /// Update the snapshot for (pid, hwnd) with the actionable elements
     /// from a UIA walk. Mirrors `update_msaa` for the MSAA path.
-    pub fn update(&self, pid: u32, hwnd: u64, nodes: &[UiaNode]) {
-        self.update_with_kind(pid, hwnd, nodes, SnapshotKind::Uia);
+    pub fn update(&self, pid: u32, hwnd: u64, nodes: &[UiaNode]) -> u32 {
+        self.update_for_session(pid, hwnd, nodes, SnapshotKind::Uia, None)
     }
 
     /// Same as `update` but tags the snapshot as MSAA so Drop releases the
     /// pointers as `IAccessible` and the click tool routes through the
     /// MSAA dispatch path.
-    pub fn update_msaa(&self, pid: u32, hwnd: u64, nodes: &[UiaNode]) {
-        self.update_with_kind(pid, hwnd, nodes, SnapshotKind::Msaa);
+    pub fn update_msaa(&self, pid: u32, hwnd: u64, nodes: &[UiaNode]) -> u32 {
+        self.update_for_session(pid, hwnd, nodes, SnapshotKind::Msaa, None)
     }
 
-    fn update_with_kind(&self, pid: u32, hwnd: u64, nodes: &[UiaNode], kind: SnapshotKind) {
+    pub fn update_for_session(
+        &self,
+        pid: u32,
+        hwnd: u64,
+        nodes: &[UiaNode],
+        kind: SnapshotKind,
+        session: Option<&str>,
+    ) -> u32 {
         let actionable: Vec<&UiaNode> =
             nodes.iter().filter(|n| n.element_index.is_some()).collect();
         let elements: Vec<usize> = actionable.iter().map(|n| n.element_ptr).collect();
@@ -174,65 +160,115 @@ impl ElementCache {
         let rects: Vec<Option<(i32, i32, i32, i32)>> = actionable.iter().map(|n| n.rect).collect();
         let msaa_roles: Vec<Option<i32>> = actionable.iter().map(|n| n.msaa_role).collect();
         let actions = actionable.iter().map(|node| node.actions.clone()).collect();
-        self.core.insert(
-            CacheKey { pid, hwnd },
-            CachedSnapshot {
-                kind,
-                elements,
-                centers,
-                rects,
-                msaa_roles,
-                actions,
-            },
-        );
+        let snapshot = Arc::new(CachedSnapshot {
+            kind,
+            elements,
+            centers,
+            rects,
+            msaa_roles,
+            actions,
+        });
+        self.publish_for_session(pid, hwnd, snapshot, session)
     }
 
-    /// Look up + COM-`AddRef` the element for `element_index` in (pid, hwnd),
-    /// returning a guard that `Release`s on drop. The `AddRef` happens **under
-    /// the cache lock**, so a concurrent [`update`](Self::update) (which
-    /// replaces the snapshot and `Release`s its pointers in
-    /// `CachedSnapshot::drop`) cannot free the element between the lookup and
-    /// the `AddRef`. Hold the returned guard for the entire UIA/MSAA action —
-    /// this is what makes element actions safe when two sessions drive the same
-    /// `(pid, hwnd)`. Returns `None` if the index isn't cached.
+    #[cfg(test)]
+    fn publish(&self, pid: u32, hwnd: u64, snapshot: Arc<CachedSnapshot>) -> u32 {
+        self.publish_for_session(pid, hwnd, snapshot, None)
+    }
+
+    fn publish_for_session(
+        &self,
+        pid: u32,
+        hwnd: u64,
+        snapshot: Arc<CachedSnapshot>,
+        session: Option<&str>,
+    ) -> u32 {
+        let id = cua_driver_core::element_token::global().register_snapshot_payload_for_session(
+            pid as i32,
+            hwnd as u32,
+            0..snapshot.elements.len(),
+            snapshot.clone(),
+            session,
+        );
+        self.core
+            .insert(CacheKey { pid, hwnd }, Arc::downgrade(&snapshot));
+        id
+    }
+
+    pub fn clear_target(&self, pid: u32, hwnd: u64) {
+        cua_driver_core::element_token::global().clear_current_target(pid as i32, hwnd as u32);
+        self.core.remove(&CacheKey { pid, hwnd });
+    }
+
+    pub fn element_count(&self, pid: u32, hwnd: u64) -> usize {
+        self.core
+            .with_snapshot(&CacheKey { pid, hwnd }, |s| {
+                s.upgrade().map_or(0, |s| s.elements.len())
+            })
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Clone)]
+pub struct BoundElementCache {
+    binding: Option<SnapshotBinding>,
+}
+
+impl BoundElementCache {
+    pub fn from_resolved(resolved: &ResolvedElement) -> Self {
+        Self {
+            binding: resolved.binding(),
+        }
+    }
+
+    pub fn from_binding(binding: SnapshotBinding) -> Self {
+        Self {
+            binding: Some(binding),
+        }
+    }
+
+    fn with_snapshot<R>(
+        &self,
+        key: &CacheKey,
+        read: impl FnOnce(&CachedSnapshot) -> R,
+    ) -> Option<R> {
+        self.binding
+            .as_ref()?
+            .with_payload(key.pid as i32, key.hwnd as u32, read)
+    }
+
+    /// Retain from the bound snapshot, including its original interface kind.
     pub fn get_element_retained(
         &self,
         pid: u32,
         hwnd: u64,
         element_index: usize,
     ) -> Option<RetainedElement> {
-        self.core
-            .with_snapshot(&CacheKey { pid, hwnd }, |s| {
-                let ptr = s.elements.get(element_index).copied()?;
-                if ptr != 0 {
-                    // Safety: still inside `with_snapshot`'s lock — the same
-                    // `Mutex` that `insert` (the snapshot replace) takes — so
-                    // the snapshot and thus this COM object is alive right now.
-                    // Bump the refcount with the kind-appropriate vtable, using
-                    // the walker's clone()+forget() idiom: `dup` is the extra
-                    // ref the guard owns; the borrowed `iface` is forgotten so
-                    // it doesn't Release the cache's own ref.
-                    unsafe {
-                        match s.kind {
-                            SnapshotKind::Uia => {
-                                let iface: IUIAutomationElement =
-                                    IUIAutomationElement::from_raw(ptr as *mut _);
-                                let dup = iface.clone(); // AddRef → +1
-                                std::mem::forget(iface); // don't Release cache's ref
-                                std::mem::forget(dup); // guard owns the +1
-                            }
-                            SnapshotKind::Msaa => {
-                                let iface: IAccessible = IAccessible::from_raw(ptr as *mut _);
-                                let dup = iface.clone();
-                                std::mem::forget(iface);
-                                std::mem::forget(dup);
-                            }
+        self.with_snapshot(&CacheKey { pid, hwnd }, |s| {
+            let ptr = s.elements.get(element_index).copied()?;
+            if ptr != 0 {
+                // The immutable binding owns the original COM reference.
+                unsafe {
+                    match s.kind {
+                        SnapshotKind::Uia => {
+                            let iface: IUIAutomationElement =
+                                IUIAutomationElement::from_raw(ptr as *mut _);
+                            let dup = iface.clone(); // AddRef → +1
+                            std::mem::forget(iface); // don't Release cache's ref
+                            std::mem::forget(dup); // guard owns the +1
+                        }
+                        SnapshotKind::Msaa => {
+                            let iface: IAccessible = IAccessible::from_raw(ptr as *mut _);
+                            let dup = iface.clone();
+                            std::mem::forget(iface);
+                            std::mem::forget(dup);
                         }
                     }
                 }
-                Some(RetainedElement { ptr, kind: s.kind })
-            })
-            .flatten()
+            }
+            Some(RetainedElement { ptr, kind: s.kind })
+        })
+        .flatten()
     }
 
     pub fn get_element_center(
@@ -241,11 +277,10 @@ impl ElementCache {
         hwnd: u64,
         element_index: usize,
     ) -> Option<(i32, i32)> {
-        self.core
-            .with_snapshot(&CacheKey { pid, hwnd }, |s| {
-                s.centers.get(element_index).copied()
-            })
-            .flatten()
+        self.with_snapshot(&CacheKey { pid, hwnd }, |s| {
+            s.centers.get(element_index).copied()
+        })
+        .flatten()
     }
 
     /// Focus a cached UIA element without activating its top-level window.
@@ -294,11 +329,10 @@ impl ElementCache {
         hwnd: u64,
         element_index: usize,
     ) -> Option<(i32, i32, i32, i32)> {
-        self.core
-            .with_snapshot(&CacheKey { pid, hwnd }, |s| {
-                s.rects.get(element_index).copied().flatten()
-            })
-            .flatten()
+        self.with_snapshot(&CacheKey { pid, hwnd }, |s| {
+            s.rects.get(element_index).copied().flatten()
+        })
+        .flatten()
     }
 
     /// Kind + MSAA role for the element. `(Msaa, Some(0x38))` identifies a
@@ -310,12 +344,11 @@ impl ElementCache {
         hwnd: u64,
         element_index: usize,
     ) -> Option<(SnapshotKind, Option<i32>)> {
-        self.core
-            .with_snapshot(&CacheKey { pid, hwnd }, |s| {
-                let role = s.msaa_roles.get(element_index).copied().flatten();
-                Some((s.kind, role))
-            })
-            .flatten()
+        self.with_snapshot(&CacheKey { pid, hwnd }, |s| {
+            let role = s.msaa_roles.get(element_index).copied().flatten();
+            Some((s.kind, role))
+        })
+        .flatten()
     }
 
     pub fn get_element_actions(
@@ -324,21 +357,10 @@ impl ElementCache {
         hwnd: u64,
         element_index: usize,
     ) -> Option<Vec<String>> {
-        self.core
-            .with_snapshot(&CacheKey { pid, hwnd }, |snapshot| {
-                snapshot.actions.get(element_index).cloned()
-            })
-            .flatten()
-    }
-
-    pub fn clear_target(&self, pid: u32, hwnd: u64) {
-        self.core.remove(&CacheKey { pid, hwnd });
-    }
-
-    pub fn element_count(&self, pid: u32, hwnd: u64) -> usize {
-        self.core
-            .with_snapshot(&CacheKey { pid, hwnd }, |s| s.elements.len())
-            .unwrap_or(0)
+        self.with_snapshot(&CacheKey { pid, hwnd }, |snapshot| {
+            snapshot.actions.get(element_index).cloned()
+        })
+        .flatten()
     }
 }
 

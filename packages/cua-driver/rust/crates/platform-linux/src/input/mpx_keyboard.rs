@@ -16,8 +16,8 @@
 //! Lifecycle mirrors the MPX pointer click: the master pair is created (or
 //! reused) for the session, the keyboard slave is attached, the target window
 //! is focused for that master only, keys are emitted, delivery is confirmed
-//! through the server's raw key events, and the pair is torn down again so a
-//! non-MPX-aware WM never sees a lingering foreign master.
+//! through the server's raw key events. The pair is retained until session
+//! cleanup; a keyboard with unconfirmed input cannot be reused meanwhile.
 
 use super::*;
 use x11rb::protocol::xproto::{ConnectionExt as _, GetKeyboardMappingReply};
@@ -32,14 +32,20 @@ const X_KEYCODE_OFFSET: u16 = 8;
 const MAX_EVDEV_KEY: u16 = 0xff;
 /// Unicode keysyms are the codepoint with this bit set (X11 keysym encoding).
 const UNICODE_KEYSYM_BASE: u32 = 0x0100_0000;
-/// How long the server gets to report the last emitted key through a raw
-/// event before the pair is torn down.
+/// How long the server gets to report every emitted transition before the
+/// retained keyboard becomes unavailable until session cleanup.
 const DELIVERY_CONFIRM_TIMEOUT: Duration = Duration::from_millis(1500);
 
-static UINPUT_KEYBOARDS: OnceLock<Mutex<HashMap<String, Arc<Mutex<VirtualDevice>>>>> =
-    OnceLock::new();
+struct UinputKeyboard {
+    device: Arc<Mutex<VirtualDevice>>,
+    // A timed-out stream can still enter Xserver after a later subscription.
+    // Keep its device alive but unavailable until normal session cleanup.
+    pending: bool,
+}
 
-fn uinput_keyboards() -> &'static Mutex<HashMap<String, Arc<Mutex<VirtualDevice>>>> {
+static UINPUT_KEYBOARDS: OnceLock<Mutex<HashMap<String, UinputKeyboard>>> = OnceLock::new();
+
+fn uinput_keyboards() -> &'static Mutex<HashMap<String, UinputKeyboard>> {
     UINPUT_KEYBOARDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -55,6 +61,29 @@ fn slave_keyboard_name(master_name: &str) -> String {
 /// Xorg with udev/libinput hotplug and a writable `/dev/uinput`.
 pub fn real_keyboard_input_available() -> bool {
     real_pointer_input_available()
+}
+
+pub(crate) fn check_keyboard_background(cursor_id: &str) -> Result<()> {
+    if uinput_keyboards()
+        .lock()
+        .unwrap()
+        .get(cursor_id)
+        .is_some_and(|keyboard| keyboard.pending)
+    {
+        bail!(
+            "not_settable: the virtual keyboard has unconfirmed input; no input was sent \
+             by this request. Observe the target, then end and recreate the CUA session \
+             before sending more keyboard input"
+        );
+    }
+    // Xorg emits core FocusIn even for a master with send_core disabled.
+    // Openbox treats that event as global activation; Mutter keeps it local.
+    if crate::x11::window_manager_name()
+        .is_some_and(|name| name.trim_end_matches('\0').eq_ignore_ascii_case("Openbox"))
+    {
+        return Err(delivery::BackgroundUnavailable::WindowManagerFocus.into());
+    }
+    Ok(())
 }
 
 /// One evdev key transition for the uinput keyboard.
@@ -131,10 +160,16 @@ pub(super) fn plan_text_with_fallback<G>(
 ) -> Result<(Vec<KeyStep>, Vec<G>)> {
     let shift = shift_x_keycode.and_then(evdev_code_for_x_keycode);
     let mut steps = Vec::with_capacity(text.len() * 2);
-    let guards = type_text_with_preflight(text, mapping, remap, |keycode, needs_shift| {
-        tap_steps(keycode, needs_shift, shift, &mut steps);
-        Ok(())
-    })?;
+    let guards = type_text_with_preflight(
+        text,
+        mapping,
+        remap,
+        |keycode, needs_shift| {
+            tap_steps(keycode, needs_shift, shift, &mut steps);
+            Ok(())
+        },
+        || Ok(()),
+    )?;
     Ok((steps, guards))
 }
 
@@ -295,11 +330,15 @@ fn create_uinput_keyboard(name: &str) -> Result<VirtualDevice> {
 fn ensure_master_keyboard(
     cursor_id: &str,
 ) -> Result<(MasterPointerIds, Arc<Mutex<VirtualDevice>>)> {
+    check_keyboard_background(cursor_id)?;
+    let device = {
+        let keyboards = uinput_keyboards().lock().unwrap();
+        keyboards
+            .get(cursor_id)
+            .map(|keyboard| keyboard.device.clone())
+    };
     let ids = ensure_master_pointer(cursor_id)?;
-    if let (Some(_), Some(device)) = (
-        ids.slave_keyboard_id,
-        uinput_keyboards().lock().unwrap().get(cursor_id).cloned(),
-    ) {
+    if let (Some(_), Some(device)) = (ids.slave_keyboard_id, device) {
         return Ok((ids, device));
     }
 
@@ -313,7 +352,7 @@ fn ensure_master_keyboard(
             .and_then(|(_, _, name)| name.strip_suffix(" keyboard").map(str::to_owned))
             .ok_or_else(|| anyhow!("master keyboard {} vanished", ids.keyboard_id))?;
         let device_name = slave_keyboard_name(&base);
-        let mut device = create_uinput_keyboard(&device_name)?;
+        let device = create_uinput_keyboard(&device_name)?;
         let slave_keyboard_id = wait_for_slave_id(
             display,
             &device_name,
@@ -321,7 +360,6 @@ fn ensure_master_keyboard(
             Duration::from_secs(5),
         )?;
         attach_slave_to_master(display, slave_keyboard_id, ids.keyboard_id)?;
-        warm_up_keyboard(display, &mut device, slave_keyboard_id, ids.keyboard_id);
         let ids = MasterPointerIds {
             slave_keyboard_id: Some(slave_keyboard_id),
             ..ids
@@ -331,38 +369,135 @@ fn ensure_master_keyboard(
             .unwrap()
             .insert(cursor_id.to_owned(), ids);
         let device = Arc::new(Mutex::new(device));
+        uinput_keyboards().lock().unwrap().insert(
+            cursor_id.to_owned(),
+            UinputKeyboard {
+                device: device.clone(),
+                pending: true,
+            },
+        );
+        warm_up_keyboard(display, &mut device.lock().unwrap(), slave_keyboard_id)?;
         uinput_keyboards()
             .lock()
             .unwrap()
-            .insert(cursor_id.to_owned(), device.clone());
+            .get_mut(cursor_id)
+            .unwrap()
+            .pending = false;
         Ok((ids, device))
     })();
     unsafe { x11::xlib::XCloseDisplay(display) };
     result
 }
 
-/// evdev `KEY_UNKNOWN`: X keycode 248, `NoSymbol` in every evdev keymap, so
-/// it types nothing anywhere.
+/// evdev `KEY_UNKNOWN`: X keycode 248, normally `NoSymbol`. Warm up before
+/// the planner can borrow this keycode for a temporary mapping.
 const WARM_UP_EVDEV_CODE: u16 = 240;
+
+// x11 exposes XkbClientMapRec as opaque. These complete C layouts are from
+// X11/extensions/XKBstr.h; KeySyms uses width * (group_info & 0x0f) entries.
+#[repr(C)]
+struct XkbSymMap {
+    kt_index: [u8; 4],
+    group_info: u8,
+    width: u8,
+    offset: u16,
+}
+
+#[repr(C)]
+struct XkbClientMap {
+    size_types: u8,
+    num_types: u8,
+    types: x11::xlib::XkbKeyTypePtr,
+    size_syms: u16,
+    num_syms: u16,
+    syms: *mut x11::xlib::KeySym,
+    key_sym_map: *mut XkbSymMap,
+    modmap: *mut u8,
+}
+
+// `keyboard` must be a live XkbGetMap result (including its owned arrays).
+unsafe fn warm_up_key_has_no_symbols(
+    keyboard: x11::xlib::XkbDescPtr,
+    slave_keyboard_id: i32,
+) -> bool {
+    // XkbExplicitXIDevice allows only the low 8 bits; 0x100 selects core.
+    if !(1..=255).contains(&slave_keyboard_id) {
+        return false;
+    }
+    let Some(keyboard) = (unsafe { keyboard.as_ref() }) else {
+        return false;
+    };
+    let keycode = (WARM_UP_EVDEV_CODE + X_KEYCODE_OFFSET) as u8;
+    if keyboard.device_spec != slave_keyboard_id as u16
+        || keyboard.min_key_code < 8
+        || keyboard.min_key_code > keycode
+        || keyboard.max_key_code < keycode
+    {
+        return false;
+    }
+    let Some(map) = (unsafe { keyboard.map.cast::<XkbClientMap>().as_ref() }) else {
+        return false;
+    };
+    if map.key_sym_map.is_null() || map.syms.is_null() || map.num_syms > map.size_syms {
+        return false;
+    }
+    let entry = unsafe { &*map.key_sym_map.add(usize::from(keycode)) };
+    let groups = usize::from(entry.group_info & 0x0f);
+    if groups > 4 || (groups > 0 && entry.width == 0) {
+        return false;
+    }
+    let count = groups * usize::from(entry.width);
+    let offset = usize::from(entry.offset);
+    if offset + count > usize::from(map.num_syms) {
+        return false;
+    }
+    (0..count).all(|index| unsafe { *map.syms.add(offset + index) == 0 })
+}
+
+fn validate_warm_up_key(display: *mut x11::xlib::Display, slave_keyboard_id: i32) -> Result<()> {
+    let safe = if (1..=255).contains(&slave_keyboard_id) {
+        // A disappearing slave can produce BadDevice. GetMap waits for its
+        // reply, so restore the process handler after this synchronous call.
+        let old_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+        let keyboard = unsafe {
+            // XKB.h: XkbKeySymsMask = 1 << 1.
+            x11::xlib::XkbGetMap(display, 1 << 1, slave_keyboard_id as u32)
+        };
+        unsafe { x11::xlib::XSetErrorHandler(old_handler) };
+        let safe = unsafe { warm_up_key_has_no_symbols(keyboard, slave_keyboard_id) };
+        if !keyboard.is_null() {
+            // XKB.h: XkbAllComponentsMask = 0x7f; also free the descriptor.
+            unsafe { x11::xlib::XkbFreeKeyboard(keyboard, 0x7f, x11::xlib::True) };
+        }
+        safe
+    } else {
+        false
+    };
+    if !safe {
+        bail!(
+            "not_settable: virtual keyboard warm-up could not verify X248 is symbol-less on its \
+             slave; no input was sent. Observe the target, then end and recreate the CUA session \
+             before sending more keyboard input"
+        );
+    }
+    Ok(())
+}
 
 /// The first key events of a freshly hot-plugged keyboard were observed to
 /// vanish (the master switches to the slave's keymap on its first event and
 /// clients only learn about the new master from the hierarchy event queued
 /// ahead of the keys). Tap a symbol-less key through the whole pipeline and
 /// wait until the server reports it back, so the real text starts on a warm
-/// device. Best effort: a failure here only costs the warm-up.
+/// device. Unconfirmed warm-up leaves the retained device unavailable.
 fn warm_up_keyboard(
     display: *mut x11::xlib::Display,
     device: &mut VirtualDevice,
     slave_keyboard_id: i32,
-    master_keyboard_id: i32,
-) {
-    let Some(xi_opcode) = xinput_opcode(display) else {
-        return;
-    };
-    if select_raw_key_events(display, slave_keyboard_id).is_err() {
-        return;
-    }
+) -> Result<()> {
+    validate_warm_up_key(display, slave_keyboard_id)?;
+    let xi_opcode = xinput_opcode(display)
+        .ok_or_else(|| anyhow!("virtual keyboard warm-up requires XInput2"))?;
+    select_raw_key_events(display, slave_keyboard_id)?;
     let steps = [
         KeyStep {
             evdev_code: WARM_UP_EVDEV_CODE,
@@ -374,25 +509,35 @@ fn warm_up_keyboard(
         },
     ];
     for step in steps {
-        let _ = device.emit(&[InputEvent::new(
+        if let Err(error) = device.emit(&[InputEvent::new(
             EventType::KEY,
             step.evdev_code,
             if step.press { 1 } else { 0 },
-        )]);
+        )]) {
+            let _ = device.emit(&[InputEvent::new(EventType::KEY, WARM_UP_EVDEV_CODE, 0)]);
+            return Err(keymap_barrier::unconfirmed(format!(
+                "virtual keyboard warm-up failed: {error}; no requested input was sent. \
+                 Observe the target, then end and recreate the CUA session before sending more keyboard input"
+            )));
+        }
         sleep(Duration::from_millis(KEY_DELAY_MS));
     }
-    let seen = wait_for_raw_key(
+    let seen = wait_for_raw_keys(
         display,
         xi_opcode,
-        &[slave_keyboard_id, master_keyboard_id],
-        steps[1],
+        slave_keyboard_id,
+        &steps,
         Duration::from_millis(1500),
     );
     if !seen {
-        tracing::warn!("virtual keyboard warm-up: server did not report the probe key");
+        return Err(keymap_barrier::unconfirmed(
+            "virtual keyboard warm-up was not confirmed; no requested input was sent. \
+             Observe the target, then end and recreate the CUA session before sending more keyboard input",
+        ));
     }
     // Give clients a beat to process the hierarchy/keymap change.
     sleep(Duration::from_millis(120));
+    Ok(())
 }
 
 /// Shift keycode from the server's modifier map (modifier index 0).
@@ -438,19 +583,18 @@ fn select_raw_key_events(display: *mut x11::xlib::Display, device_id: i32) -> Re
     Ok(())
 }
 
-/// Block (bounded) until the server reports `last` as a raw key event from
-/// one of `device_ids`. Returns false on timeout.
-fn wait_for_raw_key(
+/// Confirm every transition in this batch, in order. An earlier repeated key
+/// release cannot establish that the final uinput event reached the server.
+fn wait_for_raw_keys(
     display: *mut x11::xlib::Display,
     xi_opcode: std::os::raw::c_int,
-    device_ids: &[i32],
-    last: KeyStep,
+    source_id: i32,
+    steps: &[KeyStep],
     timeout: Duration,
 ) -> bool {
-    let want_type = if last.press {
-        x11::xinput2::XI_RawKeyPress
-    } else {
-        x11::xinput2::XI_RawKeyRelease
+    let mut remaining = steps.iter();
+    let Some(mut next) = remaining.next() else {
+        return true;
     };
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
@@ -476,15 +620,30 @@ fn wait_for_raw_key(
             continue;
         }
         let raw = cookie.data as *const x11::xinput2::XIRawEvent;
-        let matched = !raw.is_null() && {
+        let transition = (!raw.is_null()).then(|| {
             let raw = unsafe { &*raw };
-            cookie.evtype == want_type
-                && raw.detail == i32::from(last.x_keycode())
-                && (device_ids.contains(&raw.deviceid) || device_ids.contains(&raw.sourceid))
-        };
+            (
+                if raw.sourceid == 0 {
+                    raw.deviceid
+                } else {
+                    raw.sourceid
+                },
+                raw.detail,
+                cookie.evtype == x11::xinput2::XI_RawKeyPress,
+            )
+        });
         unsafe { x11::xlib::XFreeEventData(display, &mut cookie) };
-        if matched {
-            return true;
+        if let Some((source, keycode, press)) = transition {
+            if source != source_id {
+                continue;
+            }
+            if keycode != i32::from(next.x_keycode()) || press != next.press {
+                return false;
+            }
+            match remaining.next() {
+                Some(step) => next = step,
+                None => return true,
+            }
         }
     }
     false
@@ -513,16 +672,17 @@ impl Keymap {
 }
 
 /// Deliver `steps` to `target_window` through the session's virtual master
-/// keyboard. `remap_guards` keeps any spare-keycode remaps alive until the
-/// server has processed the events.
+/// keyboard. Remaps stay live through server delivery and the client queue.
 fn deliver(
     cursor_id: &str,
     target_window: u64,
     steps: &[KeyStep],
     remap_guards: Vec<RemappedKeycode<'_>>,
     keymap_conn: &RustConnection,
+    barrier: Option<KeymapBarrier<'_>>,
+    keyboard: (MasterPointerIds, Arc<Mutex<VirtualDevice>>),
 ) -> Result<KeyboardDeliveryReport> {
-    let _op = mpx_op_guard(cursor_id);
+    let (ids, device) = keyboard;
     let display = open_display()?;
     let result = (|| -> Result<KeyboardDeliveryReport> {
         supports_parallel_pointer_injection(display)?;
@@ -534,7 +694,6 @@ fn deliver(
         }
         let xi_opcode = xinput_opcode(display)
             .ok_or_else(|| anyhow!("virtual keyboard delivery requires XInput2"))?;
-        let (ids, device) = ensure_master_keyboard(cursor_id)?;
         let slave_keyboard_id = ids
             .slave_keyboard_id
             .ok_or_else(|| anyhow!("uinput keyboard for '{cursor_id}' is not attached"))?;
@@ -567,12 +726,18 @@ fn deliver(
         unsafe { x11::xlib::XSetErrorHandler(previous_handler) };
         if !focus_taken {
             bail!(
-                "virtual master keyboard could not take focus on window 0x{target_window:x} \
-                 (not viewable, or another client owns the master focus)"
+                "not_settable: virtual master keyboard could not take focus on window 0x{target_window:x} \
+                 (not viewable, or another client owns the master focus); no requested keyboard input was sent"
             );
         }
 
-        let mut last = None;
+        uinput_keyboards()
+            .lock()
+            .unwrap()
+            .get_mut(cursor_id)
+            .unwrap()
+            .pending = true;
+
         let mut held: Vec<u16> = Vec::new();
         for step in steps {
             let emitted = {
@@ -587,40 +752,47 @@ fn deliver(
                 // Never abort with keys down: a held modifier would chord
                 // every later key of this session.
                 let mut device = device.lock().unwrap();
+                if step.press {
+                    let _ = device.emit(&[InputEvent::new(EventType::KEY, step.evdev_code, 0)]);
+                }
                 for code in held.iter().rev() {
                     let _ = device.emit(&[InputEvent::new(EventType::KEY, *code, 0)]);
                 }
-                return Err(error.into());
+                return Err(keymap_barrier::unconfirmed(error.to_string()));
             }
             if step.press {
                 held.push(step.evdev_code);
             } else {
                 held.retain(|code| *code != step.evdev_code);
             }
-            last = Some(*step);
             sleep(Duration::from_millis(KEY_DELAY_MS));
         }
-        let delivery_confirmed = match last {
-            Some(last) => wait_for_raw_key(
-                display,
-                xi_opcode,
-                &[slave_keyboard_id, ids.keyboard_id],
-                last,
-                DELIVERY_CONFIRM_TIMEOUT,
-            ),
-            None => true,
-        };
-        // The raw event proves the server consumed the transition; give the
-        // toolkit a beat to translate it under any temporary remap before the
-        // guards restore the keymap and the slave disappears.
-        sleep(Duration::from_millis(30));
-        let _ = keymap_conn.get_input_focus()?.reply();
+        let delivery_confirmed = wait_for_raw_keys(
+            display,
+            xi_opcode,
+            slave_keyboard_id,
+            steps,
+            DELIVERY_CONFIRM_TIMEOUT,
+        );
+        keymap_conn
+            .get_input_focus()
+            .map_err(|error| keymap_barrier::unconfirmed(error.to_string()))?
+            .reply()
+            .map_err(|error| keymap_barrier::unconfirmed(error.to_string()))?;
         let virtual_focus_held = xi_get_focus(display, ids.keyboard_id) == Some(window);
         let core_focus_unchanged = core_focus(display) == core_before;
+        if let Some(barrier) = &barrier {
+            if !delivery_confirmed || !virtual_focus_held {
+                return Err(keymap_barrier::unconfirmed(
+                    "virtual key delivery or focus was not confirmed",
+                ));
+            }
+            barrier.wait()?;
+        }
         if !delivery_confirmed {
             tracing::warn!(
                 cursor_id,
-                "virtual keyboard: server did not report the last key event within {:?}",
+                "virtual keyboard: server did not confirm the complete key batch within {:?}",
                 DELIVERY_CONFIRM_TIMEOUT
             );
         }
@@ -641,8 +813,18 @@ fn deliver(
     // a uinput keyboard and churn the XInput hierarchy on every keystroke
     // batch — enough to crash LibreOffice VCL. The pair is cleaned up on
     // end_session / idle / startup reap instead.
-    let _ = cursor_id;
     unsafe { x11::xlib::XCloseDisplay(display) };
+    if result
+        .as_ref()
+        .is_ok_and(|report| report.delivery_confirmed && report.virtual_focus_held)
+    {
+        uinput_keyboards()
+            .lock()
+            .unwrap()
+            .get_mut(cursor_id)
+            .unwrap()
+            .pending = false;
+    }
     result
 }
 
@@ -656,7 +838,15 @@ pub fn send_virtual_keyboard_text(
     let _keymap = KEYMAP_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _op = mpx_op_guard(cursor_id);
+    let keyboard = ensure_master_keyboard(cursor_id)?;
     let keymap = Keymap::load()?;
+    let barrier = KeymapBarrier::prepare(
+        &keymap.conn,
+        Some(target_window as u32),
+        &keymap.mapping,
+        text.chars().map(keysym_for_char),
+    )?;
     // Characters absent from the keymap (a sparse layout, or a non-Latin
     // glyph) are hosted on spare keycodes, with a guard that
     // restores the map after delivery. plan_text_with_fallback resolves each
@@ -669,7 +859,15 @@ pub fn send_virtual_keyboard_text(
         plan_text_with_fallback(&keymap.mapping, keymap.shift, text, |ch, mapping| {
             keycode_for_keysym(&keymap.conn, mapping, keysym_for_char(ch), &ch.to_string())
         })?;
-    deliver(cursor_id, target_window, &steps, guards, &keymap.conn)
+    deliver(
+        cursor_id,
+        target_window,
+        &steps,
+        guards,
+        &keymap.conn,
+        barrier,
+        keyboard,
+    )
 }
 
 /// Press `key` with `modifiers` held, into `target_window`, without touching
@@ -683,7 +881,19 @@ pub fn send_virtual_keyboard_key(
     let _keymap = KEYMAP_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _op = mpx_op_guard(cursor_id);
+    let keyboard = ensure_master_keyboard(cursor_id)?;
     let mut keymap = Keymap::load()?;
+    let requested = std::iter::once(key)
+        .chain(modifiers.iter().copied())
+        .map(key_name_to_keysym)
+        .collect::<Result<Vec<_>>>()?;
+    let barrier = KeymapBarrier::prepare(
+        &keymap.conn,
+        Some(target_window as u32),
+        &keymap.mapping,
+        requested,
+    )?;
     let mut guards = Vec::new();
     let mut modifier_keycodes = Vec::with_capacity(modifiers.len());
     for modifier in modifiers {
@@ -704,7 +914,15 @@ pub fn send_virtual_keyboard_key(
         }
     };
     let steps = plan_chord(&modifier_keycodes, keycode, needs_shift, keymap.shift);
-    deliver(cursor_id, target_window, &steps, guards, &keymap.conn)
+    deliver(
+        cursor_id,
+        target_window,
+        &steps,
+        guards,
+        &keymap.conn,
+        barrier,
+        keyboard,
+    )
 }
 
 #[cfg(test)]
@@ -880,6 +1098,143 @@ mod tests {
         assert_eq!(presses.len(), 3);
         assert_ne!(presses[0], presses[1]);
         assert_eq!(presses[0], presses[2]);
+    }
+
+    #[test]
+    fn warm_up_keycode_can_be_the_only_spare_for_a_temporary_mapping() {
+        let mut keymap = mapping();
+        keymap.keysyms = vec![1; 248 * usize::from(keymap.keysyms_per_keycode)];
+        let keycode = (WARM_UP_EVDEV_CODE + X_KEYCODE_OFFSET) as u8;
+        let per = keymap.keysyms_per_keycode as usize;
+        let offset = (usize::from(keycode) - 8) * per;
+        keymap.keysyms[offset..offset + per].fill(0);
+        let (borrowed, ()) = reserve_spare_keycode(
+            &mut keymap,
+            keysym_for_char('界'),
+            |borrowed, _, original, _| {
+                assert_eq!(borrowed, keycode);
+                assert!(original.iter().all(|symbol| *symbol == 0));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(borrowed, 248);
+    }
+
+    fn with_warm_up_map(
+        check: impl FnOnce(
+            *mut x11::xlib::_XkbDesc,
+            *mut XkbClientMap,
+            *mut XkbSymMap,
+            *mut x11::xlib::KeySym,
+        ),
+    ) {
+        let mut entries: [XkbSymMap; 256] = std::array::from_fn(|_| XkbSymMap {
+            kt_index: [0; 4],
+            group_info: 4,
+            width: 7,
+            offset: 3,
+        });
+        let mut symbols = vec![0; 1024];
+        let mut map = XkbClientMap {
+            size_types: 0,
+            num_types: 0,
+            types: std::ptr::null_mut(),
+            size_syms: symbols.len() as u16,
+            num_syms: symbols.len() as u16,
+            syms: symbols.as_mut_ptr(),
+            key_sym_map: entries.as_mut_ptr(),
+            modmap: std::ptr::null_mut(),
+        };
+        let mut keyboard: x11::xlib::_XkbDesc = unsafe { std::mem::zeroed() };
+        keyboard.device_spec = 6;
+        keyboard.min_key_code = 8;
+        keyboard.max_key_code = 255;
+        keyboard.map = (&mut map as *mut XkbClientMap).cast();
+        check(
+            &mut keyboard,
+            &mut map,
+            &mut entries[248],
+            symbols.as_mut_ptr(),
+        );
+    }
+
+    #[test]
+    fn warm_up_checks_every_group_and_level_in_the_slave_map() {
+        with_warm_up_map(|keyboard, _, entry, symbols| unsafe {
+            assert!(warm_up_key_has_no_symbols(keyboard, 6));
+            for index in 3..3 + 4 * 7 {
+                *symbols.add(index) = 0xff0d;
+                assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+                *symbols.add(index) = 0;
+            }
+            (*entry).width = 200;
+            *symbols.add(3 + 4 * 200 - 1) = 97;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+        });
+    }
+
+    #[test]
+    fn warm_up_accepts_verified_empty_groups_with_nonzero_width() {
+        with_warm_up_map(|keyboard, map, entry, _| unsafe {
+            // Read-only Xephyr slave6 reply: zero groups, width 2, offset449.
+            (*entry).group_info = 0;
+            (*entry).width = 2;
+            (*entry).offset = 449;
+            (*map).num_syms = 456;
+            (*map).size_syms = 640;
+            assert!(warm_up_key_has_no_symbols(keyboard, 6));
+            (*entry).offset = 457;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+        });
+    }
+
+    #[test]
+    fn warm_up_rejects_core_wrong_or_invalid_device_ids() {
+        with_warm_up_map(|keyboard, _, _, _| unsafe {
+            for id in [-1, 0, 7, 256, 65536, i32::MAX] {
+                assert!(!warm_up_key_has_no_symbols(keyboard, id));
+            }
+            (*keyboard).device_spec = 256;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+        });
+    }
+
+    #[test]
+    fn warm_up_rejects_unknown_or_out_of_bounds_maps() {
+        assert!(!unsafe { warm_up_key_has_no_symbols(std::ptr::null_mut(), 6) });
+        with_warm_up_map(|keyboard, map, entry, _| unsafe {
+            (*keyboard).min_key_code = 249;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*keyboard).min_key_code = 0;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*keyboard).min_key_code = 8;
+            (*keyboard).max_key_code = 247;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*keyboard).max_key_code = 255;
+            (*entry).group_info = 5;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*entry).group_info = 4;
+            (*entry).width = 0;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*entry).width = 7;
+            (*entry).offset = u16::MAX;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*entry).offset = 3;
+            (*map).num_syms = 30;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*map).num_syms = (*map).size_syms + 1;
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*map).num_syms = (*map).size_syms;
+            (*map).syms = std::ptr::null_mut();
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+        });
+        with_warm_up_map(|keyboard, map, _, _| unsafe {
+            (*map).key_sym_map = std::ptr::null_mut();
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+            (*keyboard).map = std::ptr::null_mut();
+            assert!(!warm_up_key_has_no_symbols(keyboard, 6));
+        });
     }
 
     #[test]

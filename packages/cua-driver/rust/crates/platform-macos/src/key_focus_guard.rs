@@ -19,13 +19,13 @@
 //! the loss; the menu stays open and is still operable through accessibility.
 //!
 //! Opening a menu also makes WindowServer order the menu's window group to the
-//! front, which lifts the target's parent window above the user's window. No
-//! client can stop that ordering or reorder another app's windows, so the
-//! guard restores the order right after: once the menu window is on screen
+//! front, which can lift the target's parent window above the user's window.
+//! The guard restores the parent window order after the menu appears; it does
+//! not establish uninterrupted visibility. Once the menu window is on screen
 //! (and again when the action ends), if a target window sits above the user's
-//! front window, the already-active front app is re-activated with all its
-//! windows. Key status does not move and the menu stays open; the raise is
-//! visible for at most a frame or two.
+//! front window, the guard asks the front app to raise its current focused
+//! window. It checks the exact visible window and leaves recent hardware
+//! input alone. Key status does not move and the target's menu stays open.
 //!
 //! Theft ids come from one session-wide counter that only the thief learns.
 //! The guard learns the target's id only after the tap has seen the theft:
@@ -70,7 +70,7 @@ const POPUP_MENU_LAYER: i32 = 101;
 fn target_above_front(target: i32, front: i32) -> bool {
     // Every layer, without the Space queries of `visible_windows`: this runs
     // while the raise is on screen, so it has to be quick.
-    let windows = crate::windows::all_windows_any_layer();
+    let windows = crate::windows::visible_windows_any_layer();
     target_above_front_in(&windows, target, front)
 }
 
@@ -89,25 +89,10 @@ fn target_above_front_in(windows: &[crate::windows::WindowInfo], target: i32, fr
     }
 }
 
-/// Put the user's front app back above a background target that raised its
-/// window (AppKit orders a popup menu's window group to the front, which
-/// lifts its parent window). Re-activating the already-active front app with
-/// all its windows restores the order without moving key status; the
-/// target's menu stays open.
-/// Put `front`'s windows back above `target` if the target's window was
-/// lifted over them (see [`restore_front_if_raised`]).
+/// Ask `front` to raise its current focused window if `target` was
+/// lifted over it (see [`restore_front_if_raised`]).
 pub fn restore_order_now(target: i32, front: i32) -> bool {
-    // NSWorkspace's frontmost reading can lag inside the daemon; the caller
-    // has already checked WindowServer's front process.
-    if !target_above_front(target, front) {
-        return false;
-    }
-    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
-    unsafe {
-        NSRunningApplication::runningApplicationWithProcessIdentifier(front).is_some_and(|app| {
-            app.activateWithOptions(NSApplicationActivationOptions::NSApplicationActivateAllWindows)
-        })
-    }
+    raise_front_window_if_covered(target, front) == Some(crate::ax::bindings::kAXErrorSuccess)
 }
 
 /// Whether a normal-level window of `target` sits above `front`'s frontmost
@@ -117,23 +102,67 @@ pub fn target_window_above_front(target: i32, front: i32) -> bool {
 }
 
 fn restore_front_if_raised(target: i32, front: i32) -> bool {
-    if crate::apps::frontmost_pid() != Some(front) || !target_above_front(target, front) {
+    let Some(error) = raise_front_window_if_covered(target, front) else {
         return false;
-    }
-    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
-    let restored = unsafe {
-        NSRunningApplication::runningApplicationWithProcessIdentifier(front).is_some_and(|app| {
-            app.activateWithOptions(NSApplicationActivationOptions::NSApplicationActivateAllWindows)
-        })
     };
     RESTORED.fetch_add(1, Ordering::Relaxed);
     tracing::debug!(
         target,
         front,
-        restored,
-        "restored the user's window above a background target"
+        error,
+        "requested the user's focused window above a background target"
     );
     true
+}
+
+fn raise_front_window_if_covered(target: i32, front: i32) -> Option<crate::ax::bindings::AXError> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::{CFType, CFTypeRef, TCFType};
+
+    if skylight::front_process_pid() != Some(front)
+        || user_switched_recently()
+        || !target_above_front(target, front)
+    {
+        return None;
+    }
+    unsafe {
+        let app = AXUIElementCreateApplication(front);
+        if app.is_null() {
+            return None;
+        }
+        let _app = CFType::wrap_under_create_rule(app as CFTypeRef);
+        if AXUIElementSetMessagingTimeout(app, 0.1) != kAXErrorSuccess {
+            return None;
+        }
+        let window = copy_element_attr(app, "AXFocusedWindow")?;
+        let _window = CFType::wrap_under_create_rule(window as CFTypeRef);
+        if AXUIElementSetMessagingTimeout(window, 0.1) != kAXErrorSuccess {
+            return None;
+        }
+        let mut pid = 0;
+        if AXUIElementGetPid(window, &mut pid) != kAXErrorSuccess || pid != front {
+            return None;
+        }
+        let mut wid = 0;
+        if _AXUIElementGetWindow(window, &mut wid) != kAXErrorSuccess || wid == 0 {
+            return None;
+        }
+        let windows = crate::windows::visible_windows_any_layer();
+        if !windows.iter().any(|w| {
+            w.pid == front
+                && w.window_id == wid
+                && w.layer == 0
+                && w.is_on_screen
+                && w.bounds.width > 1.0
+                && w.bounds.height > 1.0
+        }) || !target_above_front_in(&windows, target, front)
+            || skylight::front_process_pid() != Some(front)
+            || user_switched_recently()
+        {
+            return None;
+        }
+        Some(perform_action(window, "AXRaise"))
+    }
 }
 
 /// Whether WindowServer's front process is the background target: it

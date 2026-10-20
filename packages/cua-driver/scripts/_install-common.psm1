@@ -1,13 +1,10 @@
-# _install-common.psm1 - shared helpers for install.ps1 + install-local.ps1.
+# _install-common.psm1 - daemon cleanup helpers for install.ps1.
 #
-# Both scripts import this module to avoid drift in the daemon-kill logic.
-#
-#   * install-local.ps1 runs from a checked-out repo, so it imports the
-#     module from disk via $PSScriptRoot/_install-common.psm1.
 #   * install.ps1 is fetched via `irm | iex` and has no file on disk
 #     during execution. It uses Import-CuaDriverInstallModule (below)
 #     which prefers the on-disk copy when available (dev / CI) and
 #     falls back to fetching the .psm1 from GitHub raw.
+#   * install-local.ps1 manages its separate -local process identity.
 #
 # Keep this module narrow on purpose - it's loaded over the network in
 # the production install path, so every additional line is paid for in
@@ -17,6 +14,36 @@
 # directly) or anything that pulls in a heavy module dependency.
 
 Set-StrictMode -Version Latest
+
+# A tree kill of an updater ancestor also terminates this installer.
+# A parent PID created after its child has been reused and ends the walk.
+function Get-CuaDriverAncestorProcessIds {
+    [CmdletBinding()]
+    param()
+    $ids = @([int]$PID)
+    try {
+        $child = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
+        if (-not $child) { throw "current process is unavailable" }
+        while ($child) {
+            $parentId = [int]$child.ParentProcessId
+            if ($parentId -le 0 -or $ids -contains $parentId) { break }
+            $parent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$parentId" -ErrorAction Stop
+            if (-not $parent) { break }
+            if ($parent.CreationDate -and $child.CreationDate -and $parent.CreationDate -gt $child.CreationDate) { break }
+            $ids += $parentId
+            $child = $parent
+        }
+    } catch {
+        throw "Cannot inspect the installer's process ancestry; refusing daemon cleanup: $($_.Exception.Message)"
+    }
+    return $ids
+}
+
+function Get-CuaDriverProcesses {
+    param([int[]]$ExcludeIds = @())
+    return @(Get-Process -Name "qwen-cua-driver","qwen-cua-driver-uia" -ErrorAction SilentlyContinue |
+        Where-Object { $ExcludeIds -notcontains $_.Id })
+}
 
 # Best-effort kill of any running Qwen driver and UIA worker processes
 # so the next `qwen-cua-driver autostart kick` / `qwen-cua-driver mcp` starts the
@@ -30,26 +57,38 @@ Set-StrictMode -Version Latest
 #      Scheduler runs as SYSTEM so it can kill High-IL processes that
 #      a Medium-IL shell can't. /End on an instance the current user
 #      registered does NOT need admin.
-#   2. taskkill /F /IM - Medium-IL backstop for any process that
-#      wasn't task-attached.
-#   3. Returns the surviving process list so callers can warn the user
+#      Skip this operation when a driver ancestor might own the task.
+#   2. taskkill /F /T /PID and Stop-Process - stop non-ancestor drivers.
+#   3. Returns only non-ancestor survivors so callers can warn the user
 #      (these are the processes a Medium-IL shell genuinely can't reach
 #      - High-IL daemons whose parent wasn't `cua-driver-serve`).
 function Stop-CuaDriverDaemons {
     [CmdletBinding()]
     param()
+    $ancestorIds = @(Get-CuaDriverAncestorProcessIds)
+    $kept = @(Get-CuaDriverProcesses | Where-Object { $ancestorIds -contains $_.Id })
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & schtasks.exe /End /TN "qwen-cua-driver-serve" 2>$null | Out-Null
-        Start-Sleep -Milliseconds 200
-        & taskkill.exe /F /IM "qwen-cua-driver.exe" /T 2>$null | Out-Null
-        & taskkill.exe /F /IM "qwen-cua-driver-uia.exe" /T 2>$null | Out-Null
+        if ($kept.Count -eq 0) {
+            & schtasks.exe /End /TN "qwen-cua-driver-serve" 2>$null | Out-Null
+            Start-Sleep -Milliseconds 200
+        }
+        foreach ($proc in (Get-CuaDriverProcesses -ExcludeIds $ancestorIds)) {
+            & taskkill.exe /F /T /PID $proc.Id 2>$null | Out-Null
+        }
+        foreach ($proc in (Get-CuaDriverProcesses -ExcludeIds $ancestorIds)) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
     } finally {
         $ErrorActionPreference = $prevEAP
     }
+    if ($kept.Count -gt 0) {
+        $keptIds = ($kept | ForEach-Object { $_.Id }) -join ', '
+        Write-Host "Leaving the Qwen driver process(es) that launched this installer running (pid: $keptIds)." -ForegroundColor DarkGray
+    }
     Start-Sleep -Milliseconds 200
-    return @(Get-Process -Name "qwen-cua-driver","qwen-cua-driver-uia" -ErrorAction SilentlyContinue)
+    return (Get-CuaDriverProcesses -ExcludeIds $ancestorIds)
 }
 
 # Probe whether `\\.\pipe\qwen-cua-driver` is currently accepting connections.

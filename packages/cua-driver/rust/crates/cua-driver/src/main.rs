@@ -109,6 +109,9 @@ fn maybe_wrap_finite_command() {
     let Some(command_name) = cli::finite_command_name_from_argv() else {
         return;
     };
+    if !telemetry::is_enabled() {
+        return;
+    }
     let tool_name = cli::finite_tool_name_from_argv();
     let computer_action = cli::finite_computer_action_from_argv();
     let operation = cli::finite_operation_from_argv();

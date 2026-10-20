@@ -284,7 +284,7 @@ export class ComputerUse {
     }
   }
 
-  /** Connect to a caller-selected daemon and bind a transport-owned session. */
+  /** Compatibility factory; ordinary serve daemons reject trusted session binding. */
   static async connect(options = {}) {
     const signal = options.signal;
     requireDispatchableSignal("createTrustedSession", signal);

@@ -63,10 +63,12 @@ fn def() -> &'static ToolDef {
             the driver synthesizes a real mouse-wheel event (CGEventCreateScrollWheelEvent, \
             at that screen point. The renderer hit-tests the wheel at the \
             cursor, so the scroll lands on whatever element is under the point — exactly \
-            like physically rolling the wheel over it. This is the ONLY way to scroll a \
+            like physically rolling the wheel over it. Use it to scroll a \
             nested `overflow:auto` region (e.g. a scrollable <div> with no tabindex): such \
             regions never take keyboard focus, so the keystroke path below no-ops on them. \
-            Use this for inner/nested scrollers in web views.\n\n\
+            Use this for inner/nested scrollers in web views. Background Electron \
+            uses one native AX reveal instead of a wheel event, without activating \
+            the window. The distance is approximate; observe afterward.\n\n\
             • **Keystroke path (focused region)** — when you pass NO target (just pid + \
             direction): synthesizes PageDown/PageUp (by='page') or Down/Up arrows \
             (by='line'); horizontal uses Left/Right arrows. Drives the focused / page \
@@ -174,13 +176,8 @@ impl Tool for ScrollTool {
         // background CGEvents). Only the pixel-wheel path honors it; the
         // keystroke path is background-by-design and untouched.
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
-        if !delivery_mode.is_foreground() && crate::browser::ElectronJs::is_electron(pid) {
-            return ToolResult::error(
-                "Background scroll is unavailable for Electron/Chromium windows on macOS."
-                    .to_owned(),
-            )
-            .with_structured(serde_json::json!({ "code": "background_unavailable" }));
-        }
+        let electron_background =
+            !delivery_mode.is_foreground() && crate::browser::ElectronJs::is_electron(pid);
         let direction = match args.require_str("direction") {
             Ok(v) => v,
             Err(e) => return e,
@@ -202,12 +199,14 @@ impl Tool for ScrollTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                ..
             } => (Some(idx), wid),
         };
 
@@ -218,7 +217,7 @@ impl Tool for ScrollTool {
         // the element before the suppressed focus below dereferences it
         // (use-after-free → daemon crash). Guard lives to method end.
         let pre_focus_guard = if let (Some(idx), Some(wid)) = (element_index, window_id) {
-            self.state.element_cache.get_element_retained(pid, wid, idx)
+            element_cache.get_element_retained(pid, wid, idx)
         } else {
             None
         };
@@ -234,6 +233,10 @@ impl Tool for ScrollTool {
                     "Element index {idx} not found. Call get_window_state first."
                 ));
             }
+        }
+        if electron_background {
+            return electron_reveal_scroll(&self.state, pid, window_id, pre_focus_guard, &args)
+                .await;
         }
         let mut _mutation_lease: Option<super::BackgroundMutationLease> = None;
 
@@ -268,10 +271,7 @@ impl Tool for ScrollTool {
                         }
                     }
                 }
-                let native_element_guard = self
-                    .state
-                    .element_cache
-                    .get_element_retained(pid, wid, index);
+                let native_element_guard = element_cache.get_element_retained(pid, wid, index);
                 let direction_for_ax = direction.clone();
                 let by_for_ax = by.clone();
                 let foreground = delivery_mode.is_foreground();
@@ -702,6 +702,131 @@ impl Tool for ScrollTool {
             Ok(Err(e)) => ToolResult::error(format!("Scroll failed: {e}")),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
+    }
+}
+
+fn reveal_unavailable(reason: &str) -> ToolResult {
+    ToolResult::error(format!("Background native scroll refused: {reason}")).with_structured(
+        serde_json::json!({
+            "code": "background_unavailable", "sent": false, "effect": "refused"
+        }),
+    )
+}
+
+async fn electron_reveal_scroll(
+    state: &ToolState,
+    pid: i32,
+    window_id: Option<u32>,
+    element: Option<crate::ax::cache::RetainedElement>,
+    args: &Value,
+) -> ToolResult {
+    use cua_driver_core::tool_args::ArgsExt;
+    let Some(wid) = window_id else {
+        return reveal_unavailable("an exact window_id is required.");
+    };
+    let Some(bounds) = crate::windows::window_bounds_by_id(wid) else {
+        return reveal_unavailable("the requested window has no live frame.");
+    };
+    let point = if element.is_none() {
+        if let (Some(x), Some(y)) = (args.opt_f64("x"), args.opt_f64("y")) {
+            let ratio = state.resize_registry.ratio(pid, Some(wid)).unwrap_or(1.0);
+            let frame = match super::px_frame::resolve_or_refuse(wid).await {
+                Ok(frame) => frame,
+                Err(mut refusal) => {
+                    refusal
+                        .structured_content
+                        .get_or_insert_with(|| serde_json::json!({}))["sent"] = false.into();
+                    return refusal;
+                }
+            };
+            let (sx, sy, _, _) = frame.to_screen(x * ratio, y * ratio);
+            (sx, sy)
+        } else {
+            (
+                bounds.x + bounds.width / 2.0,
+                bounds.y + bounds.height / 2.0,
+            )
+        }
+    } else {
+        (0.0, 0.0)
+    };
+    let window = [bounds.x, bounds.y, bounds.width, bounds.height];
+    let direction = args.str_or("direction", "down");
+    let step = if args.str_or("by", "line") == "page" {
+        WHEEL_STEP_PAGE_PX
+    } else {
+        WHEEL_STEP_LINE_PX
+    };
+    let distance = step as f64 * args.u64_or("amount", 3).clamp(1, 50) as f64;
+    let lease = super::acquire_background_mutation(pid).await;
+    let direction_for_read = direction.clone();
+    let prepared = tokio::task::spawn_blocking(move || unsafe {
+        crate::ax::reveal_scroll::prepare(
+            pid,
+            wid,
+            element.as_ref().map(|held| held.as_ptr()),
+            point,
+            window,
+            &direction_for_read,
+            distance,
+        )
+    })
+    .await;
+    let target = match prepared {
+        Ok(Some(target)) => target,
+        Ok(None) => return reveal_unavailable("no safe content past the selected container's edge was found; observe the window before choosing another action."),
+        Err(error) => return reveal_unavailable(&format!("native target selection failed: {error}")),
+    };
+    let role = target.container_role.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        use cua_driver_core::background_input::{
+            decide_background_input, BackgroundAction, BackgroundInputDecision, ExactWindowTarget,
+        };
+        // Keep both the native reference and lease in the worker if its async
+        // caller is cancelled during the exact-target reads or dispatch.
+        let _lease = lease;
+        let facts =
+            crate::ax::exact_target::gather_background_facts(pid, wid, Some(target.element_ptr()));
+        if let BackgroundInputDecision::Refuse(refusal) = decide_background_input(
+            ExactWindowTarget {
+                pid,
+                window_id: wid,
+            },
+            &facts,
+            BackgroundAction::AxSemantic,
+        ) {
+            let mut result = super::background_refusal_result(pid, wid, &refusal);
+            result
+                .structured_content
+                .get_or_insert_with(|| serde_json::json!({}))["sent"] = false.into();
+            return Err(result);
+        }
+        unsafe { target.dispatch(pid, wid) }.map_err(reveal_unavailable)
+    })
+    .await;
+    match result {
+        Ok(Ok(status)) => {
+            let warning = if status == kAXErrorSuccess {
+                "Effect is not verified; observe before another action.".to_owned()
+            } else {
+                format!("AX returned {status}; delivery is uncertain. Observe before another action; this request was not replayed.")
+            };
+            ToolResult::text(format!(
+                "Sent one native {direction} scroll request for {role}. {warning}"
+            ))
+            .with_structured(serde_json::json!({
+                "path": "ax", "sent": true, "verified": false,
+                "effect": "unverifiable", "ax_status": status,
+                "warning": warning
+            }))
+        }
+        Ok(Err(refusal)) => refusal,
+        Err(error) => ToolResult::error(format!(
+            "Native scroll task interrupted: {error}. Delivery is uncertain; observe before another action."
+        ))
+        .with_structured(serde_json::json!({
+            "path": "ax", "sent": true, "verified": false, "effect": "unverifiable"
+        })),
     }
 }
 

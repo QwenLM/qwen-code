@@ -48,16 +48,22 @@ pub fn screenshot_for_recording(window_id: Option<u64>, pid: Option<i64>) -> Opt
 }
 
 #[cfg(target_os = "linux")]
-pub fn element_window_local_xy(window_id: u64, pid: i64, element_index: u32) -> Option<(f64, f64)> {
+pub fn element_window_local_xy(
+    window_id: u64,
+    pid: i64,
+    element_index: u32,
+    binding: &cua_driver_core::element_token::SnapshotBinding,
+) -> Option<(f64, f64)> {
+    let binding = binding.clone();
     if tokio::runtime::Handle::try_current().is_ok() {
         return std::thread::spawn(move || {
-            element_window_local_xy_blocking(window_id, pid, element_index)
+            element_window_local_xy_blocking(window_id, pid, element_index, &binding)
         })
         .join()
         .ok()
         .flatten();
     }
-    element_window_local_xy_blocking(window_id, pid, element_index)
+    element_window_local_xy_blocking(window_id, pid, element_index, &binding)
 }
 
 #[cfg(target_os = "linux")]
@@ -65,10 +71,13 @@ fn element_window_local_xy_blocking(
     window_id: u64,
     pid: i64,
     element_index: u32,
+    binding: &cua_driver_core::element_token::SnapshotBinding,
 ) -> Option<(f64, f64)> {
     let pid = u32::try_from(pid).ok()?;
+    let cache = crate::atspi::cache::BoundElementCache::from_binding(binding.clone());
+    let identity = cache.get_element_identity(pid, window_id, element_index as usize)?;
     let (screen_x, screen_y, width, height) =
-        crate::atspi::get_element_bounds(pid, element_index as usize).ok()?;
+        crate::atspi::get_element_bounds_exact(pid, element_index as usize, identity).ok()?;
     let window = resolve_window_for_recording(pid, Some(window_id))?;
     Some((
         f64::from(screen_x - window.x) + f64::from(width) / 2.0,
@@ -104,6 +113,7 @@ pub fn element_window_local_xy(
     _window_id: u64,
     _pid: i64,
     _element_index: u32,
+    _binding: &cua_driver_core::element_token::SnapshotBinding,
 ) -> Option<(f64, f64)> {
     None
 }

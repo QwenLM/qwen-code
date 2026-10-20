@@ -15,7 +15,7 @@ The native driver owns application/window resolution, short IDs, snapshot cursor
 
 The direct `qwen-cua-driver mcp` entry point exposes the same app operations and parameters, using snake_case names. `computer-use/interface.json` is generated from the Rust contract with `cargo run -p cua-driver-contract --bin cua-contract-gen -- computer-use`; the same source supplies MCP descriptions and runtime documentation. Set the host environment `CUA_DRIVER_EXTRA_TOOLS=1` to also list advanced native tools. The underlying typed SDK remains available from `@qwen-code/cua-sdk` for native integrations.
 
-For an existing daemon, the transport layer supports `ComputerUse.connect({socketPath})`; otherwise `ComputerUse.create()` owns an embedded native runtime. Close the owning transport when finished. Node REPL supplies cancellation barriers and waits for native cleanup after dispatch.
+`ComputerUse.create()` owns an embedded native runtime and its authenticated session. Standalone daemon clients use the low-level `CuaDriver.connect(socketPath)` transport. The compatibility `ComputerUse.connect()` factory cannot bind a trusted facade session to an ordinary `serve` daemon. Close the owning transport when finished. Node REPL supplies cancellation barriers and waits for native cleanup after dispatch.
 
 Linux supports X11 applications, including X11 apps under XWayland. Inherit DISPLAY, XAUTHORITY and the desktop accessibility session bus. Native Wayland targets are unsupported.
 

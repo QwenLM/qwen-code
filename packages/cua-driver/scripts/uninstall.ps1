@@ -91,7 +91,83 @@ $Purge = $env:CUA_DRIVER_RS_UNINSTALL_PURGE -match '^(1|true|yes|on)$'
 
 # ---------- Elevation pre-check -------------------------------------------
 
+if ($env:CUA_DRIVER_RS_INSTALL_DIR) {
+    $VisibleBinDir = $env:CUA_DRIVER_RS_INSTALL_DIR
+} else {
+    # New layout (v0.2.14+). Path rename rationale: see install.ps1.
+    $VisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin"
+}
+
+# Legacy bin dir from v0.2.13 and earlier. We also clean these up so a
+# fresh uninstall after upgrading leaves nothing behind. Empty-vendor-dir
+# The legacy Qwen namespace is pruned if no other apps live under it.
+$LegacyVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver-rs\bin"
+$LegacyVendorDir     = Join-Path $env:LOCALAPPDATA "Programs\Qwen"
+
+if ($env:CUA_DRIVER_RS_HOME) {
+    $HomeDir = $env:CUA_DRIVER_RS_HOME
+} else {
+    $HomeDir = Join-Path $env:USERPROFILE ".cua-driver"
+}
+
+# Legacy package home from v0.2.13 and earlier.
+$LegacyHomeDir = Join-Path $env:USERPROFILE ".cua-driver-rs"
+
+$PackagesDir  = Join-Path $HomeDir   "packages"
+$CurrentDir   = Join-Path $PackagesDir "current"
+
+$IsolatedInstall = [bool]($env:CUA_DRIVER_RS_INSTALL_DIR -or $env:CUA_DRIVER_RS_HOME)
+
+function Test-SelectedExecutable([string]$path) {
+    if (-not $path) { return $false }
+    try {
+        $executable = [IO.Path]::GetFullPath($path.Trim('"'))
+        foreach ($root in @($PackagesDir, $VisibleBinDir)) {
+            $prefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+            if ($executable.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+function Get-SelectedProcesses {
+    $processes = @(Get-Process -Name "qwen-cua-driver","qwen-cua-driver-uia" -ErrorAction SilentlyContinue)
+    if (-not $IsolatedInstall) { return $processes }
+    return @($processes | Where-Object {
+        try { Test-SelectedExecutable $_.Path } catch { $false }
+    })
+}
+
 $AutoStartTask = "qwen-cua-driver-serve"
+$OwnsAutoStartTask = -not $IsolatedInstall
+if ($IsolatedInstall) {
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $taskXml = & schtasks.exe /Query /TN $AutoStartTask /XML 2>$null
+        if ($LASTEXITCODE -eq 0 -and $taskXml) {
+            $task = [xml]($taskXml -join "`n")
+            $actions = @($task.Task.Actions.Exec)
+            # Recognize the exact hidden PowerShell wrapper registered by this installer.
+            $wrapper = '^-NoProfile -WindowStyle Hidden -NonInteractive -Command "Start-Process -FilePath ''(?<exe>(?:[^'']|'''')+)'' -ArgumentList ''serve'' -WindowStyle Hidden -WorkingDirectory ''(?:[^'']|'''')*''"$'
+            $otherActions = @($task.Task.Actions.ChildNodes | Where-Object {
+                $_.NodeType -eq [Xml.XmlNodeType]::Element -and $_.LocalName -ne 'Exec'
+            })
+            $OwnsAutoStartTask = $actions.Count -gt 0 -and $otherActions.Count -eq 0
+            foreach ($action in $actions) {
+                $owned = Test-SelectedExecutable ([string]$action.Command)
+                if (-not $owned -and [IO.Path]::GetFileName([string]$action.Command) -in @('powershell.exe','pwsh.exe') -and [string]$action.Arguments -match $wrapper) {
+                    $owned = Test-SelectedExecutable $Matches.exe.Replace("''", "'")
+                }
+                if (-not $owned) { $OwnsAutoStartTask = $false }
+            }
+        }
+    } catch {
+        $OwnsAutoStartTask = $false
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
 
 function Test-IsElevated {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -108,11 +184,11 @@ function Test-NeedsElevation {
     $ErrorActionPreference = 'Continue'
     try {
         & schtasks.exe /Query /TN $AutoStartTask 2>$null | Out-Null
-        $hasTask = ($LASTEXITCODE -eq 0)
+        $hasTask = $OwnsAutoStartTask -and ($LASTEXITCODE -eq 0)
     } finally {
         $ErrorActionPreference = $prevEAP
     }
-    $hasDaemon = @(Get-Process -Name "qwen-cua-driver" -ErrorAction SilentlyContinue).Count -gt 0
+    $hasDaemon = @(Get-SelectedProcesses).Count -gt 0
     return ($hasTask -or $hasDaemon)
 }
 
@@ -149,34 +225,6 @@ if (-not (Test-IsElevated) -and (Test-NeedsElevation)) {
         exit 1
     }
 }
-
-# ---------- Path resolution (mirrors install.ps1) -------------------------
-
-if ($env:CUA_DRIVER_RS_INSTALL_DIR) {
-    $VisibleBinDir = $env:CUA_DRIVER_RS_INSTALL_DIR
-} else {
-    # New layout (v0.2.14+). Path rename rationale: see install.ps1.
-    $VisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin"
-}
-
-# Legacy bin dir from v0.2.13 and earlier. We also clean these up so a
-# fresh uninstall after upgrading leaves nothing behind. Empty-vendor-dir
-# The legacy Qwen namespace is pruned if no other apps live under it.
-$LegacyVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver-rs\bin"
-$LegacyVendorDir     = Join-Path $env:LOCALAPPDATA "Programs\Qwen"
-
-if ($env:CUA_DRIVER_RS_HOME) {
-    $HomeDir = $env:CUA_DRIVER_RS_HOME
-} else {
-    $HomeDir = Join-Path $env:USERPROFILE ".cua-driver"
-}
-
-# Legacy package home from v0.2.13 and earlier.
-$LegacyHomeDir = Join-Path $env:USERPROFILE ".cua-driver-rs"
-
-$PackagesDir  = Join-Path $HomeDir   "packages"
-$CurrentDir   = Join-Path $PackagesDir "current"
-# $AutoStartTask hoisted to the elevation pre-check block above.
 
 # Skill junctions — mirrors the AGENTS list in
 # packages/cua-driver/rust/crates/cua-driver/src/skills.rs (the verb that
@@ -233,10 +281,9 @@ function Test-IsQwenSkillReparsePoint([string]$path) {
     if (-not (Test-IsReparsePoint $path)) { return $false }
     try {
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-        $ownedRoots = @(
-            (Join-Path $HomeDir "skills"),
-            (Join-Path $LegacyHomeDir "skills")
-        ) | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') }
+        $ownedRoots = @((Join-Path $HomeDir "skills"))
+        if (-not $IsolatedInstall) { $ownedRoots += (Join-Path $LegacyHomeDir "skills") }
+        $ownedRoots = $ownedRoots | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') }
         foreach ($target in @($item.Target)) {
             if (-not $target) { continue }
             $resolvedTarget = if ([System.IO.Path]::IsPathRooted($target)) {
@@ -298,7 +345,7 @@ try {
 } finally {
     $ErrorActionPreference = $prevEAP
 }
-if ($taskExitCode -eq 0 -and $taskQuery) {
+if ($OwnsAutoStartTask -and $taskExitCode -eq 0 -and $taskQuery) {
     if (Confirm-Remove "scheduled task '$AutoStartTask' (autostart at logon)") {
         $ErrorActionPreference = 'Continue'
         try {
@@ -324,7 +371,7 @@ if ($taskExitCode -eq 0 -and $taskQuery) {
 #    pin the directory junction's target open and make Remove-Item
 #    fail with "in use". Stop them up front so subsequent deletes
 #    aren't racy.
-$running = @(Get-Process -Name "qwen-cua-driver" -ErrorAction SilentlyContinue)
+$running = @(Get-SelectedProcesses)
 if ($running.Count -gt 0) {
     Write-Step "stopping $($running.Count) running qwen-cua-driver.exe process(es)"
     foreach ($p in $running) {
@@ -421,49 +468,51 @@ if (Test-Path -LiteralPath $HomeDir) {
 #    sweep these so a fresh uninstall after upgrading via install.ps1
 #    leaves nothing behind. Skip silently when the legacy paths don't
 #    exist — common case post-v0.2.14.
-if (Test-Path -LiteralPath $LegacyVisibleBinDir) {
-    if (Test-IsReparsePoint $LegacyVisibleBinDir) {
-        Remove-Item -LiteralPath $LegacyVisibleBinDir -Force -Recurse -ErrorAction SilentlyContinue
-        Write-Step "removed legacy junction $LegacyVisibleBinDir"
-    } else {
-        Remove-Item -LiteralPath $LegacyVisibleBinDir -Force -Recurse -ErrorAction SilentlyContinue
-        Write-Step "removed legacy directory $LegacyVisibleBinDir"
-    }
-}
-# Empty cua-driver-rs parent (under trycua\)
-$legacyParent = Split-Path -Parent $LegacyVisibleBinDir
-if ((Test-Path -LiteralPath $legacyParent) -and -not (Get-ChildItem -LiteralPath $legacyParent -Force -ErrorAction SilentlyContinue)) {
-    Remove-Item -LiteralPath $legacyParent -Force -ErrorAction SilentlyContinue
-    Write-Step "removed empty legacy parent $legacyParent"
-}
-# Empty Qwen vendor dir
-if ((Test-Path -LiteralPath $LegacyVendorDir) -and -not (Get-ChildItem -LiteralPath $LegacyVendorDir -Force -ErrorAction SilentlyContinue)) {
-    Remove-Item -LiteralPath $LegacyVendorDir -Force -ErrorAction SilentlyContinue
-    Write-Step "removed empty legacy vendor dir $LegacyVendorDir"
-}
-# Legacy package home. Preserve telemetry state on a normal uninstall so a
-# future runtime can migrate the same pseudonymous identity to ~/.cua-driver.
-if (Test-Path -LiteralPath $LegacyHomeDir) {
-    if ($Purge) {
-        Remove-Item -LiteralPath $LegacyHomeDir -Force -Recurse -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $LegacyHomeDir) {
-            Write-WarningStep "$LegacyHomeDir was not fully removed — some files may still be locked."
+if (-not $IsolatedInstall) {
+    if (Test-Path -LiteralPath $LegacyVisibleBinDir) {
+        if (Test-IsReparsePoint $LegacyVisibleBinDir) {
+            Remove-Item -LiteralPath $LegacyVisibleBinDir -Force -Recurse -ErrorAction SilentlyContinue
+            Write-Step "removed legacy junction $LegacyVisibleBinDir"
         } else {
-            Write-Step "purged legacy package home $LegacyHomeDir"
+            Remove-Item -LiteralPath $LegacyVisibleBinDir -Force -Recurse -ErrorAction SilentlyContinue
+            Write-Step "removed legacy directory $LegacyVisibleBinDir"
         }
-    } else {
-        foreach ($legacyRuntimePath in @(
-            (Join-Path $LegacyHomeDir "packages"),
-            (Join-Path $LegacyHomeDir "skills"),
-            (Join-Path $LegacyHomeDir ".tcc-signing-identity"),
-            (Join-Path $LegacyHomeDir "serve.out.log"),
-            (Join-Path $LegacyHomeDir "serve.err.log")
-        )) {
-            if (Test-Path -LiteralPath $legacyRuntimePath) {
-                Remove-Item -LiteralPath $legacyRuntimePath -Force -Recurse -ErrorAction SilentlyContinue
+    }
+    # Empty cua-driver-rs parent (under trycua\)
+    $legacyParent = Split-Path -Parent $LegacyVisibleBinDir
+    if ((Test-Path -LiteralPath $legacyParent) -and -not (Get-ChildItem -LiteralPath $legacyParent -Force -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $legacyParent -Force -ErrorAction SilentlyContinue
+        Write-Step "removed empty legacy parent $legacyParent"
+    }
+    # Empty Qwen vendor dir
+    if ((Test-Path -LiteralPath $LegacyVendorDir) -and -not (Get-ChildItem -LiteralPath $LegacyVendorDir -Force -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $LegacyVendorDir -Force -ErrorAction SilentlyContinue
+        Write-Step "removed empty legacy vendor dir $LegacyVendorDir"
+    }
+    # Legacy package home. Preserve telemetry state on a normal uninstall so a
+    # future runtime can migrate the same pseudonymous identity to ~/.cua-driver.
+    if (Test-Path -LiteralPath $LegacyHomeDir) {
+        if ($Purge) {
+            Remove-Item -LiteralPath $LegacyHomeDir -Force -Recurse -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $LegacyHomeDir) {
+                Write-WarningStep "$LegacyHomeDir was not fully removed — some files may still be locked."
+            } else {
+                Write-Step "purged legacy package home $LegacyHomeDir"
             }
+        } else {
+            foreach ($legacyRuntimePath in @(
+                (Join-Path $LegacyHomeDir "packages"),
+                (Join-Path $LegacyHomeDir "skills"),
+                (Join-Path $LegacyHomeDir ".tcc-signing-identity"),
+                (Join-Path $LegacyHomeDir "serve.out.log"),
+                (Join-Path $LegacyHomeDir "serve.err.log")
+            )) {
+                if (Test-Path -LiteralPath $legacyRuntimePath) {
+                    Remove-Item -LiteralPath $legacyRuntimePath -Force -Recurse -ErrorAction SilentlyContinue
+                }
+            }
+            Write-Step "removed legacy runtime payloads and preserved legacy telemetry state"
         }
-        Write-Step "removed legacy runtime payloads and preserved legacy telemetry state"
     }
 }
 

@@ -1637,7 +1637,8 @@ async fn write_through_editable_proxies(
         .map_err(|e| anyhow!("EditableText unavailable: {e}"))?;
 
     let off = proxies.text().await?.caret_offset().await?;
-    let len = text.chars().count() as i32;
+    let len = i32::try_from(text.len())
+        .map_err(|_| anyhow!("AT-SPI text exceeds the supported UTF-8 byte length"))?;
 
     attempt.dispatch();
     if !et.insert_text(off, text, len).await? {
@@ -2841,6 +2842,28 @@ fn x11_window_origin(xid: u64) -> Option<(i32, i32)> {
     Some((trans.dst_x as i32, trans.dst_y as i32))
 }
 
+fn x11_top_level_geometry(xid: u64) -> Option<(i32, i32, i32, i32)> {
+    use x11rb::protocol::xproto::*;
+    use x11rb::rust_connection::RustConnection;
+
+    let (conn, _) = RustConnection::connect(None).ok()?;
+    let mut window = xid as u32;
+    loop {
+        let tree = conn.query_tree(window).ok()?.reply().ok()?;
+        if tree.parent == tree.root || tree.parent == x11rb::NONE {
+            break;
+        }
+        window = tree.parent;
+    }
+    let geom = conn.get_geometry(window).ok()?.reply().ok()?;
+    Some((
+        i32::from(geom.x),
+        i32::from(geom.y),
+        i32::from(geom.width),
+        i32::from(geom.height),
+    ))
+}
+
 /// Read the GTK4 client-side-decoration shadow inset from the X11
 /// `_GTK_FRAME_EXTENTS` property (`CARDINAL[4]` = left, right, top, bottom).
 ///
@@ -2930,9 +2953,13 @@ fn window_to_screen_offset(pid: u32, xid: u64, _title: Option<&str>) -> Option<(
     Some((ox + fl, oy + ft))
 }
 
-fn screen_extent_rebase(x11_origin: (i32, i32), frame: (i32, i32, i32, i32)) -> Option<(i32, i32)> {
+fn screen_extent_rebase(
+    x11_origin: (i32, i32),
+    frame: (i32, i32, i32, i32),
+    top_level: Option<(i32, i32, i32, i32)>,
+) -> Option<(i32, i32)> {
     let (x, y, w, h) = frame;
-    if w <= 0 || h <= 0 {
+    if w <= 0 || h <= 0 || top_level == Some(frame) {
         return None;
     }
     (x.abs() <= 2 && y.abs() <= 2).then_some((x11_origin.0 - x, x11_origin.1 - y))
@@ -3029,7 +3056,12 @@ async fn element_bounds_for_visited(
                 },
                 _ => None,
             };
-            accessible_origin.and_then(|frame_origin| screen_extent_rebase(origin, frame_origin))
+            accessible_origin.and_then(|frame_origin| {
+                let top_level = (frame_origin.0.abs() <= 2 && frame_origin.1.abs() <= 2)
+                    .then(|| x11_top_level_geometry(xid))
+                    .flatten();
+                screen_extent_rebase(origin, frame_origin, top_level)
+            })
         } else {
             None
         }
@@ -3575,11 +3607,34 @@ mod coord_tests {
     #[test]
     fn screen_extents_are_rebased_from_accessible_frame_to_x11_origin() {
         assert_eq!(
-            screen_extent_rebase((604, 80), (0, 0, 800, 600)),
+            screen_extent_rebase((604, 80), (0, 0, 800, 600), None),
             Some((604, 80))
         );
-        assert_eq!(screen_extent_rebase((604, 100), (604, 80, 800, 600)), None);
-        assert_eq!(screen_extent_rebase((604, 80), (604, 80, 800, 600)), None);
+        assert_eq!(
+            screen_extent_rebase((604, 100), (604, 80, 800, 600), None),
+            None
+        );
+        assert_eq!(
+            screen_extent_rebase((604, 80), (604, 80, 800, 600), None),
+            None
+        );
+    }
+
+    #[test]
+    fn corner_screen_frames_keep_their_coordinates_but_renderer_frames_are_rebased() {
+        assert_eq!(
+            screen_extent_rebase((1, 16), (0, 0, 422, 301), Some((0, 0, 422, 301))),
+            None
+        );
+        assert_eq!(
+            screen_extent_rebase((5, 29), (0, 0, 640, 480), Some((0, 0, 650, 514))),
+            Some((5, 29))
+        );
+        assert_eq!(
+            screen_extent_rebase((5, 29), (0, 0, 640, 480), None),
+            Some((5, 29))
+        );
+        assert_eq!(screen_extent_rebase((5, 29), (0, 0, 0, 0), None), None);
     }
 
     #[test]

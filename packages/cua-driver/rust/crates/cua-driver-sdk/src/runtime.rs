@@ -597,8 +597,8 @@ fn configure_macos_runtime() {
     cua_driver_core::recording::set_ax_snapshot_fn(|window_id, pid| {
         platform_macos::recording_hooks::app_state_json_for(window_id, pid)
     });
-    cua_driver_core::recording::set_element_bounds_fn(|window_id, pid, index| {
-        platform_macos::recording_hooks::element_window_local_xy(window_id, pid, index)
+    cua_driver_core::recording::set_element_bounds_fn(|window_id, pid, index, binding| {
+        platform_macos::recording_hooks::element_window_local_xy(window_id, pid, index, binding)
     });
     cua_driver_core::video::set_video_backend_factory(Box::new(
         platform_macos::video_sckit::SckitVideoBackendFactory,
@@ -616,8 +616,8 @@ fn configure_windows_runtime() {
     cua_driver_core::recording::set_ax_snapshot_fn(|window_id, pid| {
         platform_windows::recording_hooks::app_state_json_for(window_id, pid)
     });
-    cua_driver_core::recording::set_element_bounds_fn(|window_id, pid, index| {
-        platform_windows::recording_hooks::element_window_local_xy(window_id, pid, index)
+    cua_driver_core::recording::set_element_bounds_fn(|window_id, pid, index, binding| {
+        platform_windows::recording_hooks::element_window_local_xy(window_id, pid, index, binding)
     });
     cua_driver_core::video::set_video_backend_factory(Box::new(
         cua_driver_core::video_ffmpeg::FfmpegVideoBackendFactory,
@@ -643,8 +643,8 @@ fn configure_linux_runtime(prepare_desktop_environment: bool) {
     cua_driver_core::recording::set_ax_snapshot_fn(|window_id, pid| {
         platform_linux::recording_hooks::app_state_json_for(window_id, pid)
     });
-    cua_driver_core::recording::set_element_bounds_fn(|window_id, pid, index| {
-        platform_linux::recording_hooks::element_window_local_xy(window_id, pid, index)
+    cua_driver_core::recording::set_element_bounds_fn(|window_id, pid, index, binding| {
+        platform_linux::recording_hooks::element_window_local_xy(window_id, pid, index, binding)
     });
     {
         cua_driver_core::video::set_video_backend_factory(Box::new(

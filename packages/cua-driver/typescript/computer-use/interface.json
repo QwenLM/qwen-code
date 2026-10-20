@@ -101,31 +101,9 @@
       "description": "Observe the current application window screenshot without an AX walk. Coordinates in actions use this image's pixels.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -194,31 +172,9 @@
       "description": "Click a current short element ID or screenshot point. Optional key holds modifiers during the click. Observe the result before retrying an unconfirmed action.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -243,18 +199,11 @@
             "type": "integer"
           },
           "key": {
-            "description": "Modifier keys held during the click, such as shift or ctrl.",
-            "oneOf": [
-              {
-                "type": "string"
-              },
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              }
-            ]
+            "description": "Modifier keys held during the click, such as [\"shift\"] or [\"ctrl\",\"shift\"].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "scope": {
             "description": "Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app.",
@@ -287,31 +236,9 @@
       "description": "Double-click a current short element ID or screenshot point, then observe the result.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -348,31 +275,9 @@
       "description": "Right-click a current short element ID or screenshot point, then observe the result.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -409,28 +314,6 @@
       "description": "Scroll at a current element or screenshot point. Observe the result before sending another scroll.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "amount": {
             "default": 3,
@@ -439,7 +322,7 @@
             "type": "integer"
           },
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -490,31 +373,9 @@
       "description": "Drag between current window screenshot points. Unsupported background gestures refuse before sending input; use semantic value operations when available.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -558,31 +419,9 @@
       "description": "Insert text at the current text caret. This does not replace the whole field; use set_value for replacement.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -647,31 +486,9 @@
       "description": "Press a key in the selected app. Optional modifiers form a chord. Observe before retrying an unconfirmed dispatch.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -709,31 +526,9 @@
       "description": "Press a modifier/key chord in the selected app.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "scope"
-              ]
-            },
-            "required": [
-              "app"
-            ]
-          },
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
           "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
+            "description": "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop.",
             "minLength": 1,
             "type": "string"
           },
@@ -769,24 +564,7 @@
       "description": "Hold a desktop key for this session. Release with key_up in finally. Session end releases owned keys. While keys are held, use key_down/key_up for chords and desktop pointer actions without explicit modifiers.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
-          "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
-            "minLength": 1,
-            "type": "string"
-          },
           "key": {
             "minLength": 1,
             "type": "string"
@@ -817,24 +595,7 @@
       "description": "Release a desktop key held by this session. Another session cannot release it.",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": [
-                "app"
-              ]
-            },
-            "required": [
-              "scope"
-            ]
-          }
-        ],
         "properties": {
-          "app": {
-            "description": "Exact application name, identifier or absolute path from get_state/get_app.",
-            "minLength": 1,
-            "type": "string"
-          },
           "key": {
             "minLength": 1,
             "type": "string"

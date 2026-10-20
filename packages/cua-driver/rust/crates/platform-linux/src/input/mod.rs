@@ -16,11 +16,14 @@
 /// `tools::DeliveryMode` and Windows `input::delivery`.
 pub mod delivery;
 pub mod focus_guard;
+mod keymap_barrier;
 mod mpx_keyboard;
 mod mpx_owner;
 mod user_input;
 
 pub use focus_guard::{BackgroundFocusGuard, FocusGuardReport, FocusSnapshot, SameAppWindow};
+pub(crate) use keymap_barrier::delivery_is_unconfirmed;
+pub(crate) use mpx_keyboard::check_keyboard_background;
 pub use mpx_keyboard::{
     real_keyboard_input_available, send_virtual_keyboard_key, send_virtual_keyboard_text,
     KeyboardDeliveryReport, MPX_UINPUT_PATH,
@@ -29,6 +32,7 @@ pub use mpx_keyboard::{
 use anyhow::{anyhow, bail, Context, Result};
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, Key, RelativeAxisType};
+use keymap_barrier::KeymapBarrier;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
@@ -3423,6 +3427,7 @@ fn type_text_with_preflight<G>(
     keymap: &GetKeyboardMappingReply,
     mut remap: impl FnMut(char, &mut GetKeyboardMappingReply) -> Result<(u8, Option<G>)>,
     mut send: impl FnMut(u8, bool) -> Result<()>,
+    finish: impl FnOnce() -> Result<()>,
 ) -> Result<Vec<G>> {
     let mut mapping = keymap.clone();
     let mut guards = Vec::new();
@@ -3457,8 +3462,19 @@ fn type_text_with_preflight<G>(
         };
         keys.push(key);
     }
-    for (keycode, needs_shift) in keys {
-        send(keycode, needs_shift)?;
+    let mut dispatched = false;
+    let sent = keys.into_iter().try_for_each(|(keycode, shift)| {
+        send(keycode, shift)?;
+        dispatched = true;
+        Ok(())
+    });
+    // Even a partial dispatch must keep its mappings while the client drains.
+    let finished = finish();
+    let result = sent.and(finished);
+    if dispatched {
+        result.map_err(|error| keymap_barrier::unconfirmed(format!("{error:#}")))?;
+    } else {
+        result?;
     }
     Ok(guards)
 }
@@ -3471,63 +3487,76 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
     let window = xid as u32;
     let root = conn.setup().roots[0].root;
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let barrier = KeymapBarrier::prepare(
+        &conn,
+        Some(window),
+        &mapping,
+        text.chars().map(keysym_for_char),
+    )?;
     let _guards = type_text_with_preflight(
         text,
         &mapping,
         |ch, mapping| keycode_for_keysym(&conn, mapping, keysym_for_char(ch), &ch.to_string()),
         |keycode, needs_shift| {
             user_input::checkpoint()?;
-            let state = if needs_shift {
-                KeyButMask::SHIFT
-            } else {
-                KeyButMask::from(0u16)
-            };
+            keymap_barrier::dispatch(|| {
+                let state = if needs_shift {
+                    KeyButMask::SHIFT
+                } else {
+                    KeyButMask::from(0u16)
+                };
 
-            let press = KeyPressEvent {
-                response_type: KEY_PRESS_EVENT,
-                detail: keycode,
-                sequence: 0,
-                time: x11rb::CURRENT_TIME,
-                root,
-                event: window,
-                child: x11rb::NONE,
-                root_x: 0,
-                root_y: 0,
-                event_x: 0,
-                event_y: 0,
-                state,
-                same_screen: true,
-            };
-            let release = KeyReleaseEvent {
-                response_type: KEY_RELEASE_EVENT,
-                detail: keycode,
-                sequence: 0,
-                time: x11rb::CURRENT_TIME,
-                root,
-                event: window,
-                child: x11rb::NONE,
-                root_x: 0,
-                root_y: 0,
-                event_x: 0,
-                event_y: 0,
-                state,
-                same_screen: true,
-            };
+                let press = KeyPressEvent {
+                    response_type: KEY_PRESS_EVENT,
+                    detail: keycode,
+                    sequence: 0,
+                    time: x11rb::CURRENT_TIME,
+                    root,
+                    event: window,
+                    child: x11rb::NONE,
+                    root_x: 0,
+                    root_y: 0,
+                    event_x: 0,
+                    event_y: 0,
+                    state,
+                    same_screen: true,
+                };
+                let release = KeyReleaseEvent {
+                    response_type: KEY_RELEASE_EVENT,
+                    detail: keycode,
+                    sequence: 0,
+                    time: x11rb::CURRENT_TIME,
+                    root,
+                    event: window,
+                    child: x11rb::NONE,
+                    root_x: 0,
+                    root_y: 0,
+                    event_x: 0,
+                    event_y: 0,
+                    state,
+                    same_screen: true,
+                };
 
-            conn.send_event(false, window, EventMask::KEY_PRESS, press)?;
-            // Start the hold interval after sending the press, not while it is buffered.
-            conn.flush()?;
-            sleep(Duration::from_millis(KEY_DELAY_MS));
-            conn.send_event(false, window, EventMask::KEY_RELEASE, release)?;
-            conn.flush()?;
-            if inter_char_ms > 0 {
-                sleep(Duration::from_millis(inter_char_ms));
+                conn.send_event(false, window, EventMask::KEY_PRESS, press)?;
+                // Start the hold interval after sending the press, not while it is buffered.
+                conn.flush()?;
+                sleep(Duration::from_millis(KEY_DELAY_MS));
+                conn.send_event(false, window, EventMask::KEY_RELEASE, release)?;
+                conn.flush()?;
+                if inter_char_ms > 0 {
+                    sleep(Duration::from_millis(inter_char_ms));
+                }
+                Ok(())
+            })
+        },
+        || {
+            conn.get_input_focus()?.reply()?;
+            if let Some(barrier) = &barrier {
+                barrier.wait()?;
             }
             Ok(())
         },
     )?;
-    // Deliver the final release before this short-lived connection closes.
-    conn.get_input_focus()?.reply()?;
     Ok(())
 }
 
@@ -3545,6 +3574,7 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
     use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, _) = connect_x11_for_input()?;
     let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let barrier = KeymapBarrier::prepare(&conn, None, &mapping, text.chars().map(keysym_for_char))?;
     // Shift keycode (modifier index 0) for shifted characters.
     let modmap = conn.get_modifier_mapping()?.reply()?;
     let kpm = modmap.keycodes_per_modifier() as usize;
@@ -3559,23 +3589,31 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         |ch, mapping| keycode_for_keysym(&conn, mapping, keysym_for_char(ch), &ch.to_string()),
         |keycode, needs_shift| {
             user_input::checkpoint()?;
-            if needs_shift {
-                conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
+            if let Some(barrier) = &barrier {
+                barrier.check_focus()?;
             }
-            conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
-            conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
-            if needs_shift {
-                conn.xtest_fake_input(KEY_RELEASE_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
+            keymap_barrier::dispatch(|| {
+                if needs_shift {
+                    conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
+                }
+                conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
+                conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
+                if needs_shift {
+                    conn.xtest_fake_input(KEY_RELEASE_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
+                }
+                conn.flush()?;
+                sleep(Duration::from_millis(KEY_DELAY_MS));
+                Ok(())
+            })
+        },
+        || {
+            conn.get_input_focus()?.reply()?;
+            if let Some(barrier) = &barrier {
+                barrier.wait()?;
             }
-            conn.flush()?;
-            sleep(Duration::from_millis(KEY_DELAY_MS));
             Ok(())
         },
     )?;
-    // Round-trip so the server delivers the final character's key events before
-    // this short-lived connection drops (see send_key_xtest — keyboard XTEST
-    // events queued on a connection that closes immediately can be lost).
-    let _ = conn.get_input_focus()?.reply();
     Ok(())
 }
 
@@ -3601,6 +3639,12 @@ pub fn send_key_xtest(key: &str, modifiers: &[&str]) -> Result<()> {
     use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, _) = connect_x11_for_input()?;
     let mut mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+
+    let requested = std::iter::once(key)
+        .chain(modifiers.iter().copied())
+        .map(key_name_to_keysym)
+        .collect::<Result<Vec<_>>>()?;
+    let barrier = KeymapBarrier::prepare(&conn, None, &mapping, requested)?;
 
     // Resolve modifier keycodes first. Keep any spare-keycode remap guards alive
     // until after the events are delivered (drop at end of fn).
@@ -3650,40 +3694,44 @@ pub fn send_key_xtest(key: &str, modifiers: &[&str]) -> Result<()> {
     };
 
     // Press modifiers (+ auto-Shift), tap the key, release in reverse order.
-    for &kc in &mod_keycodes {
-        conn.xtest_fake_input(KEY_PRESS_EVENT, kc, 0, x11rb::NONE, 0, 0, 0)?;
+    if let Some(barrier) = &barrier {
+        barrier.check_focus()?;
     }
-    if let Some(sk) = auto_shift_kc {
-        conn.xtest_fake_input(KEY_PRESS_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
-    }
-    conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?
-        .check()?;
-    conn.flush()?;
-    sleep(Duration::from_millis(KEY_DELAY_MS));
-    conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
-    if let Some(sk) = auto_shift_kc {
-        conn.xtest_fake_input(KEY_RELEASE_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
-    }
-    for &kc in mod_keycodes.iter().rev() {
-        conn.xtest_fake_input(KEY_RELEASE_EVENT, kc, 0, x11rb::NONE, 0, 0, 0)?;
-    }
-    conn.flush()?;
-
-    // Round-trip so the server actually PROCESSES (delivers) the injected XTEST
-    // key events before this function returns and drops its short-lived
-    // connection. `flush()` only writes the requests to the socket; without a
-    // following reply-bearing request the connection can close before the server
-    // routes the KeyPress/KeyRelease to the focused window, and the events are
-    // dropped. Observed under Xtigervnc: identical raw `xtest_fake_input` calls
-    // deliver when the connection stays alive but vanish from this short-lived
-    // one — pointer events (send_click_xtest_desktop) survive, keyboard events do
-    // not. Unconditional (previously only ran for spare-keycode remaps).
-    let _ = conn.get_input_focus()?.reply();
-    if !guards.is_empty() {
-        // Spare-keycode remap: give the target a beat to translate the events
-        // under the temporary mapping before the guards restore it on drop.
+    keymap_barrier::dispatch(|| {
+        for &kc in &mod_keycodes {
+            conn.xtest_fake_input(KEY_PRESS_EVENT, kc, 0, x11rb::NONE, 0, 0, 0)?;
+        }
+        if let Some(sk) = auto_shift_kc {
+            conn.xtest_fake_input(KEY_PRESS_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
+        }
+        conn.xtest_fake_input(KEY_PRESS_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?
+            .check()?;
+        conn.flush()?;
         sleep(Duration::from_millis(KEY_DELAY_MS));
-    }
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, keycode, 0, x11rb::NONE, 0, 0, 0)?;
+        if let Some(sk) = auto_shift_kc {
+            conn.xtest_fake_input(KEY_RELEASE_EVENT, sk, 0, x11rb::NONE, 0, 0, 0)?;
+        }
+        for &kc in mod_keycodes.iter().rev() {
+            conn.xtest_fake_input(KEY_RELEASE_EVENT, kc, 0, x11rb::NONE, 0, 0, 0)?;
+        }
+        conn.flush()?;
+
+        // Round-trip so the server actually PROCESSES (delivers) the injected XTEST
+        // key events before this function returns and drops its short-lived
+        // connection. `flush()` only writes the requests to the socket; without a
+        // following reply-bearing request the connection can close before the server
+        // routes the KeyPress/KeyRelease to the focused window, and the events are
+        // dropped. Observed under Xtigervnc: identical raw `xtest_fake_input` calls
+        // deliver when the connection stays alive but vanish from this short-lived
+        // one — pointer events (send_click_xtest_desktop) survive, keyboard events do
+        // not. Unconditional (previously only ran for spare-keycode remaps).
+        conn.get_input_focus()?.reply()?;
+        if let Some(barrier) = &barrier {
+            barrier.wait()?;
+        }
+        Ok(())
+    })?;
     drop(guards);
     Ok(())
 }
@@ -3724,6 +3772,9 @@ pub fn send_click_xtest_desktop_with_modifiers(
     let mut modifier_keycodes = Vec::new();
     for modifier in modifiers {
         let keysym = key_name_to_keysym(modifier)?;
+        if !mapping.keysyms.contains(&keysym) {
+            bail!("not_settable: pointer modifiers must exist in the X11 keyboard map; no input was sent");
+        }
         let (keycode, guard) = keycode_for_keysym(&conn, &mut mapping, keysym, modifier)?;
         if let Some(guard) = guard {
             guards.push(guard);
@@ -3915,8 +3966,11 @@ pub fn send_drag_xtest_desktop_with_modifiers(
     let mut guards = Vec::new();
     let mut codes = Vec::new();
     for modifier in modifiers {
-        let (code, guard) =
-            keycode_for_keysym(&conn, &mut mapping, key_name_to_keysym(modifier)?, modifier)?;
+        let keysym = key_name_to_keysym(modifier)?;
+        if !mapping.keysyms.contains(&keysym) {
+            bail!("not_settable: pointer modifiers must exist in the X11 keyboard map; no input was sent");
+        }
+        let (code, guard) = keycode_for_keysym(&conn, &mut mapping, keysym, modifier)?;
         guards.extend(guard);
         codes.push(code);
     }
@@ -3974,6 +4028,11 @@ fn send_key_to_target(
     // that restores the original mapping once the event has been delivered.
     let keysym = key_name_to_keysym(key)?;
     let mut mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let requested = std::iter::once(key)
+        .chain(modifiers.iter().copied())
+        .map(key_name_to_keysym)
+        .collect::<Result<Vec<_>>>()?;
+    let barrier = KeymapBarrier::prepare(&conn, Some(window), &mapping, requested)?;
     let (keycode, remap_guard) = keycode_for_keysym(&conn, &mut mapping, keysym, key)?;
 
     // XSendEvent's state mask describes modifiers for one key event, but does
@@ -4012,42 +4071,39 @@ fn send_key_to_target(
         conn.send_event(false, window, event_mask, &event)
     };
 
-    let mut state_bits = 0u16;
-    for &(modifier_keycode, modifier_mask) in &modifier_keycodes {
-        send_key_event(
-            KEY_PRESS_EVENT,
-            modifier_keycode,
-            KeyButMask::from(state_bits),
-            EventMask::KEY_PRESS,
-        )?;
-        state_bits |= u16::from(modifier_mask);
-    }
-    let state = KeyButMask::from(state_bits);
-    send_key_event(KEY_PRESS_EVENT, keycode, state, EventMask::KEY_PRESS)?.check()?;
-    conn.flush()?;
-    sleep(Duration::from_millis(KEY_DELAY_MS));
-    send_key_event(KEY_RELEASE_EVENT, keycode, state, EventMask::KEY_RELEASE)?;
-    for &(modifier_keycode, modifier_mask) in modifier_keycodes.iter().rev() {
-        send_key_event(
-            KEY_RELEASE_EVENT,
-            modifier_keycode,
-            KeyButMask::from(state_bits),
-            EventMask::KEY_RELEASE,
-        )?;
-        state_bits &= !u16::from(modifier_mask);
-    }
-    conn.flush()?;
-
-    // If we borrowed a spare keycode for this keysym, give the target client a
-    // moment to translate the synthetic event under the temporary mapping before
-    // we restore it. The keycode->keysym lookup is client-side, so restoring too
-    // eagerly would race delivery. A server round-trip (which only returns once
-    // our queued requests have been processed) plus a short settle keeps that
-    // race closed; the guard then reinstates the original keysyms on drop.
-    let _ = conn.get_input_focus()?.reply();
-    if remap_guard.is_some() || !remap_guards.is_empty() {
+    keymap_barrier::dispatch(|| {
+        let mut state_bits = 0u16;
+        for &(modifier_keycode, modifier_mask) in &modifier_keycodes {
+            send_key_event(
+                KEY_PRESS_EVENT,
+                modifier_keycode,
+                KeyButMask::from(state_bits),
+                EventMask::KEY_PRESS,
+            )?;
+            state_bits |= u16::from(modifier_mask);
+        }
+        let state = KeyButMask::from(state_bits);
+        send_key_event(KEY_PRESS_EVENT, keycode, state, EventMask::KEY_PRESS)?.check()?;
+        conn.flush()?;
         sleep(Duration::from_millis(KEY_DELAY_MS));
-    }
+        send_key_event(KEY_RELEASE_EVENT, keycode, state, EventMask::KEY_RELEASE)?;
+        for &(modifier_keycode, modifier_mask) in modifier_keycodes.iter().rev() {
+            send_key_event(
+                KEY_RELEASE_EVENT,
+                modifier_keycode,
+                KeyButMask::from(state_bits),
+                EventMask::KEY_RELEASE,
+            )?;
+            state_bits &= !u16::from(modifier_mask);
+        }
+        conn.flush()?;
+
+        conn.get_input_focus()?.reply()?;
+        if let Some(barrier) = &barrier {
+            barrier.wait()?;
+        }
+        Ok(())
+    })?;
     drop(remap_guard);
     Ok(())
 }
@@ -4164,6 +4220,7 @@ mod key_name_alias_tests {
                     target.push(if shift { 'A' } else { 'a' });
                     Ok(())
                 },
+                || Ok(()),
             );
             assert!(result
                 .unwrap_err()
@@ -4199,6 +4256,7 @@ mod key_name_alias_tests {
                 target.push('a');
                 Ok(())
             },
+            || Ok(()),
         )
         .unwrap_err();
         assert_eq!(
@@ -4213,6 +4271,51 @@ mod key_name_alias_tests {
     }
 
     struct Restore<'a>(&'a std::cell::Cell<usize>);
+
+    #[test]
+    fn text_preflight_marks_errors_after_a_sent_prefix_as_unconfirmed() {
+        let mapping = GetKeyboardMappingReply {
+            keysyms_per_keycode: 2,
+            sequence: 0,
+            keysyms: vec!['a' as u32, 'A' as u32],
+        };
+        for (fail_at, finish_fails, unconfirmed) in [
+            (Some(0), false, false),
+            (Some(0), true, false),
+            (Some(1), false, true),
+            (Some(1), true, true),
+            (None, true, true),
+        ] {
+            let mut sent = 0;
+            let mut finished = false;
+            let error = type_text_with_preflight::<()>(
+                "aa",
+                &mapping,
+                |_, _| unreachable!(),
+                |_, _| {
+                    if fail_at == Some(sent) {
+                        anyhow::bail!("focus changed before next character");
+                    }
+                    sent += 1;
+                    Ok(())
+                },
+                || {
+                    finished = true;
+                    if finish_fails {
+                        anyhow::bail!("client queue read failed");
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert!(finished, "even partial input must finish its queue barrier");
+            assert_eq!(
+                super::delivery_is_unconfirmed(&error),
+                unconfirmed,
+                "sent={sent}, finish_fails={finish_fails}: {error:#}"
+            );
+        }
+    }
 
     impl Drop for Restore<'_> {
         fn drop(&mut self) {
@@ -4252,6 +4355,14 @@ mod key_name_alias_tests {
                     }
                     Ok(())
                 },
+                || {
+                    assert_eq!(
+                        restored.get(),
+                        0,
+                        "restore must follow client queue completion"
+                    );
+                    Ok(())
+                },
             );
             assert_eq!(result.is_ok(), ok, "{text}");
             drop(result);
@@ -4285,6 +4396,7 @@ mod key_name_alias_tests {
                 events.push((keycode, shift));
                 Ok(())
             },
+            || Ok(()),
         )
         .unwrap();
         assert_eq!(remaps, 2);
@@ -4314,6 +4426,7 @@ mod key_name_alias_tests {
                 events.push((keycode, shift));
                 Ok(())
             },
+            || Ok(()),
         )
         .unwrap();
         assert_eq!(events, [(8, false), (8, true), (8, false)]);

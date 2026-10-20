@@ -237,12 +237,14 @@ impl Tool for HotkeyTool {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id,
                 element_index,
                 via_token: _,
+                ..
             } => (Some(element_index), window_id),
         };
         // delivery_mode gates whether we raise: background (default) never fronts
@@ -258,11 +260,7 @@ impl Tool for HotkeyTool {
         }
 
         let element_guard = if let (Some(index), Some(window_id)) = (element_index, window_id) {
-            match self
-                .state
-                .element_cache
-                .get_element_retained(pid, window_id, index)
-            {
+            match element_cache.get_element_retained(pid, window_id, index) {
                 Some(guard) => Some(guard),
                 None => {
                     return ToolResult::error(format!(

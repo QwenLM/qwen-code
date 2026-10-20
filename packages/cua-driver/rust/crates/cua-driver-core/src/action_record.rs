@@ -59,6 +59,8 @@ pub enum ActualDelivery {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ActionTransport {
     AgentCursorOverlay,
+    #[cfg(target_os = "macos")]
+    MacosAppleEvents,
     MacosAxAction,
     MacosAxValue,
     MacosAxWindowFrame,
@@ -81,6 +83,7 @@ pub enum ActionTransport {
     LinuxAtSpiAction,
     LinuxAtSpiValue,
     LinuxPty,
+    LinuxUinput,
     LinuxXSendEvent,
     LinuxXTest,
     LinuxX11ConfigureWindow,
@@ -92,6 +95,8 @@ pub enum ActionTransport {
 impl ActionTransport {
     pub const ALL: &'static [Self] = &[
         Self::AgentCursorOverlay,
+        #[cfg(target_os = "macos")]
+        Self::MacosAppleEvents,
         Self::MacosAxAction,
         Self::MacosAxValue,
         Self::MacosAxWindowFrame,
@@ -114,6 +119,7 @@ impl ActionTransport {
         Self::LinuxAtSpiAction,
         Self::LinuxAtSpiValue,
         Self::LinuxPty,
+        Self::LinuxUinput,
         Self::LinuxXSendEvent,
         Self::LinuxXTest,
         Self::LinuxX11ConfigureWindow,
@@ -125,6 +131,8 @@ impl ActionTransport {
     pub const fn route(self) -> ActionRoute {
         match self {
             Self::AgentCursorOverlay => ActionRoute::SyntheticEvents,
+            #[cfg(target_os = "macos")]
+            Self::MacosAppleEvents => ActionRoute::SystemApi,
             Self::MacosAxAction
             | Self::MacosAxValue
             | Self::MacosAxWindowFrame
@@ -141,6 +149,7 @@ impl ActionTransport {
             Self::MacosCgEventPid
             | Self::WindowsPostMessage
             | Self::LinuxPty
+            | Self::LinuxUinput
             | Self::LinuxXSendEvent => ActionRoute::SyntheticEvents,
             Self::MacosCgEventHid
             | Self::WindowsTargetedInjection
@@ -443,15 +452,13 @@ impl ActionExecutionRecord {
 
         if legacy_has_publishable_readback(tool_name, structured) {
             record.evidence.push(ActionEvidence {
-                kind: if matches!(
-                    transport,
+                kind: match transport {
+                    #[cfg(target_os = "macos")]
+                    ActionTransport::MacosAppleEvents => EvidenceKind::ValueReadback,
                     ActionTransport::BrowserCdpInputMouse
-                        | ActionTransport::BrowserCdpInputKey
-                        | ActionTransport::BrowserCdpRuntimeFunction
-                ) {
-                    EvidenceKind::BrowserReadback
-                } else {
-                    EvidenceKind::AccessibilityReadback
+                    | ActionTransport::BrowserCdpInputKey
+                    | ActionTransport::BrowserCdpRuntimeFunction => EvidenceKind::BrowserReadback,
+                    _ => EvidenceKind::AccessibilityReadback,
                 },
                 detail: structured
                     .get("verify")
@@ -730,6 +737,8 @@ fn parse_actual_delivery_name(value: &str) -> Result<ActualDelivery, String> {
 fn parse_transport_name(value: &str) -> Result<ActionTransport, String> {
     let transport = match value {
         "agent_cursor_overlay" => ActionTransport::AgentCursorOverlay,
+        #[cfg(target_os = "macos")]
+        "macos_apple_events" => ActionTransport::MacosAppleEvents,
         "macos_ax_action" => ActionTransport::MacosAxAction,
         "macos_ax_value" => ActionTransport::MacosAxValue,
         "macos_ax_window_frame" => ActionTransport::MacosAxWindowFrame,
@@ -752,6 +761,7 @@ fn parse_transport_name(value: &str) -> Result<ActionTransport, String> {
         "linux_at_spi_action" => ActionTransport::LinuxAtSpiAction,
         "linux_at_spi_value" => ActionTransport::LinuxAtSpiValue,
         "linux_pty" => ActionTransport::LinuxPty,
+        "linux_uinput" => ActionTransport::LinuxUinput,
         "linux_x_send_event" => ActionTransport::LinuxXSendEvent,
         "linux_x_test" => ActionTransport::LinuxXTest,
         "linux_x11_configure_window" => ActionTransport::LinuxX11ConfigureWindow,
@@ -873,8 +883,13 @@ fn browser_refusal_escalation(code: &str) -> Option<ActionEscalation> {
 /// against the request. A click may do so only when the producer also declares
 /// explicit accessibility read-back evidence, as the macOS collection-item
 /// selection fallback does after observing `AXSelected`.
+/// Native Apple Events save also compares the document's modified state.
 fn legacy_has_publishable_readback(tool_name: &str, structured: &serde_json::Value) -> bool {
     let value_readback_tool = matches!(tool_name, "type_text" | "type_text_chars" | "set_value");
+    #[cfg(target_os = "macos")]
+    let value_readback_tool = value_readback_tool
+        || (tool_name == "hotkey"
+            && structured.get("path").and_then(serde_json::Value::as_str) == Some("apple_events"));
     let click_selection_readback = tool_name == "click"
         && structured
             .get("evidence")
@@ -901,6 +916,8 @@ fn transport_from_legacy(
 ) -> Option<ActionTransport> {
     let path = raw_path.unwrap_or("");
     let transport = match path {
+        #[cfg(target_os = "macos")]
+        "apple_events" => ActionTransport::MacosAppleEvents,
         "ax" | "ax_fg" => {
             if cfg!(target_os = "macos") {
                 if matches!(tool_name, "type_text" | "type_text_chars" | "set_value") {
@@ -1243,6 +1260,8 @@ fn escalation_kind_name(kind: EscalationKind) -> &'static str {
 fn transport_name(transport: ActionTransport) -> &'static str {
     match transport {
         ActionTransport::AgentCursorOverlay => "agent_cursor_overlay",
+        #[cfg(target_os = "macos")]
+        ActionTransport::MacosAppleEvents => "macos_apple_events",
         ActionTransport::MacosAxAction => "macos_ax_action",
         ActionTransport::MacosAxValue => "macos_ax_value",
         ActionTransport::MacosAxWindowFrame => "macos_ax_window_frame",
@@ -1265,6 +1284,7 @@ fn transport_name(transport: ActionTransport) -> &'static str {
         ActionTransport::LinuxAtSpiAction => "linux_at_spi_action",
         ActionTransport::LinuxAtSpiValue => "linux_at_spi_value",
         ActionTransport::LinuxPty => "linux_pty",
+        ActionTransport::LinuxUinput => "linux_uinput",
         ActionTransport::LinuxXSendEvent => "linux_x_send_event",
         ActionTransport::LinuxXTest => "linux_x_test",
         ActionTransport::LinuxX11ConfigureWindow => "linux_x11_configure_window",
@@ -1421,6 +1441,10 @@ mod tests {
             .unwrap();
             let route = record.stable_projection().unwrap().route;
             assert_eq!(route, transport.route());
+            assert_eq!(
+                ActionExecutionRecord::from_private_json(&record.debug_json()).unwrap(),
+                record
+            );
             routes.push(route);
         }
         assert!(routes.contains(&ActionRoute::Accessibility));
@@ -1705,6 +1729,41 @@ mod tests {
                 !rendered.contains(forbidden),
                 "public ActionResult leaked {forbidden}: {rendered}"
             );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn apple_event_native_readback_preserves_the_actual_background_system_route() {
+        for tool in ["hotkey", "set_value"] {
+            let args = serde_json::json!({"pid":101,"window_id":501,"delivery_mode":"foreground"});
+            let result = serde_json::json!({
+                "path":"apple_events", "verified":true, "effect":"confirmed",
+                "delivery_mode":"background"
+            });
+            let record = ActionExecutionRecord::from_legacy(tool, &args, &result)
+                .expect("the native save/rename producer has independent readback");
+            assert_eq!(record.requested_delivery, RequestedDelivery::Foreground);
+            assert_eq!(record.actual_delivery, Some(ActualDelivery::Background));
+            let public = record.public_result().unwrap();
+            public.validate_invariants().unwrap();
+            let public = serde_json::to_value(public).unwrap();
+            assert_eq!(public["effect"], "confirmed");
+            assert_eq!(public["route"], "system_api");
+            assert_eq!(public["delivery"]["mode"], "background");
+            assert_eq!(public["evidence"][0]["kind"], "value_readback");
+
+            let mut unverified = result.clone();
+            unverified["verified"] = serde_json::json!(false);
+            let record = ActionExecutionRecord::from_legacy(tool, &args, &unverified).unwrap();
+            assert_eq!(record.effect, ActionEffect::Unverifiable);
+            assert!(record.evidence.is_empty());
+
+            let mut acknowledgement = result.clone();
+            acknowledgement.as_object_mut().unwrap().remove("effect");
+            let record = ActionExecutionRecord::from_legacy(tool, &args, &acknowledgement).unwrap();
+            assert_eq!(record.effect, ActionEffect::Unverifiable);
+            assert!(record.evidence.is_empty());
         }
     }
 

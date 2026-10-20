@@ -7,6 +7,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -174,16 +175,60 @@ describe('JavaScript MCP server', () => {
   }, 15000);
 
   it('does not run user code after a timeout during first-call preloading', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-js-preload-'));
+    const entered = path.join(dir, 'entered');
+    const release = path.join(dir, 'release');
+    const runtime = path.join(dir, 'runtime.mjs');
+    const loader = path.join(dir, 'loader.mjs');
+    const register = path.join(dir, 'register.mjs');
+    fs.writeFileSync(
+      runtime,
+      `import fs from 'node:fs';
+       fs.writeFileSync(${JSON.stringify(entered)}, 'entered');
+       while (!fs.existsSync(${JSON.stringify(release)})) {
+         await new Promise(resolve => setTimeout(resolve, 5));
+       }
+       export function createCua() { return { rewriteDocumentation() {} }; }`,
+    );
+    fs.writeFileSync(
+      loader,
+      `export function resolve(specifier, context, nextResolve) {
+         if (specifier === '@qwen-code/cua-sdk/runtime') {
+           return { url: ${JSON.stringify(pathToFileURL(runtime).href)}, shortCircuit: true };
+         }
+         return nextResolve(specifier, context);
+       }`,
+    );
+    fs.writeFileSync(
+      register,
+      `import { register } from 'node:module';
+       register(${JSON.stringify(pathToFileURL(loader).href)}, import.meta.url);`,
+    );
     const { client, close } = await connected();
+    const previousOptions = process.env['NODE_OPTIONS'];
+    process.env['NODE_OPTIONS'] = [
+      previousOptions,
+      `--import=${pathToFileURL(register).href}`,
+    ]
+      .filter(Boolean)
+      .join(' ');
     try {
-      const result = await client.callTool({
+      const pending = client.callTool({
         name: 'js',
         arguments: {
           code: 'globalThis.preloadEffect = true;',
-          timeout_ms: 1,
+          timeout_ms: 100,
         },
       });
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(entered) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(fs.existsSync(entered)).toBe(true);
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('timeout');
+      fs.writeFileSync(release, 'release');
       const next = await client.callTool({
         name: 'js',
         arguments: {
@@ -191,9 +236,13 @@ describe('JavaScript MCP server', () => {
         },
       });
       expect(next.isError).not.toBe(true);
-      expect(textOf(next)).toContain(result.isError ? 'undefined' : 'boolean');
+      expect(textOf(next)).toContain('undefined');
     } finally {
+      fs.writeFileSync(release, 'release');
+      if (previousOptions === undefined) delete process.env['NODE_OPTIONS'];
+      else process.env['NODE_OPTIONS'] = previousOptions;
       await close();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

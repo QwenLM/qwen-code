@@ -258,7 +258,10 @@ pub(super) fn run(
         return match crate::apple_events::save_document(&bundle, &bundle, &path) {
             Ok(_) => {
                 ToolResult::text("Saved through Apple Events; the app reports no unsaved changes.")
-                    .with_structured(serde_json::json!({"verified":true,"path":"apple_events"}))
+                    .with_structured(serde_json::json!({
+                        "verified":true,"path":"apple_events","effect":"confirmed",
+                        "delivery_mode":"background"
+                    }))
             }
             Err(error) => ToolResult::computer_use_error(
                 error.code,
@@ -302,12 +305,12 @@ pub(super) fn run(
         CFRelease(target as CFTypeRef);
         if result == kAXErrorSuccess {
             ToolResult::text("Sent background menu command; observe before retrying.")
+                .with_structured(serde_json::json!({
+                    "path":"ax","verified":false,"effect":"unverifiable",
+                    "delivery_mode":"background"
+                }))
         } else {
-            ToolResult::computer_use_error(
-                "menu_action_failed",
-                format!("AXPress returned {result}; observe before retrying"),
-                true,
-            )
+            super::ax_action_unconfirmed("AXPress", None, result)
         }
     }
 }

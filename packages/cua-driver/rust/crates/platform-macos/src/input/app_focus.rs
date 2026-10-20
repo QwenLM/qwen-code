@@ -590,7 +590,7 @@ mod tests {
             (Preparation::Activate, 13),
             (Preparation::ReturnKeyFocus, 21),
         ] {
-            let events = super::super::app_pointer::focus_events(preparation, 1234, None).unwrap();
+            let events = super::super::app_pointer::focus_events(preparation, 1234).unwrap();
             let event = events[0].as_ptr() as *mut c_void;
             assert_eq!(
                 unsafe { observe_event(std::ptr::null_mut(), kind, event, context) },

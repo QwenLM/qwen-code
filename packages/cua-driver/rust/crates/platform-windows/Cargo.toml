@@ -85,3 +85,6 @@ windows = { version = "0.58", features = [
     "Win32_System_WinRT_Graphics_Capture",
 ] }
 base64 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -48,18 +48,18 @@ fn tool(
     );
     if desktop {
         properties.insert("scope".into(), json!({"type":"string","enum":["desktop"],"description":"Explicit foreground desktop input. Coordinates use the latest primary-display screenshot pixels. Omit app."}));
+        if matches!(name, "key_down" | "key_up") {
+            properties.remove("app");
+        } else {
+            properties.get_mut("app").unwrap()["description"] = json!(
+                "Exact application name, identifier or absolute path. Supply exactly one of app or scope:desktop."
+            );
+        }
     }
-    let mut schema = json!({
+    let schema = json!({
         "type":"object", "properties":properties,
         "required":required.iter().filter(|field| !desktop || **field != "app").collect::<Vec<_>>(), "additionalProperties":false,
     });
-    if desktop {
-        schema["oneOf"] = if matches!(name, "key_down" | "key_up") {
-            json!([{"required":["scope"],"not":{"required":["app"]}}])
-        } else {
-            json!([{"required":["app"],"not":{"required":["scope"]}}, {"required":["scope"],"not":{"required":["app"]}}])
-        };
-    }
     ComputerUseTool {
         name,
         method,
@@ -87,7 +87,7 @@ pub fn tools() -> Vec<ComputerUseTool> {
         "y":{"type":"number","description":"Window screenshot pixel y. Requires a current screenshot."},
     });
     let mut click = point.clone();
-    click["key"] = json!({"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Modifier keys held during the click, such as shift or ctrl."});
+    click["key"] = json!({"type":"array","items":{"type":"string"},"description":"Modifier keys held during the click, such as [\"shift\"] or [\"ctrl\",\"shift\"]."});
     click["button"] = json!({"type":"string","enum":["left","middle","right"],"default":"left"});
     click["count"] = json!({"type":"integer","minimum":1,"maximum":3,"default":1});
     let mut scroll = point;

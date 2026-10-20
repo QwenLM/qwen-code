@@ -62,6 +62,8 @@ pub enum BackgroundUnavailable {
     /// WebKitGTK rejects synthetic XSendEvent input and no real target-addressed
     /// pointer backend is available in this session.
     WebKitSyntheticInput,
+    /// Openbox promotes an MPX master's core FocusIn to global activation.
+    WindowManagerFocus,
 }
 
 impl BackgroundUnavailable {
@@ -70,6 +72,7 @@ impl BackgroundUnavailable {
             Self::ChromiumInput => "background_unavailable",
             Self::FocusedInputOnly => "background_unavailable",
             Self::WebKitSyntheticInput => "background_unavailable",
+            Self::WindowManagerFocus => "background_unavailable",
         }
     }
     fn detail(self) -> &'static str {
@@ -85,9 +88,20 @@ impl BackgroundUnavailable {
             Self::WebKitSyntheticInput => {
                 "WebKitGTK rejects synthetic XSendEvent input and this session has no real target-addressed pointer backend"
             }
+            Self::WindowManagerFocus => {
+                "Openbox treats virtual keyboard focus as global window activation"
+            }
         }
     }
 }
+
+impl std::fmt::Display for BackgroundUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.detail())
+    }
+}
+
+impl std::error::Error for BackgroundUnavailable {}
 
 /// Build the structured `background_unavailable` error returned when a
 /// background injection has no usable backend. Mirrors the

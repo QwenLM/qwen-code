@@ -238,9 +238,13 @@ fn validate(name: &str, args: &Value) -> Result<(), ToolResult> {
             Some("integer") => value.is_i64() || value.is_u64(),
             Some("number") => value.is_number(),
             Some("boolean") => value.is_boolean(),
-            Some("array") => value
-                .as_array()
-                .is_some_and(|values| values.iter().all(Value::is_string)),
+            Some("array") => {
+                // The JS click API also accepts one modifier as a string.
+                name == "click" && field == "key" && value.is_string()
+                    || value
+                        .as_array()
+                        .is_some_and(|values| values.iter().all(Value::is_string))
+            }
             _ => {
                 value.is_string()
                     || value
@@ -600,6 +604,18 @@ impl ComputerUseRuntime {
             .as_u64()
             .filter(|pid| *pid > 0)
             .ok_or_else(|| error("app_not_running", "The app has no running process.", false))?;
+        let readiness_deadline = (observing && name != "get_screenshot")
+            .then(|| std::time::Instant::now() + crate::tool::AX_READINESS_BUDGET);
+        let call = |name: &'static str, mut input: Value| {
+            if let Some(session) = &session {
+                input["session"] = session.clone();
+            }
+            Box::pin(registry.invoke_computer_use_native_with_readiness(
+                name,
+                input,
+                readiness_deadline,
+            ))
+        };
         let mut windows = checked(
             call("list_windows", json!({"pid":pid,"app_context":true})).await,
             false,
@@ -723,14 +739,22 @@ impl ComputerUseRuntime {
             if !screenshot_only && structured["capture_complete"] == false {
                 body = format!("Accessibility capture is incomplete; only current captured IDs are actionable. Use a screenshot or a larger capture budget if needed.\n{body}");
             }
+            if let Some(note) = structured["off_space_staleness"].as_str() {
+                body = format!("{note}\n{body}");
+            }
             let title = window["title"].as_str().unwrap_or_default();
+            let mut metadata =
+                json!({"app":identity(&app),"name":app["name"],"window":title,"mode":mode});
+            for field in ["on_current_space", "off_space_staleness"] {
+                if let Some(value) = structured.get(field) {
+                    metadata[field] = value.clone();
+                }
+            }
             let mut result = ToolResult::text(format!(
                 "{} — {title} ({mode})\n{body}",
                 app["name"].as_str().unwrap_or(selector)
             ))
-            .with_structured(
-                json!({"app":identity(&app),"name":app["name"],"window":title,"mode":mode}),
-            );
+            .with_structured(metadata);
             result.content.extend(
                 observed
                     .content
@@ -965,6 +989,20 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn flat_schema_keeps_target_and_modifier_validation() {
+        for args in [json!({}), json!({"app":"Fixture","scope":"desktop"})] {
+            let refusal = validate("click", &args).unwrap_err();
+            assert_eq!(refusal.structured_content.unwrap()["sent"], false);
+        }
+        for key in [json!("shift"), json!(["ctrl", "shift"])] {
+            assert!(validate("click", &json!({"app":"Fixture","element":1,"key":key})).is_ok());
+        }
+        assert!(validate("click", &json!({"app":"Fixture","element":1,"key":[7]})).is_err());
+        assert!(validate("key_down", &json!({"app":"Fixture","key":"shift"})).is_err());
+        assert!(validate("key_down", &json!({"scope":"desktop","key":"shift"})).is_ok());
+    }
+
+    #[test]
     fn explicit_dispatch_state_survives_error_classification() {
         let result = ToolResult::computer_use_error(
             "not_settable",
@@ -979,7 +1017,9 @@ mod tests {
     struct Fixture {
         window: Mutex<u64>,
         screen_width: Mutex<u64>,
+        off_space: Mutex<bool>,
         calls: Mutex<Vec<(String, Value)>>,
+        readiness: Mutex<Vec<(String, Option<std::time::Instant>)>>,
     }
     struct Native {
         def: ToolDef,
@@ -991,6 +1031,10 @@ mod tests {
             &self.def
         }
         async fn invoke(&self, args: Value) -> ToolResult {
+            self.fixture.readiness.lock().unwrap().push((
+                self.def.name.clone(),
+                crate::tool::current_ax_readiness_deadline(),
+            ));
             self.fixture
                 .calls
                 .lock()
@@ -1009,10 +1053,20 @@ mod tests {
                 "list_windows" => ToolResult::text("").with_structured(json!({"windows":[{
                     "pid":42,"window_id":window,"title":"Fixture window","is_app_target":true,"z_index":1,
                 }]})),
-                "get_window_state" => ToolResult::text("").with_structured(json!({
-                    "tree_markdown":"[100] button Save", "elements":[{"element_id":100,"element_token":"native-token"}],
-
-                })),
+                "get_window_state" => {
+                    let mut metadata = json!({
+                        "tree_markdown":"[100] button Save", "elements":[{"element_id":100,"element_token":"native-token"}],
+                    });
+                    if *self.fixture.off_space.lock().unwrap() {
+                        metadata["on_current_space"] = json!(false);
+                        metadata["off_space_staleness"] = json!("This read may show an older state.");
+                    }
+                    let mut result = ToolResult::text("").with_structured(metadata);
+                    if args["include_screenshot"] == true {
+                        result.content.push(Content::image_png("AQ==".into()));
+                    }
+                    result
+                },
                 _ => ToolResult::text("dispatched"),
             }
         }
@@ -1070,6 +1124,51 @@ mod tests {
         registry
             .invoke_with_context_and_evidence(name, args, context, evidence)
             .await
+    }
+    #[tokio::test]
+    async fn ax_observation_shares_one_readiness_deadline_but_input_and_screenshot_do_not_wait() {
+        let (registry, fixture, context) = setup();
+        let result = call(
+            &registry,
+            context.clone(),
+            "get_app",
+            json!({"app":"Fixture"}),
+            "readiness",
+        )
+        .await;
+        assert_ne!(result.is_error, Some(true), "{}", text(&result));
+        let reads = fixture.readiness.lock().unwrap().clone();
+        let selection = reads
+            .iter()
+            .find(|(name, _)| name == "list_windows")
+            .unwrap()
+            .1;
+        let walk = reads
+            .iter()
+            .find(|(name, _)| name == "get_window_state")
+            .unwrap()
+            .1;
+        assert!(selection.is_some());
+        assert_eq!(selection, walk);
+        assert!(reads
+            .iter()
+            .filter(|(name, _)| name == "list_apps")
+            .all(|(_, deadline)| deadline.is_none()));
+        for (name, args) in [
+            ("click", json!({"app":"Fixture","element":1})),
+            ("get_screenshot", json!({"app":"Fixture"})),
+        ] {
+            fixture.readiness.lock().unwrap().clear();
+            let result = call(&registry, context.clone(), name, args, "readiness").await;
+            assert_ne!(result.is_error, Some(true), "{}", text(&result));
+            assert!(fixture
+                .readiness
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, deadline)| deadline.is_none()));
+        }
+        assert!(crate::tool::current_ax_readiness_deadline().is_none());
     }
     #[tokio::test]
     async fn desktop_maps_the_observed_frame_once_and_invalidates_changed_geometry() {
@@ -1235,6 +1334,38 @@ mod tests {
         assert_eq!(action["window_id"], 8);
         assert_eq!(action["element_token"], "native-token");
         assert!(action.get("element").is_none());
+    }
+
+    #[tokio::test]
+    async fn app_observation_preserves_off_space_warning_on_all_observation_routes() {
+        let (registry, fixture, context) = setup();
+        *fixture.off_space.lock().unwrap() = true;
+        for name in [
+            "get_app",
+            "get_ax_state",
+            "get_screenshot",
+            "get_ax_state_and_screenshot",
+        ] {
+            let result = call(
+                &registry,
+                context.clone(),
+                name,
+                json!({"app":"Fixture"}),
+                "off-space",
+            )
+            .await;
+            assert_ne!(result.is_error, Some(true), "{name}: {}", text(&result));
+            assert!(
+                text(&result).contains("This read may show an older state."),
+                "{name}"
+            );
+            let metadata = result.structured_content.unwrap();
+            assert_eq!(metadata["on_current_space"], false);
+            assert_eq!(
+                metadata["off_space_staleness"],
+                "This read may show an older state."
+            );
+        }
     }
     #[tokio::test]
     async fn app_state_is_transport_isolated_and_options_are_checked_before_native_calls() {

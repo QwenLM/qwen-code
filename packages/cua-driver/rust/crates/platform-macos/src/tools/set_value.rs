@@ -3,9 +3,9 @@
 //! Two modes, determined by the element's AXRole:
 //!
 //! * **AXPopUpButton**: Find the child option whose AXTitle or AXValue matches
-//!   `value` (case-insensitive) and AXPress it directly.  The native macOS popup
-//!   menu is never opened, so focus is never stolen. Safari's front-document
-//!   fallback is used only when the exact requested window is already focused.
+//!   `value` (case-insensitive) and AXPress it. Open the menu first when its
+//!   options are not exposed while closed. Safari's front-document fallback
+//!   is used only when the exact requested window is already focused.
 //!
 //! * **Everything else**: Write `AXValue` directly (sliders, steppers, native
 //!   text fields that expose a settable AXValue).
@@ -48,9 +48,9 @@ fn def() -> &'static ToolDef {
             "Set a value on a UI element. Two modes depending on element role:\n\
              \n\
              - **AXPopUpButton / select dropdown**: finds the child option whose \
-             title or value matches `value` (case-insensitive) and AXPresses it \
-             directly — the native macOS popup menu is never opened, so focus \
-             is never stolen. Use this for HTML <select> elements in Safari or \
+             title or value matches `value` (case-insensitive) and AXPresses it. \
+             Opens the menu first when the requested option is not exposed \
+             while closed. Use this for HTML <select> elements in Safari or \
              any native NSPopUpButton.\n\
              \n\
              - **All other elements**: writes AXValue directly (sliders, steppers, \
@@ -120,6 +120,7 @@ impl Tool for SetValueTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => {
                 return ToolResult::error(
@@ -131,6 +132,7 @@ impl Tool for SetValueTool {
                 window_id: Some(wid),
                 element_index: idx,
                 via_token: _,
+                ..
             } => (idx, wid),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: None, ..
@@ -145,19 +147,15 @@ impl Tool for SetValueTool {
         // Retain out of the cache so a concurrent get_window_state can't free
         // the element mid-action (use-after-free → daemon crash). Guard lives
         // to the end of this method, past the AX write below.
-        let element_guard =
-            match self
-                .state
-                .element_cache
-                .get_element_retained(pid, window_id, element_index)
-            {
-                Some(e) => e,
-                None => {
-                    return ToolResult::error(format!(
-                        "Element index {element_index} not found. Call get_window_state first."
-                    ))
-                }
-            };
+        let element_guard = match element_cache.get_element_retained(pid, window_id, element_index)
+        {
+            Some(e) => e,
+            None => {
+                return ToolResult::error(format!(
+                    "Element index {element_index} not found. Call get_window_state first."
+                ))
+            }
+        };
         let element_ptr = element_guard.as_ptr();
 
         // set_value is an always-background semantic AX mutation. Re-prove
@@ -218,7 +216,10 @@ impl Tool for SetValueTool {
             return match renamed {
                 Ok(Ok(path)) => {
                     ToolResult::text(format!("Renamed and verified on disk: {}", path.display()))
-                        .with_structured(serde_json::json!({"path":"apple_events","verified":true}))
+                        .with_structured(serde_json::json!({
+                            "path":"apple_events","verified":true,"effect":"confirmed",
+                            "delivery_mode":"background"
+                        }))
                 }
                 Ok(Err(error)) => ToolResult::computer_use_error(
                     error.code,

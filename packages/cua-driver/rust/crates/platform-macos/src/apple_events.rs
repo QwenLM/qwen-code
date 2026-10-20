@@ -287,8 +287,8 @@ fn folder_lists(folder: &Path, name: &str) -> bool {
 /// through the Cocoa Standard Suite `save` command, then read its modified
 /// flag back. Raw codes keep the script independent of the app's
 /// terminology: `docu` document, `ppth` its path (TextEdit) or `file` its
-/// file (the Standard Suite), `imod` modified, `core/save` save. Returns `false` when the app still reports unsaved
-/// changes.
+/// file (the Standard Suite), `imod` modified, `core/save` save. Returns `false`
+/// when the app reports no unsaved changes.
 const SAVE_DOCUMENT_SCRIPT: &str = r#"on run argv
 	set thePath to item 1 of argv
 	tell application id (item 2 of argv)
@@ -336,6 +336,57 @@ const DOCUMENT_MODIFIED_SCRIPT: &str = r#"on run argv
 end run
 "#;
 
+// Excel exposes neither the Standard Suite file nor modified properties.
+// Resolve its workbook by name, then guard the full path before the one save.
+const EXCEL_DOCUMENT_SCRIPT: &str = r#"on run argv
+	set thePath to item 1 of argv
+	set theBundle to item 2 of argv
+	set theName to item 3 of argv
+	set theAction to item 4 of argv
+	tell application id theBundle
+		considering case
+			if («property 1773» of («class X141» theName)) is not thePath then return "no-document"
+		end considering
+		if theAction is "save" then
+			«event coresave» («class X141» theName)
+		end if
+		return (not («property 1842» of («class X141» theName))) as text
+	end tell
+end run
+"#;
+
+fn run_document_script(
+    bundle_id: &str,
+    path: &Path,
+    save: bool,
+    timeout: Duration,
+) -> Result<String, ScriptRefusal> {
+    let path_text = path.to_string_lossy();
+    if bundle_id == "com.microsoft.Excel" {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        run_script(
+            EXCEL_DOCUMENT_SCRIPT,
+            &[
+                &path_text,
+                bundle_id,
+                &name,
+                if save { "save" } else { "read" },
+            ],
+            timeout,
+        )
+    } else {
+        run_script(
+            if save {
+                SAVE_DOCUMENT_SCRIPT
+            } else {
+                DOCUMENT_MODIFIED_SCRIPT
+            },
+            &[&path_text, bundle_id],
+            timeout,
+        )
+    }
+}
+
 /// Whether the app reports unsaved changes in the document at `path`.
 /// Only reads when Automation is already granted, so a readback never shows
 /// the consent prompt; `None` when it cannot tell.
@@ -343,14 +394,9 @@ pub fn document_modified(bundle_id: &str, path: &Path) -> Option<bool> {
     if automation_permission(bundle_id) != AutomationPermission::Granted {
         return None;
     }
-    let path_text = path.to_string_lossy();
-    match run_script(
-        DOCUMENT_MODIFIED_SCRIPT,
-        &[&path_text, bundle_id],
-        Duration::from_secs(5),
-    )
-    .ok()?
-    .as_str()
+    match run_document_script(bundle_id, path, false, Duration::from_secs(5))
+        .ok()?
+        .as_str()
     {
         "true" => Some(true),
         "false" => Some(false),
@@ -372,12 +418,7 @@ pub fn save_document(
 ) -> Result<SavedDocument, ScriptRefusal> {
     ensure_permitted(bundle_id, app_name)?;
     let before = modified_time(path);
-    let path_text = path.to_string_lossy();
-    let result = run_script(
-        SAVE_DOCUMENT_SCRIPT,
-        &[&path_text, bundle_id],
-        Duration::from_secs(30),
-    )?;
+    let result = run_document_script(bundle_id, path, true, Duration::from_secs(30))?;
     match result.as_str() {
         "false" => {}
         "true" => {
@@ -530,6 +571,7 @@ mod tests {
         // Values reach the scripts through argv, never through the source.
         assert!(FINDER_RENAME_SCRIPT.contains("item 1 of argv"));
         assert!(SAVE_DOCUMENT_SCRIPT.contains("item 2 of argv"));
+        assert!(EXCEL_DOCUMENT_SCRIPT.contains("item 3 of argv"));
         assert!(!FINDER_RENAME_SCRIPT.contains('{'));
     }
 }

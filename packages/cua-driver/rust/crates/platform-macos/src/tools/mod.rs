@@ -216,6 +216,58 @@ pub(crate) fn background_refusal_result(
     .with_structured(structured)
 }
 
+pub(super) fn ax_action_unconfirmed(
+    action: &str,
+    index: Option<usize>,
+    status: crate::ax::bindings::AXError,
+) -> cua_driver_core::protocol::ToolResult {
+    let warning = format!(
+        "{action} returned {status}; delivery is uncertain. Observe before another action; this request was not replayed."
+    );
+    let target = index.map_or_else(
+        || "the hit-tested element".to_owned(),
+        |i| format!("element [{i}]"),
+    );
+    cua_driver_core::protocol::ToolResult::text(format!("Sent {action} to {target}. {warning}"))
+        .with_structured(serde_json::json!({
+            "path": "ax", "delivery_mode": "background", "sent": true, "verified": false,
+            "effect": "unverifiable", "ax_status": status, "warning": warning
+        }))
+}
+
+#[cfg(test)]
+mod ax_dispatch_tests {
+    #[test]
+    fn ax_errors_remain_unconfirmed_through_the_public_action_projection() {
+        use cua_driver_core::action_record::{ActionEffect, ActionExecutionRecord};
+
+        for (tool, action) in [
+            ("click", "AXPress"),
+            ("double_click", "AXOpen"),
+            ("right_click", "AXShowMenu"),
+        ] {
+            let result = super::ax_action_unconfirmed(action, None, -25202);
+            assert_ne!(result.is_error, Some(true));
+            let structured = result.structured_content.unwrap();
+            assert_eq!(structured["sent"], true);
+            assert!(structured["warning"].as_str().unwrap().contains("Observe"));
+            let record = ActionExecutionRecord::from_legacy(
+                tool,
+                &serde_json::json!({"pid": 101, "window_id": 501, "delivery_mode": "foreground"}),
+                &structured,
+            )
+            .unwrap();
+            assert_eq!(record.effect, ActionEffect::Unverifiable);
+            assert!(record.evidence.is_empty());
+            let public = record.public_result().unwrap();
+            public.validate_invariants().unwrap();
+            let public = serde_json::to_value(public).unwrap();
+            assert_eq!(public["effect"], "unverifiable");
+            assert_eq!(public["delivery"]["mode"], "background");
+        }
+    }
+}
+
 /// Exclusive per-process ownership of one background mutation. Callers must
 /// keep this value alive through actuator dispatch, focus restoration, and
 /// target-bound verification.
@@ -962,10 +1014,6 @@ pub fn register_all(
             cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
-    // Share the element cache with the recording-hook layer so it can
-    // resolve element_index → window-local screenshot coords for click.png.
-    crate::recording_hooks::set_element_cache(state.element_cache.clone());
-
     // Drop a disconnecting session's config overrides + owned cursor on
     // `session_end`. The daemon fans the session id out to this hook;
     // recording ownership is handled separately on the core RecordingSession.

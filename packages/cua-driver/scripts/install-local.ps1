@@ -309,10 +309,13 @@ Write-Host "  exe:    $(Join-Path $VisibleBinDir $BinaryName)"
 Write-Host "  source: $installedBinary"
 Write-Host ""
 
+$AutoStartRegistered = $false
+
 if ($AutoStart) {
     Write-Step "registering Scheduled Task 'qwen-cua-driver-local-serve'"
     try {
         Register-CuaDriverAutostart -InstalledBinary (Join-Path $VisibleBinDir $BinaryName)
+        $AutoStartRegistered = $true
         Write-Host "  Registered. qwen-cua-driver-local serve auto-starts at every interactive logon." -ForegroundColor Green
     }
     catch {
@@ -339,6 +342,7 @@ if ($AutoStart) {
         Write-Step "found existing 'qwen-cua-driver-local-serve' task - re-registering against fresh binary"
         try {
             Register-CuaDriverAutostart -InstalledBinary (Join-Path $VisibleBinDir $BinaryName)
+            $AutoStartRegistered = $true
             Write-Host "  Re-registered. Task action now uses this build's hidden-console wrapper." -ForegroundColor Green
         }
         catch {
@@ -388,8 +392,8 @@ if (-not (Test-Path -LiteralPath $releaseBinary -PathType Leaf)) {
 }
 
 # Windows-specific autostart hint (kept inline; per-shell natural location).
-if ($AutoStart) {
-    # Default branch: autostart was enabled (either by default or explicitly).
+if ($AutoStartRegistered) {
+    # Registration succeeded for this installation.
     # Surface the management subcommands so the user knows how to inspect /
     # disable later without digging through Task Scheduler.
     Write-Host ""
@@ -399,9 +403,8 @@ if ($AutoStart) {
     Write-Host "  qwen-cua-driver-local autostart kick      (start now without re-logging)" -ForegroundColor Cyan
     Write-Host ""
 } else {
-    # Opt-out branch (-NoAutoStart or -AutoStart:`$false`).
     Write-Host ""
-    Write-Host "Auto-start at logon (NOT enabled - re-run without -NoAutoStart to register, or:):" -ForegroundColor Cyan
+    Write-Host "Auto-start for this installation was not confirmed. To register:" -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver-local autostart enable    (register Scheduled Task at RunLevel=Highest)" -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver-local autostart kick      (start now without re-logging)" -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver-local autostart status    (inspect)" -ForegroundColor Cyan
