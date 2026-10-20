@@ -93,15 +93,17 @@ name is computed:
 | `pull_request`        | touched               | `Managed Agent fast tier`            |
 | `pull_request_review` | touched, full run     | `Managed Agent gate`                 |
 | `pull_request_review` | touched, no full run  | `Managed Agent review (no full run)` |
-| `pull_request_review` | not an approval       | every job skips, nothing reported    |
+| `pull_request_review` | not an approval       | all jobs skip; no gate check         |
 | `push`, `merge_group` | touched               | `Managed Agent gate`                 |
 | any                   | tier selection failed | `Managed Agent gate` (fail)          |
 
 A review that is not an approval starts no job: GitHub still creates the run,
 but it can never select a tier above `none`, so both `scope` and `gate` skip
-and it finishes in seconds without taking a runner. It used to report
-`Managed Agent review (no full run)` — a green check no rule reads — and now
-reports nothing.
+and it finishes in seconds without taking a runner. The run still lists one
+skipped check per job, and `gate`'s name is reported as its unevaluated
+expression, so no check named `Managed Agent gate` or
+`Managed Agent review (no full run)` appears. It used to report
+`Managed Agent review (no full run)` — a green check no rule reads.
 
 Branch protection reads the most recently updated check of a name. A touched
 PR therefore shows `Managed Agent gate` as expected until the full run on its
