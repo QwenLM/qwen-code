@@ -205,7 +205,19 @@ jobs:
       # Core and CLI JavaScript, as mysql-integration's suite does.
       - name: 'Build Managed Agent JavaScript prerequisites (fast tier)'
         if: "${{ inputs.tier == 'fast' }}"
-        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+        run: |-
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -620,7 +632,19 @@ jobs:
           echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
 
       - name: 'Build native producer prerequisites'
-        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+        run: |-
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Install Managed Agent dependencies'
         env:
@@ -718,13 +742,19 @@ jobs:
     # 150 s, moving the fork to 9261 s and Verify to 165 minutes; the FG13b
     # Hook dispatch store-rejection cell adds 150 s, moving the fork to
     # 9411 s and Verify to 167 minutes; the FG11f publication cell adds 82 s, so
-    # the fork moves to 9493 s and Verify to 169 minutes, wrapping fork + 600 s
-    # plus margin;
+    # the fork moves to 9493 s and Verify to 169 minutes; the FG12f delivery
+    # cell adds 30 s, moving the fork to 9523 s and Verify to 169 minutes; the
+    # FG11f refusing-arms cells add 242 s, moving the fork to 9765 s and
+    # Verify to 173 minutes; the FG13b Hook result store-rejection cell adds
+    # 150 s, moving the fork to 9915 s and Verify to 176 minutes; the FG13b
+    # Hook plan-result store-rejection cell adds 150 s, moving the fork to
+    # 10065 s and Verify to 178 minutes, wrapping
+    # fork + 600 s plus margin;
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 259 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 272
+    # checks): 268 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 281
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -762,7 +792,18 @@ jobs:
         run: 'corepack enable'
       - name: 'Install, build and bundle CLI'
         run: |-
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
       - name: 'Install Managed Agent dependencies'
         id: 'managed_dependencies'
         env:
@@ -813,8 +854,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 9493 s, so the step wraps to fork + 600 s plus margin (169 min).
-        timeout-minutes: 169
+        # 10065 s, so the step wraps to fork + 600 s plus margin (178 min).
+        timeout-minutes: 178
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -947,7 +988,18 @@ jobs:
         run: 'corepack enable'
       - name: 'Install, build and bundle CLI'
         run: |-
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
       - name: 'Install Managed Agent dependencies'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
@@ -1461,7 +1513,18 @@ jobs:
         uses: './.github/actions/self-hosted-node'
       - name: 'Install, build and bundle CLI'
         run: |-
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
       - name: 'Install Managed Agent dependencies'
         env:
           # Job-local repo, shared with the verify step (the mysql-integration
@@ -1766,7 +1829,19 @@ jobs:
           # workspace twice; that duplicate compile is what exhausted the V8
           # heap on the shared pool (#14823).
           QWEN_SKIP_PREPARE: '1'
-        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+        run: |-
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step skips prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Build Qwen Code'
         run: 'npm run build'

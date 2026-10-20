@@ -1060,3 +1060,102 @@ describe('setup-java Maven cache stays on hosted runners', () => {
     expect(step.with?.cache).toBe(hostedOnly);
   });
 });
+
+// A bare `corepack pnpm install` has no retry. Run 39348512071's daemon E2E
+// lane died in that step before any test ran, inside the workspace build the
+// install's `prepare` re-enters: packages/cli's `tsc --build` exhausted V8's
+// heap. The network class of that failure is what e2e.yml, repo-hygiene.yml
+// and qwen-autofix.yml already absorb (#11726); the heap class is capped in
+// pnpm-workspace.yaml, and a retry only offers it a quieter host. Pin the
+// recipe on every install so a new bare step fails here instead of on main.
+// Each attempt re-runs prepare's build (~4m32s observed), not just backoff.
+describe('SDK Java install-transient retry', () => {
+  const installs = Object.entries(parse(workflow).jobs).flatMap(
+    ([jobName, job]) =>
+      (job.steps ?? [])
+        .filter(
+          (s) => typeof s.run === 'string' && s.run.includes('pnpm install'),
+        )
+        .map((s) => [jobName, s]),
+  );
+
+  it('finds every install step', () => {
+    expect(installs.map(([jobName]) => jobName).sort()).toEqual([
+      'daemon-e2e',
+      'event-transport-multi-node',
+      'hosted-failover-e2e',
+      'hosted-harness-mysql',
+      'mysql-integration',
+      'test',
+    ]);
+  });
+
+  it.each(installs)('%s retries a transient install', (jobName, step) => {
+    for (const fragment of [
+      'for attempt in 1 2 3; do',
+      'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+      'if [[ "${attempt}" != "1" ]]; then',
+      'echo "::warning::corepack pnpm install',
+      'break',
+      'if [[ "${attempt}" == "3" ]]; then',
+      'exit 1',
+      'sleep $((attempt * 15))',
+    ]) {
+      expect(step.run, jobName).toContain(fragment);
+    }
+    expect(step.run, jobName).not.toMatch(/^\s*corepack pnpm install/m);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'retries a failed install and exits 1 only after the third attempt',
+    () => {
+      const [, installStep] = installs.find(
+        ([jobName]) => jobName === 'daemon-e2e',
+      );
+      const runInstall = (failures) =>
+        spawnSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            [
+              'attempts=0',
+              `corepack() {
+                attempts=$((attempts + 1))
+                echo "ATTEMPT $attempts"
+                if (( attempts < ${failures} )); then return 1; fi
+                return 0
+              }`,
+              'sleep() { echo "SLEEP $1"; }',
+              installStep.run,
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        );
+
+      const absorbed = runInstall(2);
+      expect(absorbed.error).toBeUndefined();
+      expect(absorbed.status, absorbed.stderr).toBe(0);
+      expect(absorbed.stdout.match(/ATTEMPT/g)).toHaveLength(2);
+      expect(absorbed.stdout).toContain('SLEEP 15');
+      expect(absorbed.stdout).toContain('failed 1 time(s)');
+
+      const firstTry = runInstall(1);
+      expect(firstTry.status, firstTry.stderr).toBe(0);
+      expect(firstTry.stdout.match(/ATTEMPT/g)).toHaveLength(1);
+      expect(firstTry.stdout).not.toContain('::warning::');
+      expect(firstTry.stdout).not.toContain('SLEEP');
+
+      const exhausted = runInstall(4);
+      expect(exhausted.error).toBeUndefined();
+      expect(exhausted.status, exhausted.stderr).toBe(1);
+      expect(exhausted.stdout.match(/ATTEMPT/g)).toHaveLength(3);
+      expect(exhausted.stdout).toContain('SLEEP 30');
+      expect(exhausted.stdout).not.toContain('::warning::');
+    },
+  );
+});

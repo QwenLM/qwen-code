@@ -19,6 +19,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
@@ -1089,12 +1090,31 @@ class HostedAutomationFaultGatesIT {
     // arm faults the physical object write. The store never rewrites the
     // object and never re-runs the Shell, so these assertions read what it
     // kept rather than assuming a retry the store does not drive.
+    // One method per arm keeps a stall in one arm inside its own ceiling. The
+    // selector keeps the meaning it has for fg11b and fg11c: unset runs every
+    // arm, and naming one runs only that one.
+    @Test
+    @Timeout(600)
+    void fg11fPublicationFailsBeforeWriteOnMySql() throws Exception {
+        assumeTrue(selected("fg11f", "fail-before-write"));
+        runPublicationArm("fail-before-write");
+    }
+
+    @Test
+    @Timeout(600)
+    void fg11fPublicationTimesOutOnMySql() throws Exception {
+        assumeTrue(selected("fg11f", "timeout"));
+        runPublicationArm("timeout");
+    }
+
     @Test
     @Timeout(600)
     void fg11fPublicationFaultsSettleOnceOnMySql() throws Exception {
-        assumeTrue(anySelected("fg11f", "drop-ack-after-write", "fail-before-write", "timeout"));
-        String arm = List.of("drop-ack-after-write", "fail-before-write", "timeout").stream()
-                .filter(name -> selected("fg11f", name)).findFirst().orElse("drop-ack-after-write");
+        assumeTrue(selected("fg11f", "drop-ack-after-write"));
+        runPublicationArm("drop-ack-after-write");
+    }
+
+    private void runPublicationArm(String arm) throws Exception {
         publicationFaults = publicationFaults(arm);
         boot("fg11f");
         String definition = request("POST", "/v1/agents", Map.of(
@@ -1655,7 +1675,8 @@ class HostedAutomationFaultGatesIT {
 
     // Awaitility ignores the interrupt a @Timeout sends, so every wait fails on it.
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted())
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted())
                 .pollInterval(Duration.ofMillis(200));
     }
 
