@@ -1,3 +1,8 @@
+import { plural } from './utils/plural.js';
+import {
+  MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_ZH,
+} from './components/message-deletion-messages.js';
 import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
@@ -6,6 +11,10 @@ import {
   FILES_MESSAGES_EN,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
+import {
+  TOKEN_USAGE_MESSAGES_EN,
+  TOKEN_USAGE_MESSAGES_ZH,
+} from './components/artifacts/token-usage-messages.js';
 import {
   createContext,
   useContext,
@@ -57,13 +66,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/** English count plus its noun, pluralised the regular way. */
-function plural(count: string | number | undefined, noun: string): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
-}
 
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
@@ -870,6 +872,12 @@ const EN: Messages = {
     'Unable to preview this workbook. It may be damaged, password protected, too complex, or unsupported by this browser. You can download the original.',
   'excel.timeout':
     'This workbook took too long to preview. Download the original to open it.',
+  'docx.tooLarge':
+    'DOCX preview supports files up to 10 MiB. Download the original to open it.',
+  'docx.invalid':
+    'Unable to preview this DOCX document. You can download the original.',
+  'docx.timeout':
+    'This document took too long to preview. Download the original or try again.',
   'artifact.openLink': 'Open link',
   'artifact.longDocument': 'File is large. Source is shown by default.',
   'artifact.renderFullPreview': 'Render full preview',
@@ -2413,6 +2421,20 @@ const EN: Messages = {
     'Model response stream was interrupted. Please retry.',
   'error.loopDetected':
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
+  'error.loopDetected.explicitCap': (vars) =>
+    `This turn reached the limit of ${vars?.limit} tool calls set by model.maxToolCallsPerTurn, so it was stopped. Your session is still open—raise the limit in your settings, or send a new instruction to continue.`,
+  'error.loopDetected.backstop': (vars) =>
+    `This turn reached the safety limit of ${vars?.limit} tool calls, so it was stopped. Your session is still open—send a new instruction to continue, or set model.maxToolCallsPerTurn to choose a different limit.`,
+  'error.loopDetected.stuckRepetition': (vars) =>
+    `After more than ${vars?.limit} tool calls, the model kept repeating the same call, so this turn was stopped. Your session is still open—try a different or more specific instruction.`,
+  'error.loopDetected.repeatedCall':
+    'The model kept repeating the same tool call during this turn, so it was stopped. Your session is still open—try a different or more specific instruction.',
+  'error.loopDetected.providerDuplicateId':
+    'The model service sent a tool call that had already run, so this turn was stopped instead of running it again. Your session is still open—send a new message to continue.',
+  'error.loopDetected.invalidToolParams':
+    'The model kept sending invalid arguments to the same tool, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
+  'error.loopDetected.repeatedToolFailure':
+    'The same tool kept failing for the same reason after a reminder, so this turn was stopped. Your session is still open—check the errors above, or try a different approach.',
   'shell.command': 'Shell Command',
   'shell.result.timedOut': 'Timed out',
   'shell.result.notices': 'Notices',
@@ -3175,6 +3197,9 @@ const EN: Messages = {
   'model.footer': 'Enter select, ↑↓ navigate, Esc close',
   'model.searchHint': 'Press / to search',
   'model.fastHint': 'for suggestions and side tasks',
+  'model.refresh': 'Refresh models',
+  'model.refreshing': 'Refreshing models…',
+  'model.refreshFailed': (v) => `Unable to refresh models: ${v?.error ?? ''}`,
   'model.noMatch': (v) => `No model matching "${v?.query ?? ''}"`,
   'model.unavailable':
     'Models are unavailable; the daemon default will be used.',
@@ -3404,31 +3429,7 @@ const EN: Messages = {
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'contextUsage.unknown':
     'Context usage has not been observed for this session yet.',
-  'tokenUsage.avgLatency': 'Avg latency',
-  'tokenUsage.cached': 'Cached input',
-  'tokenUsage.firstTokenLatency': (v) =>
-    `First-token latency ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `Generation ${v?.duration ?? ''}`,
-  'tokenUsage.input': 'Input',
-  'tokenUsage.loadError': 'Failed to load token usage.',
-  'tokenUsage.models': 'By model',
-  'tokenUsage.noData': 'No API calls in this session yet.',
-  'tokenUsage.noSubagents': 'No subagent calls in this session yet.',
-  'tokenUsage.noTools': 'No tool calls in this session yet.',
-  'tokenUsage.open': 'Session token usage',
-  'tokenUsage.output': 'Total output',
-  'tokenUsage.outputSpeed': (v) => `Output speed ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.refresh': 'Refresh',
-  'tokenUsage.requests': 'Requests',
-  'tokenUsage.retry': 'Retry',
-  'tokenUsage.subagents': 'Subagents',
-  'tokenUsage.thoughts': 'Reasoning (included in total output)',
-  'tokenUsage.title': 'Token Usage',
-  'tokenUsage.toolRow': (v) =>
-    `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
-  'tokenUsage.tools': 'Tools',
-  'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
-  'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  ...TOKEN_USAGE_MESSAGES_EN,
   'trajectory.title': 'Trajectory',
   'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
@@ -3765,6 +3766,8 @@ const EN: Messages = {
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
+  'message.moreActions': 'More message actions',
+  ...MESSAGE_DELETION_MESSAGES_EN,
   'userMessage.editSubmit': 'Send',
   'userMessage.editSending': 'Sending…',
   'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
@@ -3902,6 +3905,21 @@ const EN: Messages = {
   'tasks.shortcut.cancelConfirm': 'Esc cancel',
   'tasks.detail.workingDir': 'Working dir',
   'tasks.detail.outputFile': 'Output file',
+  'tasks.detail.startedAt': 'Started',
+  'tasks.detail.endedAt': 'Ended',
+  'tasks.detail.totalDuration': 'Total duration',
+  'tasks.detail.residentMemory': 'Resident memory',
+  'tasks.detail.output': 'Output',
+  'tasks.detail.outputSize': (v) => `: ${v?.size ?? ''}`,
+  'tasks.detail.outputEmpty': 'No output yet',
+  'tasks.detail.outputNone': 'No output',
+  'tasks.detail.runtimeUnavailable': 'Task details are no longer available',
+  'tasks.detail.outputPartial':
+    'Output is available, but file details could not be read',
+  'tasks.detail.outputRefreshFailed': 'Could not refresh output. ',
+  'tasks.detail.outputTruncated': 'Showing the end only',
+  'tasks.detail.outputUnavailable': 'Output unavailable',
+  'tasks.detail.lastWrite': 'Last write',
   'tasks.detail.command': 'Command',
   'tasks.detail.events': (v) => `${v?.count ?? 0} events`,
   'tasks.detail.exit': (v) => `exit ${v?.exitCode ?? ''}`,
@@ -5314,6 +5332,9 @@ const ZH: Messages = {
   'excel.invalid':
     '无法预览此工作簿，文件可能已损坏、受密码保护、复杂度过高，或当前浏览器不支持。你可以下载原文件。',
   'excel.timeout': '工作簿预览超时，请下载原文件打开。',
+  'docx.tooLarge': 'DOCX 预览支持最大 10 MiB 的文件，请下载原文件打开。',
+  'docx.invalid': '无法预览此 DOCX 文档，你可以下载原文件。',
+  'docx.timeout': '文档预览超时，你可以下载原文件或重试。',
   'artifact.openLink': '打开链接',
   'artifact.longDocument': '文件过大，默认展示源码。',
   'artifact.renderFullPreview': '完整排版预览',
@@ -6727,6 +6748,20 @@ const ZH: Messages = {
   'error.modelStreamInterrupted': '模型响应流已中断，请重试。',
   'error.loopDetected':
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
+  'error.loopDetected.explicitCap': (vars) =>
+    `本轮工具调用达到了 model.maxToolCallsPerTurn 设定的上限（${vars?.limit} 次），因此系统停止了本轮操作。会话并未结束，你可以在设置中调高上限，或发送新的指令继续。`,
+  'error.loopDetected.backstop': (vars) =>
+    `本轮工具调用达到了 ${vars?.limit} 次的安全上限，因此系统停止了本轮操作。会话并未结束，你可以发送新的指令继续，也可以通过 model.maxToolCallsPerTurn 设定其他上限。`,
+  'error.loopDetected.stuckRepetition': (vars) =>
+    `工具调用超过 ${vars?.limit} 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。`,
+  'error.loopDetected.repeatedCall':
+    '模型在本轮中反复发起同一个工具调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
+  'error.loopDetected.providerDuplicateId':
+    '模型服务发来了一个已经执行过的工具调用，为避免重复执行，系统停止了本轮操作。会话并未结束，你可以发送新消息继续。',
+  'error.loopDetected.invalidToolParams':
+    '模型反复向同一个工具传入无效参数，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
+  'error.loopDetected.repeatedToolFailure':
+    '同一个工具在收到提醒后仍因相同原因失败，因此系统停止了本轮操作。会话并未结束，你可以查看上面的错误，或换一种方式。',
   'shell.command': 'Shell 命令',
   'shell.result.timedOut': '执行超时',
   'shell.result.notices': '提示',
@@ -7430,6 +7465,9 @@ const ZH: Messages = {
   'model.footer': 'Enter 选择，↑↓ 导航，Esc 关闭',
   'model.searchHint': '按 / 搜索',
   'model.fastHint': '用于建议和旁路任务',
+  'model.refresh': '刷新模型列表',
+  'model.refreshing': '正在刷新模型…',
+  'model.refreshFailed': (v) => `刷新模型失败：${v?.error ?? ''}`,
   'model.noMatch': (v) => `没有匹配 "${v?.query ?? ''}" 的模型`,
   'model.unavailable': '模型列表暂不可用，将使用守护进程默认模型。',
   'model.none': '没有可用模型',
@@ -7644,30 +7682,7 @@ const ZH: Messages = {
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
-  'tokenUsage.avgLatency': '平均延迟',
-  'tokenUsage.cached': '缓存输入',
-  'tokenUsage.firstTokenLatency': (v) => `首 token 延迟 ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `生成 ${v?.duration ?? ''}`,
-  'tokenUsage.input': '输入',
-  'tokenUsage.loadError': 'Token 消耗加载失败。',
-  'tokenUsage.models': '按模型',
-  'tokenUsage.noData': '本会话还没有 API 调用。',
-  'tokenUsage.noSubagents': '本会话还没有子 agent 调用。',
-  'tokenUsage.noTools': '本会话还没有工具调用。',
-  'tokenUsage.open': '会话 Token 消耗',
-  'tokenUsage.output': '总输出',
-  'tokenUsage.outputSpeed': (v) => `输出速度 ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.refresh': '刷新',
-  'tokenUsage.requests': '请求',
-  'tokenUsage.retry': '重试',
-  'tokenUsage.subagents': '子agent',
-  'tokenUsage.thoughts': '思考（包含在总输出中）',
-  'tokenUsage.title': 'Token 消耗',
-  'tokenUsage.toolRow': (v) =>
-    `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
-  'tokenUsage.tools': '工具',
-  'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
-  'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  ...TOKEN_USAGE_MESSAGES_ZH,
   'trajectory.title': '轨迹',
   'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
@@ -7976,6 +7991,8 @@ const ZH: Messages = {
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
+  'message.moreActions': '更多操作',
+  ...MESSAGE_DELETION_MESSAGES_ZH,
   'userMessage.editSubmit': '发送',
   'userMessage.editSending': '发送中…',
   'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
@@ -8094,6 +8111,20 @@ const ZH: Messages = {
   'tasks.shortcut.cancelConfirm': 'Esc 取消',
   'tasks.detail.workingDir': '工作目录',
   'tasks.detail.outputFile': '输出文件',
+  'tasks.detail.startedAt': '开始时间',
+  'tasks.detail.endedAt': '结束时间',
+  'tasks.detail.totalDuration': '总时长',
+  'tasks.detail.residentMemory': '常驻内存',
+  'tasks.detail.output': '输出',
+  'tasks.detail.outputSize': (v) => `：${v?.size ?? ''}`,
+  'tasks.detail.outputEmpty': '暂无输出',
+  'tasks.detail.outputNone': '无输出',
+  'tasks.detail.runtimeUnavailable': '任务详情已不可用',
+  'tasks.detail.outputPartial': '输出可用，但无法读取文件信息',
+  'tasks.detail.outputRefreshFailed': '无法刷新输出。',
+  'tasks.detail.outputTruncated': '仅显示末尾',
+  'tasks.detail.outputUnavailable': '无法读取输出',
+  'tasks.detail.lastWrite': '最后写入',
   'tasks.detail.command': '命令',
   'tasks.detail.events': (v) => `${v?.count ?? 0} 个事件`,
   'tasks.detail.exit': (v) => `退出码 ${v?.exitCode ?? ''}`,

@@ -39,13 +39,13 @@
 
 ### 分层
 
-| 触发                  | 条件                                           | 层级 | 检查项                                      |
-| --------------------- | ---------------------------------------------- | ---- | ------------------------------------------- |
-| `pull_request` push   | 改到 Managed Agent 路径                        | fast | flyway 检查、真实 daemon E2E、Linux Java 21 |
-| `pull_request_review` | 当前 head 的首个维护者 approve，且改到这些路径 | full | 全部 11 项                                  |
-| `push` 到 main        | 改到这些路径                                   | fast | 同上                                        |
-| `merge_group`         | 改到这些路径                                   | fast | 同上                                        |
-| 夜间、手动、发布      | 不变（直接调用 `sdk-java.yml`）                | full | 全部 11 项                                  |
+| 触发                  | 条件                                                        | 层级 | 检查项                                      |
+| --------------------- | ----------------------------------------------------------- | ---- | ------------------------------------------- |
+| `pull_request` push   | 改到 Managed Agent 路径                                     | fast | flyway 检查、真实 daemon E2E、Linux Java 21 |
+| `pull_request_review` | 当前 head 的首个维护者 approve（PR 仍打开），且改到这些路径 | full | 全部 11 项                                  |
+| `push` 到 main        | 改到这些路径                                                | fast | 同上                                        |
+| `merge_group`         | 改到这些路径                                                | fast | 同上                                        |
+| 夜间、手动、发布      | 不变（直接调用 `sdk-java.yml`）                             | full | 全部 11 项                                  |
 
 `managed-agent-gate.yml` 选择层级，并通过 `workflow_call` 调用 `sdk-java.yml`，
 传入新增的 `tier` 输入。`tier: fast` 把 `test` 矩阵收窄到 Linux Java 21 一条，并跳过
@@ -71,16 +71,24 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 
 ### 必需检查
 
-`gate` job 总会运行并报告层级结果。它的名字是计算出来的：
+`gate` job 为工作流启动的每次运行报告层级结果。它的名字是计算出来的：
 
-| 事件                  | 范围           | 名字                                 |
-| --------------------- | -------------- | ------------------------------------ |
-| 任意                  | 未改到         | `Managed Agent gate`（通过）         |
-| `pull_request`        | 改到           | `Managed Agent fast tier`            |
-| `pull_request_review` | 改到，跑了全量 | `Managed Agent gate`                 |
-| `pull_request_review` | 改到，未跑全量 | `Managed Agent review (no full run)` |
-| `push`、`merge_group` | 改到           | `Managed Agent gate`                 |
-| 任意                  | 层级选择失败   | `Managed Agent gate`（失败）         |
+| 事件                  | 范围                     | 名字                                 |
+| --------------------- | ------------------------ | ------------------------------------ |
+| 任意                  | 未改到                   | `Managed Agent gate`（通过）         |
+| `pull_request`        | 改到                     | `Managed Agent fast tier`            |
+| `pull_request_review` | 改到，跑了全量           | `Managed Agent gate`                 |
+| `pull_request_review` | 改到，未跑全量           | `Managed Agent review (no full run)` |
+| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不生成 gate check     |
+| `push`、`merge_group` | 改到                     | `Managed Agent gate`                 |
+| 任意                  | 层级选择失败             | `Managed Agent gate`（失败）         |
+
+非 approve 的 review，以及 PR 关闭后才提交的 review，都不启动任何 job：GitHub 仍会
+创建这次运行，但它永远选不到 `none` 以上的层级——或者它要报告的检查已经不再门禁任何
+东西——因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。运行里仍会为
+每个 job 列出一条 skipped check，而 `gate` 的名字显示为未求值的表达式，因此不会出现
+名为 `Managed Agent gate` 或 `Managed Agent review (no full run)` 的 check。它以前会
+报告 `Managed Agent review (no full run)`——一条没有任何规则读取的绿色 check。
 
 分支保护读取同名检查中最近一次更新的那个。因此改到路径的 PR 会一直显示
 `Managed Agent gate` 为 Expected，直到其 head 上的全量运行报告它；对这类 PR，只有

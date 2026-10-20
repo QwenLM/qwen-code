@@ -36,6 +36,14 @@ concurrency:
 jobs:
   scope:
     name: 'Select the Managed Agent tier'
+    # Only an approval on an open pull request can select a tier above none
+    # (see `Choose the tier`), so any other review starts no job and costs no
+    # runner. On a touched PR its only possible check was the informational
+    # one; on an untouched PR the same head's pull_request run already reports
+    # `Managed Agent gate`. A review submitted after the pull request closed
+    # cannot gate anything — its head already merged or was abandoned — and
+    # the push arm covers the merged tree.
+    if: "${{ github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.pull_request.state == 'open') }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     permissions:
@@ -271,8 +279,10 @@ jobs:
       - 'suite'
     # A cancelled PR run must release concurrency even if scope was cancelled
     # before choosing a tier. Full runs and main/merge-group cancellations
-    # still report.
-    if: "${{ always() && (github.event_name != 'pull_request' || needs.scope.outputs.tier == 'full' || !cancelled()) }}"
+    # still report. A review that is not an approval, or one submitted after
+    # the pull request closed, skips with `scope` above: reporting a tier it
+    # never selected would only add a green check.
+    if: "${{ always() && (github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.pull_request.state == 'open')) && (github.event_name != 'pull_request' || needs.scope.outputs.tier == 'full' || !cancelled()) }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     steps:
