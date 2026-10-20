@@ -105,6 +105,7 @@ class HostedAutomationFaultGatesIT {
     // whatever the store accepted, so the assertions read the same bytes.
     private HostedGateTestSupport.PublicationFaults publicationFaults;
     private final Map<String, byte[]> publicationObjects = new ConcurrentHashMap<>();
+    private final AtomicInteger publicationFaultsSeen = new AtomicInteger();
     private final AtomicInteger shellSteps = new AtomicInteger();
     // Fronts the Session Store for the Harness when a test asks for it before booting, and
     // drops the answer to the one commit whose command id is armed.
@@ -1175,17 +1176,34 @@ class HostedAutomationFaultGatesIT {
                 + " WHERE harness_session_id = ?", Integer.class, session)).as("one Shell execution").isEqualTo(1);
         List<String> puts = jdbc.queryForList("SELECT state FROM ma_operation"
                 + " WHERE tenant_id = ? AND operation_kind = 'OBJECT_PUT'", String.class, tenant);
+        // The injected fault must have fired. Without this a dropped injection
+        // leaves an ordinary publication that passes every other assertion.
+        assertThat(publicationFaultsSeen.get()).as("the injected fault fired").isGreaterThanOrEqualTo(1);
         if ("drop-ack-after-write".equals(arm)) {
-            assertThat(puts).as("the put stays unresolved or reconciles from the object").isNotEmpty()
-                    .allMatch(state -> "UNKNOWN".equals(state) || "RETURNED".equals(state));
-            // The store publishes a manifest beside the captured bytes, so the
-            // arm pins that exactly one large object survived, not that the
-            // bucket holds a single key.
+            // The lost ack is transient: the store reconciles by reading the
+            // object back and settles the put exactly once.
+            assertThat(puts).as("the lost ack reconciles to settled puts").isNotEmpty()
+                    .allMatch("RETURNED"::equals);
             assertThat(publicationObjects).as("the committed object is kept").isNotEmpty();
-            // The store publishes the capture as chunks plus a manifest, so pin
-            // that a real capture landed rather than one key of a fixed size.
-            assertThat(publicationObjects.values().stream().mapToLong(bytes -> bytes.length).max().orElse(0))
-                    .as("the published bytes, not a re-run").isGreaterThan(64 * 1024);
+            // The Shell writes 2 MiB of "a" against a 4 MiB publication limit,
+            // so the retained chunks must add up to exactly that and hold the
+            // run's own bytes rather than any same-sized placeholder.
+            // The store also writes its envelope beside the payload, so count
+            // only the chunks that carry this run's own bytes: a same-sized
+            // placeholder would leave nothing to count.
+            java.util.List<byte[]> captured = publicationObjects.values().stream()
+                    .filter(bytes -> bytes.length >= 64 * 1024)
+                    .filter(bytes -> {
+                        for (byte value : bytes) {
+                            if (value != 'a') {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }).toList();
+            assertThat(captured).as("the capture landed as chunks of this run's output").isNotEmpty();
+            assertThat(captured.stream().mapToLong(bytes -> bytes.length).sum())
+                    .as("the retained payload is the Shell's 2 MiB").isEqualTo(2 * 1024 * 1024);
         } else {
             assertThat(puts).as("a refused write stays unresolved").isNotEmpty()
                     .allMatch("UNKNOWN"::equals);
@@ -1195,15 +1213,17 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11f-retire", 202);
     }
 
-    private static HostedGateTestSupport.PublicationFaults publicationFaults(String arm) {
+    private HostedGateTestSupport.PublicationFaults publicationFaults(String arm) {
         return new HostedGateTestSupport.PublicationFaults() {
             @Override
             public void beforePut(String key, byte[] bytes) {
                 if ("fail-before-write".equals(arm)) {
+                    publicationFaultsSeen.incrementAndGet();
                     throw new com.aliyun.oss.OSSException("Injected write failure", "InternalError",
                             "request", "host", "fg11f-bucket", key, "resource");
                 }
                 if ("timeout".equals(arm)) {
+                    publicationFaultsSeen.incrementAndGet();
                     try {
                         Thread.sleep(11_000);
                     } catch (InterruptedException interrupted) {
@@ -1216,6 +1236,7 @@ class HostedAutomationFaultGatesIT {
             @Override
             public void afterPut(String key, byte[] bytes) {
                 if ("drop-ack-after-write".equals(arm)) {
+                    publicationFaultsSeen.incrementAndGet();
                     throw new com.aliyun.oss.ClientException("Connection reset after commit");
                 }
             }
