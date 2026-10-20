@@ -79,15 +79,25 @@ around it.
   turn, which this fixture does not expose yet.
 - `close-*` needs a workspace-backed Session: the automation API refuses a
   Session without one (`session_not_found`), while closing a workspace
-  Session in this fixture answers `workspace_unavailable` from the managed
-  Session's workspace-execution check, not from the store-level authority
-  FG11f hits.
+  Session in this fixture answers `409 workspace_unavailable` with
+  `Hosted Workspace execution is not available.` The public close route takes
+  `SessionLifecycleService.admit`'s workspace arm into
+  `ManagedAgentStore.beginWorkspaceLifecycle`, and `beginLifecycle` throws
+  there. The message is shared by ten raise sites in five classes, so name the
+  route rather than a class: it is not the store-level authority FG11f faults.
+  That slice records two refusals — the non-durable broker's 409 from
+  `resolveScope`, and, under the durable broker, `WorkspaceExecutionStore`'s
+  `Workspace execution authority is unavailable.` — so neither is this
+  lifecycle throw.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
-  `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn parked
-  on the model, that cancel then left the run unsettled for 120 s while the
-  Harness connection closed with socket EOF; staging the cell needs a
-  different hold point.
+  `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn kept
+  parked on the model, the cancel wins: the task and the run both settle
+  `cancelled` in under a second, and releasing the model afterwards does not
+  revive them. Releasing the model immediately after the `202` instead lets the
+  turn finish first, and the run settles `completed`. The parked model is
+  therefore the hold point this cell needs; the release ordering, not the
+  fixture, decides the outcome.
 - Lease takeover during a cancel is out of scope, as in FG11c.
 - The stream-gap gate (`FG11e`) is untouched.
 
