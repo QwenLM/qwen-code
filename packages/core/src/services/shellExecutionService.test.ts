@@ -14,6 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import EventEmitter from 'node:events';
+import { isUtf8 } from 'node:buffer';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
 import pkg from '@xterm/headless';
@@ -2290,10 +2291,7 @@ describe('ShellExecutionService child_process fallback', () => {
     expect(tail).toMatch(/^A+$/);
   });
 
-  it('renders U+FFFD for orphan UTF-8 continuation bytes when the remainder is all ASCII', async () => {
-    // When the ring opens on a continuation byte but the remainder is pure ASCII,
-    // it is ambiguous whether this is a broken UTF-8 sequence or a legacy single-byte
-    // character. We avoid silent data loss by decoding as UTF-8, producing U+FFFD.
+  it('drops orphan UTF-8 continuation bytes when the remainder is all ASCII', async () => {
     const payload = Buffer.concat([
       Buffer.alloc(32, 'A'),
       Buffer.from([0xe9, 0x94, 0x99]),
@@ -2305,7 +2303,81 @@ describe('ShellExecutionService child_process fallback', () => {
     const tail = result.output.split(
       'complete bytes are retained in the managed capture.]\n',
     )[1];
-    expect(tail).toMatch(/^\uFFFDA+$/);
+    expect(tail).toMatch(/^A+$/);
+  });
+
+  it('keeps a legitimate 100ms prefix when the tail opens on plain ASCII', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(37768, 'A'),
+      Buffer.from('100ms latency ok'),
+      Buffer.alloc(32752, 'A'),
+    ]);
+    const { result } = await runCaptured(
+      'printf output',
+      () => emitOut(payload),
+      0,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 65536 },
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^100ms latency ok/);
+  });
+
+  it('drops an orphan CSI fragment when the ring is cut inside \\x1b[?25l', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(30, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x6c]), // \x1b[?25l
+      Buffer.from('REST'),
+      Buffer.alloc(26, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^REST/);
+  });
+
+  it('falls back to UTF-8 when the detected label is not decodable', async () => {
+    mockGetCachedEncodingForBuffer.mockReturnValue('utf-32');
+    const payload = Buffer.concat([
+      Buffer.alloc(32, 'A'),
+      Buffer.from([0xe9, 0x94, 0x99]),
+      Buffer.alloc(31, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^A+$/);
+  });
+
+  it('detects the tail label on ring bytes even when the full buffer is not UTF-8', async () => {
+    mockGetCachedEncodingForBuffer.mockImplementation((b: Buffer) =>
+      isUtf8(b) ? 'utf-8' : 'gbk',
+    );
+    // 0xff poisons the FULL capture, so a label taken from the head/final
+    // buffer resolves to 'gbk' and mojibakes the tail. The ring bytes stay
+    // valid UTF-8, so only ring-based detection decodes the marker correctly.
+    const marker = 'caf\u00e9 na\u00efve r\u00e9sum\u00e9';
+    const payload = Buffer.concat([
+      Buffer.from([0xff]),
+      Buffer.alloc(34, 'A'),
+      Buffer.from(marker, 'utf-8'),
+      Buffer.alloc(10, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toContain(marker);
+    expect(tail).not.toContain('\uFFFD');
   });
 
   it('preserve non-UTF_8 leading bytes when the ring starts on them', async () => {
@@ -2364,7 +2436,10 @@ describe('ShellExecutionService child_process fallback', () => {
     const { result } = await runCaptured('printf output', () =>
       emitOut(payload),
     );
-    expect(result.output).toBeDefined();
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^\uFFFDA+$/);
   });
 
   describe('child environment sanitization (#6601)', () => {
