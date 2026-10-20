@@ -4031,7 +4031,9 @@ describe('AppContainer State Management', () => {
       // and bumps the submit epoch; vim's Enter must use it, not submit the
       // raw buffer it just cleared.
       const composerSubmit = vi.fn();
-      capturedUIActions.registerPromptSubmit(composerSubmit);
+      const registerSubmit = capturedUIActions.registerPromptSubmit;
+      expect(registerSubmit).toBeDefined();
+      registerSubmit!(composerSubmit);
       const vimSubmit = mockedUseVim.mock.calls.at(-1)?.[1] as (
         value: string,
       ) => void;
