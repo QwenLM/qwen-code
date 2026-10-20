@@ -93,6 +93,7 @@ import {
   type ServeSessionLspStatus,
   type ServeSessionResourcesStatus,
   type ServeSessionSavedWorkflowStatus,
+  type ServeSessionTaskRuntimeStatus,
   type ServeSessionTasksStatus,
   type ServeSessionWorkflowTaskStatus,
   type ServeWorkspaceMcpResourcesStatus,
@@ -13920,6 +13921,14 @@ export function createSessionControlPlane(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionTasks,
         { includeWorkflows: opts?.includeWorkflows === true },
+      );
+    },
+
+    async getSessionTaskRuntime(sessionId, taskId) {
+      return requestSessionStatus<ServeSessionTaskRuntimeStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionTaskRuntime,
+        { taskId },
       );
     },
 

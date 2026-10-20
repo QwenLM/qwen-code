@@ -475,9 +475,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (162 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (173 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 252, 265],
+    ['hosted-harness-mysql', 263, 276],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -688,13 +688,18 @@ describe('Hosted real-process gates', () => {
       // lost-reply cell adds 150 s, so the fork moves to 9045 and the Verify
       // step to 161 minutes; the FG12d refused-release cell adds 6 s, so the
       // fork moves to 9051 and the Verify step stays 161 minutes; cleanup
-      // retention adds 60s, moving the fork to 9111 and the Verify step to
-      // 162 minutes):
+      // retention adds 60 s, moving the fork to 9111 and the Verify step to
+      // 162 minutes; the FG13b Hook intent store-rejection cell adds 150 s,
+      // so the fork moves to 9261 and the Verify step to 165 minutes; the
+      // FG13b Hook dispatch store-rejection cell adds 150 s, so the fork
+      // moves to 9411 and the Verify step to 167 minutes; the FG11f publication
+      // cell adds 82 s (2x its measured 41.1 s), so the fork moves to 9493 and
+      // the step to 169 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(9111);
+        expect(forkSeconds).toBe(9765);
       }
     },
   );
@@ -759,14 +764,16 @@ describe('Hosted real-process gates', () => {
   // cell adds 150s, so it becomes 7959s; the FG11d disabled-span cell adds
   // 336s (2x its measured 168.1s), so it becomes 8295s; the FG13f failClosed
   // lost-reply cell adds 150s, so it becomes 8445s; the FG12d refused-release
-  // cell adds 6s, so it becomes 8451s. The cleanup-retention
-  // MySQL class measures 22.2s on JDK 21 + MySQL 8.4.11, budgeted at 60s,
-  // so it becomes 8511s. The largest
+  // cell adds 6s, so it becomes 8451s. The cleanup-retention MySQL class
+  // measures 22.2s on JDK 21 + MySQL 8.4.11, budgeted at 60s, so it becomes
+  // 8511s; the FG13b Hook intent store-rejection cell adds 150s, so it
+  // becomes 8661s; the FG13b Hook dispatch store-rejection cell adds 150s,
+  // so it becomes 8811s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 8511;
+  const hostedForkHealthySeconds = 9165;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -840,6 +847,7 @@ describe('Hosted real-process gates', () => {
       'HostedHookReplyLossFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
+      'HostedMcpResultDeliveryIT',
       'HostedMcpStoreFaultGatesIT',
       'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',

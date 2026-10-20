@@ -2,8 +2,13 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.StoreFaultGate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +24,9 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
@@ -216,6 +224,7 @@ class HostedHookReplyLossFaultGatesIT {
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
+                .sources(StoreFaultConfiguration.class)
                 .run("--server.address=127.0.0.1", "--server.port=" + port,
                         "--spring.datasource.url=" + System.getProperty("mysql.url"),
                         "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -283,12 +292,16 @@ class HostedHookReplyLossFaultGatesIT {
     }
 
     private JsonNode hookExecution(String session) {
-        List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
-                .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
-                .toList();
+        List<JsonNode> records = hookExecutions(session);
         assertThat(records).as("hook execution records").hasSize(1);
         assertThat(records.getFirst().path("eventName").asText()).isEqualTo("PreToolUse");
         return records.getFirst();
+    }
+
+    private List<JsonNode> hookExecutions(String session) {
+        return HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
+                .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
+                .toList();
     }
 
     private JsonNode hookResult(String session) throws Exception {
@@ -514,6 +527,46 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13bHookIntentStoreRejectionDispatchesNothingOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_INTENT, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_INTENT");
+        // The injection fires inside the real commit transaction; the rejected
+        // intent never reaches the worker and leaves no record behind.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
+                .until(() -> true);
+        assertThat(events("hook.call")).isEmpty();
+        assertThat(hookExecutions(session)).as("rejected intent commit").isEmpty();
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13bHookDispatchStoreRejectionDispatchesNothingOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_DISPATCH_STARTED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_DISPATCH");
+        // The dispatch commit is refused before the worker is reached, so the
+        // command never runs and the intent stays retryable.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
+                .until(() -> true);
+        assertThat(events("hook.call")).isEmpty();
+        List<JsonNode> records = hookExecutions(session);
+        assertThat(records).as("records after the refused dispatch").hasSize(1);
+        assertThat(records.getFirst().at("/run/execution").asText()).isEqualTo("intent");
+        StoreFaultGate.INSTANCE.clear();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
@@ -598,7 +651,8 @@ class HostedHookReplyLossFaultGatesIT {
             boolean call = results.isEmpty()
                     && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS",
                             "FG13_CATALOG_LOSS", "FG13_HTTP_LOSS",
-                            "FG13_DENY_LOSS", "FG13_FAILCLOSED_LOSS").contains(prompt);
+                            "FG13_DENY_LOSS", "FG13_FAILCLOSED_LOSS",
+                            "FG13_STORE_INTENT", "FG13_STORE_DISPATCH").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
@@ -688,6 +742,7 @@ class HostedHookReplyLossFaultGatesIT {
 
     @AfterEach
     void stop() {
+        StoreFaultGate.INSTANCE.clear();
         assertAll(this::saveEvidence,
                 () -> { if (model != null) {
                     model.stop(0);
@@ -760,6 +815,21 @@ class HostedHookReplyLossFaultGatesIT {
             json.writeValue(destination.resolve("hook-executions.json").toFile(),
                     jdbc.queryForList("SELECT record_id, domain, state, runtime_state FROM ma_session_record"
                             + " WHERE tenant_id = ? AND domain = 'hook_execution'", tenant));
+        }
+    }
+
+    // Test-only: replaces the record store bean with the faulting wrapper.
+    // The store's own constructor wiring is unchanged, so every commit still
+    // runs in the real transaction.
+    @Configuration(proxyBeanMethods = false)
+    static class StoreFaultConfiguration {
+        @Bean
+        @Primary
+        ManagedExtensionRecordStore faultingExtensionRecordStore(
+                JdbcTemplate jdbc, AgentStateStore sessions,
+                ManagedTaskEventStore taskEvents) {
+            return new FaultingExtensionRecordStore(jdbc, sessions, taskEvents,
+                    StoreFaultGate.INSTANCE);
         }
     }
 }

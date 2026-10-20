@@ -338,11 +338,50 @@ describe('Managed Agent gate required check', () => {
     (event, tier, cancelled, expected) => {
       expect(
         evaluate(gate.jobs.gate.if, {
-          github: github(event),
+          // Only an approval reaches this arm of a review event.
+          github: github(
+            event,
+            event === 'pull_request_review'
+              ? { review: { state: 'approved' } }
+              : {},
+          ),
           needs: { scope: { outputs: { tier } } },
           cancelled,
         }),
       ).toBe(expected);
+    },
+  );
+
+  // A review that is not an approval can never select a tier above `none`
+  // (Choose the tier), so starting a run for it buys two runner slots and
+  // publishes a check nothing reads. Both jobs must skip instead.
+  it.each(['commented', 'changes_requested'])(
+    'a %s review starts no job',
+    (state) => {
+      const context = {
+        github: github('pull_request_review', { review: { state } }),
+        needs: { scope: { outputs: {} } },
+      };
+      expect(evaluate(gate.jobs.scope.if, context)).toBe(false);
+      expect(evaluate(gate.jobs.gate.if, context)).toBe(false);
+    },
+  );
+
+  it('an approval still runs both jobs', () => {
+    const context = {
+      github: github('pull_request_review', { review: { state: 'approved' } }),
+      needs: { scope: { outputs: { tier: 'none' } } },
+    };
+    expect(evaluate(gate.jobs.scope.if, context)).toBe(true);
+    expect(evaluate(gate.jobs.gate.if, context)).toBe(true);
+  });
+
+  it.each(['pull_request', 'push', 'merge_group'])(
+    'a %s event ignores the review guard',
+    (event) => {
+      expect(
+        evaluate(gate.jobs.scope.if, { github: github(event), needs: {} }),
+      ).toBe(true);
     },
   );
 

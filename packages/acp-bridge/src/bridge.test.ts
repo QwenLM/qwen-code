@@ -4557,6 +4557,14 @@ describe('createAcpSessionBridge', () => {
                 tasks: [],
               };
             }
+            if (method === 'qwen/status/session/task_runtime') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                taskId: params['taskId'],
+                runtime: { outputTail: 'ready' },
+              };
+            }
             if (method === 'qwen/status/session/agent_trace') {
               return {
                 v: 1,
@@ -4644,6 +4652,13 @@ describe('createAcpSessionBridge', () => {
       tasks: [],
     });
     await expect(
+      bridge.getSessionTaskRuntime(session.sessionId, 'bg_1'),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      taskId: 'bg_1',
+      runtime: { outputTail: 'ready' },
+    });
+    await expect(
       bridge.getSessionAgentsStatus(session.sessionId),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
@@ -4681,6 +4696,7 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
+      'qwen/status/session/task_runtime',
       'qwen/status/session/agents',
       'qwen/status/session/agent_trace',
       'qwen/status/session/lsp',
