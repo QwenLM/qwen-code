@@ -49,7 +49,10 @@ interface StandaloneRecentsProps {
       onDelete: () => void;
     },
   ) => ReactNode;
-  onLoadSession: (sessionId: string) => Promise<void> | void;
+  onLoadSession: (
+    sessionId: string,
+    displayName?: string,
+  ) => Promise<void> | void;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onMutated?: () => void;
   onStatusChange?: (status: {
@@ -407,7 +410,11 @@ export function StandaloneRecents({
       openingSessionIdRef.current = sessionId;
       setSessionError(undefined);
       try {
-        await onLoadSession(sessionId);
+        await onLoadSession(
+          sessionId,
+          sessionsRef.current.find((session) => session.sessionId === sessionId)
+            ?.displayName,
+        );
       } catch (error) {
         if (generation !== openGenerationRef.current) return;
         if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) return;
