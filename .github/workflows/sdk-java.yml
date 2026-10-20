@@ -748,8 +748,9 @@ jobs:
     # Verify to 173 minutes; the FG13b Hook result store-rejection cell adds
     # 150 s, moving the fork to 9915 s and Verify to 176 minutes; the FG13b
     # Hook plan-result store-rejection cell adds 150 s, moving the fork to
-    # 10080 s and Verify to 179 minutes, wrapping
-    # fork + 600 s plus margin;
+    # 10080 s and Verify to 179 minutes; the FG12f delivery entry moves from
+    # 30 s to 50 s, moving the fork to 10100 s, wrapping
+    # fork + 600 s plus margin (10700 s of fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
