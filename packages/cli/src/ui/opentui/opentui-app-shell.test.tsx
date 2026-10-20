@@ -62,6 +62,8 @@ import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
 import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
+import type { StatusLineState } from '../hooks/useStatusLine.js';
+import { StreamingState } from '../types.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -87,6 +89,15 @@ const mocks = vi.hoisted(() => {
     handleMcpApprovalSelect: vi.fn(),
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
+    statusLineState: null as StatusLineState | null,
+    worktree: null as null | {
+      slug: string;
+      worktreePath: string;
+      worktreeBranch: string;
+      originalCwd: string;
+      originalBranch: string;
+      originalHeadCommit: string;
+    },
     loadingProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     exitInProgress: false,
@@ -286,10 +297,30 @@ vi.mock('./exit-lifecycle.js', () => ({
 vi.mock('../hooks/useAutoAcceptIndicator.js', () => ({
   emitAutoModeEntryNotices: mocks.state.emitAutoModeEntryNotices,
 }));
+vi.mock('../hooks/useWorktreeSession.js', () => ({
+  useWorktreeSession: () => mocks.state.worktree,
+}));
+vi.mock('../hooks/useGitBranchName.js', () => ({
+  useGitBranchName: () => 'current-branch',
+}));
+vi.mock('../hooks/useStatusLine.js', () => ({
+  useStatusLineState: ({ state }: { state: StatusLineState }) => {
+    mocks.state.statusLineState = state;
+    return {
+      lines: [],
+      useThemeColors: true,
+      respectUserColors: false,
+      hideContextIndicator: false,
+    };
+  },
+}));
 
 const CONFIG = {
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
+  getTargetDir: () => '/repo',
+  getModel: () => 'session-model',
+  onModelChange: () => () => {},
 } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
@@ -395,11 +426,100 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.loadingProps?.['streaming']).toBe(true);
   });
 
+  it('uses the current render statistics for status output and dialog preview', async () => {
+    const stale = {
+      sessionId: 'old',
+      lastPromptTokenCount: 10,
+    } as SessionStatsState;
+    const current = {
+      sessionId: 'new',
+      lastPromptTokenCount: 500,
+    } as SessionStatsState;
+    renderApp({
+      getSessionStats: () => stale,
+      sessionStats: current,
+      streaming: true,
+    });
+    await settle();
+    expect(mocks.state.statusLineState?.sessionStats).toBe(current);
+    expect(mocks.state.statusLineState?.streamingState).toBe(
+      StreamingState.Responding,
+    );
+    expect(mocks.state.footerProps?.['sessionStats']).toBe(current);
+
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'statusline' },
+    };
+    await submit('/statusline');
+    expect(mocks.state.dialogProps?.['statusLineState']).toMatchObject({
+      sessionStats: current,
+      branchName: 'current-branch',
+    });
+  });
+
+  it('keeps the session model across a scoped override and adopts model-change events', async () => {
+    let model = 'session-model';
+    let notify: (model: string) => void = () => {};
+    const unsubscribe = vi.fn();
+    const config = {
+      ...CONFIG,
+      getModel: () => model,
+      onModelChange: (listener: typeof notify) => {
+        notify = listener;
+        return unsubscribe;
+      },
+    } as unknown as Config;
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    model = 'fast-subagent';
+    view.rerender(<OpenTuiApp {...props} streaming />);
+    expect(mocks.state.statusLineState?.currentModel).toBe('session-model');
+    act(() => notify('selected-model'));
+    expect(mocks.state.statusLineState?.currentModel).toBe('selected-model');
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('projects active worktree details and confirmation state into the status command input', async () => {
+    mocks.state.worktree = {
+      slug: 'feature',
+      worktreePath: '/repo/.worktrees/feature',
+      worktreeBranch: 'feature/one',
+      originalCwd: '/repo',
+      originalBranch: 'main',
+      originalHeadCommit: 'a'.repeat(40),
+    };
+    try {
+      renderApp({ streaming: true, waitingToolCalls: [parkedCall] });
+      await settle();
+      expect(mocks.state.statusLineState).toMatchObject({
+        streamingState: StreamingState.WaitingForConfirmation,
+        activeWorktree: {
+          slug: 'feature',
+          path: '/repo/.worktrees/feature',
+          branch: 'feature/one',
+          originalCwd: '/repo',
+        },
+      });
+    } finally {
+      mocks.state.worktree = null;
+    }
+  });
+
   // ink's Composer drops the phrase, not the row, when this setting is off, so
   // the gate has to reach both mounts of the indicator: the composer's and the
   // waiting row under a parked confirmation.
   function phraseConfig(enableLoadingPhrases: boolean): Config {
     return {
+      ...CONFIG,
       getContextFilePaths: () => [],
       getAccessibility: () => ({ enableLoadingPhrases }),
     } as unknown as Config;

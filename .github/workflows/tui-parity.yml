@@ -8,6 +8,8 @@ on:
       - 'integration-tests/renderer-matrix*'
       - 'integration-tests/interactive/interactive-session*'
       - 'integration-tests/interactive/tui-migration.test.ts'
+      - 'integration-tests/interactive/statusline-parity.test.ts'
+      - 'integration-tests/helpers/statusline-command.mjs'
       - '.github/workflows/tui-parity.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -77,12 +79,12 @@ jobs:
           export QWEN_HOME
           trap 'rm -rf "$QWEN_HOME"' EXIT
           cd integration-tests
-          npx vitest run renderer-matrix.test.ts interactive/interactive-session-viewport.test.ts --retry=0 --maxWorkers=1 --minWorkers=1
+          npx vitest run renderer-matrix.test.ts interactive/interactive-session-viewport.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false
           failed=0
           for leg in node:ink bun:ink bun:opentui; do
             export QWEN_E2E_RUNTIME="${leg%%:*}"
             export QWEN_E2E_RENDERER="${leg#*:}"
-            npx vitest run interactive/tui-migration.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 || failed=1
+            npx vitest run interactive/tui-migration.test.ts interactive/statusline-parity.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
           done
           exit "$failed"
       - name: 'Upload product acceptance evidence'

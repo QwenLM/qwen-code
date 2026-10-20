@@ -306,6 +306,28 @@ export class InteractiveSession {
     ).join('\n');
   }
 
+  async viewportCells() {
+    await this.flush();
+    const buffer = this.terminal.buffer.active;
+    return Array.from({ length: this.terminal.rows }, (_, row) => {
+      const line = buffer.getLine(buffer.viewportY + row);
+      return {
+        text: line?.translateToString(true, 0, this.terminal.cols) ?? '',
+        cells: Array.from({ length: this.terminal.cols }, (_, col) => {
+          const cell = line?.getCell(col);
+          return cell
+            ? {
+                text: cell.getChars(),
+                fg: cell.getFgColor(),
+                rgb: cell.isFgRGB(),
+                dim: Boolean(cell.isDim()),
+              }
+            : null;
+        }),
+      };
+    });
+  }
+
   resize(cols: number, rows: number): void {
     this.terminal.resize(cols, rows);
     this.ptyProcess.resize(cols, rows);

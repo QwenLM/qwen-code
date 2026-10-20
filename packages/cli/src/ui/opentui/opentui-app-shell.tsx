@@ -51,8 +51,13 @@ import type { LoadedSettings } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import { useWorktreeSession } from '../hooks/useWorktreeSession.js';
+import { useGitBranchName } from '../hooks/useGitBranchName.js';
+import { useStatusLineState } from '../hooks/useStatusLine.js';
+import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import {
   MessageType,
+  StreamingState,
   type HistoryItem,
   type HistoryItemWithoutId,
 } from '../types.js';
@@ -114,6 +119,8 @@ export interface OpenTuiAppProps {
   commands?: readonly SlashCommand[];
   /** Owned by a Batch-6 stats provider; commands read it through the host. */
   getSessionStats: () => SessionStatsState;
+  /** Reactive provider snapshot; the getter remains for imperative commands. */
+  sessionStats?: SessionStatsState;
   /** Runtime sidecar, created by the entry and passed straight through. */
   runtime?: OpenTuiRuntime;
   extensionRefreshState?: ExtensionRefreshState;
@@ -570,6 +577,36 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   useSyncExternalStore(
     useCallback((cb) => host.subscribe(cb), [host]),
     useCallback(() => host.getVersion(), [host]),
+  );
+
+  const worktree = useWorktreeSession(config);
+  const activeWorktree = worktree
+    ? {
+        slug: worktree.slug,
+        path: worktree.worktreePath,
+        branch: worktree.worktreeBranch,
+        originalCwd: worktree.originalCwd,
+        originalBranch: worktree.originalBranch,
+        originalHeadCommit: worktree.originalHeadCommit,
+      }
+    : null;
+  const branchName = useGitBranchName(config.getTargetDir());
+  const [currentModel, setCurrentModel] = useState(() => config.getModel());
+  useEffect(() => config.onModelChange(setCurrentModel), [config]);
+  const statusLineState = {
+    sessionStats: props.sessionStats ?? getSessionStats(),
+    currentModel,
+    branchName,
+    activeWorktree,
+    streamingState: props.waitingToolCalls?.length
+      ? StreamingState.WaitingForConfirmation
+      : streaming
+        ? StreamingState.Responding
+        : StreamingState.Idle,
+  };
+  const statusLine = useStatusLineState(
+    { settings, config, state: statusLineState, terminalWidth },
+    isNarrowWidth(terminalWidth),
   );
 
   // Mirror the live-turn state onto the host so command gating (isIdle)
@@ -1069,6 +1106,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 }
                 onApprovalModeChanged={adoptApprovalMode}
                 availableTerminalHeight={dialogRegionHeight}
+                statusLineState={statusLineState}
               />
             </box>
           ) : (
@@ -1121,10 +1159,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !showSuggestions) ? (
             <OpenTuiFooter
               config={config}
+              settings={settings}
+              statusLine={statusLine}
+              sessionStats={statusLineState.sessionStats}
+              activeWorktree={activeWorktree}
               streaming={Boolean(streaming)}
               approvalMode={currentApprovalMode}
               queueLength={queueLength}
-              sessionName={host.sessionName}
               shellModeActive={shellModeActive}
               exitHint={exitHint}
             />

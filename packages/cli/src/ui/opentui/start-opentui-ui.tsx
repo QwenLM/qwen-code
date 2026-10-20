@@ -353,6 +353,7 @@ function OpenTuiEntryApp({
       settings={settings}
       logger={logger}
       getSessionStats={getSessionStats}
+      sessionStats={stats}
       runtime={runtime}
       extensionRefreshState={extensionRefreshState}
       initialDialog={initialDialog}
