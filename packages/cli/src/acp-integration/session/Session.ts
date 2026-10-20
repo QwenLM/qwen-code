@@ -281,7 +281,6 @@ import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
-import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
