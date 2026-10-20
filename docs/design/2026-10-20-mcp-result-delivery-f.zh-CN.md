@@ -15,7 +15,7 @@ Issue #14447 的 FG12f 行要求四种投递行为：在 Broker 或 Runtime 不�
 
 ## 决定
 
-1. **新增一个类、三格。** `HostedMcpResultDeliveryIT` 承载重放、输出上限与列表变更三格，复用应答丢失类已有的 Broker 代理装置与私有控制面。
+1. **新增一个类、四格。** `HostedMcpResultDeliveryIT` 承载重放、输出上限、列表变更与迟到结论四格，复用应答丢失类已有的 Broker 代理装置与私有控制面。
 2. **重放在两层取证。** 同一 operation id 提交两次；第二次应答必须等于已发布的 `resultRef` 内容，且不得新增 `mcp-invoke` 控制或 Broker 交换，落库记录数保持一条。
 3. **输出上限通过落库记录取证。** 61 KiB 的资源读取结算为 `managed_mcp_output_limit`，落库记录为 `failed`/`settled`，夹具恰好记录一次副作用，随后的关闭到达 `released` 且不再补发 invoke，因此没有留下 hold。
 4. **列表变更只钉当前实现确有的行为。** 夹具在回答读取之前发出 `notifications/tools/list_changed`；用例断言恰好一次 invoke、一次副作用，以及该调用保持启动时的 `catalogRevision`。issue 里「产生新配置代际」这一条不断言，因为本树的通知不会回写配置记录，断言它等于钉一个并不存在的行为。
@@ -24,5 +24,5 @@ Issue #14447 的 FG12f 行要求四种投递行为：在 Broker 或 Runtime 不�
 
 ## 验收
 
-- 三格在 MySQL 8.x 车道通过，证据落在 `target/fg12-cases/fg12f/<tenant>/`。
+- 四格在 MySQL 8.x 车道通过，证据落在 `target/fg12-cases/fg12f/<tenant>/`。
 - 元测试 roster 含 `HostedMcpResultDeliveryIT`，上述 fork 账目在 `hosted-process-ci.test.js` 中成立。

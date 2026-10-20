@@ -202,6 +202,44 @@ class HostedMcpResultDeliveryIT {
                 .isGreaterThan(discoversBefore);
     }
 
+    @Test
+    @Timeout(300)
+    void lateConclusiveReplySettlesTheUnknownOperationOnceOnMySql()
+            throws Exception {
+        boot();
+        SessionRef session = createSession();
+        baseline(session);
+        proxyCalls.clear();
+        wire.clear();
+        String operation = uuid();
+        JsonNode answer = privateRequest("POST", "/session/" + session.id()
+                + "/mcp/operations", Map.of("operationId", operation,
+                        "serverId", "fixture", "request", Map.of("kind",
+                                "resource_read", "uri", "ext://late")),
+                session, 202);
+        assertThat(answer.path("state").asText())
+                .as("the unparseable answer leaves the operation unknown")
+                .isEqualTo("outcome_unknown");
+        JsonNode settled = null;
+        for (int attempt = 0; attempt < 40; attempt++) {
+            JsonNode view = privateRequest("GET", "/session/" + session.id()
+                    + "/mcp/operations/" + operation, null, session, 200);
+            if ("settled".equals(view.path("state").asText())) {
+                settled = view;
+                break;
+            }
+            Thread.sleep(100);
+        }
+        assertThat(settled).as("the late reply settles the original")
+                .isNotNull();
+        assertThat(settled.at("/response/contents/0/text").asText())
+                .isEqualTo("EXT_RESOURCE_1");
+        assertThat(effects("resource_read")).containsExactly("ext://late");
+        assertThat(controls("mcp-invoke"))
+                .as("the late reply is not a second invoke")
+                .hasSize(1);
+    }
+
     private Map<String, Object> mcpPin(int revision) {
         return Map.of("serverId", "fixture", "serverRevision", revision,
                 "definitionDigest", DigestUtils.sha256Hex(mcpDigest + revision));

@@ -521,7 +521,7 @@
                                  the FG11f publication cell adds 82 s, so the
                                  fork moves to 9493 s and the Verify step to
                                  169 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9523</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>9533</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
