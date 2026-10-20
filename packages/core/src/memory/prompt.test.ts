@@ -156,6 +156,44 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result.split('\n').length).toBeLessThan(400);
   });
 
+  it('blames entry count, not entry length, when every entry is within the per-line cap', () => {
+    const entries = Array.from(
+      { length: MAX_MANAGED_AUTO_MEMORY_INDEX_LINES },
+      (_, index) =>
+        `- [Entry ${index}](memory/e${index}.md) — ${'p'.repeat(110)}`,
+    );
+    const index = entries.join('\n');
+    // Legal input: no line exceeds the per-line cap, yet the total overflows.
+    expect(Math.max(...entries.map((line) => line.length))).toBeLessThanOrEqual(
+      MAX_INDEX_LINE_CHARS,
+    );
+    expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
+
+    const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+
+    expect(result).not.toContain('index entries are too long');
+    expect(result).not.toContain(`one line at most ${MAX_INDEX_LINE_CHARS}`);
+    expect(result).toContain('too many entries');
+    expect(result).toContain('prune or merge entries, or raise the budget');
+  });
+
+  it('names the entries dropped from an over-budget index', () => {
+    const entries = Array.from(
+      { length: MAX_MANAGED_AUTO_MEMORY_INDEX_LINES },
+      (_, index) =>
+        `- [Entry ${index}](memory/e${index}.md) — ${'p'.repeat(110)}`,
+    );
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      entries.join('\n'),
+    );
+
+    expect(result).toMatch(
+      /Dropped \d+ of 200 entries: Entry \d+, Entry \d+, Entry \d+/,
+    );
+    expect(result).toContain('Only part of it was loaded.');
+  });
+
   it.each(['project', 'user', 'team'] as const)(
     'drops an oversized %s index entry whole and retains subsequent complete links',
     (scope) => {

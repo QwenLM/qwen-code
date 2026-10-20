@@ -161,6 +161,33 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
   'A memory that summarizes repo state (activity logs, architecture snapshots) is frozen in time. If the user asks about *recent* or *current* state, prefer `git log` or reading the code over recalling the snapshot.',
 ];
 
+function indexEntryName(line: string): string {
+  const match = /^-\s*\[([^\]]+)\]/.exec(line);
+  if (match) {
+    return match[1];
+  }
+  return line.length > 40 ? `${line.slice(0, 40)}…` : line;
+}
+
+// trimIndexToBudget keeps an in-order subset, so a greedy walk recovers the
+// dropped entries and reports the real set rather than assuming a tail.
+function droppedIndexEntries(
+  entries: readonly string[],
+  kept: string,
+): string[] {
+  const keptLines = kept.length === 0 ? [] : kept.split('\n');
+  const dropped: string[] = [];
+  let cursor = 0;
+  for (const entry of entries) {
+    if (cursor < keptLines.length && keptLines[cursor] === entry) {
+      cursor += 1;
+    } else {
+      dropped.push(entry);
+    }
+  }
+  return dropped;
+}
+
 function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const trimmed = normalizeContent(indexContent).trim();
   const lines = trimmed.split('\n');
@@ -178,15 +205,37 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length).split('\n')
     : lines;
   const truncated = trimIndexToBudget(entries);
+  // Only a line that actually exceeds the per-line cap makes length advice
+  // actionable; a count/char overflow of legal entries cannot be fixed by it.
+  const hasOverlongEntry = entries.some(
+    (line) => line.length > MAX_INDEX_LINE_CHARS,
+  );
+  const dropped = droppedIndexEntries(entries, truncated);
 
   const reason =
     wasCharTruncated && !wasLineTruncated
-      ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — index entries are too long`
+      ? hasOverlongEntry
+        ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — index entries are too long`
+        : `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — too many entries for the budget`
       : wasLineTruncated && !wasCharTruncated
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files.`;
+  const droppedNote =
+    dropped.length === 0
+      ? ''
+      : ` Dropped ${dropped.length} of ${entries.length} entries: ${dropped
+          .slice(0, 3)
+          .map(indexEntryName)
+          .join(
+            ', ',
+          )}${dropped.length > 3 ? `, and ${dropped.length - 3} more` : ''}.`;
+
+  const advice = hasOverlongEntry
+    ? `Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files.`
+    : 'Every entry is within the per-line limit; prune or merge entries, or raise the budget.';
+
+  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${droppedNote} ${advice}`;
 }
 
 /**
