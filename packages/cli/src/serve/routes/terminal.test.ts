@@ -244,6 +244,8 @@ describe('terminal WebSocket route', () => {
       exitCode: 7,
       workspaceCwd: '/workspace',
     });
+    const detachFailure = vi.fn();
+    vi.mocked(registry.addFailureListener).mockReturnValueOnce(detachFailure);
     const ws = new FakeWebSocket();
 
     await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
@@ -259,6 +261,9 @@ describe('terminal WebSocket route', () => {
       '/workspace',
     );
     expect(registry.write).not.toHaveBeenCalled();
+    expect(detachFailure).toHaveBeenCalledOnce();
+    ws.emit('close');
+    expect(detachFailure).toHaveBeenCalledOnce();
   });
 
   it('surfaces a backend resource failure as an error frame and a non-retryable close', async () => {
