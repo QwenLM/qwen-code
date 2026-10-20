@@ -13,6 +13,7 @@ export interface MarkdownChunkOptions {
 
 const blocks = unified().use(remarkParse);
 const gfm = unified().use(remarkParse).use(remarkGfm);
+const candidateOverflow = Symbol('Markdown candidate exceeds batch budget');
 const notice =
   '> Markdown element exceeds the message limit; original text follows in parts.\n\n';
 
@@ -34,27 +35,37 @@ export function splitMarkdown(
   const size = (value: string) =>
     unit === 'utf8' ? Buffer.byteLength(value, 'utf8') : value.length;
   const length = size(text) + reservedLength;
+  const maxOutput = 4 * length + maxLength + reservedLength;
   // Relative limits bound amplification, never truncate a delivery batch.
   const fits = (parts: string[]) =>
     parts.length <=
       Math.max(1, 4 * Math.ceil(length / (targetLength + reservedLength))) &&
     parts.reduce((total, part) => total + size(part) + reservedLength, 0) <=
-      4 * length + maxLength + reservedLength &&
+      maxOutput &&
     parts.every((part) => size(part) <= maxLength);
-  for (const target of [
-    reservedLength > targetLength ? maxLength : targetLength,
-    maxLength,
-  ]) {
+  const attempt = (target: number, depth: number) => {
     try {
-      const parts = split(text, target, maxLength, size, 0);
-      if (fits(parts)) return parts;
+      const parts = split(text, target, maxLength, size, depth, maxOutput);
+      return fits(parts) ? parts : undefined;
     } catch (error) {
-      if (!(error instanceof RangeError)) throw error;
+      if (
+        error !== candidateOverflow &&
+        !(depth === 0 && error instanceof RangeError)
+      )
+        throw error;
+      return undefined;
     }
-  }
+  };
+  const preferred = attempt(
+    reservedLength > targetLength ? maxLength : targetLength,
+    0,
+  );
+  if (preferred) return preferred;
+  const expanded = attempt(maxLength, 0);
+  if (expanded) return expanded;
   // Re-plan from the original source, without repeated container context.
-  const literal = split(text, maxLength, maxLength, size, 16);
-  if (fits(literal)) return literal;
+  const literal = attempt(maxLength, 16);
+  if (literal) return literal;
   throw new RangeError(
     'Markdown budget cannot contain a bounded lossless batch',
   );
@@ -66,7 +77,21 @@ function split(
   maximum: number,
   size: (value: string) => number,
   depth: number,
+  maxOutput: number,
 ): string[] {
+  // Intermediate arrays can contain pieces later packed together. Bound their
+  // output size, not their count, without charging the same pieces twice.
+  const totals = new WeakMap<string[], number>();
+  const append = (parts: string[], ...values: string[]) => {
+    let total =
+      totals.get(parts) ?? parts.reduce((sum, part) => sum + size(part), 0);
+    for (const part of values) {
+      total += size(part);
+      if (total > maxOutput) throw candidateOverflow;
+      parts.push(part);
+    }
+    totals.set(parts, total);
+  };
   const source = (node: Nodes) =>
     text.slice(node.position!.start.offset!, node.position!.end.offset!);
   function cut(value: string, budget: number): number {
@@ -114,7 +139,7 @@ function split(
         throw new RangeError(
           'Markdown budget cannot contain a fenced fragment',
         );
-      result.push(chunk);
+      append(result, chunk);
       value = value.slice(end);
     }
     return result;
@@ -154,26 +179,25 @@ function split(
           : [];
         const table = raw.slice(offset);
         if (size(table) <= limit) return [...before, table];
-        if (size(header) >= limit / 2)
-          return [...before, ...plain(table, limit)];
         const result = [...before];
         const tableStart = result.length;
         let current = header;
         for (const row of lines.slice(i + 1)) {
           if (size(header + row) > limit) {
-            if (current !== header) result.push(current);
-            result.push(...plain(header + row, limit));
+            if (current !== header) append(result, current);
+            append(result, ...plain(header + row, limit));
             current = header;
           } else {
             if (current !== header && size(current + row) > preferred) {
-              result.push(current);
+              append(result, current);
               current = header;
             }
             current += row;
           }
         }
-        if (current !== header) result.push(current);
-        if (result.length === tableStart) result.push(...plain(table, limit));
+        if (current !== header) append(result, current);
+        if (result.length === tableStart)
+          append(result, ...plain(table, limit));
         return result;
       }
       offset += lines[i - 1]!.length;
@@ -203,7 +227,7 @@ function split(
         const becomesCode =
           /`{3}|~{3}/u.test(current) &&
           blocks.parse(current).children.some((node) => node.type === 'code');
-        result.push(...(becomesCode ? plain(current, limit) : [current]));
+        append(result, ...(becomesCode ? plain(current, limit) : [current]));
       }
       current = '';
     };
@@ -216,7 +240,7 @@ function split(
         if (current && size(current + value) > preferred) flush();
         if (size(value) > limit) {
           flush();
-          result.push(...plain(value, limit));
+          append(result, ...plain(value, limit));
         } else current += value;
         continue;
       }
@@ -257,7 +281,7 @@ function split(
         }
         const piece = value.slice(0, end);
         if (size(current + piece) > limit) flush();
-        if (size(piece) > limit) result.push(...plain(piece, limit));
+        if (size(piece) > limit) append(result, ...plain(piece, limit));
         else current += piece;
         value = value.slice(end);
         if (value) flush();
@@ -294,17 +318,22 @@ function split(
         `${opening}\n${part}${part.endsWith('\n') ? '' : '\n'}${marker}`;
       if (size(wrap(node.value)) <= limit) return [wrap(node.value)];
       const overhead = size(wrap(''));
-      if (overhead >= limit / 2) return plain(raw, limit);
+      if (overhead >= limit) return plain(raw, limit);
       const budget =
         overhead < preferred / 2 ? preferred - overhead : limit - overhead;
       const result: string[] = [];
       let current = '';
       for (let line of node.value.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
         if (current && size(wrap(current + line)) > preferred) {
-          result.push(wrap(current));
+          append(result, wrap(current));
           current = '';
         }
         while (size(line) > Math.min(budget, limit - overhead)) {
+          if (
+            size(String.fromCodePoint(line.codePointAt(0)!)) >
+            limit - overhead
+          )
+            return plain(raw, limit);
           const end = cut(
             line,
             Math.min(
@@ -315,12 +344,12 @@ function split(
               limit - overhead,
             ),
           );
-          result.push(wrap(line.slice(0, end)));
+          append(result, wrap(line.slice(0, end)));
           line = line.slice(end);
         }
         current += line;
       }
-      if (current) result.push(wrap(current));
+      if (current) append(result, wrap(current));
       return result;
     }
     if (size(raw) <= preferred) return [raw];
@@ -338,10 +367,12 @@ function split(
         limit,
         (value) => (value ? size(wrap(value)) : 0),
         depth + 1,
+        maxOutput,
       ).map(wrap);
     }
     if (node.type === 'list') {
-      return node.children.flatMap((item, itemIndex) => {
+      const result: string[] = [];
+      for (const [itemIndex, item] of node.children.entries()) {
         const nextItem = node.children[itemIndex + 1];
         const gap = nextItem
           ? text.slice(
@@ -350,13 +381,18 @@ function split(
             )
           : '';
         const itemText = source(item);
-        if (size(itemText) <= preferred)
-          return gap ? [itemText, gap] : [itemText];
+        if (size(itemText) <= preferred) {
+          append(result, itemText, gap);
+          continue;
+        }
         const marker =
           /^(\s*(?:[-+*]|\d+[.)])\s+)(?:\[[ xX]\](?:[ \t]+|(?=\r?\n|$)))?/u.exec(
             itemText,
           );
-        if (!marker) return gap ? [itemText, gap] : [itemText];
+        if (!marker) {
+          append(result, itemText, gap);
+          continue;
+        }
         const indent = ' '.repeat(marker[1]!.length);
         const body = itemText
           .slice(marker[0].length)
@@ -384,12 +420,14 @@ function split(
           limit,
           (value) => (value ? size(wrap(value) + '\n') : 0),
           depth + 1,
+          maxOutput,
         ).map(
           (part, index, parts) =>
             wrap(part) + (index < parts.length - 1 ? '\n' : ''),
         );
-        return gap ? [...parts, gap] : parts;
-      });
+        append(result, ...parts, gap);
+      }
+      return result;
     }
     return size(raw) <= limit ? [raw] : plain(raw, limit);
   }
@@ -399,7 +437,7 @@ function split(
   let heading = '';
   let previousEnd = 0;
   const flush = () => {
-    if (current) result.push(current + suffix);
+    if (current) append(result, current + suffix);
     current = '';
   };
   for (const node of tree.children) {
@@ -416,8 +454,9 @@ function split(
     let reserve = size(head + leading);
     if (reserve && (reserve >= hard - minimum || soft - reserve < minimum)) {
       flush();
-      result.push(
-        ...split(head + leading, soft, hard, size, depth + 1).map(
+      append(
+        result,
+        ...split(head + leading, soft, hard, size, depth + 1, maxOutput).map(
           (part) => part + suffix,
         ),
       );
@@ -449,7 +488,7 @@ function split(
       if (!current) next = prefix + next;
       if (size(next) > hard) {
         flush();
-        result.push(...plain(next + suffix, maximum));
+        append(result, ...plain(next + suffix, maximum));
       } else current = current ? current + separator + next : next;
     }
   }
@@ -462,7 +501,7 @@ function split(
     if (size(current + tail) <= hard) current += tail;
     else {
       flush();
-      result.push(...plain(tail, maximum));
+      append(result, ...plain(tail, maximum));
     }
   }
   flush();

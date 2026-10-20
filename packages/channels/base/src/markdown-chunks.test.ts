@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Nodes } from 'mdast';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
@@ -340,7 +340,48 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     expect(blocks.every((block) => block.lang === language)).toBe(true);
     expect(blocks.map((block) => block.value).join('')).toBe(body);
   });
-  it.each([1891, 1892, 3788, 3789, 3790, 3797, 9983, 9984, 19985])(
+  it.each([10500, 11000, 15000])(
+    'retains affordable code language and metadata above half the hard budget (%s)',
+    (length) => {
+      const metadata = 'x'.repeat(length - 3);
+      const body = '中😀y'.repeat(7500);
+      const parts = split('```ts ' + metadata + '\n' + body + '\n```');
+      const blocks = parts.flatMap(code);
+      expect(blocks).toHaveLength(parts.length);
+      expect(
+        blocks.every((block) => block.lang === 'ts' && block.meta === metadata),
+      ).toBe(true);
+      expect(blocks.map((block) => block.value).join('')).toBe(body);
+      expect(
+        parts.every((part) => !part.includes('original text follows in parts')),
+      ).toBe(true);
+    },
+  );
+  it.each([10500, 11000])(
+    'retains affordable large table headers and every row (%s)',
+    (length) => {
+      const header = '| ' + 'h'.repeat(length) + ' |\n|---|\n';
+      const data = Array.from(
+        { length: 100 },
+        (_, i) => '| row-' + i + ' ' + '中😀'.repeat(100) + ' |',
+      ).join('\n');
+      const parts = split(header + data);
+      expect(parts.every((part) => part.startsWith(header))).toBe(true);
+      expect(
+        parts.every((part) =>
+          nodes(part).some((node) => node.type === 'table'),
+        ),
+      ).toBe(true);
+      expect(parts.map((part) => part.slice(header.length)).join('')).toBe(
+        data,
+      );
+      expect(parts.flatMap(rows)).toHaveLength(100);
+    },
+  );
+  it.each([
+    1891, 1892, 3788, 3789, 3790, 3797, 9983, 9984, 19985, 19988, 19989, 19990,
+    19991, 19992,
+  ])(
     'bounds fence repetition around budget boundaries (info length %s)',
     (length) => {
       const info = 'x'.repeat(length);
@@ -544,4 +585,48 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     expect(parts.some((part) => part.includes('\\*'))).toBe(true);
     expect(parts.some((part) => part.includes('&amp;'))).toBe(true);
   });
+});
+
+it('abandons an over-budget candidate before constructing thousands of repeated fences', () => {
+  const opener = '```' + 'x'.repeat(19985) + '\n';
+  const text = opener + 'y'.repeat(30000) + '\n```';
+  const byteLength = Buffer.byteLength;
+  let wrappedMeasurements = 0;
+  const spy = vi
+    .spyOn(Buffer, 'byteLength')
+    .mockImplementation((value, encoding) => {
+      if (typeof value === 'string' && value.startsWith(opener))
+        wrappedMeasurements++;
+      return byteLength(value, encoding);
+    });
+  let parts: string[];
+  try {
+    parts = splitMarkdown(text, {
+      targetLength: 3800,
+      maxLength: 20000,
+      unit: 'utf8',
+    });
+  } finally {
+    spy.mockRestore();
+  }
+  expect(wrappedMeasurements).toBeLessThan(100);
+  expect(
+    parts
+      .flatMap(code)
+      .map((block) => block.value)
+      .join(''),
+  ).toBe(text);
+});
+
+it('reports an impossible literal budget instead of swallowing the final failure', () => {
+  expect(() =>
+    splitMarkdown(
+      '[source](https://docs.example.com/' + 'x'.repeat(400) + ')',
+      {
+        targetLength: 64,
+        maxLength: 64,
+        unit: 'utf8',
+      },
+    ),
+  ).toThrow('Markdown budget cannot contain a fenced fragment');
 });
