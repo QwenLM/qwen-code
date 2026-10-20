@@ -26,7 +26,8 @@
   },
   "dependencies": {
     "@qwen-code/channel-base": "0.25.3",
-    "@wecom/aibot-node-sdk": "^1.0.7"
+    "@wecom/aibot-node-sdk": "^1.0.7",
+    "saxes": "6.0.0"
   },
   "devDependencies": {
     "typescript": "^5.0.0"
