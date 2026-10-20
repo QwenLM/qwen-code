@@ -1760,6 +1760,12 @@ jobs:
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
       - name: 'Install Node.js dependencies'
+        env:
+          # This lane builds and bundles explicitly below. Without this the
+          # install's prepare hook repeats both, so one job compiles the whole
+          # workspace twice; that duplicate compile is what exhausted the V8
+          # heap on the shared pool (#14823).
+          QWEN_SKIP_PREPARE: '1'
         run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
 
       - name: 'Build Qwen Code'

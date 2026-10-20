@@ -90,6 +90,20 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
+  it('skips the install-time prepare build in the daemon-e2e lane', () => {
+    const install = step(job('daemon-e2e'), 'Install Node.js dependencies');
+    // The lane builds and bundles explicitly, so prepare's copy compiles the
+    // whole workspace a second time in the same job — the duplicated compile
+    // that exhausted the heap in #14823.
+    expect(install).toContain("QWEN_SKIP_PREPARE: '1'");
+    expect(step(job('daemon-e2e'), 'Build Qwen Code')).toContain(
+      "run: 'npm run build'",
+    );
+    expect(step(job('daemon-e2e'), 'Bundle Qwen Code')).toContain(
+      "run: 'npm run bundle'",
+    );
+  });
+
   it('serializes latency-sensitive tests on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
