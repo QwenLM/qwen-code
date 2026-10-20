@@ -18,6 +18,7 @@ import {
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
+import { isFullyQualifiedPath } from '../config/storage-paths-lite.js';
 import { isLoopbackBind } from '../serve/loopback-binds.js';
 import {
   ignoreBrokenPipe,
@@ -357,6 +358,25 @@ const START_ENV_DROP = [
 const START_LOG_MAX_AGE_MS = 24 * 60 * 60_000;
 
 /**
+ * Resolve a runtime/config directory against the launching directory unless
+ * it is already fully qualified. On Windows, `\runtime` and `/runtime` are
+ * absolute but depend on the current drive, so only drive-letter and UNC
+ * forms are fixed.
+ */
+export function resolveStartEnvPath(
+  value: string | undefined,
+  cwd: string,
+  pathApi: Pick<typeof path, 'isAbsolute' | 'resolve'> = path,
+  fullyQualified: (candidate: string) => boolean = isFullyQualifiedPath,
+): string | undefined {
+  if (!value) return undefined;
+  if (value === '~' || value.startsWith('~/') || value.startsWith('~\\')) {
+    return value;
+  }
+  return fullyQualified(value) ? value : pathApi.resolve(cwd, value);
+}
+
+/**
  * The child is a new daemon, not a worker of the session that launched it.
  * Drop the parent's session/worker bindings and every private marker, then
  * pin relative runtime directories to the launching directory so the parent
@@ -379,17 +399,12 @@ export function buildDaemonStartEnv(
     }
   }
   for (const key of ['QWEN_RUNTIME_DIR', 'QWEN_HOME'] as const) {
-    const value = child[key];
-    if (
-      !value ||
-      value === '~' ||
-      value.startsWith('~/') ||
-      value.startsWith('~\\') ||
-      path.isAbsolute(value)
-    ) {
-      continue;
+    const resolved = resolveStartEnvPath(child[key], cwd);
+    if (resolved === undefined) {
+      delete child[key];
+    } else {
+      child[key] = resolved;
     }
-    child[key] = path.resolve(cwd, value);
   }
   if (token) child['QWEN_SERVER_TOKEN'] = token;
   return child;

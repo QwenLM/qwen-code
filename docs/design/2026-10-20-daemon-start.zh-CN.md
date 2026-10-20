@@ -20,6 +20,8 @@
 
 子进程是一个新的 daemon，不是启动它的会话的 worker。启动命令在 spawn 前移除父会话的绑定：`QWEN_CODE_SESSION_ID`、`QWEN_CODE_PROMPT_ID`、`QWEN_CODE_PROJECT_DIR`、`QWEN_CODE_SERVE`、`QWEN_CODE_AGENT_ID`、`QWEN_DAEMON_TOKEN`、`QWEN_CODE_MESSAGING_TOKEN`、`QWEN_CODE_MESSAGING_SOCKET`、`QWEN_CODE_CLI`、`QWEN_CODE_NO_RELAUNCH`，以及所有以 `QWEN_CODE_PRIVATE_` 开头的键（包括 Conversations runtime 与 guard-provider 标记）。相对的 `QWEN_RUNTIME_DIR`/`QWEN_HOME` 会在 spawn 前以启动目录为基准固定为绝对路径，使父子进程使用同一 discovery 命名空间。操作者的模型与认证环境保留。
 
+Windows 无盘符根路径也会按启动目录所在盘符解析；只有盘符/UNC 形式原样保留。
+
 启动前会使用与 `serve` 相同的函数规范化工作区，因此 symlink alias 与真实路径在重复启动检查和子进程参数中视为同一工作区。
 
 显式 token 通过 `QWEN_SERVER_TOKEN` 传递，不进入子进程参数。`--token` 会出现在启动 shell 的进程列表中，因此命令会提示并建议使用环境变量。
@@ -42,7 +44,7 @@
 
 ## 验证
 
-- daemon 命令测试覆盖参数构造、摘要格式、环境隔离（含私有键前缀与相对运行目录）、工作区 canonicalization、启动日志清扫、记录选择，以及既有 status/log/stop 行为。
+- daemon 命令测试覆盖参数构造、摘要格式、环境隔离（含私有键前缀与相对运行目录）、工作区 canonicalization（含 Windows 无盘符根路径）、启动日志清扫、记录选择，以及既有 status/log/stop 行为。
 - 全仓 typecheck 与 ESLint 通过。
 - 本地端到端：`daemon start --port 0 --no-web --json` 发布记录，`daemon status --json` 报 running，`daemon stop --port <port>` 终止进程，随后记录目录为空。
 

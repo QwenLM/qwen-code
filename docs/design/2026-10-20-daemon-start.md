@@ -38,6 +38,8 @@ against the launching directory before spawn, so the parent polls the same
 discovery namespace the child writes. The operator's model and auth
 environment is kept.
 
+Windows drive-relative roots are resolved against the launching drive as well; only drive-letter and UNC forms are kept verbatim.
+
 The command canonicalizes workspaces with the same function `serve` uses, so a
 symlink alias and its target are treated as one workspace for the
 duplicate-start check and in the child's arguments.
@@ -75,7 +77,8 @@ startup log.
 
 - The daemon command suite covers argument construction, summary formatting,
   environment isolation (including the private-key prefix and relative runtime
-  paths), workspace canonicalization, startup-log sweeping, record selection,
+  paths), workspace canonicalization (including Windows drive-relative roots),
+  startup-log sweeping, record selection,
   and the existing status/log/stop behavior.
 - Full workspace typecheck and ESLint pass.
 - Local E2E: `daemon start --port 0 --no-web --json` published a record,

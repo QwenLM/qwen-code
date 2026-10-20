@@ -38,6 +38,7 @@ import {
   probeHealth,
   processStartMatchesRecord,
   processStartTime,
+  resolveStartEnvPath,
   selectDaemonEntries,
   sweepStaleStartLogs,
   tailLines,
@@ -170,6 +171,30 @@ describe('qwen daemon command', () => {
     );
     expect(env['QWEN_RUNTIME_DIR']).toBe(path.resolve(cwd, 'runtime'));
     expect(env['QWEN_HOME']).toBe(path.resolve(cwd, 'home'));
+  });
+
+  it('resolves Windows drive-relative roots against the launching drive', () => {
+    const sep = path.win32.sep;
+    const cwd = ['C:', 'launch'].join(sep);
+    const driveRelative = sep + 'runtime';
+    const slashRelative = '/runtime';
+    const drivePath = ['C:', 'runtime'].join(sep);
+    const unc = sep + sep + ['server', 'share', 'runtime'].join(sep);
+    const winFullyQualified = (value: string) =>
+      path.win32.isAbsolute(value) &&
+      (/^[a-zA-Z]:/.test(value) || value.startsWith(sep + sep));
+    expect(
+      resolveStartEnvPath(driveRelative, cwd, path.win32, winFullyQualified),
+    ).toBe(drivePath);
+    expect(
+      resolveStartEnvPath(slashRelative, cwd, path.win32, winFullyQualified),
+    ).toBe(drivePath);
+    expect(
+      resolveStartEnvPath(drivePath, cwd, path.win32, winFullyQualified),
+    ).toBe(drivePath);
+    expect(resolveStartEnvPath(unc, cwd, path.win32, winFullyQualified)).toBe(
+      unc,
+    );
   });
 
   it('drops every private marker by prefix', () => {
