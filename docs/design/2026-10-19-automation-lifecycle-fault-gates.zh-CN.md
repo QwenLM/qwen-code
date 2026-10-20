@@ -72,9 +72,10 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   FG11f 命中的 store 级授权。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
-  接受。扣住的模型就是扣留点：wake turn 一直扣住时，取消会赢，task 与 run 在
-  一秒内结算为 `cancelled`。反之，收到 `202` 后立刻释放模型，turn 会先跑完，
-  run 结算为 `completed`——决定结果的是顺序，因此已交付的格子保持模型扣住。
+  接受。把 wake turn 一直扣在模型上时，取消会赢：task 与 run 都在一秒内结算为
+  `cancelled`，之后再释放模型也不会复活。反之，在收到 `202` 后立刻释放模型，
+  turn 会先跑完，run 结算为 `completed`。因此扣住的模型本身就是这一格所需的
+  扣留点；决定结果的是释放顺序，而不是夹具。
 - 取消期间的租约接管不在范围内，与 FG11c 一致。
 - stream gap 门禁（FG11e）不在此处。
 

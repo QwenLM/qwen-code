@@ -65,11 +65,11 @@ asserts:
 - a retry under the same key reuses the original operation and run, and a
   parked cancel is never redelivered.
 
-`cancel-stops-only-the-target` is delivered. With the wake turn parked on the
-model, the public task cancel settles the task and the run `cancelled` in under
-a second and the schedule stays `live`; releasing the model immediately after
-the `202` instead lets the turn finish first, which is the ordering the cell
-avoids.
+- `cancel-stops-only-the-target` is delivered. With the wake turn parked on the
+  model, the public task cancel settles the task and the run `cancelled` in
+  under a second and the schedule stays `live`; releasing the model immediately
+  after the `202` instead lets the turn finish first, which is the ordering the
+  cell avoids.
 
 #14526 implemented the per-run cancel; slice 2 pins the round-level matrix
 around it.
@@ -91,12 +91,13 @@ around it.
   FG11f hits.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
-  `GET /v1/agents/sessions/{id}/tasks` is accepted. The parked model is the
-  hold point: with the wake turn kept parked, the cancel wins and settles the
-  task and the run `cancelled` in under a second. Releasing the model
-  immediately after the `202` lets the turn finish first instead, and the run
-  settles `completed` — the ordering decides, which is why the delivered cell
-  keeps the model parked.
+  `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn kept
+  parked on the model, the cancel wins: the task and the run both settle
+  `cancelled` in under a second, and releasing the model afterwards does not
+  revive them. Releasing the model immediately after the `202` instead lets the
+  turn finish first, and the run settles `completed`. The parked model is
+  therefore the hold point this cell needs; the release ordering, not the
+  fixture, decides the outcome.
 - Lease takeover during a cancel is out of scope, as in FG11c.
 - The stream-gap gate (`FG11e`) is untouched.
 
