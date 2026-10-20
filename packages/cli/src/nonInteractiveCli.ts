@@ -97,6 +97,7 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { ModSession } from './services/mod-session.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
+import { formatDroppedReferencesNotice } from './utils/dropped-references.js';
 import {
   AlreadyReportedError,
   handleError,
@@ -623,6 +624,16 @@ export async function runNonInteractive(
       adapter.emitResult(result);
       options.onResultEmitted?.();
       await modSession?.flushOutput();
+    };
+
+    // A notice the user must see. Plain stderr in text mode, a structured
+    // system message otherwise.
+    const emitNotice = (subtype: string, notice: string): void => {
+      if (outputFormat === OutputFormat.TEXT) {
+        process.stderr.write(`${notice}\n`);
+      } else {
+        adapter.emitSystemMessage(subtype, { notice });
+      }
     };
 
     // Get readonly values once at the start
@@ -1415,13 +1426,20 @@ export async function runNonInteractive(
         }
 
         if (!slashHandled) {
-          const { processedQuery, shouldProceed } = await handleAtCommand({
-            query: input,
-            config,
-            onDebugMessage: () => {},
-            messageId: Date.now(),
-            signal: abortController.signal,
-          });
+          const { processedQuery, shouldProceed, droppedReferences } =
+            await handleAtCommand({
+              query: input,
+              config,
+              onDebugMessage: (message) => debugLogger.debug(message),
+              messageId: Date.now(),
+              signal: abortController.signal,
+            });
+
+          const droppedNotice =
+            formatDroppedReferencesNotice(droppedReferences);
+          if (droppedNotice) {
+            emitNotice('at_reference_dropped', droppedNotice);
+          }
 
           if (!shouldProceed || !processedQuery) {
             // An error occurred during @include processing (e.g., file not found).
@@ -1508,13 +1526,6 @@ export async function runNonInteractive(
       let initialParts = normalizePartList(initialPartList);
       let fullTurnModelOverride: string | undefined;
       let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
-      const emitVisionNotice = (subtype: string, notice: string) => {
-        if (outputFormat === OutputFormat.TEXT) {
-          process.stderr.write(`${notice}\n`);
-        } else {
-          adapter.emitSystemMessage(subtype, { notice });
-        }
-      };
       if (
         inlineModelOverride === undefined &&
         shouldRunVisionBridge(config) &&
@@ -1534,7 +1545,7 @@ export async function runNonInteractive(
               .resolveForModel(fullTurnModelOverride.slice(0, -1), {
                 failClosed: true,
               });
-            emitVisionNotice(
+            emitNotice(
               'vision_routing',
               formatFullTurnVisionNotice(fullTurnModel),
             );
@@ -1550,7 +1561,7 @@ export async function runNonInteractive(
               bridgeResult.status !== 'skipped' ||
               bridgeResult.egressOccurred
             ) {
-              emitVisionNotice(
+              emitNotice(
                 'vision_bridge',
                 formatVisionBridgeNotice(bridgeResult),
               );
@@ -1565,7 +1576,7 @@ export async function runNonInteractive(
                 error instanceof Error ? error.message : String(error)
               }`,
             );
-            emitVisionNotice(
+            emitNotice(
               'vision_bridge_failed',
               'Vision bridge failed; proceeding without the image(s).',
             );

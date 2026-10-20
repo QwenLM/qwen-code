@@ -110,6 +110,7 @@ import {
   handleAtCommand,
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
+import { formatDroppedReferencesNotice } from '../../utils/dropped-references.js';
 import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
@@ -1829,6 +1830,16 @@ export const useLlmStream = (
             addItem,
           });
 
+          const droppedNotice = formatDroppedReferencesNotice(
+            atCommandResult.droppedReferences,
+          );
+          if (droppedNotice) {
+            addItem(
+              { type: 'info', text: droppedNotice },
+              userMessageTimestamp,
+            );
+          }
+
           if (!atCommandResult.shouldProceed) {
             return { queryToSend: null, shouldProceed: false };
           }
@@ -3389,6 +3400,18 @@ export const useLlmStream = (
             const shouldSkipMessage =
               !atCommandResult.shouldProceed &&
               (atCommandResult.toolDisplays?.length ?? 0) > 0;
+            const droppedNotice = formatDroppedReferencesNotice(
+              atCommandResult.droppedReferences,
+            );
+            if (droppedNotice) {
+              const showDroppedNotice = () =>
+                addItem(
+                  { type: 'info', text: droppedNotice },
+                  timestamp + index,
+                );
+              if (shouldSkipMessage) showDroppedNotice();
+              else sideEffects.push(showDroppedNotice);
+            }
             if (
               atCommandResult.shouldProceed &&
               atCommandResult.processedQuery !== null
