@@ -5,6 +5,12 @@ on:
     paths:
       - 'packages/cli/**'
       - 'scripts/tui-parity/**'
+      - 'integration-tests/renderer-matrix*'
+      - 'integration-tests/interactive/interactive-session*'
+      - 'integration-tests/interactive/tui-migration.test.ts'
+      - '.github/workflows/tui-parity.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
   workflow_dispatch:
 
 jobs:
@@ -59,6 +65,33 @@ jobs:
         run: 'npm run build'
       - name: 'Component parity snapshots (ink vs opentui)'
         run: 'bash scripts/tui-parity/component-parity.sh'
+      - name: 'Bundle the product for runtime and renderer comparison'
+        run: 'npm run bundle'
+      - name: 'Three-leg product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)'
+        env:
+          QWEN_SANDBOX: 'false'
+          QWEN_TUI_ACCEPTANCE_OUT: '${{ runner.temp }}/tui-migration'
+        run: |-
+          set -euo pipefail
+          QWEN_HOME="$(mktemp -d "${RUNNER_TEMP}/tui-migration-home.XXXXXX")"
+          export QWEN_HOME
+          trap 'rm -rf "$QWEN_HOME"' EXIT
+          cd integration-tests
+          npx vitest run renderer-matrix.test.ts interactive/interactive-session-viewport.test.ts --retry=0 --maxWorkers=1 --minWorkers=1
+          failed=0
+          for leg in node:ink bun:ink bun:opentui; do
+            export QWEN_E2E_RUNTIME="${leg%%:*}"
+            export QWEN_E2E_RENDERER="${leg#*:}"
+            npx vitest run interactive/tui-migration.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 || failed=1
+          done
+          exit "$failed"
+      - name: 'Upload product acceptance evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'tui-migration-${{ github.event.pull_request.head.sha || github.sha }}'
+          path: '${{ runner.temp }}/tui-migration/'
+          if-no-files-found: 'warn'
 
   noflicker:
     name: 'OpenTUI no-flicker gate'
