@@ -34,6 +34,14 @@ const lstatFault = vi.hoisted<{ path: string | null }>(() => ({
   path: null,
 }));
 
+// Simulates a path-based rename resolving inside a swapped directory: the
+// bytes land outside the session tree and no entry appears at `target`.
+const renameRedirect = vi.hoisted<{ directory: string | null }>(() => ({
+  directory: null,
+}));
+
+const directoryOpens = vi.hoisted<string[]>(() => []);
+
 const noFollowFault = vi.hoisted<{
   error: (Error & { code?: string }) | null;
   calls: string[];
@@ -54,6 +62,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     open: async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
+      if (args[1] === 'r') {
+        directoryOpens.push(args[0] as string);
+      }
       if (chmodFault.error !== null) {
         handle.chmod = () => Promise.reject(chmodFault.error!);
       }
@@ -67,6 +78,16 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         handle.sync = () => Promise.reject(failure);
       }
       return handle;
+    },
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      const [from, to] = args;
+      if (renameRedirect.directory !== null) {
+        return actual.rename(
+          from,
+          path.join(renameRedirect.directory, path.basename(to as string)),
+        );
+      }
+      return actual.rename(from, to);
     },
     chmod: async (...args: Parameters<typeof actual.chmod>) => {
       if (chmodFault.error !== null) throw chmodFault.error;
@@ -112,6 +133,8 @@ afterEach(async () => {
     await fs.rm(directory, { recursive: true, force: true });
   }
   temporaryDirectories.clear();
+  renameRedirect.directory = null;
+  directoryOpens.length = 0;
 });
 
 async function createRoot(): Promise<string> {
@@ -413,6 +436,32 @@ describe('managed session resource store', () => {
     ).rejects.toThrow(/resource directory is not private/);
   });
 
+  it('refuses a publish whose rename landed outside the session directory', async () => {
+    const { store, runtimeBaseDir } = await createStore();
+    const outside = path.join(runtimeBaseDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    renameRedirect.directory = outside;
+
+    await expect(
+      store.publish('managed-input', Buffer.from('x', 'utf8')),
+    ).rejects.toThrow(/was not published inside its session directory/);
+    expect(
+      await fs.readdir(path.join(store.sessionRoot, 'managed-input')),
+    ).toEqual([]);
+  });
+
+  it('syncs only the kind directory once the directories exist', async () => {
+    const { store } = await createStore();
+    await store.publish('managed-input', Buffer.from('warm', 'utf8'));
+    directoryOpens.length = 0;
+
+    await store.publish('managed-input', Buffer.from('steady', 'utf8'));
+
+    expect(directoryOpens).toEqual([
+      path.join(store.sessionRoot, 'managed-input'),
+    ]);
+  });
+
   it('refuses to read a resource replaced by a symlink', async () => {
     const { store, runtimeBaseDir } = await createStore();
     const ref = await store.publish(
@@ -428,6 +477,22 @@ describe('managed session resource store', () => {
     );
 
     await expect(store.read(ref)).rejects.toThrow(/is not a regular file/);
+  });
+
+  it('refuses to read through a symlinked kind directory', async () => {
+    const { store, runtimeBaseDir } = await createStore();
+    const content = Buffer.from('outside copy', 'utf8');
+    const ref = await store.publish('managed-input', content);
+    const kindDir = path.join(store.sessionRoot, ref.kind);
+    const outside = path.join(runtimeBaseDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    await fs.writeFile(path.join(outside, ref.resourceId), content);
+    await fs.rm(kindDir, { recursive: true, force: true });
+    await fs.symlink(outside, kindDir);
+
+    await expect(store.read(ref)).rejects.toThrow(
+      /resource directory is not private/,
+    );
   });
 
   it('maps an ELOOP from the no-follow open to a record error', async () => {

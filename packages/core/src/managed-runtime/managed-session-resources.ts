@@ -101,10 +101,12 @@ export class LocalManagedSessionResourceStore
 
     const digest = createHash('sha256');
     const handle = await open(pending, 'wx', 0o600);
+    let written: { dev: number; ino: number };
     try {
       digest.update(bytes);
       await handle.writeFile(bytes);
       await handle.sync();
+      written = await handle.stat();
     } catch (cause) {
       await handle.close();
       await unlink(pending).catch(() => undefined);
@@ -114,6 +116,26 @@ export class LocalManagedSessionResourceStore
 
     try {
       await rename(pending, target);
+      // The directory checks above and this rename are path-based, and Node
+      // has no `openat`, so a swap between them can land the bytes outside the
+      // session tree. Comparing the entry at `target` with the file this call
+      // wrote refuses to hand back a ref for those bytes; preventing the
+      // outside deposit itself would need an `openat`-style handle.
+      const published = await lstat(target).catch((cause: unknown) => {
+        if ((cause as NodeJS.ErrnoException).code === 'ENOENT')
+          return undefined;
+        throw cause;
+      });
+      if (
+        published === undefined ||
+        !published.isFile() ||
+        published.dev !== written.dev ||
+        published.ino !== written.ino
+      ) {
+        throw new ManagedSessionRecordError(
+          `resource ${resourceId} was not published inside its session directory.`,
+        );
+      }
       await syncDirectory(directory);
     } catch (cause) {
       await unlink(pending).catch(() => undefined);
@@ -139,6 +161,31 @@ export class LocalManagedSessionResourceStore
       assertPathSegment(ref.kind, 'kind'),
       assertPathSegment(ref.resourceId, 'resourceId'),
     );
+    // Opening the leaf without following it only helps when the directories
+    // above it are real: a symlinked kind directory redirects the same open to
+    // an outside copy that passes the digest check.
+    try {
+      for (const directory of [
+        path.dirname(this.root),
+        this.root,
+        path.dirname(target),
+      ]) {
+        const ancestor = await lstat(directory);
+        if (ancestor.isSymbolicLink() || !ancestor.isDirectory()) {
+          throw new ManagedSessionRecordError(
+            `session resource directory is not private: ${directory} is not a real directory.`,
+          );
+        }
+      }
+    } catch (cause) {
+      if (cause instanceof ManagedSessionRecordError) throw cause;
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ManagedSessionRecordError(
+          `resource ${ref.resourceId} is not present for session ${this.sessionKey.sessionId}.`,
+        );
+      }
+      throw cause;
+    }
     let bytes: Buffer;
     let size: number;
     try {
@@ -296,7 +343,7 @@ function assertPathSegment(value: string, label: string): string {
  * check a pre-existing symlink redirects every resource written through it.
  */
 async function ensurePrivateDirectory(directory: string): Promise<void> {
-  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const created = await mkdir(directory, { recursive: true, mode: 0o700 });
   const stat = await lstat(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new ManagedSessionRecordError(
@@ -311,9 +358,13 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
     await tightenDirectory(directory);
   }
   // `publish` promises a ref that is safe to reference from a transaction
-  // once it resolves, so the directory entry has to be durable in its parent
-  // before bytes land under it.
-  await syncDirectory(path.dirname(directory));
+  // once it resolves, so a directory entry has to be durable in its parent
+  // before bytes land under it. `publish` calls this once per level, so only
+  // the level this call created is new; syncing an existing parent on every
+  // publish would add a directory fsync per level for nothing.
+  if (created !== undefined) {
+    await syncDirectory(path.dirname(directory));
+  }
 }
 
 /**
