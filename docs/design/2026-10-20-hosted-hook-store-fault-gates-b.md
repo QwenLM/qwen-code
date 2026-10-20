@@ -33,9 +33,16 @@ commit still runs in the real transaction.
 
 ## Witnesses
 
-- Arm the wrong phase: `attempts` stays zero and the cell's wait times out.
-- Match only the MCP domains: the Hook commit is never rejected.
-- Let the commit through: `hook.call` becomes one in the no-dispatch cells.
+Measured on the `hosted-harness-mysql` lane, one mutation at a time.
+
+- Arm the wrong phase, or leave the gate unarmed: `attempts` never leaves zero,
+  so the cell reddens as a `ConditionTimeout` on that wait.
+- Match only the MCP domains, so the Hook commit is never rejected: the same
+  `ConditionTimeout` on `attempts`, since the injection never fires.
+- Let every commit through with the gate still armed: the shipped 2–3 s window
+  is too short to see it, and the cell stays green. Widening the window to
+  25–30 s reddens it on the zero-`hook.call` assertion, so the window is the
+  liveness bound rather than the assertion.
 
 ## Validation
 

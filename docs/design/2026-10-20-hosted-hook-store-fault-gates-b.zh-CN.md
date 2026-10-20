@@ -30,9 +30,15 @@ FG13b 在真实 Session store 事务内逐一拒绝 Hook 的持久化提交：�
 
 ## 变异见证
 
-- arm 错 phase：`attempts` 恒为 0，用例的等待超时。
-- 只匹配 MCP 域：Hook 提交永远不会被拒绝。
-- 让提交通过：无派发用例里 `hook.call` 变为 1。
+以下均在 `hosted-harness-mysql` 车道上单点改造实测。
+
+- arm 错 phase，或不 arm：`attempts` 恒为 0，用例以该等待的
+  `ConditionTimeout` 变红。
+- 只匹配 MCP 域，Hook 提交永远不会被拒绝：注入不触发，同样是 `attempts`
+  等待的 `ConditionTimeout`。
+- gate 仍 arm 但让每次提交通过：现装的 2–3 秒窗口太短看不见，用例保持绿。
+  把窗口放宽到 25–30 秒才在零 `hook.call` 断言上变红，可见窗口本身就是活性
+  界，而不是断言。
 
 ## 验证
 

@@ -292,12 +292,16 @@ class HostedHookReplyLossFaultGatesIT {
     }
 
     private JsonNode hookExecution(String session) {
-        List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
-                .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
-                .toList();
+        List<JsonNode> records = hookExecutions(session);
         assertThat(records).as("hook execution records").hasSize(1);
         assertThat(records.getFirst().path("eventName").asText()).isEqualTo("PreToolUse");
         return records.getFirst();
+    }
+
+    private List<JsonNode> hookExecutions(String session) {
+        return HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
+                .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
+                .toList();
     }
 
     private JsonNode hookResult(String session) throws Exception {
@@ -533,11 +537,12 @@ class HostedHookReplyLossFaultGatesIT {
         String session = createSession(definition.path("id").asText(), "initial");
         submit(session, "FG13_STORE_INTENT");
         // The injection fires inside the real commit transaction; the rejected
-        // intent never reaches the worker.
+        // intent never reaches the worker and leaves no record behind.
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
         await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
                 .until(() -> true);
         assertThat(events("hook.call")).isEmpty();
+        assertThat(hookExecutions(session)).as("rejected intent commit").isEmpty();
         StoreFaultGate.INSTANCE.clear();
     }
 
@@ -556,6 +561,9 @@ class HostedHookReplyLossFaultGatesIT {
         await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
                 .until(() -> true);
         assertThat(events("hook.call")).isEmpty();
+        List<JsonNode> records = hookExecutions(session);
+        assertThat(records).as("records after the refused dispatch").hasSize(1);
+        assertThat(records.getFirst().at("/run/execution").asText()).isEqualTo("intent");
         StoreFaultGate.INSTANCE.clear();
     }
 
