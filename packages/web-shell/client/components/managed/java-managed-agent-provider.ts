@@ -109,6 +109,7 @@ export function createJavaManagedAgentProvider(
       input?: import('./managed-agent-provider').ManagedInputBlock[];
       approvalMode?: ManagedApprovalMode;
       planMode?: boolean;
+      skills?: import('./managed-agent-provider').ManagedSessionSkill[];
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -117,6 +118,7 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.skills?.length ? { skills: request.skills } : {}),
         ...(request.approvalMode === undefined
           ? {}
           : { approvalMode: request.approvalMode }),
@@ -511,11 +513,25 @@ export function createJavaManagedAgentProvider(
             getSessionOptions: (agentId, request) =>
               client.getSessionOptions(agentId, request.signal),
             createEmpty: (
-              { agentId, workspaceId, cwdRelative, approvalMode, planMode },
+              {
+                agentId,
+                workspaceId,
+                cwdRelative,
+                approvalMode,
+                planMode,
+                skills,
+              },
               command,
             ) =>
               createWorkspaceSession(
-                { agentId, workspaceId, cwdRelative, approvalMode, planMode },
+                {
+                  agentId,
+                  workspaceId,
+                  cwdRelative,
+                  approvalMode,
+                  planMode,
+                  skills,
+                },
                 command,
               ),
             createSession: createWorkspaceSession,

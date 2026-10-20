@@ -1,4 +1,9 @@
+import {
+  isManagedSessionSkills,
+  type ManagedCreationSkillsSource,
+} from './managed-creation-skills';
 import { useManagedFileReferences } from './use-managed-file-references';
+import { useManagedSkills } from './use-managed-skills';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useEffect, useRef, useState } from 'react';
 import shellStyles from '../../App.module.css';
@@ -44,6 +49,7 @@ import type {
   ManagedApprovalMode,
   ManagedSessionOptions,
   ManagedInputBlock,
+  ManagedSessionSkill,
 } from './managed-agent-provider';
 import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
 import {
@@ -70,6 +76,7 @@ interface PendingCreation {
   sessionId?: string;
   approvalMode?: ManagedApprovalMode;
   planMode?: boolean;
+  skills?: ManagedSessionSkill[];
 }
 
 interface PendingWorkspace {
@@ -136,6 +143,8 @@ function readPending(
         !isManagedApprovalMode(item['approvalMode'])) ||
       (item['planMode'] !== undefined &&
         typeof item['planMode'] !== 'boolean') ||
+      (item['skills'] !== undefined &&
+        !isManagedSessionSkills(item['skills'])) ||
       !isManagedInput(input) ||
       (item['sessionId'] !== undefined && typeof item['sessionId'] !== 'string')
     )
@@ -163,12 +172,16 @@ export function WorkspaceBindingCreator({
   onCreated,
   onAbandoned,
   interactive = true,
+  creationSkills,
+  onManageSkills,
 }: {
   provider: ManagedAgentProvider;
   clientId: string;
   onCreated: (sessionId: string) => void;
   onAbandoned?: () => void;
   interactive?: boolean;
+  creationSkills?: ManagedCreationSkillsSource;
+  onManageSkills?: () => void;
 }) {
   const { t } = useI18n();
   const binding = provider.workspaceBinding!;
@@ -205,6 +218,8 @@ export function WorkspaceBindingCreator({
   const [optionsError, setOptionsError] = useState<string>();
   const [optionsRevision, setOptionsRevision] = useState(0);
   const [planMode, setPlanMode] = useState(false);
+  const skillsSourceRef = useRef(creationSkills);
+  skillsSourceRef.current = creationSkills;
   const encoding = useRef(false);
   const [items, setItems] = useState<ManagedAgentWorkspace[]>([]);
   const selectionKey = `qwen-managed-workspace-selection:${provider.storageKey}`;
@@ -435,6 +450,12 @@ export function WorkspaceBindingCreator({
 
   const currentOptions =
     sessionOptions?.agentId === agentId ? sessionOptions : undefined;
+  const skills = useManagedSkills(
+    provider,
+    clientId,
+    undefined,
+    currentOptions?.skillsSupported ? creationSkills : undefined,
+  );
   const fileReferences = useManagedFileReferences(
     provider,
     clientId,
@@ -525,9 +546,20 @@ export function WorkspaceBindingCreator({
         return;
       }
       let input: ManagedInputBlock[] = [];
+      let skills: ManagedSessionSkill[] = [];
+      const source = creationSkills;
       encoding.current = true;
       setBusy(true);
       try {
+        if (source) {
+          skills = await source.load(abort.signal);
+          if (source !== skillsSourceRef.current)
+            throw new Error(t('managed.creationSkillsSourceChanged'));
+          if (!isManagedSessionSkills(skills))
+            throw new Error(t('managed.creationSkillsUnavailable'));
+          if (skills.length && !currentOptions?.skillsSupported)
+            throw new Error(t('managed.creationSkillsUnavailable'));
+        }
         if (text !== undefined) {
           const prepared = await fileReferences.prepareInput(
             text,
@@ -549,6 +581,10 @@ export function WorkspaceBindingCreator({
         setBusy(false);
       }
       if (abort.signal.aborted) return;
+      if (source !== skillsSourceRef.current) {
+        setError(t('managed.creationSkillsSourceChanged'));
+        return;
+      }
       attempt = {
         agentId,
         workspaceId: selected,
@@ -556,6 +592,7 @@ export function WorkspaceBindingCreator({
         input,
         clientId,
         idempotencyKey: managedRequestId(),
+        ...(skills.length ? { skills: structuredClone(skills) } : {}),
         ...(supportsApprovalModeSelection && currentOptions
           ? { approvalMode: currentOptions.approvalMode }
           : {}),
@@ -586,6 +623,7 @@ export function WorkspaceBindingCreator({
           agentId: attempt.agentId,
           workspaceId: attempt.workspaceId,
           cwdRelative: attempt.cwdRelative,
+          ...(attempt.skills?.length ? { skills: attempt.skills } : {}),
           ...(attempt.approvalMode === undefined
             ? {}
             : { approvalMode: attempt.approvalMode }),
@@ -920,6 +958,25 @@ export function WorkspaceBindingCreator({
           {t('managed.newWorkspaceResume')}
         </Button>
       )}
+      {(creationSkills || pending?.skills?.length) && (
+        <p className="my-2 text-sm text-muted-foreground">
+          {pending?.skills?.length
+            ? t('managed.creationSkillsPinned', {
+                count: pending.skills.length,
+              })
+            : t('managed.creationSkillsFromSettings')}
+          {onManageSkills && (
+            <Button
+              type="button"
+              variant="link"
+              title={creationSkills?.workspaceCwd}
+              onClick={onManageSkills}
+            >
+              {t('managed.creationSkillsManage')}
+            </Button>
+          )}
+        </p>
+      )}
       {pending && !busy ? (
         <div className="space-y-2 text-sm">
           <p>{t('managed.workspaceUncertain')}</p>
@@ -1166,11 +1223,18 @@ export function WorkspaceBindingCreator({
             {fileReferences.error && <p role="alert">{fileReferences.error}</p>}
             <ChatEditor
               ref={editor}
-              commands={[]}
+              commands={skills.commands}
               composerScopeKey={`managed:${provider.storageKey}:new`}
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
+              skills={skills.skills}
+              onSkillsOpenChange={
+                skills.supported ? skills.onOpenChange : undefined
+              }
+              skillsLoading={skills.loading}
+              skillsLoadError={skills.error}
+              skillsLoaded={skills.loaded}
               fileReferenceActions={fileReferences.actions}
               persistFileReferences
               existingFolderWorkspaceSupported={
@@ -1186,6 +1250,7 @@ export function WorkspaceBindingCreator({
                   ? [
                       ...(currentOptions?.inputAttachments ||
                       fileReferences.actions ||
+                      skills.supported ||
                       currentOptions?.planModeSupported
                         ? ['addMenu' as const]
                         : []),

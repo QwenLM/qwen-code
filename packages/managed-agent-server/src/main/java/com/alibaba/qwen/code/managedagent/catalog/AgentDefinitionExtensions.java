@@ -24,14 +24,22 @@ public final class AgentDefinitionExtensions {
     private static final Pattern BLANK = Pattern.compile("^[\\s\\p{Zs}\\u2028\\u2029\\uFEFF]*$");
     private static final Pattern ID = Pattern.compile("^[A-Za-z0-9._:-]{1,128}$");
     private static final Pattern DIGEST = Pattern.compile("^[0-9a-f]{64}$");
-    private static final Set<String> SKILL_FIELDS = Set.of("name", "description", "body", "base_directory");
+    private static final Set<String> SKILL_FIELDS = Set.of("name", "description", "body", "base_directory", "model_invocable", "user_invocable");
 
     private AgentDefinitionExtensions() {
     }
 
     public static List<Map<String, Object>> skills(Object value, boolean workspaceBound) {
+        return skills(value, workspaceBound, false);
+    }
+
+    public static List<Map<String, Object>> sessionSkills(Object value) {
+        return skills(value, true, true);
+    }
+
+    private static List<Map<String, Object>> skills(Object value, boolean workspaceBound, boolean sessionCatalog) {
         List<?> entries = list(value, "skills");
-        if (entries.size() > 16 || !entries.isEmpty() && !workspaceBound) {
+        if (entries.size() > (sessionCatalog ? 256 : 16) || !entries.isEmpty() && !workspaceBound) {
             throw unsupported("skills");
         }
         List<Map<String, Object>> result = new ArrayList<>();
@@ -42,7 +50,7 @@ public final class AgentDefinitionExtensions {
                     || !text(skill.get("name"), 128)
                     || !SKILL_NAME.matcher((String) skill.get("name")).matches()
                     || !text(skill.get("description"), 4096)
-                    || !text(skill.get("body"), 32768)
+                    || !text(skill.get("body"), sessionCatalog ? 512 * 1024 : 32768)
                     || !names.add((String) skill.get("name"))) {
                 throw unsupported("skills");
             }
@@ -57,9 +65,19 @@ public final class AgentDefinitionExtensions {
                 }
                 supported.put("base_directory", directory);
             }
+            for (String field : List.of("model_invocable", "user_invocable")) {
+                if (skill.containsKey(field)) {
+                    if (!sessionCatalog || !(skill.get(field) instanceof Boolean)) {
+                        throw unsupported("skills");
+                    }
+                    supported.put(field, skill.get(field));
+                }
+            }
             result.add(Collections.unmodifiableMap(supported));
         }
-        skillsBytes(result);
+        if (skillsBytes(result).length > (sessionCatalog ? ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES : 48 * 1024)) {
+            throw unsupported("skills");
+        }
         return List.copyOf(result);
     }
 

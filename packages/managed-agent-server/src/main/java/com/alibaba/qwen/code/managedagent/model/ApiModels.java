@@ -70,7 +70,8 @@ public final class ApiModels {
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
             Boolean stream,
-            JsonNode workspace) {
+            JsonNode workspace,
+            @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
     }
 
     // D7-3: admission_profile asks a Turn input or cancel for the
@@ -297,14 +298,19 @@ public final class ApiModels {
             String environmentId, String title,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
-            JsonNode workspace, String approvalMode, Boolean planMode) {
+            JsonNode workspace, String approvalMode, Boolean planMode,
+            @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
     }
 
     public record WebShellSessionOptionsRequest(@NotBlank @Size(max = 128) String agentId) {
     }
 
     public record WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
-            boolean planModeSupported, boolean inputAttachments) {
+            boolean planModeSupported, boolean inputAttachments, boolean skillsSupported) {
+        public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
+                boolean planModeSupported, boolean inputAttachments) {
+            this(approvalMode, availableApprovalModes, planModeSupported, inputAttachments, false);
+        }
         public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes) {
             this(approvalMode, availableApprovalModes, false, false);
         }

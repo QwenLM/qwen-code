@@ -73,6 +73,7 @@ const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
   if (kind === 'managed-input') return MAX_ATTACHMENT_INPUT_BYTES;
+  if (kind === 'managed-agent-skills') return 2 * 1024 * 1024;
   if (kind === 'hosted-model-request') return HOSTED_MODEL_REQUEST_BYTES;
   return HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
 }

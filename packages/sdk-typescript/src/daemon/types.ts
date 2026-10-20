@@ -2508,6 +2508,17 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   extensionDisplayName?: string;
 }
 
+export interface DaemonWorkspaceSkillsSnapshot {
+  workspaceCwd: string;
+  skills: Array<{
+    name: string;
+    description: string;
+    body: string;
+    model_invocable?: boolean;
+    user_invocable?: boolean;
+  }>;
+}
+
 export interface DaemonWorkspaceSkillsStatus {
   v: 1;
   workspaceCwd: string;

@@ -4993,6 +4993,14 @@
             "$ref": "#/components/schemas/WorkspaceSelection",
             "x-qwen-implementation-status": "partial",
             "description": "W0. Only omission allows default resolution; null or an empty object is invalid. Resolve and persist an explicit authorized tenant default on first admission; no default means workspace_required. The caller request digest retains an omission marker; replay resolves the original receipt before defaults. A changed default must never rebind a retry. Unavailable W0 support rejects rather than ignores this field."
+          },
+          "skills": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/SessionCreationSkill"
+            },
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency."
           }
         }
       },
@@ -5968,6 +5976,14 @@
           "planMode": {
             "type": "boolean",
             "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "skills": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/SessionCreationSkill"
+            },
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency."
           }
         }
       },
@@ -10917,6 +10933,10 @@
           "inputAttachments": {
             "type": "boolean",
             "description": "Optional deployment capability; missing means false."
+          },
+          "skillsSupported": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false. Requires a compatible Harness and durable Session Store."
           }
         }
       },
@@ -11776,6 +11796,40 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "SessionCreationSkill": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description", "body"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique Skill name, at most 128 UTF-8 bytes."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "At most 4096 UTF-8 bytes."
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Static instructions, at most 524288 UTF-8 bytes."
+          },
+          "base_directory": {
+            "type": "string",
+            "description": "Canonical POSIX path relative to the Session working directory; defaults to dot."
+          },
+          "model_invocable": {
+            "type": "boolean",
+            "description": "Whether the model may invoke this Skill; defaults to true."
+          },
+          "user_invocable": {
+            "type": "boolean",
+            "description": "Whether the user may invoke this Skill; defaults to true."
           }
         }
       }

@@ -30,11 +30,14 @@ export function isManagedApprovalMode(
   return value === 'default' || value === 'auto-edit' || value === 'yolo';
 }
 
+export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+
 export interface ManagedSessionOptions {
   approvalMode: ManagedApprovalMode;
   availableApprovalModes: ManagedApprovalMode[];
   planModeSupported?: boolean;
   inputAttachments?: boolean;
+  skillsSupported?: boolean;
 }
 
 export interface ManagedSessionApproval extends ManagedSessionOptions {
@@ -376,6 +379,7 @@ export interface ManagedAgentProvider {
         cwdRelative: string;
         approvalMode?: ManagedApprovalMode;
         planMode?: boolean;
+        skills?: ManagedSessionSkill[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
@@ -388,6 +392,7 @@ export interface ManagedAgentProvider {
         input?: ManagedInputBlock[];
         approvalMode?: ManagedApprovalMode;
         planMode?: boolean;
+        skills?: ManagedSessionSkill[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;

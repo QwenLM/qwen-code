@@ -1465,6 +1465,26 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
+    void historicalReaderAcceptsForeignSessionSkillSnapshotsAndStillRefusesInvalidFlags() throws Exception {
+        var expected = historicalKeys();
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        transactions.executeWithoutResult(status ->
+                ToolPublicationRetentionStore.lockSession(jdbc, "foreign", "foreign-session"));
+        var catalog = new java.util.ArrayList<Map<String, Object>>();
+        for (int i = 0; i < 42; i++) {
+            catalog.add(Map.of("name", "imported-" + i, "description", "Imported Skill",
+                    "body", i == 0 ? "x".repeat(404465) : "Instruction", "model_invocable", false));
+        }
+        var resources = new ManagedSessionStore(jdbc);
+        resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", catalog);
+        assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).isEmpty();
+        resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", List.of(
+                Map.of("name", "invalid", "description", "Invalid flag", "body", "Instruction", "model_invocable", "false")));
+        assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).anyMatch(blocker ->
+                blocker.table().equals("ma_resource") && blocker.code().equals("invalid_historical_payload"));
+    }
+
+    @Test
     void historicalReaderPreservesActualForeignControlSessionWithSameLocalId() throws Exception {
         var expected = historicalKeys();
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));

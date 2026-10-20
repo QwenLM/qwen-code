@@ -218,6 +218,15 @@ const EN: Messages = {
   'managed.result.close': 'Close output',
   'managed.result.refresh': 'Refresh output',
   'managed.phase.created': 'Created',
+  'managed.creationSkillsFromSettings':
+    'Enabled Skills on the Skills page are added to new Managed sessions. Existing sessions keep their original Skills.',
+  'managed.creationSkillsManage': 'Manage Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `${v?.count ?? 0} Skills are saved with this creation request.`,
+  'managed.creationSkillsSourceChanged':
+    'The Skills source changed. Retry with the selected source.',
+  'managed.creationSkillsUnavailable':
+    'Enabled Skills could not be loaded for this Managed session.',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
   'managed.modelPreset': 'Model / Agent preset',
@@ -4632,6 +4641,15 @@ const ZH: Messages = {
   'managed.result.close': '关闭输出',
   'managed.result.refresh': '刷新输出',
   'managed.phase.created': '已创建',
+  'managed.creationSkillsFromSettings':
+    '技能页面中已启用的 Skills 会用于新建 Managed 会话。已有会话保留创建时的 Skills。',
+  'managed.creationSkillsManage': '管理 Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `本次创建请求已保存 ${v?.count ?? 0} 个 Skills。`,
+  'managed.creationSkillsSourceChanged':
+    'Skills 来源已变化，请按当前选择重试。',
+  'managed.creationSkillsUnavailable':
+    '无法为此 Managed 会话加载已启用的 Skills。',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',
   'managed.modelPreset': '模型 / Agent 预设',

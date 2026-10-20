@@ -22,7 +22,7 @@ public final class ManagedSessionStoreModels {
     /** The agent-instructions bound the publisher and both verifiers
      * must agree on (admission, publish, verify, recovery read). */
     public static final int MAX_AGENT_INSTRUCTIONS_BYTES = 64 * 1024;
-    public static final int MAX_AGENT_SKILLS_BYTES = 48 * 1024;
+    public static final int MAX_AGENT_SKILLS_BYTES = 2 * 1024 * 1024;
     public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
@@ -72,6 +72,7 @@ public final class ManagedSessionStoreModels {
     public static int inlineResourceBytes(String kind) {
         return switch (kind) {
             case "managed-input" -> MAX_ATTACHMENT_INPUT_BYTES;
+            case "managed-agent-skills" -> MAX_AGENT_SKILLS_BYTES;
             case "hosted-model-request" -> MAX_MODEL_REQUEST_BYTES;
             default -> MAX_INLINE_RESOURCE_BYTES;
         };

@@ -22,12 +22,20 @@ interface PluginManagerPageProps {
   onClose: () => void;
   onUseSkill: (name: string) => void;
   initialFocusRef?: Ref<HTMLButtonElement>;
+  initialTab?: PluginTab;
+  skillsWorkspaceCwd?: string;
+  onSkillsWorkspaceChange?: (cwd: string) => void;
+  managedSkills?: boolean;
 }
 
 export function PluginManagerPage({
   onClose,
   onUseSkill,
   initialFocusRef,
+  initialTab = 'extensions',
+  skillsWorkspaceCwd,
+  onSkillsWorkspaceChange,
+  managedSkills = false,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -58,9 +66,9 @@ export function PluginManagerPage({
       'workspace_skills_config_runtime',
     ) === true;
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
-    () => defaultWorkspaceCwd,
+    () => skillsWorkspaceCwd ?? defaultWorkspaceCwd,
   );
-  const [activeTab, setActiveTab] = useState<PluginTab>('extensions');
+  const [activeTab, setActiveTab] = useState<PluginTab>(initialTab);
   const [detailOpen, setDetailOpen] = useState(false);
   const [pageRevision, setPageRevision] = useState(0);
 
@@ -75,6 +83,11 @@ export function PluginManagerPage({
     }
     setSelectedWorkspaceCwd(defaultWorkspaceCwd);
   }, [defaultWorkspaceCwd, selectedWorkspaceCwd, workspaces]);
+
+  useEffect(() => {
+    if (activeTab === 'skills' && selectedWorkspaceCwd)
+      onSkillsWorkspaceChange?.(selectedWorkspaceCwd);
+  }, [activeTab, onSkillsWorkspaceChange, selectedWorkspaceCwd]);
 
   const resetToRoot = useCallback(() => {
     setDetailOpen(false);
@@ -142,6 +155,11 @@ export function PluginManagerPage({
       ) : null}
 
       <TabsContent value={activeTab} className="mt-0">
+        {activeTab === 'skills' && managedSkills && (
+          <p className="my-2 text-sm text-muted-foreground">
+            {t('managed.creationSkillsFromSettings')}
+          </p>
+        )}
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
             key={`extensions-${pageRevision}`}
