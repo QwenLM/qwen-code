@@ -15,6 +15,10 @@ import {
 } from '../daemon/session/turn-navigation-store';
 import type { MessageListHandle } from './MessageList';
 
+vi.mock('../hooks/useMessageDeletion', () => ({
+  useMessageDeletion: () => undefined,
+}));
+
 const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
 }));

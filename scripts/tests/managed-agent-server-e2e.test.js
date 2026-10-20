@@ -295,6 +295,7 @@ describe('managed-agent-server e2e runner', () => {
     const scripts = [
       'test:e2e:managed-harness-restart-approval-after-decision',
       'test:e2e:managed-harness-restart-approval-after-prepare',
+      'test:e2e:managed-harness-restart-approval-after-result',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
     ];
@@ -346,6 +347,35 @@ describe('managed-agent-server e2e runner', () => {
     expect(proxy).toBeGreaterThan(-1);
     expect(source.slice(proxy - 500, proxy)).toContain(
       "approvalFault === 'after-decision'",
+    );
+    // The result-commit crash waits for the settled result and the held
+    // model round, then releases the hold; its reissue must reuse the same
+    // saved request or the proof is about a rewritten one.
+    expect(source).toContain(
+      'Approved result committed and its prefix published',
+    );
+    expect(source).toContain('SETTLED\\t1');
+    expect(source).toContain('releaseApprovalResultHold()');
+    expect(source).toContain(
+      'Result-commit recovery changed the saved model request',
+    );
+    expect(source).toContain('publishedPrefixSequences');
+    expect(source).toContain("approvalFault === 'after-result'");
+    expect(source).toContain('expectedModelsAfterResults');
+    expect(source).toContain('? 2');
+    // R1-3: the retraction assertion must be pinned, or deleting it keeps
+    // every script suite green while the arm stops proving the prefix left.
+    expect(source).toContain('Result-commit recovery left');
+    // R1-2: the structured half (stream.reconciled ordering) must be
+    // asserted, not only written to the evidence file.
+    expect(source).toContain(
+      'Result-commit recovery did not reconcile the published prefix',
+    );
+    // R1-6: a parity failure must retain the two request bodies for diffing.
+    expect(source).toContain('model-request-parity.json');
+    // R1-5: the pre-dispatch proxy must never hold after-result's :start.
+    expect(source.slice(proxy - 500, proxy)).not.toContain(
+      "approvalFault === 'after-result'",
     );
   });
 
