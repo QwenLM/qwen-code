@@ -1292,6 +1292,62 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-cancel-retire", 202);
     }
 
+    // FG11d: the fire is parked in the relay before the Harness admits it, so the
+    // occurrence exists and no run does, and the definition is retired there. The
+    // retire settles the occurrence instead of leaving it to the recovery sweep:
+    // `skipped` for `definition_retired` with no attempt, no run, no Turn. A claim
+    // already held at `intent` is a different branch — the Harness cancels it on
+    // its own, which the CLI-side session case pins; this lane does not reach it.
+    @Test
+    @Timeout(600)
+    void fg11dRetireAtIntentSettlesTheClaimOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("retire-intent");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_INTENT", "0 0 1 1 *"), "fg11d-intent-base", 202).path("id").asText();
+        Hold parked = hold("retire-at-intent",
+                body -> kind(body, "fire_run") && id.equals(body.path("scheduleId").asText()));
+        // The manual fire blocks while parked, so it cannot run on this thread.
+        // Its answer crosses threads as data: an assertion raised inside the
+        // thread would be swallowed, and the case would then accept any status.
+        AtomicReference<HttpResponse<String>> answered = new AtomicReference<>();
+        AtomicReference<Throwable> lost = new AtomicReference<>();
+        Thread manual = Thread.ofVirtual().start(() -> {
+            try {
+                answered.set(send("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-intent-run"));
+            } catch (Throwable failure) {
+                lost.set(failure);
+            }
+        });
+        assertThat(parked.reached().await(150, TimeUnit.SECONDS)).as("the fire parked at admission").isTrue();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-intent-retire", 202);
+        parked.release().countDown();
+        manual.join(150_000);
+        assertThat(lost.get()).as("the fire request completes").isNull();
+        HttpResponse<String> answer = answered.get();
+        assertThat(answer).as("the fire was answered").isNotNull();
+        // Retire and the fire race: the retire either refuses the fire outright or
+        // wins after admission. Any other answer is a defect, so nothing here may
+        // absorb it.
+        assertThat(answer.statusCode()).as("the fire is admitted or refused: %s", answer.body())
+                .isIn(202, 409);
+        if (answer.statusCode() == 409) {
+            assertThat(answer.body()).as("the refused fire names the skipped run")
+                    .contains("automation_run_skipped");
+        }
+        Map<String, Object> claim = jdbc.queryForMap("SELECT outcome, reason, attempts FROM ma_schedule_occurrence"
+                + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?", tenant, id,
+                "manual:fg11d-intent-run");
+        assertThat(claim).as("the retired claim settles skipped, never unknown")
+                .containsEntry("outcome", "skipped").containsEntry("reason", "definition_retired");
+        assertThat(((Number) claim.get("attempts")).intValue()).as("no attempt was spent").isZero();
+        assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
+                + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
+                .as("no run commits behind a claim that never started").isEmpty();
+        assertThat(modelPrompts).as("the retired claim never reaches the model")
+                .noneMatch(prompt -> prompt.contains("FG11D_INTENT"));
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
