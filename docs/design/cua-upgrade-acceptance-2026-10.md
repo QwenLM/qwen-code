@@ -2,7 +2,11 @@
 
 [English](cua-upgrade-acceptance-2026-10.md) | [简体中文](cua-upgrade-acceptance-2026-10.zh-CN.md)
 
-Implementation follows the [approved decisions](cua-upgrade-2026-10.md) and [platform port ledger](cua-upgrade-platform-ports.md). Work is on `lazzy/cua-upgrade-2026-10`, based on `a8eb74fdf5b60851e1fc4a8e258e043273df4411`. Version `0.26.0` is the local development target and has not been released. No push, PR creation, merge into a shared branch or release workflow has occurred; isolated local merge-validation commits are identified below.
+Implementation follows the [approved decisions](cua-upgrade-2026-10.md) and [platform port ledger](cua-upgrade-platform-ports.md). Work is on `lazzy/cua-upgrade-2026-10`, based on `a8eb74fdf5b60851e1fc4a8e258e043273df4411`. Version `0.26.0` is the local development target and has not been released. At the F31 native checkpoint, no push, PR creation, shared-branch merge or release workflow had occurred; isolated local merge-validation commits are identified below. The subsequent PR submission decision is recorded next.
+
+## PR submission and evaluation schedule (2026-10-20)
+
+The user authorized this feature PR and explicitly moved OSWorld evaluation after release. The native/runtime acceptance facts below retain their candidate identities and limitations; absent benchmark results are not marked passed. The release audit also separates the three Computer Use npm packages from CLI version bumps and publication, while preserving their shared 0.26.0 version and dependency publication order. Production release execution has not been requested in this submission step.
 
 ## Acceptance clarification (2026-10-20)
 

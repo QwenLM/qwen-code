@@ -245,9 +245,9 @@ Other fixes: #3671 avoids fallback after timeout and duplicate clicks; #4774 imp
 
 ### Topic 7: evaluation
 
-- Run two layers before release:
+- Record tool and model evaluation separately; the user moved OSWorld evaluation after release on 2026-10-20:
   - **Layer 1, tools without models**: compare the candidate, Codex and upstream on the same cases for correctness, action latency, interference and success-without-effect. The driver merge gate is at least the better comparator. The user clarified on 2026-10-20 that the observed transient macOS target/menu cover is acceptable and expected; record it and recovery separately rather than applying a strict zero-cover blocker. This does not accept wrong-target input, changed click semantics or replay after uncertain delivery.
-  - **Layer 2, small model evaluation**: primary metrics are **rounds, tokens and wall-clock time**, provided success rate does not regress.
+  - **Layer 2, small model/OSWorld evaluation after release**: primary metrics are **rounds, tokens and wall-clock time**, provided success rate does not regress. This is post-release follow-up rather than a pre-release gate; no improvement or nonregression result is claimed before execution.
 - **Tasks**:
   - macOS and Windows use 20 OSWorld-V2 tasks selected in two AP groups (`sh-prod-1`, Qoder + Node REPL scaffold, `azure.gpt-6-astra`):
     - `group-5cff67aa55934a09a45160e3194b5801-s1`: macOS, mean 0.26, one full-score task.
@@ -329,4 +329,4 @@ AP at that time: mini ap-client upgraded from ArtLab to 0.5.1 and passed its ver
 
 ## 8. Current execution scope (2026-10-19)
 
-The user prioritizes the first four verification items: macOS, Windows and Linux X11 native acceptance, followed by runtime, installation and package checks. OSWorld/model evaluation remains deferred; future model runs use `gpt-6-sol`. On 2026-10-20 the user requested a fresh same-mini Codex tool comparison and clarified acceptance of observed transient macOS cover. All remaining native GUI tests run on mini. The 10-16 environment table above is historical. Current evidence and candidate identities are recorded in the [acceptance ledger](cua-upgrade-acceptance-2026-10.md#acceptance-clarification-2026-10-20). This clarification does not mark deferred model/release gates passed or authorize a push, PR or release.
+The user prioritizes the first four verification items: macOS, Windows and Linux X11 native acceptance, followed by runtime, installation and package checks. OSWorld evaluation is scheduled after release by the user’s 2026-10-20 decision; future model runs use `gpt-6-sol`. On 2026-10-20 the user requested a fresh same-mini Codex tool comparison and clarified acceptance of observed transient macOS cover. All remaining native GUI tests run on mini. The 10-16 environment table above is historical. Current evidence and candidate identities are recorded in the [acceptance ledger](cua-upgrade-acceptance-2026-10.md#acceptance-clarification-2026-10-20). The user now authorizes pushing this feature branch and submitting its PR to main. OSWorld results are not a release prerequisite; production release execution is a separate action and no benchmark result is marked passed.

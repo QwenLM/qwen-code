@@ -94,6 +94,16 @@ const liveHostOssWorkflow = readFileSync(
 );
 
 describe('CUA release workflow', () => {
+  it('excludes the Computer Use distribution from the CLI release', () => {
+    for (const name of [
+      '@qwen-code/browser-use',
+      '@qwen-code/cua-sdk',
+      '@qwen-code/node-repl-mcp',
+    ]) {
+      expect(RELEASE_WORKSPACES).not.toContain(name);
+    }
+  });
+
   it('keeps the Computer Use distribution on one version', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
     expect(nodeReplPackage.version).toBe(cuaSdkPackage.version);

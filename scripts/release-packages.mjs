@@ -12,6 +12,8 @@ import { getWorkspacePackageJsonPaths } from './workspaces.js';
 export const INDEPENDENT_PACKAGES = [
   '@qwen-code/sdk',
   '@qwen-code/mobile-mcp',
+  '@qwen-code/browser-use',
+  '@qwen-code/cua-sdk',
   '@qwen-code/node-repl-mcp',
   '@qwen-code/qwen-live',
 ];

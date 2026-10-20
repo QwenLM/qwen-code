@@ -222,7 +222,7 @@ exhausted 诊断确认容器正确，但上方旧 row 被报为底边1px sliver�
 
 ## 验证边界
 
-忽略的 `.qwen/e2e-tests/cua-upgrade-2026-10-artifacts/` 保存不可变 source manifest、构建日志、协议调用和 fixture 读回。[当前验收快照](cua-upgrade-acceptance-2026-10.zh-CN.md#验收口径澄清2026-10-20) 将早期受控/GNU/Xvfb 检查与后来的真实 Windows MSVC/交互桌面、Linux Xorg/uinput/Mutter、macOS 原生 fixture 分开。均不证明物理真人并发。用户澄清已观察到的 macOS 目标窗口/菜单短暂遮挡可接受；遮挡测量、恢复与功能正确性分别保留。模型成功率、token 与时长等效性须延后的第二层评测。
+忽略的 `.qwen/e2e-tests/cua-upgrade-2026-10-artifacts/` 保存不可变 source manifest、构建日志、协议调用和 fixture 读回。[当前验收快照](cua-upgrade-acceptance-2026-10.zh-CN.md#验收口径澄清2026-10-20) 将早期受控/GNU/Xvfb 检查与后来的真实 Windows MSVC/交互桌面、Linux Xorg/uinput/Mutter、macOS 原生 fixture 分开。均不证明物理真人并发。用户澄清已观察到的 macOS 目标窗口/菜单短暂遮挡可接受；遮挡测量、恢复与功能正确性分别保留。模型成功率、token 与时长等效性仍须实际第二层证据。用户于 2026-10-20 将 OSWorld 安排在发布后，不再作为发布前门槛。
 
 后续验收修复补充上游移植：精确 AppKit key-window records 修复已复现的 sheet Return 失败，内部含 NaN 坐标 mouse 事件，并未解决指针/窗口覆盖。Windows 隔离卸载归属检查覆盖全部 task action，进程/安装范围限选定根目录，已在真实 PowerShell 验证。有限 CLI 命令在有效遥测偏好为 false 时跳过观察 self-wrapper，保留既有偏好优先级和启用行为；该 v21 CLI 改动与未变的 SDK 后端分开验证。运行时/打包附录保留本地开发签名与 installer seam 边界，不证明官方签名/notarization 或正式发布。
 

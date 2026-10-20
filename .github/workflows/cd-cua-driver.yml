@@ -139,15 +139,10 @@ jobs:
             fi
           done
           USER_GUIDE_NODE_REPL_VERSION=$(sed -nE 's/^qwen mcp add --scope user node-repl npx -y @qwen-code\/node-repl-mcp@([^ ]+)$/\1/p' docs/users/features/computer-use.md)
-          for PAIR in \
-            "Computer Use user guide Node REPL:$USER_GUIDE_NODE_REPL_VERSION"; do
-            LABEL=${PAIR%%:*}
-            VALUE=${PAIR#*:}
-            if [[ "$VALUE" != "$NODE_REPL_VERSION" ]]; then
-              echo "::error::$LABEL version $VALUE does not match Node REPL version $NODE_REPL_VERSION"
-              exit 1
-            fi
-          done
+          if [[ "$USER_GUIDE_NODE_REPL_VERSION" != "$NODE_REPL_VERSION" ]]; then
+            echo "::error::Computer Use user guide Node REPL version $USER_GUIDE_NODE_REPL_VERSION does not match Node REPL version $NODE_REPL_VERSION"
+            exit 1
+          fi
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "::error::A production dispatch must run from protected main"
