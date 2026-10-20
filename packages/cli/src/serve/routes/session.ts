@@ -7284,7 +7284,8 @@ export function registerSessionRoutes(
     ),
   );
 
-  // 持久化 workspace 管理接口不借用会话客户端身份，也不加载冷会话。
+  // Persisted workspace management neither borrows a session client identity
+  // nor loads cold sessions.
   for (const operation of ['read', 'remove'] as const) {
     const route =
       '/workspaces/:workspace/session/:id/artifact-library' +

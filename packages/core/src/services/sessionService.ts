@@ -3131,7 +3131,8 @@ export class SessionService {
     const { messages, gaps } = this.reconstructHistory(records, {
       detectGaps: true,
     });
-    // 首次 prompt 前也能登记产物；这种合法会话只有旁路记录，没有对话主链。
+    // Artifacts can be registered before the first prompt; these valid
+    // sessions have only side records and no conversation chain.
     const sideRecordsOnly = records.every(
       (record) =>
         isSessionArtifactRecord(record) ||
@@ -3153,7 +3154,7 @@ export class SessionService {
       identity,
       records,
       snapshot,
-      // 来源等旁路记录不能作为父节点，否则恢复主链时会漏掉本次删除。
+      // Parenting to side records would hide this removal on conversation replay.
       artifactParentUuid: messages.at(-1)?.uuid ?? null,
     };
   }

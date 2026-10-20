@@ -2375,7 +2375,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<SessionArtifactMutationResult>;
 
-  /** 仅供通过 strict mutation 与 workspace 归属校验的管理接口调用，不接受客户端自授权限。 */
+  /**
+   * Only for management routes with strict mutation and workspace ownership
+   * checks; clients cannot grant themselves this authority.
+   */
   removeSessionArtifactForWorkspaceOwner(
     sessionId: string,
     artifactId: string,

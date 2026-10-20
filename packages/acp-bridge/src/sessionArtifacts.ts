@@ -804,7 +804,8 @@ export class SessionArtifactStore {
       // Client-created artifacts with an owner require the same client id.
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
-      // 管理接口代表已认证的 workspace 所有者；旧客户端接口不能传入此权限。
+      // Management routes act for the authenticated workspace owner; legacy
+      // client routes cannot grant this authority.
       if (!options?.workspaceOwner)
         this.denyCrossClientMutation('remove', artifactId, existing, options);
       const removedAt = new Date().toISOString();
