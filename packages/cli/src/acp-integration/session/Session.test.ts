@@ -20115,6 +20115,7 @@ describe('Session', () => {
             code: 'LOOP_DETECTED',
             errorKind: 'loop_detected',
             loopType: core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+            loopReason: core.LoopReason.PROVIDER_DUPLICATE_ID,
           },
         });
 
@@ -20777,6 +20778,12 @@ describe('Session', () => {
             code: 'LOOP_DETECTED',
             errorKind: 'loop_detected',
             loopType: core.LoopType.TURN_TOOL_CALL_CAP,
+            // The 102nd call reuses the first id and is deduplicated, so the
+            // 101 remaining calls count before the explicit cap of 100 skips
+            // the batch.
+            loopReason: core.LoopReason.EXPLICIT_CAP,
+            toolCallCount: 101,
+            toolCallLimit: 100,
           },
         });
 
@@ -21123,6 +21130,10 @@ describe('Session', () => {
             'Stopping ACP turn after the same tool call repeated 6 times.',
           ),
         );
+        expect(toolLoopState).toMatchObject({
+          loopType: core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopDetail: { loopReason: core.LoopReason.REPEATED_CALL },
+        });
       });
 
       it('accumulates repeat counts across responses against the same loop state', async () => {
@@ -29121,6 +29132,7 @@ describe('Session', () => {
           mockConfig,
           expect.objectContaining({
             loop_type: core.LoopType.TURN_TOOL_CALL_CAP,
+            loop_reason: core.LoopReason.EXPLICIT_CAP,
           }),
           {},
         );
@@ -51673,6 +51685,9 @@ describe('Session', () => {
       expect(toolLoopState.loopType).toBe(
         core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       );
+      expect(toolLoopState.loopDetail).toEqual({
+        loopReason: core.LoopReason.PROVIDER_DUPLICATE_ID,
+      });
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         3,
       );

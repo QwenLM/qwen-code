@@ -182,6 +182,7 @@ export type {
   RunConformanceOptions,
 } from './ui/index.js';
 export type {
+  DaemonLoopStop,
   DaemonShellTranscriptBlock,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
@@ -695,9 +696,11 @@ export type {
   DaemonPendingUserQuestionInteraction,
   DaemonSessionState,
   DaemonSessionSummary,
+  DaemonSessionShellTaskRuntime,
   DaemonSessionShellTaskStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskLifecycleStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
