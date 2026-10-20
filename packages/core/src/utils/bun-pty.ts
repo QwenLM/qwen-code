@@ -625,6 +625,9 @@ export class BunPtyProcess extends EventEmitter {
   clear(): void {}
 
   kill(signal?: string): void {
+    // Native exit already reaped the leader, or resource failure owns its
+    // termination. A later caller must not signal a potentially reused pid.
+    if (this.exited || this.resourceFailed) return;
     try {
       process.kill(this.pid, signal || 'SIGHUP');
     } catch {

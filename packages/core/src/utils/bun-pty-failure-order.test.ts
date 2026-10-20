@@ -464,3 +464,134 @@ it.skipIf(process.platform === 'win32').each(['per-pty', 'process'])(
     });
   },
 );
+
+it.skipIf(process.platform === 'win32').each(['per-pty', 'process'])(
+  'runs the native-suite cleanup hook against production refunds on the %s cap',
+  async (scope) => {
+    vi.useFakeTimers();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('Blocked process.kill');
+    });
+    const { spawn, getPtyBudgetStats, processPtyBudget } = await import(
+      './bun-pty.js'
+    );
+    const { cleanupPtys } = await import('./bun-pty-test-utils.js');
+    const original = processPtyBudget.totalWriteQueueBytes;
+    const pty = spawn('mock-command-never-executed', [], {
+      env: {},
+      limits: { writeQueueBytes: scope === 'per-pty' ? 4096 : 8192 },
+    });
+    pty.on('error', () => {});
+    try {
+      if (scope === 'process') processPtyBudget.totalWriteQueueBytes = 4096;
+      fake.retryWrites = true;
+      fake.captureWrite = true;
+      pty.write(Buffer.alloc(4096));
+      pty.pause();
+      const readBuffer = fake.read.mock.calls.at(-1)![1] as Buffer;
+      Buffer.from('held').copy(readBuffer);
+      fake.readCallback!(null, 4);
+      expect(getPtyBudgetStats()).toEqual({
+        activePtys: 1,
+        pausedHoldBytes: 4,
+        writeQueueBytes: 4096,
+      });
+      fake.nativeExit!(3, 0);
+      pty.write('x');
+
+      // Use the very same cleanup implementation registered by the native
+      // suite. Handle rejection before advancing time, then rethrow it so a
+      // production refund leak fails at the cleanup assertion itself.
+      const cleanup = cleanupPtys([pty]).then(
+        () => ({ error: undefined }),
+        (error: unknown) => ({ error }),
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      const { error } = await cleanup;
+      if (error) throw error;
+    } finally {
+      processPtyBudget.totalWriteQueueBytes = original;
+      fake.writeCallback?.(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      fake.readCallback?.(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      fake.writeCallback = undefined;
+      fake.readCallback = undefined;
+    }
+    expect(fake.close).toHaveBeenCalledExactlyOnceWith(fake.fd);
+    expect(kill).not.toHaveBeenCalled();
+  },
+);
+
+it.skipIf(process.platform === 'win32').each([undefined, 'SIGTERM'])(
+  'still forwards %s when killing a live PTY',
+  async (signal) => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('Blocked process.kill');
+    });
+    const { spawn } = await import('./bun-pty.js');
+    const pty = spawn('mock-command-never-executed', [], { env: {} });
+    try {
+      expect(() => pty.kill(signal)).not.toThrow();
+      expect(kill).toHaveBeenCalledExactlyOnceWith(
+        fake.pid,
+        signal ?? 'SIGHUP',
+      );
+      fake.nativeExit!(0, 0);
+    } finally {
+      fake.readCallback?.(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      fake.readCallback = undefined;
+    }
+    expect(fake.close).toHaveBeenCalledExactlyOnceWith(fake.fd);
+  },
+);
+
+it
+  .skipIf(process.platform === 'win32')
+  .each(['native-exit', 'resource-failure'])(
+  'does not signal again after %s',
+  async (terminal) => {
+    vi.useFakeTimers();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('Blocked process.kill');
+    });
+    const { spawn } = await import('./bun-pty.js');
+    const pty = spawn('mock-command-never-executed', [], {
+      env: {},
+      limits: { writeQueueBytes: 4096 },
+    });
+    pty.on('error', () => {});
+    try {
+      if (terminal === 'native-exit') {
+        fake.nativeExit!(0, 0);
+        expect(kill).not.toHaveBeenCalled();
+      } else {
+        pty.write(Buffer.alloc(8192));
+        await vi.advanceTimersByTimeAsync(500);
+        expect(kill.mock.calls).toEqual([
+          [-fake.pid, 'SIGTERM'],
+          [fake.pid, 'SIGTERM'],
+          [-fake.pid, 'SIGKILL'],
+          [fake.pid, 'SIGKILL'],
+        ]);
+      }
+      kill.mockClear();
+      pty.kill('SIGKILL');
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      fake.readCallback?.(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      fake.readCallback = undefined;
+    }
+    expect(fake.close).toHaveBeenCalledExactlyOnceWith(fake.fd);
+  },
+);
