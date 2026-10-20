@@ -117,6 +117,11 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        // Without a title the Session list and header fall back to a UUID
+        // prefix, unlike the standard shell's prompt-derived title.
+        ...(request.text === undefined
+          ? {}
+          : { title: titleFor(request.text) }),
         ...(request.approvalMode === undefined
           ? {}
           : { approvalMode: request.approvalMode }),
