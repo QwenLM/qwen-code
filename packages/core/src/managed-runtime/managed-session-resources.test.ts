@@ -16,13 +16,19 @@ import {
   MANAGED_SESSION_RESOURCE_LIMITS,
 } from './managed-session-resources.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { UNVERIFIABLE_IDENTITY_CODE } from '../utils/no-follow-open.js';
 
 type DirectorySyncFault = (Error & NodeJS.ErrnoException) | null;
 
 const directorySyncFault = vi.hoisted<{
   error: DirectorySyncFault;
   target: string | null;
-}>(() => ({ error: null, target: null }));
+  hits: string[];
+}>(() => ({ error: null, target: null, hits: [] }));
+
+const chmodFault = vi.hoisted<{
+  error: (Error & NodeJS.ErrnoException) | null;
+}>(() => ({ error: null }));
 
 const noFollowFault = vi.hoisted<{
   error: (Error & { code?: string }) | null;
@@ -50,9 +56,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         args[1] === 'r' &&
         args[0] === directorySyncFault.target
       ) {
+        directorySyncFault.hits.push(args[0] as string);
         handle.sync = () => Promise.reject(failure);
       }
       return handle;
+    },
+    chmod: async (...args: Parameters<typeof actual.chmod>) => {
+      if (chmodFault.error !== null) throw chmodFault.error;
+      return actual.chmod(...args);
     },
   };
 });
@@ -192,7 +203,7 @@ describe('managed session resource store', () => {
     );
   });
 
-  it('rejects content that changes after it was opened', async () => {
+  it('rejects content truncated after it was read', async () => {
     const { store } = await createStore();
     const ref = await store.publish(
       'managed-input',
@@ -206,6 +217,28 @@ describe('managed session resource store', () => {
     try {
       await expect(store.read(ref)).rejects.toThrow(
         /is 5 bytes where 8 was recorded/,
+      );
+    } finally {
+      noFollowFault.override = null;
+    }
+  });
+
+  it('refuses a leaf that stops being a regular file while it is opened', async () => {
+    const { store } = await createStore();
+    const ref = await store.publish(
+      'managed-input',
+      Buffer.from('original', 'utf8'),
+    );
+    noFollowFault.override = async () => ({
+      stat: async () => ({ isFile: () => false, size: 8 }),
+      readFile: async () => {
+        throw new Error('must not be read');
+      },
+      close: async () => undefined,
+    });
+    try {
+      await expect(store.read(ref)).rejects.toThrow(
+        /changed while it was being read/,
       );
     } finally {
       noFollowFault.override = null;
@@ -240,18 +273,24 @@ describe('managed session resource store', () => {
     ).rejects.toThrow(/resourceId must be a single path segment/);
   });
 
-  it('creates the session and kind directories privately', async () => {
-    const { store } = await createStore();
-    const ref = await store.publish('managed-input', Buffer.from('x', 'utf8'));
+  it.skipIf(process.platform === 'win32')(
+    'creates the session and kind directories privately',
+    async () => {
+      const { store } = await createStore();
+      const ref = await store.publish(
+        'managed-input',
+        Buffer.from('x', 'utf8'),
+      );
 
-    for (const directory of [
-      store.sessionRoot,
-      path.join(store.sessionRoot, ref.kind),
-    ]) {
-      const stat = await fs.stat(directory);
-      expect(stat.mode & 0o777).toBe(0o700);
-    }
-  });
+      for (const directory of [
+        store.sessionRoot,
+        path.join(store.sessionRoot, ref.kind),
+      ]) {
+        const stat = await fs.stat(directory);
+        expect(stat.mode & 0o777).toBe(0o700);
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'tightens a pre-existing directory to 0700',
@@ -273,6 +312,29 @@ describe('managed session resource store', () => {
       ]) {
         const stat = await fs.stat(directory);
         expect(stat.mode & 0o777).toBe(0o700);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'publishes when a directory cannot be tightened',
+    async () => {
+      const { store } = await createStore();
+      const kindDir = path.join(store.sessionRoot, 'managed-input');
+      await fs.mkdir(kindDir, { recursive: true, mode: 0o755 });
+      await fs.chmod(store.sessionRoot, 0o755);
+      await fs.chmod(kindDir, 0o755);
+      chmodFault.error = Object.assign(new Error('EPERM'), {
+        code: 'EPERM',
+      });
+      try {
+        const ref = await store.publish(
+          'managed-input',
+          Buffer.from('x', 'utf8'),
+        );
+        expect(await store.read(ref)).toEqual(Buffer.from('x', 'utf8'));
+      } finally {
+        chmodFault.error = null;
       }
     },
   );
@@ -337,6 +399,21 @@ describe('managed session resource store', () => {
     });
     try {
       await expect(store.read(ref)).rejects.toThrow(/is not a regular file/);
+    } finally {
+      noFollowFault.error = null;
+    }
+  });
+
+  it('maps an unverifiable identity to a record error', async () => {
+    const { store } = await createStore();
+    const ref = await store.publish('managed-input', Buffer.from('x', 'utf8'));
+    noFollowFault.error = Object.assign(new Error('EUNVERIFIABLE'), {
+      code: UNVERIFIABLE_IDENTITY_CODE,
+    });
+    try {
+      await expect(store.read(ref)).rejects.toThrow(
+        /could not be identity-verified/,
+      );
     } finally {
       noFollowFault.error = null;
     }
@@ -490,6 +567,7 @@ describe('directory sync refusal', () => {
       code,
     });
     directorySyncFault.error = failure;
+    directorySyncFault.hits = [];
     try {
       const { store } = await createStore();
       // Arm the fault on the kind directory so it reaches the post-rename
@@ -501,6 +579,7 @@ describe('directory sync refusal', () => {
       // the platform stub are cleared here or they leak into every later case.
       directorySyncFault.error = null;
       directorySyncFault.target = null;
+      directorySyncFault.hits = [];
       platformStub.mockRestore();
     }
   }
@@ -512,6 +591,9 @@ describe('directory sync refusal', () => {
         const content = Buffer.from('bytes that outlive the refusal', 'utf8');
         const ref = await store.publish('managed-input', content);
         expect(ref.byteLength).toBe(content.byteLength);
+        expect(directorySyncFault.hits).toContain(
+          path.join(store.sessionRoot, 'managed-input'),
+        );
         expect(await store.read(ref)).toEqual(content);
       });
     },

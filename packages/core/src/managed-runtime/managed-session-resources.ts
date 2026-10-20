@@ -8,7 +8,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
-import { openNoFollow } from '../utils/no-follow-open.js';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '../utils/no-follow-open.js';
 import { managedSessionResourceRoot } from '../utils/sessionStorageUtils.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import {
@@ -175,6 +178,11 @@ export class LocalManagedSessionResourceStore
           `resource ${ref.resourceId} is not a regular file.`,
         );
       }
+      if (isUnverifiableIdentityError(cause)) {
+        throw new ManagedSessionRecordError(
+          `resource ${ref.resourceId} could not be identity-verified.`,
+        );
+      }
       throw cause;
     }
     try {
@@ -281,9 +289,10 @@ function assertPathSegment(value: string, label: string): string {
 }
 
 /**
- * Creates a directory the session owns with private permissions, then refuses
- * anything that is not the real directory it just made. Without the check a
- * pre-existing symlink redirects every resource written through it.
+ * Creates a directory the session owns with private permissions, refuses
+ * anything that is not a real directory, and tightens a pre-existing real
+ * directory to 0700 when permitted rather than refusing it. Without the
+ * check a pre-existing symlink redirects every resource written through it.
  */
 async function ensurePrivateDirectory(directory: string): Promise<void> {
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -294,10 +303,11 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
     );
   }
   // Directories written by an earlier build carry the process default mode.
-  // Tighten them in place instead of refusing: every existing session tree
-  // would otherwise fail to publish.
+  // Tighten them when permitted; a directory owned by another user or on a
+  // mount without chmod support stays as it is rather than turning a working
+  // publish into a refusal.
   if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700) {
-    await chmod(directory, 0o700);
+    await chmod(directory, 0o700).catch(() => undefined);
   }
   // `publish` promises a ref that is safe to reference from a transaction
   // once it resolves, so the directory entry has to be durable in its parent
