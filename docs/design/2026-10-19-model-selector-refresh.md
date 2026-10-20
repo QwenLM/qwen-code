@@ -12,13 +12,13 @@ Expose optional `onRefreshModels({ workspaceCwd, sessionId })` on Web Shell. Awa
 
 Add `POST /workspaces/:workspace/models/reload` and the matching workspace SDK method, reusing `reloadModelProviders`. This selected-runtime mutation requires authentication, trust, a valid runtime generation, and runtime-scoped client identity. Unknown or unavailable workspaces must never fall back to primary. Advertise `workspace_model_reload` so older daemons do not show an unsupported action. The endpoint returns the existing `applied | deferred | failed` result and does not write settings or broadcast events.
 
-The session action captures the current workspace/session before awaiting the host. Reload that runtime, then read the existing live-session context and map its authoritative model list. Before a session exists, read workspace providers instead; deferred reload is acceptable only in that state. Do not create or replay a session. Replace only model-list metadata and preserve the current selection and other session state. Discard completions after ownership changes.
+The session action captures the current workspace/session before awaiting the host. Reload that runtime, then read the existing live-session context and map its authoritative model list. Before a session exists, read workspace providers instead; deferred reload is acceptable only in that state. Do not create or replay a session. Refresh the provider cache and model-list metadata, including the retained model's context limit, while preserving the current selection and other session state. Reject degraded or empty welcome catalogs without replacing the previous list. Compare semantic workspace/session ownership, and prevent an older same-session load from replacing a completed refresh.
 
 Render a refresh button next to the selector's search/list, including the reasoning submenu. Keep the old list while loading, prevent duplicate requests, and display a localized failure message with retry. Share the same action between the main composer, split panes, and main-model dialog. Non-workspace session contexts and older daemons do not expose the button.
 
 ## Implementation boundaries
 
-Changes span daemon lifecycle routing/capabilities, the TypeScript workspace SDK, and Web Shell actions, customization, model-picker UI, and tests. Reuse the model-specific runtime reload rather than broad workspace reload, which can modify unrelated settings and active selections. A refresh updates only the requesting page; other pages can refresh independently.
+Changes span daemon lifecycle routing/capabilities, the TypeScript workspace SDK, and Web Shell actions, customization, model-picker UI, and tests. Reuse the model-provider reload path. It re-reads user/workspace settings and refreshes the selected runtime environment overlay and ACP child environment to pick up provider credentials; unrelated environment keys may also change there without an event or response field. It leaves daemon-process environment, workflow enablement, and active model selection unchanged. A refresh updates only the requesting page; other pages can refresh independently.
 
 ## Validation and acceptance
 

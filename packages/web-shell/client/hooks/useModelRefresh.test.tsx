@@ -11,6 +11,7 @@ const mock = vi.hoisted(() => ({
     status: 'connected',
     sessionId: 'a',
     workspaceCwd: '/a',
+    sessionContext: { kind: 'workspace' as const, cwd: '/a' },
     capabilities: { features: ['workspace_model_reload'] },
   },
   guard: { capture: () => ({ isCurrent: () => true }) },
@@ -73,6 +74,33 @@ describe('model refresh controls', () => {
     });
     expect(state.error).toBeUndefined();
     expect(mock.actions.refreshModels).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an in-flight refresh pending across equivalent context objects', async () => {
+    const completions: Array<() => void> = [];
+    mock.actions.refreshModels.mockImplementation(
+      () =>
+        new Promise<void>((done) => {
+          completions.push(done);
+        }),
+    );
+    let first!: Promise<void>;
+    await act(async () => {
+      first = state.refresh!();
+    });
+    mock.connection.sessionContext = { kind: 'workspace', cwd: '/a' };
+    await act(async () => root.render(<Host />));
+    const stayedPending = state.refreshing;
+    await act(async () => {
+      void state.refresh!();
+    });
+    const calls = mock.actions.refreshModels.mock.calls.length;
+    await act(async () => {
+      completions.forEach((done) => done());
+    });
+    expect(stayedPending).toBe(true);
+    expect(calls).toBe(1);
+    await first;
   });
 
   it('ignores an old request failure after changing sessions', async () => {

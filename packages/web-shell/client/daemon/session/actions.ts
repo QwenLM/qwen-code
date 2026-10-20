@@ -1847,16 +1847,20 @@ export function createDaemonSessionActions({
       const isCurrent = (current = getConnection()) =>
         sessionRef.current === session &&
         current.sessionId === before.sessionId &&
-        current.sessionContext === context &&
+        sessionContextKey(current.sessionContext) ===
+          sessionContextKey(context) &&
         current.workspaceCwd === before.workspaceCwd &&
         current.status === 'connected' &&
         (session ? session.client === client : getClient?.() === client);
       await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
       if (!isCurrent()) return;
       const workspace = client.workspaceByCwd(workspaceCwd);
-      const result = await workspace.reloadModelProviders({
+      const reload = workspace.reloadModelProviders({
         clientId: session?.clientId,
       });
+      const result = await (session
+        ? trackSessionConfigMutation(session, reload)
+        : reload);
       if (!isCurrent()) return;
       if (
         result.status !== 'applied' &&
@@ -1871,13 +1875,37 @@ export function createDaemonSessionActions({
         if (status.sessionId !== session.sessionId || !models) {
           throw new Error('Unable to read the refreshed session model list.');
         }
+        const providers = await workspace.workspaceProviders();
+        if (!isCurrent()) return;
+        if (!providers.initialized) {
+          throw new Error(
+            providers.errors?.[0]?.error ??
+              'Unable to read the refreshed model list.',
+          );
+        }
         setConnection((current) =>
-          isCurrent(current) ? { ...current, models: models.models } : current,
+          isCurrent(current)
+            ? {
+                ...current,
+                providers,
+                models: models.models,
+                contextWindow:
+                  models.models.find(
+                    (model) => model.id === current.currentModel,
+                  )?.contextWindow ?? current.contextWindow,
+              }
+            : current,
         );
       } else {
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;
         const { models } = mapProviderStatus(providers);
+        if (!providers.initialized || models.length === 0) {
+          throw new Error(
+            providers.errors?.[0]?.error ??
+              'Unable to read the refreshed model list.',
+          );
+        }
         setConnection((current) =>
           isCurrent(current) ? { ...current, providers, models } : current,
         );

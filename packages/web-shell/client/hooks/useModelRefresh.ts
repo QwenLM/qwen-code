@@ -5,6 +5,7 @@ import {
   useDaemonSessionOwnerGuard,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionActions } from '@qwen-code/web-shell/daemon-react-sdk';
+import { sessionContextKey } from '../daemon/session/session-context.js';
 
 export function useModelRefresh(
   beforeRefresh?: Parameters<DaemonSessionActions['refreshModels']>[0],
@@ -16,6 +17,7 @@ export function useModelRefresh(
   const [error, setError] = useState<string>();
   const pending = useRef(false);
   const generation = useRef(0);
+  const contextKey = sessionContextKey(connection.sessionContext);
   useLayoutEffect(() => {
     generation.current += 1;
     pending.current = false;
@@ -24,11 +26,7 @@ export function useModelRefresh(
     return () => {
       generation.current += 1;
     };
-  }, [
-    connection.sessionId,
-    connection.workspaceCwd,
-    connection.sessionContext,
-  ]);
+  }, [connection.sessionId, connection.workspaceCwd, contextKey]);
   const refresh = useCallback(async () => {
     if (pending.current) return;
     pending.current = true;

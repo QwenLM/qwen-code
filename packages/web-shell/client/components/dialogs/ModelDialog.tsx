@@ -174,7 +174,6 @@ export function ModelDialog({
 
   return (
     <div className={styles.layout}>
-      <ModelRefreshControl state={modelRefresh} />
       <div
         className={`${styles.list} ${keyboardMode ? styles.keyboardOnly : ''}`}
         ref={listRef}
@@ -271,6 +270,7 @@ export function ModelDialog({
           </div>
         </>
       ) : null}
+      <ModelRefreshControl state={modelRefresh} />
     </div>
   );
 }

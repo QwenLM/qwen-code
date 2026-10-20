@@ -7598,6 +7598,114 @@ describe('model catalog refresh', () => {
     },
   );
 
+  it('applies refresh across an equivalent same-session context replacement', async () => {
+    const h = setup();
+    h.replaceConnection({
+      ...h.getConnection(),
+      sessionContext: { kind: 'workspace', cwd: '/workspace' },
+    });
+    const gate = createDeferred<void>();
+    h.workspace.reloadModelProviders.mockImplementation(async () => {
+      await gate.promise;
+      return { status: 'applied' };
+    });
+    const refresh = h.actions.refreshModels();
+    await vi.waitFor(() =>
+      expect(h.workspace.reloadModelProviders).toHaveBeenCalled(),
+    );
+    h.replaceConnection({
+      ...h.getConnection(),
+      sessionContext: { kind: 'workspace', cwd: '/workspace' },
+    });
+    gate.resolve();
+    await refresh;
+    expect(h.getConnection().models?.map((model) => model.id)).toEqual([
+      'old-model',
+      'new-model',
+    ]);
+  });
+
+  it('retains the refreshed provider catalog when the session is cleared', async () => {
+    const h = setup();
+    const providers = workspaceProvidersStatus('high');
+    providers.providers[0].models = [
+      {
+        ...providers.providers[0].models[0],
+        modelId: 'old-model',
+        baseModelId: 'old-model',
+      },
+      {
+        ...providers.providers[0].models[0],
+        modelId: 'new-model',
+        baseModelId: 'new-model',
+      },
+    ];
+    h.replaceConnection({
+      ...h.getConnection(),
+      providers: workspaceProvidersStatus('high'),
+    });
+    h.workspace.workspaceProviders.mockResolvedValue(providers);
+    await h.actions.refreshModels();
+    expect(
+      getConnectionAfterSessionClear(
+        h.getConnection(),
+        'session-a',
+      ).models?.map((model) => model.id),
+    ).toEqual(['old-model', 'new-model']);
+  });
+
+  it('updates the context window for the retained model rather than the daemon default', async () => {
+    const h = setup();
+    h.replaceConnection({ ...h.getConnection(), contextWindow: 1000 });
+    h.context.state.models = {
+      currentModelId: 'new-default',
+      availableModels: [
+        { modelId: 'old-model', contextLimit: 2000 },
+        { modelId: 'new-default', contextLimit: 8000 },
+      ],
+    };
+    await h.actions.refreshModels();
+    expect(h.getConnection().currentModel).toBe('old-model');
+    expect(h.getConnection().contextWindow).toBe(2000);
+  });
+
+  it('preserves the welcome catalog when provider readback reports a failure', async () => {
+    const session = createMockSession('unused');
+    const workspace = session.client.workspaceByCwd();
+    workspace.reloadModelProviders.mockResolvedValue({ status: 'deferred' });
+    session.client.workspaceByCwd.mockReturnValue(workspace);
+    const providers = workspaceProvidersStatus('high');
+    const models = [{ id: 'retained-model' }];
+    const h = createActionsHarness({
+      getClient: () => session.client as unknown as DaemonClient,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        models,
+        providers,
+      },
+    });
+    workspace.workspaceProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      providers: [],
+      errors: [
+        {
+          kind: 'providers',
+          status: 'error',
+          error: 'bad model_providers block',
+        },
+      ],
+    });
+    await expect(h.actions.refreshModels()).rejects.toThrow(
+      'bad model_providers block',
+    );
+    expect(h.getConnection().models).toBe(models);
+    expect(h.getConnection().providers).toBe(providers);
+  });
+
   it('awaits the host and stops on host failure without losing models', async () => {
     const h = setup();
     const host = createDeferred<void>();

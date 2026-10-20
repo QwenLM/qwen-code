@@ -12,13 +12,13 @@ Web Shell 暴露可选 `onRefreshModels({ workspaceCwd, sessionId })`。等待�
 
 增加 `POST /workspaces/:workspace/models/reload` 及对应 workspace SDK 方法，复用 `reloadModelProviders`。这是 selected-runtime 范围的写操作，要求认证、信任、有效运行时代际及该运行时的 client 身份。未知或不可用工作区不得回退到 primary。通过 `workspace_model_reload` 能力标记让旧 daemon 不显示不支持的入口。接口返回已有 `applied | deferred | failed` 结果，不写配置、不广播事件。
 
-会话 action 在等待宿主之前捕获当前工作区与会话。重载该运行时后，读取现有 live-session context 并映射权威模型列表。尚未创建会话时改读 workspace providers；仅此状态允许 deferred。不得为刷新创建或回放会话。仅替换模型列表元数据，保留当前选择及其他会话状态。归属变化后丢弃异步结果。
+会话 action 在等待宿主之前捕获当前工作区与会话。重载该运行时后，读取现有 live-session context 并映射权威模型列表。尚未创建会话时改读 workspace providers；仅此状态允许 deferred。不得为刷新创建或回放会话。刷新 provider 缓存与模型列表元数据，包括保留模型的上下文上限，同时保留当前选择及其他会话状态。欢迎页目录异常或为空时拒绝回读并保留旧列表。按语义比较工作区与会话归属，并防止较早的同会话加载覆盖已完成的刷新。
 
 在选择器搜索与列表旁显示刷新按钮，覆盖思考设置子菜单。加载时保留旧列表，阻止重复请求，失败时显示本地化错误并允许重试。主聊天框、分屏和主模型弹窗共用同一 action。非 workspace 会话及旧 daemon 不显示按钮。
 
 ## 实现边界
 
-改动覆盖 daemon 生命周期路由及能力、TypeScript workspace SDK、Web Shell action、宿主定制接口、模型选择器 UI 和测试。复用模型专用重载，避免使用可能修改其他配置与当前选择的全量 workspace reload。仅刷新发起请求的页面；其他页面可独立刷新。
+改动覆盖 daemon 生命周期路由及能力、TypeScript workspace SDK、Web Shell action、宿主定制接口、模型选择器 UI 和测试。复用 model-provider 重载路径。它重新读取 user/workspace 设置，并刷新选定 runtime 的环境覆盖层和 ACP 子进程环境以获取 provider 凭据；其中其他环境键也可能变化，不产生事件或响应字段。daemon 进程环境、工作流启用状态与当前模型选择保持不变。仅刷新发起请求的页面；其他页面可独立刷新。
 
 ## 验证与验收
 

@@ -3381,7 +3381,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               commands:
                 supportedCommands !== undefined ? commands : current.commands,
               skills: supportedCommands !== undefined ? skills : current.skills,
-              models: sessionModels.length > 0 ? sessionModels : current.models,
+              models:
+                configSnapshotCurrent && sessionModels.length > 0
+                  ? sessionModels
+                  : current.models,
               currentModel: configSnapshotCurrent
                 ? (sessionCurrentModel ?? current.currentModel)
                 : current.currentModel,
