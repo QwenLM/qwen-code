@@ -10,8 +10,9 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
-// Estimated counts (#9309) get a '~' prefix so structured/headless consumers
-// don't treat locally estimated numbers as API-reported token counts.
+// Estimated counts (#9309) carry '~' in interactive and headless text.
+// An omitted flag leaves the display unmarked; compression token accounting
+// instead defaults missing estimate flags to true. Keep those defaults distinct.
 export const formatCompressionTokenCount = (
   count: number | undefined,
   isEstimated?: boolean,
