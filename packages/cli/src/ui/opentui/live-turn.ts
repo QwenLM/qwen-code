@@ -47,9 +47,11 @@ import {
 import {
   livePromptEvents,
   nextLivePromptId,
+  type OpenTuiSteeringSubmission,
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { OpenTuiInputSubmission } from './input-submission.js';
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -100,6 +102,7 @@ export interface UseOpenTuiLiveTurnOptions {
  * memory refresh, and the post-turn callback.
  */
 export interface OpenTuiSubmitOptions {
+  deferUntilIdle?: boolean;
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
   onComplete?: () => Promise<void>;
@@ -133,8 +136,8 @@ export interface OpenTuiLiveTurn {
   waitingCalls: readonly WaitingCallInfo[];
   /** Mid-turn queued prompts, oldest first (composer badge + Esc pop-back). */
   messageQueue: readonly string[];
-  /** Pops the whole queue back into the composer (Esc parity). */
-  popQueue(): string | null;
+  /** Pops composer submissions back together; generated turns stay queued. */
+  popQueue(): OpenTuiInputSubmission | null;
   /**
    * Submits a prompt (or queues it when a turn is in flight). A
    * `submit_prompt` outcome's per-turn options travel in `options`.
@@ -143,7 +146,7 @@ export interface OpenTuiLiveTurn {
     content: PartListUnion,
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
-  ): void;
+  ): boolean;
   /** Aborts the in-flight turn (Esc). */
   interrupt(): void;
   /** Replaces the transcript from a replay batch (session switch/resume). */
@@ -152,6 +155,11 @@ export interface OpenTuiLiveTurn {
   applyEvent(event: OpenTuiStreamEvent): void;
   /** Drops a waiting call after its dialog settled. */
   settleWaitingCall(callId: string): void;
+}
+
+interface QueuedSubmission extends OpenTuiSteeringSubmission {
+  turnOptions?: OpenTuiSubmitOptions;
+  generated?: boolean;
 }
 
 /** Folds a replay batch into a fresh item list (single commit). */
@@ -172,12 +180,22 @@ export function useOpenTuiLiveTurn(
   const [waitingCalls, setWaitingCalls] = useState<readonly WaitingCallInfo[]>(
     [],
   );
-  const queueRef = useRef<string[]>([]);
+  const queueRef = useRef<QueuedSubmission[]>([]);
   // queueRef stays the synchronous source — a turn drains and restores within
   // one tick, before any render. This mirror only exists to be displayed.
   const [queue, setQueue] = useState<readonly string[]>([]);
-  const syncQueue = useCallback(() => setQueue([...queueRef.current]), []);
+  const syncQueue = useCallback(
+    () =>
+      setQueue(
+        queueRef.current.map(
+          ({ text, imagePaths }) =>
+            text || `[${imagePaths?.length ?? 0} image]`,
+        ),
+      ),
+    [],
+  );
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
 
   const streamingRef = useRef(false);
   // Output chars streamed this turn (ink streamingResponseLengthRef parity):
@@ -211,25 +229,24 @@ export function useOpenTuiLiveTurn(
   }, []);
 
   const pushQueue = useCallback(
-    (text: string) => {
-      queueRef.current.push(text);
+    (submission: QueuedSubmission) => {
+      queueRef.current.push(submission);
       syncQueue();
     },
     [syncQueue],
   );
 
-  const drainQueue = useCallback((): string[] => {
-    const drained = queueRef.current;
-    queueRef.current = [];
+  const drainQueue = useCallback((): OpenTuiSteeringSubmission[] => {
+    const drained = queueRef.current.filter((entry) => !entry.deferUntilIdle);
+    queueRef.current = queueRef.current.filter((entry) => entry.deferUntilIdle);
     syncQueue();
     return drained;
   }, [syncQueue]);
 
   const restoreQueue = useCallback(
-    (texts: readonly string[]) => {
-      const restored = texts.map((text) => text.trim()).filter(Boolean);
-      if (restored.length === 0) return;
-      queueRef.current = [...restored, ...queueRef.current];
+    (submissions: readonly OpenTuiSteeringSubmission[]) => {
+      if (submissions.length === 0) return;
+      queueRef.current = [...submissions, ...queueRef.current];
       syncQueue();
     },
     [syncQueue],
@@ -255,8 +272,11 @@ export function useOpenTuiLiveTurn(
           modelOverride: turnOptions?.modelOverride,
           submittedPrompt: turnOptions?.submittedPrompt,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
-          drainSteering: drainQueue,
-          restoreSteering: restoreQueue,
+          isCurrentTurn: () => seq === turnSeqRef.current,
+          drainSteering: () => (seq === turnSeqRef.current ? drainQueue() : []),
+          restoreSteering: (submissions) => {
+            if (seq === turnSeqRef.current) restoreQueue(submissions);
+          },
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
             setWaitingCalls((prev) =>
@@ -324,15 +344,30 @@ export function useOpenTuiLiveTurn(
           // matching ink's pop-one-submission-per-settle drain.
           const rest = queueRef.current;
           if (rest.length > 0) {
-            const [text, ...remaining] = rest;
+            const [entry, ...remaining] = rest;
             queueRef.current = remaining;
             syncQueue();
-            apply({ type: 'user', text });
+            const promptId = nextLivePromptId(config);
+            if (!entry.turnOptions?.invocationEchoed) {
+              apply({
+                type: 'user',
+                text: entry.text,
+                promptId,
+                sentToModel: true,
+              });
+            }
             // ink keeps provenance for a queued submission, and the raw text
             // is what the stream layer expands `@path` mentions from.
-            void runTurn(text, nextLivePromptId(config), {
-              submittedPrompt: text,
-            });
+            void runTurn(
+              entry.content,
+              promptId,
+              entry.generated
+                ? entry.turnOptions
+                : {
+                    ...entry.turnOptions,
+                    submittedPrompt: entry.submittedPrompt ?? entry.text,
+                  },
+            );
           }
         }
       }
@@ -345,33 +380,52 @@ export function useOpenTuiLiveTurn(
       content: PartListUnion,
       imagePaths?: readonly string[],
       options?: OpenTuiSubmitOptions,
-    ) => {
+    ): boolean => {
+      if (!mountedRef.current) return false;
       const text =
         typeof content === 'string'
           ? content
           : collectText(normalizeParts(content));
-      if (streamingRef.current) {
-        // The steering queue is text-only; say so instead of losing the
-        // attachments without a trace. Per-turn options ride on the queued
-        // text's own submit_prompt, never on the steering drain.
-        if (imagePaths && imagePaths.length > 0) {
-          apply({
-            type: 'warning',
-            text: 'Image attachments cannot be queued mid-turn and were dropped.',
-          });
-        }
-        if (text.trim()) pushQueue(text);
-        return;
-      }
       const { parts, notices } = imagePathsToParts(imagePaths ?? []);
       for (const notice of notices) apply({ type: 'warning', text: notice });
+      if (notices.length > 0) return false;
       const prompt: PartListUnion =
-        parts.length > 0 ? [{ text }, ...parts] : content;
+        parts.length > 0 ? [...normalizeParts(content), ...parts] : content;
+      if (
+        !text.trim() &&
+        normalizeParts(prompt).every((part) => part.text !== undefined)
+      ) {
+        return false;
+      }
+      if (streamingRef.current) {
+        const generated =
+          options?.invocationEchoed === true ||
+          options?.modelOverride !== undefined ||
+          options?.refreshContextFilesOnWrite !== undefined ||
+          options?.onComplete !== undefined ||
+          (typeof content !== 'string' &&
+            options?.submittedPrompt === undefined);
+        pushQueue({
+          text,
+          content: prompt,
+          imagePaths: imagePaths ? [...imagePaths] : undefined,
+          submittedPrompt: generated
+            ? options?.submittedPrompt
+            : (options?.submittedPrompt ?? text),
+          deferUntilIdle: generated || options?.deferUntilIdle,
+          turnOptions: generated
+            ? options
+            : { ...options, submittedPrompt: options?.submittedPrompt ?? text },
+          generated,
+        });
+        return true;
+      }
       const promptId = nextLivePromptId(config);
       if (!options?.invocationEchoed) {
         apply({ type: 'user', text, promptId, sentToModel: true });
       }
       void runTurn(prompt, promptId, options);
+      return true;
     },
     [config, apply, pushQueue, runTurn],
   );
@@ -413,16 +467,33 @@ export function useOpenTuiLiveTurn(
     setWaitingCalls((prev) => prev.filter((c) => c.callId !== callId));
   }, []);
 
-  const popQueue = useCallback((): string | null => {
-    if (queueRef.current.length === 0) return null;
+  const popQueue = useCallback((): OpenTuiInputSubmission | null => {
+    const entries = queueRef.current.filter((entry) => !entry.generated);
+    if (entries.length === 0) return null;
     // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
-    // blank line, not a single newline. ink's peer/slash queue filters have no
-    // counterpart here — this queue only ever holds plain composer text
-    // (slash commands defer in the shell instead of queueing).
-    return drainQueue().join('\n\n');
-  }, [drainQueue]);
+    // blank line, not a single newline. Generated command payloads cannot
+    // be reconstructed as editable composer text, so they remain queued.
+    queueRef.current = queueRef.current.filter((entry) => entry.generated);
+    syncQueue();
+    return {
+      text: entries.map((entry) => entry.text).join('\n\n'),
+      imagePaths: entries.flatMap((entry) => entry.imagePaths ?? []),
+      submittedPrompt: entries
+        .map((entry) => entry.submittedPrompt ?? entry.text)
+        .join('\n\n'),
+      deferUntilIdle: entries.every((entry) => entry.deferUntilIdle),
+    };
+  }, [syncQueue]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      turnSeqRef.current += 1;
+      queueRef.current = [];
+      abortRef.current?.abort();
+    };
+  }, []);
 
   return {
     items,
