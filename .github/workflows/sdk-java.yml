@@ -685,7 +685,7 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (120 + 10 + 20 + 50 = 200 — the FG8 letters
+    # The step ceilings today (161 + 20 + 50 + 20 = 251 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
     # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
@@ -709,15 +709,15 @@ jobs:
     # 148 minutes, and the FG13a HTTP lost-reply cell adds 150 s, so the fork
     # moves to 8409 s and Verify to 151 minutes, and the FG13f deny
     # lost-reply cell adds 150 s, so the fork moves to 8559 s and Verify to
-    # 153 minutes; the FG11d disabled-span cell adds 336 s, so the fork moves
-    # to 8895 s and Verify to 159 minutes, and the FG13f failClosed
+    # 153 minutes; the FG11d disabled-automation span adds 336 s, so the fork
+    # moves to 8895 s and Verify to 159 minutes, and the FG13f failClosed
     # lost-reply cell adds 150 s, so the fork moves to 9045 s and Verify to
     # 161 minutes, which wraps its fork + 600 s plus margin; the Broker fault
-    # gates keep 10,
+    # gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 241 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 254
+    # checks): 251 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 264
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -828,7 +828,8 @@ jobs:
           cd integration-tests
           npx vitest run cli/hosted-latency-baseline.test.ts
       - name: 'Run Runtime Broker fault gates'
-        timeout-minutes: 10
+        # Outlive the 600 s surefire fork plus compilation and report teardown.
+        timeout-minutes: 20
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: >-
