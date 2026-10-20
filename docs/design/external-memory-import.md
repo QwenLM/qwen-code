@@ -83,9 +83,10 @@ sibling decisions, baselines and publication records.
 The metadata index uses the native parser's recognized fields, including its
 normalization rules. The model receives this bounded index and relevant complete documents, not a
 copy of every existing body. The local full snapshot still protects against edits
-and forgetting. If the index or relevant evidence cannot fit, fail with an actionable
-context-limit result rather than silently dropping relevant evidence. Index-only
-entries are explicitly identified; uncertain overlap must produce a conflict.
+and forgetting. The index is bounded to the context budget: index-only entries that
+do not fit are omitted. If relevant evidence cannot fit, fail with an actionable
+context-limit result rather than silently dropping it. Index-only entries are
+explicitly identified; uncertain overlap must produce a conflict.
 
 Offline preview estimates calls and input/output tokens by source project group,
 reserving the maximum existing-context allowance because preview does not read native

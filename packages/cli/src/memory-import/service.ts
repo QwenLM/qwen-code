@@ -206,7 +206,7 @@ function selectImportContext(
   const terms = new Set(
     source.toLowerCase().match(/[\p{L}\p{N}_-]{4,}/gu) ?? [],
   );
-  const context = existing.map((item) => {
+  const index = existing.map((item) => {
     const parsed = parseAutoMemoryTopicDocument('existing.md', item.content);
     if (!parsed)
       throw new ImportContextError(
@@ -238,13 +238,27 @@ function selectImportContext(
       indexOnly: !relevant,
     };
   });
-  if (
-    Buffer.byteLength(JSON.stringify(context)) >
-    MEMORY_IMPORT_BUDGET.contextBytes
-  )
-    throw new ImportContextError(
-      'Existing memory index or relevant evidence exceeds the 32 KiB import context budget. Select a narrower source group or consolidate existing memory before retrying. No model call was made.',
-    );
+  // Relevant full documents are evidence; index-only metadata is an index.
+  // Keep the evidence first, then admit index entries while the serialized
+  // context fits. Relevant evidence that cannot fit still fails closed.
+  const context: MemoryImportModelInput['existing'] = [];
+  let bytes = 2;
+  for (const entry of [
+    ...index.filter((item) => !item.indexOnly),
+    ...index.filter((item) => item.indexOnly),
+  ]) {
+    const size =
+      Buffer.byteLength(JSON.stringify(entry)) + (context.length ? 1 : 0);
+    if (bytes + size > MEMORY_IMPORT_BUDGET.contextBytes) {
+      if (!entry.indexOnly)
+        throw new ImportContextError(
+          'Relevant existing evidence exceeds the 32 KiB import context budget. Select a narrower source group or consolidate existing memory before retrying. No model call was made.',
+        );
+      continue;
+    }
+    bytes += size;
+    context.push(entry);
+  }
   return context;
 }
 

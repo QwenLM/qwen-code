@@ -959,6 +959,59 @@ describe('bounded project batches', () => {
       );
       expect(propose).toHaveBeenCalledTimes(1);
     }));
+  it('bounds the metadata index when a mature memory store exceeds the context budget', () =>
+    context(async () => {
+      const memory = getUserAutoMemoryRoot();
+      await fs.mkdir(memory, { recursive: true });
+      for (let i = 0; i < 150; i++)
+        await fs.writeFile(
+          path.join(memory, `existing-${i}.md`),
+          doc.replace(
+            'Validate rollback paths for every schema migration.',
+            `Validate rollback paths for every schema migration ${i}.`,
+          ),
+        );
+      const unrelated = {
+        version: 1,
+        source: 'codex',
+        files: [
+          {
+            path: 'MEMORY.md',
+            content:
+              '# Visual\ncwd: /synthetic/project\nPrefer forest green charts.',
+          },
+        ],
+      };
+      const propose = vi.fn(async (input: MemoryImportModelInput) => ({
+        items: input.sources.map(({ id }) => ({
+          id,
+          decision: 'new' as const,
+          reason: 'Portable knowledge.',
+          documents: [doc.replace('type: project', 'type: user')],
+        })),
+      }));
+      const svc = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose,
+      });
+      const task = await svc.submit(
+        unrelated,
+        [{ id: previewSource(unrelated).sections[0].id, scope: 'user' }],
+        'bounded-index',
+      );
+      const done = await svc.idle(task.id);
+      expect(done.status).toBe('completed');
+      expect(done.items[0].status).toBe('added');
+      expect(propose).toHaveBeenCalledTimes(1);
+      const existing = propose.mock.calls[0][0].existing;
+      expect(existing.length).toBeGreaterThan(0);
+      expect(existing.length).toBeLessThan(150);
+      expect(existing.every((item) => item.indexOnly)).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(existing))).toBeLessThanOrEqual(
+        32_768,
+      );
+    }));
   it('persists reservations across failed calls, restart and retry and stops at the total limit', () =>
     context(async () => {
       const propose = vi.fn(async () => {
