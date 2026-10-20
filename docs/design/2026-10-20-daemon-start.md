@@ -40,6 +40,8 @@ environment is kept.
 
 Windows drive-relative roots are resolved against the launching drive as well; only drive-letter and UNC forms are kept verbatim.
 
+An explicitly empty `QWEN_RUNTIME_DIR` or `QWEN_HOME` is preserved as a set variable; only an absent variable is removed.
+
 The command canonicalizes workspaces with the same function `serve` uses, so a
 symlink alias and its target are treated as one workspace for the
 duplicate-start check and in the child's arguments.

@@ -197,6 +197,21 @@ describe('qwen daemon command', () => {
     );
   });
 
+  it('preserves an explicit empty runtime directory', () => {
+    const cwd = path.join(os.tmpdir(), 'qwen-start-empty');
+    const env = buildDaemonStartEnv(
+      { QWEN_RUNTIME_DIR: '', QWEN_HOME: '' },
+      undefined,
+      cwd,
+    );
+    expect(Object.hasOwn(env, 'QWEN_RUNTIME_DIR')).toBe(true);
+    expect(env['QWEN_RUNTIME_DIR']).toBe('');
+    expect(Object.hasOwn(env, 'QWEN_HOME')).toBe(true);
+    expect(env['QWEN_HOME']).toBe('');
+    expect(resolveStartEnvPath('', cwd)).toBe('');
+    expect(resolveStartEnvPath(undefined, cwd)).toBeUndefined();
+  });
+
   it('drops every private marker by prefix', () => {
     const env = buildDaemonStartEnv(
       {

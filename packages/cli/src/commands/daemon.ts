@@ -369,7 +369,10 @@ export function resolveStartEnvPath(
   pathApi: Pick<typeof path, 'isAbsolute' | 'resolve'> = path,
   fullyQualified: (candidate: string) => boolean = isFullyQualifiedPath,
 ): string | undefined {
-  if (!value) return undefined;
+  if (value === undefined) return undefined;
+  // An explicit empty value is meaningful: the environment bootstrap uses
+  // Object.hasOwn to distinguish it from an unset variable.
+  if (value === '') return '';
   if (value === '~' || value.startsWith('~/') || value.startsWith('~\\')) {
     return value;
   }
