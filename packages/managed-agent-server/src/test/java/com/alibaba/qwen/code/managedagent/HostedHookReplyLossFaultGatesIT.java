@@ -567,6 +567,65 @@ class HostedHookReplyLossFaultGatesIT {
         StoreFaultGate.INSTANCE.clear();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13bHookResultStoreRejectionSettlesFromTheReceiptOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_SETTLED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_SETTLE");
+        // The worker already ran the Hook, so the refused commit leaves the
+        // record un-settled rather than un-dispatched.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        StoreFaultGate.INSTANCE.clear();
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        String executionId = hookExecution(session).path("hookExecutionId").asText();
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        // A later read takes the receipt the worker still holds and commits
+        // the result without a second physical call.
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled");
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
+    void fg13bHookPlanResultStoreRejectionRebuildsTheMarkerOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_PLAN_SETTLED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_PLAN_SETTLE");
+        // The child settled; only the marker's own commit is refused, so the
+        // marker stays replayable and is rebuilt from the saved receipts.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        StoreFaultGate.INSTANCE.clear();
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        JsonNode marker = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
+                .filter(record -> "__plan__".equals(record.path("hookId").asText()))
+                .findFirst()
+                .orElseThrow();
+        String occurrenceId = marker.path("hookExecutionId").asText();
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        waitFor(() -> {
+            var status = hookStatus(session, occurrenceId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        StoreFaultGate.INSTANCE.clear();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
@@ -652,7 +711,9 @@ class HostedHookReplyLossFaultGatesIT {
                     && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS",
                             "FG13_CATALOG_LOSS", "FG13_HTTP_LOSS",
                             "FG13_DENY_LOSS", "FG13_FAILCLOSED_LOSS",
-                            "FG13_STORE_INTENT", "FG13_STORE_DISPATCH").contains(prompt);
+                            "FG13_STORE_INTENT", "FG13_STORE_DISPATCH",
+                            "FG13_STORE_SETTLE",
+                            "FG13_STORE_PLAN_SETTLE").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);

@@ -717,12 +717,16 @@ jobs:
     # Verify to 162 minutes; the FG13b Hook intent store-rejection cell adds
     # 150 s, moving the fork to 9261 s and Verify to 165 minutes; the FG13b
     # Hook dispatch store-rejection cell adds 150 s, moving the fork to
-    # 9411 s and Verify to 167 minutes, wrapping fork + 600 s plus margin;
+    # 9411 s and Verify to 167 minutes; the FG13b Hook result store-rejection
+    # cell adds 150 s, moving the fork to 9561 s and Verify to 170 minutes;
+    # the FG13b Hook plan-result store-rejection cell adds 150 s, moving the
+    # fork to 9711 s and Verify to 172 minutes, wrapping fork + 600 s plus
+    # margin;
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 257 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 270
+    # checks): 262 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 275
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -811,8 +815,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 9411 s, so the step wraps to fork + 600 s plus margin (167 min).
-        timeout-minutes: 167
+        # 9711 s, so the step wraps to fork + 600 s plus margin (172 min).
+        timeout-minutes: 172
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

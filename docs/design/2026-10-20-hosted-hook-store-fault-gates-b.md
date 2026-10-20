@@ -2,8 +2,10 @@
 
 [English](2026-10-20-hosted-hook-store-fault-gates-b.md) | [简体中文](2026-10-20-hosted-hook-store-fault-gates-b.zh-CN.md)
 
-> The injection seam and the first two cells ship in one PR; the remaining
-> three cells are planned and are not claimed implemented until each lands.
+> The seam and the first two cells shipped in #14817. The result and
+> plan-result cells ship here. The registration settle needs a catalog phase
+> the seam does not have, so it moves to the FG13a store-ack slice rather
+> than growing a second seam here.
 
 ## Problem and scope
 
@@ -23,13 +25,13 @@ commit still runs in the real transaction.
 
 ## Cells
 
-| Cell                                                      | Inject                                  | Expect                                                                    |
-| --------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------- |
-| `fg13bHookIntentStoreRejectionDispatchesNothingOnMySql`   | Reject the intent commit                | The injection fires; zero physical calls.                                 |
-| `fg13bHookDispatchStoreRejectionDispatchesNothingOnMySql` | Reject the `dispatch_started` commit    | The injection fires; zero physical calls.                                 |
-| result commit (planned)                                   | Reject the settled commit               | One physical call; a later status read settles from the worker's receipt. |
-| plan result commit (planned)                              | Reject the plan marker's settled commit | The marker is rebuilt from the saved receipts.                            |
-| registration settle (planned)                             | Reject the catalog settle               | The retry keeps the original operation id.                                |
+| Cell                                                        | Inject                                  | Expect                                                                        |
+| ----------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------- |
+| `fg13bHookIntentStoreRejectionDispatchesNothingOnMySql`     | Reject the intent commit                | The injection fires; zero physical calls.                                     |
+| `fg13bHookDispatchStoreRejectionDispatchesNothingOnMySql`   | Reject the `dispatch_started` commit    | The injection fires; zero physical calls.                                     |
+| `fg13bHookResultStoreRejectionSettlesFromTheReceiptOnMySql` | Reject the settled commit               | One physical call; a later status read settles from the worker's receipt.     |
+| `fg13bHookPlanResultStoreRejectionRebuildsTheMarkerOnMySql` | Reject the plan marker's settled commit | The marker is rebuilt from the saved receipts.                                |
+| registration settle (moved to FG13a)                        | Reject the catalog settle               | The retry keeps the original operation id; needs a catalog phase on the seam. |
 
 ## Witnesses
 
