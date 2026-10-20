@@ -49,6 +49,7 @@ import {
   sweepStaleStartLogs,
   tailLines,
   terminateTree,
+  waitForDaemonReady,
 } from './daemon.js';
 import type { DaemonDiscoveryEntry } from '../serve/daemon-discovery.js';
 
@@ -146,6 +147,29 @@ describe('qwen daemon command', () => {
     expect(summary).toContain('started pid');
     expect(summary).toContain('http://127.0.0.1:4170');
     expect(summary).toContain('qwen daemon stop --port 4170');
+  });
+
+  it('waits for a daemon to report ready', async () => {
+    const responses = [
+      { status: 'warning', issues: ['starting'] },
+      { status: 'ok', issues: [] },
+    ];
+    const fetchDetail = vi.fn(async () => responses.shift()!);
+    await expect(
+      waitForDaemonReady(entry(4170).record, undefined, 1_000, 1, fetchDetail),
+    ).resolves.toMatchObject({ status: 'ok' });
+    expect(fetchDetail).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns the last status when readiness times out', async () => {
+    const fetchDetail = vi.fn(async () => ({
+      status: 'warning',
+      issues: ['starting'],
+    }));
+    await expect(
+      waitForDaemonReady(entry(4170).record, undefined, 0, 1, fetchDetail),
+    ).resolves.toMatchObject({ status: 'warning' });
+    expect(fetchDetail).toHaveBeenCalledTimes(1);
   });
 
   it('summarizes a daemon status response', () => {

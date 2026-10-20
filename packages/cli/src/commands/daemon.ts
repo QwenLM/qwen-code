@@ -36,6 +36,8 @@ const PROCESS_START_TOLERANCE_MS = 5_000;
 const PROCESS_START_LEAD_MS = 10 * 60_000;
 const START_TIMEOUT_MS = 30_000;
 const START_POLL_MS = 100;
+const START_READY_TIMEOUT_MS = 30_000;
+const START_READY_POLL_MS = 250;
 
 type DaemonHealth = 'running' | 'unreachable' | 'stale';
 
@@ -77,6 +79,7 @@ interface StartArgs {
   web: boolean;
   'require-auth': boolean;
   token?: string;
+  wait?: boolean;
   json?: boolean;
 }
 
@@ -312,10 +315,11 @@ export function summarizeDaemonStatus(
 export async function fetchDaemonDetail(
   record: DaemonDiscoveryRecord,
   allowToken: boolean,
+  tokenOverride?: string,
 ): Promise<DaemonDetailSummary | string> {
   const token =
     record.auth === 'bearer'
-      ? process.env['QWEN_SERVER_TOKEN']?.trim()
+      ? tokenOverride?.trim() || process.env['QWEN_SERVER_TOKEN']?.trim()
       : undefined;
   if (token && !allowToken) {
     return 'listener identity unverified; not sending QWEN_SERVER_TOKEN';
@@ -339,6 +343,28 @@ export async function fetchDaemonDetail(
     return summary ?? 'invalid status response';
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
+  }
+}
+
+export async function waitForDaemonReady(
+  record: DaemonDiscoveryRecord,
+  token: string | undefined,
+  timeoutMs: number = START_READY_TIMEOUT_MS,
+  pollMs: number = START_READY_POLL_MS,
+  fetchDetail: (
+    record: DaemonDiscoveryRecord,
+    allowToken: boolean,
+  ) => Promise<DaemonDetailSummary | string> = (candidate, allowToken) =>
+    fetchDaemonDetail(candidate, allowToken, token),
+): Promise<DaemonDetailSummary | string> {
+  const allowToken = listenerIdentityVerified(record);
+  const deadline = Date.now() + timeoutMs;
+  let result: DaemonDetailSummary | string = 'daemon status unavailable';
+  while (true) {
+    result = await fetchDetail(record, allowToken);
+    if (typeof result !== 'string' && result.status === 'ok') return result;
+    if (Date.now() >= deadline) return result;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 }
 
@@ -729,6 +755,12 @@ async function handleStart(argv: StartArgs): Promise<void> {
   }
 
   if (record) {
+    const ready =
+      argv.wait === true ? await waitForDaemonReady(record, token) : undefined;
+    const readyFailed =
+      ready !== undefined &&
+      (typeof ready === 'string' || ready.status !== 'ok');
+
     if (argv.json === true) {
       writeStdoutLine(
         JSON.stringify({
@@ -743,6 +775,21 @@ async function handleStart(argv: StartArgs): Promise<void> {
     } else {
       writeStdoutLine(formatDaemonStartSummary(record));
     }
+
+    if (readyFailed) {
+      writeStderrLine(
+        `qwen daemon: daemon pid ${record.pid} is running but did not report ready within ${
+          START_READY_TIMEOUT_MS / 1000
+        }s.`,
+      );
+      if (typeof ready === 'string') {
+        writeStderrLine(`qwen daemon: ${ready}`);
+      }
+      writeStderrLine(`qwen daemon: startup log: ${startLog}`);
+      process.exitCode = 1;
+      return;
+    }
+
     try {
       fs.rmSync(startLog, { force: true });
     } catch {
@@ -1147,6 +1194,11 @@ const startCommand: CommandModule<unknown, StartArgs> = {
       .option('token', {
         type: 'string',
         describe: 'Bearer token for the child; prefer QWEN_SERVER_TOKEN',
+      })
+      .option('wait', {
+        type: 'boolean',
+        default: false,
+        describe: 'Wait until /daemon/status reports ready before returning',
       })
       .option('json', {
         type: 'boolean',
