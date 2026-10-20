@@ -1710,6 +1710,27 @@ describe('bundled review skill', () => {
     expect(posting).not.toContain('occurs _anywhere_ in its body');
   });
 
+  it('tells the model the canonical artifact is accepted as --new-findings (#9218)', () => {
+    // Revert guard: the parser accepting the artifact shape and the example
+    // moving off `…-findings.json` are two halves of #9218; a skill text that
+    // still sends the model to hand-transcribe the anchor list keeps the
+    // transcription step alive, and writing that list over the artifact is
+    // exactly the collision the separate filename exists to prevent.
+    const posting = referenceBody('posting.md');
+    expect(posting).toContain(
+      'is accepted as-is, so there is usually nothing to write',
+    );
+    expect(posting).toContain(
+      'hand `--new-findings` the same `qwen-review-{target}-findings.json` Step 6 produced',
+    );
+    expect(posting).toContain(
+      'must never be written over the canonical artifact',
+    );
+    expect(posting).not.toContain(
+      'This list is presubmit INPUT, not the canonical findings artifact',
+    );
+  });
+
   it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {
     // presubmit's reply carrier matches a wanted id at ANY location (its
     // anchor may be unmapped or the finding moved); a location-qualified

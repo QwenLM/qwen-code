@@ -244,14 +244,31 @@ interface PresubmitArgs {
   'new-findings'?: string;
 }
 
+/** A JSON object, as opposed to `null`, an array, or a scalar. */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 /**
  * Read the `--new-findings` file into a validated anchor list, or `null` when
  * it cannot be trusted. `null` is the fail-safe value: `classifyHeadDrift`
  * treats an unknown finding set as at-risk, so a malformed file downgrades
  * the verdict rather than proving a false all-clear. A shorter-than-real list
- * would be the dangerous outcome (a dropped finding reads as disjoint), so
- * any entry lacking a string `path` — or carrying a non-null, non-string
- * or misshapen `id` — rejects the WHOLE file rather than being skipped.
+ * would be the dangerous outcome (a dropped finding reads as disjoint), so an
+ * entry that cannot be read as a location rejects the WHOLE file rather than
+ * being skipped.
+ *
+ * Two shapes are accepted, because Step 6 and Step 7 write different files and
+ * an operator must not have to hand-transcribe one into the other (#9218): the
+ * canonical findings artifact — the report object `qwen review findings --out`
+ * writes, or the bare `findings[]` array — and the minimal hand-written
+ * `[{path, line?, start_line?, id?}]` list, which is the only shape that can
+ * attach a `start_line`. An artifact entry names its location with `file`
+ * (+ optional `line`) or, for a pattern aggregate, with a `locations[]` array;
+ * an aggregate expands into one anchor per location, because every consumer
+ * below — the overlap intersection and the drift file set — keys on a single
+ * `(path, line)`. Taking the artifact directly also carries the files of the
+ * body-only Criticals the hand-built list had to name by hand.
  */
 export function parseFindingsFile(path: string): FindingAnchor[] | null {
   let parsed: unknown;
@@ -260,41 +277,72 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
   } catch {
     return null;
   }
+  // The artifact's wrapper: a report object carrying the list as `findings`.
+  // Without it the canonical artifact is an object, not an array, and is
+  // refused before a single entry is read.
+  if (isRecord(parsed) && parsed['findings'] !== undefined) {
+    parsed = parsed['findings'];
+  }
   if (!Array.isArray(parsed)) return null;
   const out: FindingAnchor[] = [];
   for (const entry of parsed) {
-    if (
-      typeof entry !== 'object' ||
-      entry === null ||
-      typeof (entry as { path?: unknown }).path !== 'string'
-    ) {
-      return null;
+    if (!isRecord(entry)) return null;
+    // The artifact's ids are the artifact's own — a deferral's `D<round>-<n>`
+    // included — and need no shape gate: an id no comment can carry simply
+    // never matches. The minimal form's id is hand-typed, so it keeps one.
+    const id = typeof entry['id'] === 'string' ? { id: entry['id'] } : {};
+
+    // The aggregate form. `locations` wins over every sibling, mirroring the
+    // artifact validator: an aggregate that arrived with a merged single
+    // location is one whose other anchors were dropped.
+    const locations = entry['locations'];
+    if (locations !== undefined) {
+      if (!Array.isArray(locations) || locations.length === 0) return null;
+      for (const location of locations) {
+        if (!isRecord(location) || typeof location['file'] !== 'string') {
+          return null;
+        }
+        out.push({
+          path: location['file'],
+          line: typeof location['line'] === 'number' ? location['line'] : 0,
+          ...id,
+        });
+      }
+      continue;
     }
-    const e = entry as {
-      path: string;
-      line?: unknown;
-      start_line?: unknown;
-      id?: unknown;
-    };
-    // Same fail-safe as `path`: an `id` of the wrong type or shape is a
-    // malformed file, and silently ignoring it would let a carried re-post
-    // read as a fresh duplicate at the very location it belongs (a typo'd
-    // id can never match the extractor, silently disabling the exemption).
-    // `null` means "no id" — JSON has no `undefined`, so a producer that
-    // emits the key uniformly uses null for id-less findings; that is a
-    // missing optional field, not a malformed file.
-    if (
-      e.id !== undefined &&
-      e.id !== null &&
-      (typeof e.id !== 'string' || !LEDGER_ID_SHAPE.test(e.id))
-    ) {
-      return null;
+
+    // The minimal hand-written form. Here the id IS the carry signal, so a
+    // present-but-misshapen one rejects the file: a typo'd id can never match
+    // the extractor and would silently disable the re-post exemption. `null`
+    // means "no id" — JSON has no `undefined`, so a producer that emits the
+    // key uniformly uses null for id-less findings.
+    if (typeof entry['path'] === 'string') {
+      if (
+        entry['id'] !== undefined &&
+        entry['id'] !== null &&
+        (typeof entry['id'] !== 'string' || !LEDGER_ID_SHAPE.test(entry['id']))
+      ) {
+        return null;
+      }
+      out.push({
+        path: entry['path'],
+        line: typeof entry['line'] === 'number' ? entry['line'] : 0,
+        ...(typeof entry['start_line'] === 'number'
+          ? { startLine: entry['start_line'] }
+          : {}),
+        ...id,
+      });
+      continue;
     }
+
+    // The artifact's standalone form: `file` (+ optional `line`). `anchor` is
+    // ignored — it is the resolver's snippet, and Step 7 has already turned it
+    // into the `line` this file reads.
+    if (typeof entry['file'] !== 'string') return null;
     out.push({
-      path: e.path,
-      line: typeof e.line === 'number' ? e.line : 0,
-      ...(typeof e.start_line === 'number' ? { startLine: e.start_line } : {}),
-      ...(typeof e.id === 'string' ? { id: e.id } : {}),
+      path: entry['file'],
+      line: typeof entry['line'] === 'number' ? entry['line'] : 0,
+      ...id,
     });
   }
   return out;
@@ -1186,9 +1234,16 @@ function writePresubmitReport(input: {
     );
   }
   if (findingsFileInvalid) {
+    // Name the shapes, not just the failure. The report is read by an
+    // orchestrator that has to PRODUCE a usable file, and "regenerate it" left
+    // the shape to the `--new-findings` help text — where the dogfood run that
+    // filed #9218 never looked, because the file it passed was the artifact
+    // the skill's own Step 6 had just told it to write.
     downgradeReasons.push(
       'the --new-findings file was malformed — overlap dedup was disabled and ' +
-        'anchor-risk defaulted to at-risk; regenerate it and re-run',
+        'anchor-risk defaulted to at-risk; expected the findings artifact ' +
+        '({findings: [{file, line} | {locations: [{file, line}]}]}) or ' +
+        '[{path, line}]; regenerate it and re-run',
     );
   }
 
@@ -1454,7 +1509,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
+          "Path to a JSON file shaped as [{path, line, id?}, ...], or the canonical `qwen review findings --out` artifact, whose `file`/`locations[]` entries are accepted as-is and normalized to `(path, line)` anchors — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
       }),
   handler: async (argv) => {
     const host = (argv as { host?: string }).host;
