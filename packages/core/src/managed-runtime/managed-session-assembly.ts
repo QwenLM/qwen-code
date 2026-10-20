@@ -31,6 +31,10 @@ const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
  * Keeps the installed activation's horizon ahead of a reader while the worker
  * is alive. The install stamps a fixed expiry, so without renewal a session
  * that outlives its lease reads as abandoned behind a live writer lock.
+ * Renewal failures are retried on the next tick: a durable write failure
+ * already fences new appends, so the timer only logs. A renewal that is still
+ * in flight owns the next attempt: queueing another one behind a stalled Store
+ * call would grow the backlog for the whole outage.
  *
  * A stopped writer cannot renew again, and a persistent failure repeats the
  * same rejection every interval for the rest of the process's life, so both
@@ -45,20 +49,24 @@ function startActivationRenewal(
   leaseDurationMs: number,
 ): { stop: () => void } {
   const intervalMs = Math.max(Math.floor(leaseDurationMs / 3), 1);
+  let inFlight = false;
   let failures = 0;
   let stopped = false;
   const timer = setInterval(() => {
-    authority.renewActivation({ leaseDurationMs }).then(
-      () => {
+    if (inFlight || stopped) return;
+    inFlight = true;
+    authority
+      .renewActivation({ leaseDurationMs })
+      .then(() => {
         if (!stopped) failures = 0;
-      },
-      (error: unknown) => {
-        if (stopped) return;
-        failures += 1;
+      })
+      .catch((error: unknown) => {
         debugLogger.debug(
           'Managed Session activation renewal failed',
           describeRenewalError(error),
         );
+        if (stopped) return;
+        failures += 1;
         if (authority.writesStopped || failures >= MAX_RENEWAL_FAILURES) {
           debugLogger.warn(
             'Managed Session activation renewal stopped',
@@ -69,8 +77,10 @@ function startActivationRenewal(
           stopped = true;
           clearInterval(timer);
         }
-      },
-    );
+      })
+      .finally(() => {
+        inFlight = false;
+      });
   }, intervalMs);
   timer.unref();
   return {
