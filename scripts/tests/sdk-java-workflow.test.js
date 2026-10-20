@@ -707,18 +707,20 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       expect(s.run, s.name).toContain(
         'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
       );
-      expect(s.run, s.name).toContain('flock --wait 5400 9');
-      // Main requires at least an hour per acquisition; 5400 s is 90 minutes.
+      // The fast tier owns the same lock and waits behind these two steps, so
+      // one acquisition budget applies to every lane; run 39229303984 died at
+      // the old 60-minute wait before Maven started. Main requires at least
+      // an hour per acquisition, and the lock sites are pinned to carry the
+      // same budget below.
       expect(
         Number(s.run.match(/flock --wait (\d+) 9/)?.[1]),
         s.name,
       ).toBeGreaterThanOrEqual(50 * 60);
     }
     // The wait budget is read back from the workflow so the arithmetic below
-    // cannot drift from it: the value pins above still force a deliberate
-    // update when the literal moves, but a re-size can no longer miss these
-    // sums and silently under-demand.
-    const waitSeconds = [
+    // cannot drift from it: every lock site must carry one budget, and a
+    // re-size can no longer miss these sums and silently under-demand.
+    const lockWaits = [
       ...parsed.jobs.test.steps,
       ...parsed.jobs['mysql-integration'].steps,
     ]
@@ -726,39 +728,29 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       .flatMap((s) =>
         [...s.run.matchAll(/flock --wait (\d+) 9/g)].map((m) => Number(m[1])),
       );
-    expect(new Set(waitSeconds).size, 'one wait budget per lock').toBe(1);
-    const lockWait = waitSeconds[0];
+    expect(new Set(lockWaits).size, 'one wait budget per lock').toBe(1);
+    const lockWait = lockWaits[0];
     // The ceiling must absorb one full wait per acquisition — this job takes
-    // the lock once per Maven step — plus the measured Maven work inside the
-    // lock plus the uncapped setup. Run 39097018288's two locked steps held
-    // 412 s and 2846 s. The sibling test job's fast-tier leg now also runs
-    // the full managed-agent H2 suite inside the lock: 925 s per hold in job
-    // 117729316936 (run 39145783034), where the step waited 1515 s. Main run
-    // 39143975111 starved on both attempts under the old 2400 s budget
-    // (#14608), and the 3600 s budget from #14522 starved jobs 118003538607
-    // and 118024095341. The wait covers 5.8 warm holds (925 s) but only 1.9
-    // of the longest recorded hold (2846 s).
-    const measuredMavenSeconds = 3258;
-    const mavenSetupSeconds = 10 * 60;
+    // the lock once per Maven step — plus the ~50 minutes of measured Maven
+    // work and ~30 minutes of uncapped setup. Derive it from the step count
+    // so another locked step cannot silently overdraw it.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
-    ).toBeGreaterThanOrEqual(
-      mavenSteps.length * lockWait + measuredMavenSeconds + mavenSetupSeconds,
-    );
+    ).toBeGreaterThanOrEqual(mavenSteps.length * lockWait + 50 * 60 + 30 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait per lock site plus one measured hold (925 s of
-    // Maven work in job 117729316936), the ~11 minutes of uncapped setup,
-    // and the unlocked work the lock does not cover (Checkstyle x2, Build
-    // release artifacts, fast-tier pnpm install).
+    // cover one full wait per lock site (the fast-tier leg runs the full
+    // managed-agent H2 suite inside the lock, 925 s per hold in job
+    // 117729316936), ~11 minutes of setup, and the ~10 minutes of unlocked
+    // work the lock does not cover (Checkstyle x2, Build release artifacts,
+    // fast-tier pnpm install).
     const testLocks = parsed.jobs.test.steps
       .filter((s) => typeof s.run === 'string')
       .reduce(
         (n, s) => n + [...s.run.matchAll(/flock --wait \d+ 9/g)].length,
         0,
       );
-    const unlockedMavenSeconds = 10 * 60;
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      testLocks * lockWait + 925 + 11 * 60 + unlockedMavenSeconds,
+      testLocks * lockWait + 925 + 11 * 60 + 10 * 60,
     );
   });
 
