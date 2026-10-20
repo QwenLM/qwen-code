@@ -344,6 +344,12 @@ function ensureBuiltins(): Promise<void> {
         { name: 'dws', promise: import('@qwen-code/channel-dws') },
         { name: 'email', promise: import('@qwen-code/channel-email') },
         { name: 'wecom', promise: import('@qwen-code/channel-wecom') },
+        {
+          name: 'wecom-callback',
+          promise: import('@qwen-code/channel-wecom').then(
+            ({ callbackPlugin }) => ({ plugin: callbackPlugin }),
+          ),
+        },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
         { name: 'github', promise: import('@qwen-code/channel-github') },
