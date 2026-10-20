@@ -3686,83 +3686,103 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
-              if (
+              const recoveryEventCurrent =
                 (context?.recovery ||
                   connectionRef.current.context?.recovery) &&
-                (event.id === undefined || event.id > recoveryEventCursor)
-              ) {
-                if (
-                  event.type === 'pending_prompt_started' ||
+                (event.id === undefined || event.id > recoveryEventCursor);
+              if (
+                recoveryEventCurrent &&
+                (event.type === 'pending_prompt_started' ||
                   hasActiveGenerationSignal(uiEvents) ||
-                  uiEvents.some((item) => item.type === 'user.text.delta')
-                ) {
-                  advanceSessionRecoveryGeneration(
-                    sessionRecoveryGenerationRef.current,
-                    activeSession,
-                  );
+                  uiEvents.some((item) => item.type === 'user.text.delta'))
+              ) {
+                advanceSessionRecoveryGeneration(
+                  sessionRecoveryGenerationRef.current,
+                  activeSession,
+                );
+                setConnection((current) =>
+                  sessionRef.current === activeSession &&
+                  current.context?.recovery?.canContinue
+                    ? {
+                        ...current,
+                        context: {
+                          ...current.context,
+                          recovery: {
+                            ...current.context.recovery,
+                            canContinue: false,
+                          },
+                        },
+                      }
+                    : current,
+                );
+              }
+              const generatedUiPolicyChanged = uiEvents.some(
+                (item) =>
+                  item.type === 'workspace.tool.toggled' ||
+                  item.type === 'workspace.mcp.server_changed' ||
+                  item.type === 'workspace.mcp.server_restarted' ||
+                  item.type === 'workspace.extensions.changed' ||
+                  (item.type === 'workspace.settings.changed' &&
+                    (item.key === 'settings_reloaded' ||
+                      item.key === 'mcp' ||
+                      item.key.startsWith('mcp.') ||
+                      item.key === 'mcpServers' ||
+                      item.key.startsWith('mcpServers.') ||
+                      item.key === 'tools' ||
+                      item.key.startsWith('tools.'))),
+              );
+              if (
+                generatedUiPolicyChanged ||
+                (recoveryEventCurrent &&
+                  (event.type === 'turn_complete' ||
+                    event.type === 'turn_error' ||
+                    // A rewind can drop the interrupted turn itself.
+                    event.type === 'session_rewound' ||
+                    uiEvents.some((item) => item.type === 'prompt.cancelled')))
+              ) {
+                const generation = advanceSessionRecoveryGeneration(
+                  sessionRecoveryGenerationRef.current,
+                  activeSession,
+                );
+                const publishContext = (
+                  updated?: DaemonSessionContextStatus,
+                ) => {
+                  // Publish receipt invalidation even when the read fails or
+                  // the response owner is wrong.
+                  if (
+                    disposed ||
+                    abort.signal.aborted ||
+                    eventStreamController.signal.aborted
+                  )
+                    return;
                   setConnection((current) =>
+                    current.sessionId === activeSession.sessionId &&
+                    eventStreamRef.current === eventStream &&
                     sessionRef.current === activeSession &&
-                    current.context?.recovery?.canContinue
+                    generation ===
+                      sessionRecoveryGenerationRef.current.get(activeSession)
                       ? {
                           ...current,
-                          context: {
-                            ...current.context,
-                            recovery: {
-                              ...current.context.recovery,
-                              canContinue: false,
-                            },
-                          },
+                          ...(current.context &&
+                          updated?.sessionId === activeSession.sessionId
+                            ? {
+                                context: {
+                                  ...current.context,
+                                  recovery: updated.recovery,
+                                },
+                              }
+                            : {}),
                         }
                       : current,
                   );
+                };
+                if (generatedUiPolicyChanged) {
+                  activeSession.session.generatedUi = undefined;
+                  publishContext();
                 }
-                if (
-                  event.type === 'turn_complete' ||
-                  event.type === 'turn_error' ||
-                  // A rewind can drop the interrupted turn itself.
-                  event.type === 'session_rewound' ||
-                  uiEvents.some((item) => item.type === 'prompt.cancelled')
-                ) {
-                  const generation = advanceSessionRecoveryGeneration(
-                    sessionRecoveryGenerationRef.current,
-                    activeSession,
-                  );
-                  const publishContext = (
-                    updated?: DaemonSessionContextStatus,
-                  ) => {
-                    // Publish receipt invalidation from the SDK even when
-                    // recovery cannot refresh or the response owner is wrong.
-                    if (
-                      disposed ||
-                      abort.signal.aborted ||
-                      eventStreamController.signal.aborted
-                    )
-                      return;
-                    setConnection((current) =>
-                      current.sessionId === activeSession.sessionId &&
-                      eventStreamRef.current === eventStream &&
-                      sessionRef.current === activeSession &&
-                      generation ===
-                        sessionRecoveryGenerationRef.current.get(activeSession)
-                        ? {
-                            ...current,
-                            ...(current.context &&
-                            updated?.sessionId === activeSession.sessionId
-                              ? {
-                                  context: {
-                                    ...current.context,
-                                    recovery: updated.recovery,
-                                  },
-                                }
-                              : {}),
-                          }
-                        : current,
-                    );
-                  };
-                  void activeSession.context().then(publishContext, () => {
-                    publishContext();
-                  });
-                }
+                void activeSession.context().then(publishContext, () => {
+                  publishContext();
+                });
               }
               const transcriptUiEvents =
                 subagentTranscriptModeRef.current === 'summary'

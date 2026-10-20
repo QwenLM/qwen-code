@@ -8708,7 +8708,7 @@ export class Config {
     );
   }
 
-  private assertGeneratedUiServerNotReplaced(
+  assertGeneratedUiServerNotReplaced(
     servers: Record<string, MCPServerConfig> | undefined,
   ): void {
     if (
