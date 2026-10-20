@@ -29,6 +29,11 @@ import {
 } from '../../test-utils/file-system-test-helpers.js';
 import type { Ignore } from './ignore.js';
 import { loadIgnoreRules } from './ignore.js';
+import { resolveRipgrep } from '../ripgrepUtils.js';
+
+// The crawler asks the resolver which ripgrep to spawn; the cases below pin
+// that hand-off, while ripgrepUtils' own suite covers the resolution itself.
+vi.mock('../ripgrepUtils.js', () => ({ resolveRipgrep: vi.fn() }));
 
 async function runExecFile(
   command: string,
@@ -156,6 +161,16 @@ const degradations = (warnSpy: MockInstance) =>
 
 describe('crawler', () => {
   let tmpDir: string;
+
+  beforeEach(() => {
+    // Cases that stub the command runner dispatch on the bare `rg` name; the
+    // resolver hand-off has its own cases below.
+    vi.mocked(resolveRipgrep).mockResolvedValue({
+      mode: 'system',
+      command: 'rg',
+    });
+  });
+
   afterEach(async () => {
     if (tmpDir) {
       await cleanupTmpDir(tmpDir);
@@ -811,6 +826,54 @@ describe('crawler', () => {
         '[crawler] falling back to fdir (ripgrep unavailable)',
       ]);
       warnSpy.mockRestore();
+    });
+
+    it('should spawn the ripgrep the resolver selects instead of a bare `rg` (#14537)', async () => {
+      tmpDir = await createTmpDir({ 'plain.js': '' });
+      const bundled = path.join(tmpDir, 'vendor', 'ripgrep', 'rg');
+      const commands: string[] = [];
+      vi.mocked(resolveRipgrep).mockResolvedValue({
+        mode: 'builtin',
+        command: bundled,
+      });
+      __setCommandRunnerForTests(async (command) => {
+        commands.push(command);
+        return command === bundled
+          ? { success: true, lines: ['plain.js'] }
+          : fail();
+      });
+
+      const results = await crawlTmp(rules(tmpDir));
+
+      expect(commands).toContain(bundled);
+      expect(results).toContain('plain.js');
+    });
+
+    it('should skip the ripgrep probe when no ripgrep is installed (#14537)', async () => {
+      tmpDir = await createTmpDir({ 'plain.js': '' });
+      const commands: string[] = [];
+      vi.mocked(resolveRipgrep).mockResolvedValue(null);
+      __setCommandRunnerForTests(async (command) => {
+        commands.push(command);
+        return fail();
+      });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let results: string[] = [];
+      let warns: string[] = [];
+      try {
+        results = await crawlTmp(rules(tmpDir));
+        warns = warnSpy.mock.calls.map((c) => String(c[0]));
+      } finally {
+        warnSpy.mockRestore();
+      }
+
+      // No doomed spawn: resolution already said there is no binary to run.
+      expect(commands).not.toContain('rg');
+      expect(results).toContain('plain.js');
+      expect(warns).toContain(
+        '[crawler] falling back to fdir (ripgrep unavailable)',
+      );
     });
 
     it('should respect maxDepth on git ls-files path', async () => {
