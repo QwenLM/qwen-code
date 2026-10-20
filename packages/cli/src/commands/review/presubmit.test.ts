@@ -5,7 +5,6 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { buildReport, validateFindings } from './findings.js';
 import {
   presubmitCommand,
   classifyCi,
@@ -682,35 +681,43 @@ describe('presubmitCommand', () => {
     expect(result.downgradeReasons.join(' ')).toContain(
       'the --new-findings file was malformed',
     );
-    // The reason names the shapes, not just the failure: the orchestrator has
-    // to produce a usable file, and "regenerate it" without the schema left
-    // the fix to a help text the dogfood run that filed #9218 never read.
-    expect(result.downgradeReasons.join(' ')).toContain('{path, line}');
-    expect(result.downgradeReasons.join(' ')).toContain('{findings:');
+    // The reason names the shape and rules out the artifact by name: the
+    // orchestrator has to produce a usable file, and the dogfood run that
+    // filed #9218 handed over the artifact Step 6 had just told it to write.
+    expect(result.downgradeReasons.join(' ')).toContain('{path, line, id?}');
+    expect(result.downgradeReasons.join(' ')).toContain(
+      'NOT the canonical findings artifact',
+    );
   });
 
-  it('takes the canonical findings artifact as --new-findings without downgrading (#9218)', async () => {
-    // The end-to-end shape of the reported bug: a clean PR, a review whose
-    // findings are the Step 6 artifact, and presubmit run against that file.
-    // Before #9218 this reported `findingsFileInvalid: true` and flipped
-    // `downgradeApprove` to true, capping the verdict — and the reason told
-    // the operator to regenerate a file that was already canonical.
+  it('refuses the canonical findings artifact instead of deduping on claimed lines (#9218)', async () => {
+    // The issue's first remedy — accept the artifact's `file`/`locations[]`
+    // directly — was implemented and reverted, and this pins WHY so it is not
+    // "fixed" back in: an artifact entry's `line` is the agent's claim (the
+    // posted line is the one `resolve-anchors` computes elsewhere) and its
+    // `id` sits on every finding, while presubmit reads the id as the
+    // carried-re-post signal. Both feed the overlap leg, so accepting the
+    // file would replace this loud refusal with a silent all-clear.
     ghMock.mockReturnValue('{"author":"contributor","headSha":"abc123"}');
     ghApiMock.mockReturnValue(null);
-    const report = buildReport(
-      validateFindings([
-        {
-          id: 'R3-1',
-          severity: 'Critical',
-          summary: 'a defect',
-          failureScenario: 'it fires once',
-          file: 'src/a.ts',
-          line: 42,
-        },
-      ]),
-    );
     readFileSyncMock.mockImplementation((path: string) =>
-      String(path).includes('findings') ? JSON.stringify(report) : '[]',
+      String(path).includes('findings')
+        ? JSON.stringify({
+            findings: [
+              {
+                id: 'R3-1',
+                severity: 'Critical',
+                source: 'review',
+                summary: 'a defect',
+                failureScenario: 'it fires once',
+                file: 'src/a.ts',
+                line: 42,
+              },
+            ],
+            counts: { total: 1 },
+            outcomesRecorded: false,
+          })
+        : '[]',
     );
 
     const handler = presubmitCommand.handler;
@@ -725,9 +732,8 @@ describe('presubmitCommand', () => {
     ) ?? [null, null];
     const result = JSON.parse(String(content));
 
-    expect(result.findingsFileInvalid).toBe(false);
-    expect(result.downgradeApprove).toBe(false);
-    expect(result.downgradeReasons).toEqual([]);
+    expect(result.findingsFileInvalid).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
   });
 
   it('does not flag findingsFileInvalid when the file is valid or absent', async () => {
@@ -2267,99 +2273,6 @@ describe('parseFindingsFile (via mocked fs)', () => {
       throw new Error('ENOENT');
     });
     expect(parseFindingsFile('/tmp/missing.json')).toBeNull();
-  });
-
-  // #9218: Step 6 writes the canonical artifact with `qwen review findings
-  // --out …-findings.json`, and the skill's presubmit example used to write the
-  // anchor list to that SAME path — so the artifact was handed to a parser that
-  // only knew the minimal shape and the WHOLE file was rejected:
-  // `findingsFileInvalid` + `downgradeApprove` (anchor-risk defaulted to
-  // at-risk, dedup disabled) on a review that was otherwise clean. The path
-  // collision is gone; the shape must be accepted too, or the operator still
-  // has to hand-transcribe the list.
-  describe('the canonical findings artifact (#9218)', () => {
-    const cases: Array<[string, unknown]> = [
-      // A standalone finding: `file`/`line` at the top level.
-      [
-        '[{"id":"R3-2","severity":"Critical","file":"src/a.ts","line":42,"anchor":"const x"}]',
-        [{ path: 'src/a.ts', line: 42, id: 'R3-2' }],
-      ],
-      // No line: a body-only Critical names a file and no diff line. It still
-      // has to reach the drift intersection — the gap the hand-built list
-      // closed only by the operator remembering to add it.
-      [
-        '[{"id":"R3-3","severity":"Critical","file":"src/b.ts"}]',
-        [{ path: 'src/b.ts', line: 0, id: 'R3-3' }],
-      ],
-      // A pattern aggregate expands to one anchor per location: every
-      // consumer keys on a single (path, line).
-      [
-        '[{"id":"R3-4","locations":[{"file":"a.ts","line":1},{"file":"b.ts","line":2,"anchor":"y"}]}]',
-        [
-          { path: 'a.ts', line: 1, id: 'R3-4' },
-          { path: 'b.ts', line: 2, id: 'R3-4' },
-        ],
-      ],
-      // `locations` wins over a sibling `file`, mirroring the artifact's own
-      // validator.
-      [
-        '[{"file":"top.ts","locations":[{"file":"loc.ts","line":3}]}]',
-        [{ path: 'loc.ts', line: 3 }],
-      ],
-    ];
-    it.each(cases)('normalizes %s', (raw, expected) => {
-      readFileSyncMock.mockReturnValue(raw as string);
-      expect(parseFindingsFile('/tmp/findings.json')).toEqual(expected);
-    });
-
-    it('accepts the report object `qwen review findings --out` writes', () => {
-      // The artifact is a REPORT, not an array — `{findings, counts,
-      // outcomesRecorded}` — so shape support that stopped at the entry would
-      // still refuse the file the skill actually produces. Built here through
-      // the command's own canonicaliser, so the pin is on the producer's
-      // output rather than on a hand-written guess at it.
-      const findings = validateFindings([
-        {
-          id: 'R3-1',
-          severity: 'Critical',
-          summary: 'a defect',
-          failureScenario: 'it fires once',
-          file: 'src/a.ts',
-          line: 42,
-        },
-        {
-          id: 'R3-2',
-          severity: 'Suggestion',
-          summary: 'the same pattern twice',
-          failureScenario: 'it fires at both sites',
-          locations: [
-            { file: 'src/b.ts', line: 7 },
-            { file: 'src/c.ts', line: 9 },
-          ],
-        },
-      ]);
-      readFileSyncMock.mockReturnValue(JSON.stringify(buildReport(findings)));
-      expect(parseFindingsFile('/tmp/findings.json')).toEqual([
-        { path: 'src/a.ts', line: 42, id: 'R3-1' },
-        { path: 'src/b.ts', line: 7, id: 'R3-2' },
-        { path: 'src/c.ts', line: 9, id: 'R3-2' },
-      ]);
-    });
-
-    it.each([
-      ['an empty locations array', '[{"locations":[]}]'],
-      ['locations that is not an array', '[{"locations":3}]'],
-      ['a location with no file', '[{"locations":[{"line":1}]}]'],
-      ['a location that is null', '[{"locations":[null]}]'],
-      ['an entry naming no location at all', '[{"severity":"Critical"}]'],
-    ])('still rejects the WHOLE file for %s', (_name, raw) => {
-      // The fail-safe the minimal form always had, unchanged: a
-      // shorter-than-real list would read as disjoint in the drift
-      // intersection and let the review submit past commits nobody read, so
-      // one unusable entry disqualifies the file.
-      readFileSyncMock.mockReturnValue(raw as string);
-      expect(parseFindingsFile('/tmp/findings.json')).toBeNull();
-    });
   });
 });
 

@@ -1710,24 +1710,20 @@ describe('bundled review skill', () => {
     expect(posting).not.toContain('occurs _anywhere_ in its body');
   });
 
-  it('tells the model the canonical artifact is accepted as --new-findings (#9218)', () => {
-    // Revert guard: the parser accepting the artifact shape and the example
-    // moving off `…-findings.json` are two halves of #9218; a skill text that
-    // still sends the model to hand-transcribe the anchor list keeps the
-    // transcription step alive, and writing that list over the artifact is
-    // exactly the collision the separate filename exists to prevent.
+  it('warns that --new-findings is not the canonical artifact (#9218)', () => {
+    // Revert guard: the artifact's `line` is the agent's claim and its `id`
+    // sits on every finding, so handing this flag the artifact makes the
+    // overlap dedup key on a line no comment was placed at — a duplicate then
+    // reads as disjoint. The step that writes the file has to say so, or the
+    // next run repeats #9218's mistake and only learns it from a downgrade.
     const posting = referenceBody('posting.md');
     expect(posting).toContain(
-      'is accepted as-is, so there is usually nothing to write',
+      '**Do not hand this flag the canonical findings artifact**',
     );
-    expect(posting).toContain(
-      'hand `--new-findings` the same `qwen-review-{target}-findings.json` Step 6 produced',
-    );
+    expect(posting).toContain("is the agent's claim");
+    expect(posting).toContain('write the list from the RESOLVED anchors');
     expect(posting).toContain(
       'must never be written over the canonical artifact',
-    );
-    expect(posting).not.toContain(
-      'This list is presubmit INPUT, not the canonical findings artifact',
     );
   });
 
