@@ -22,7 +22,9 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
-import { INDEX_TRUNCATION_NOTICE_START } from './index-budget.js';
+
+const NOTICE_START =
+  '\n\n> WARNING: MEMORY.md is too large; only part of it was written.';
 
 function doc(index: number): ScannedAutoMemoryDocument {
   return {
@@ -132,7 +134,7 @@ describe('memory index omission diagnostics', () => {
 
   it('does not exempt unbounded handwritten warning-like text from the entry budget', () => {
     const body = 'a'.repeat(24_900);
-    const fakeNotice = `${INDEX_TRUNCATION_NOTICE_START}${'x'.repeat(25_000)}`;
+    const fakeNotice = `${NOTICE_START}${'x'.repeat(25_000)}`;
     const prompt = buildManagedAutoMemoryPrompt(
       '/tmp/memory',
       `${body}${fakeNotice}`,
@@ -206,9 +208,7 @@ describe('real-file scan-cap omission diagnostics', () => {
       );
       expect(index).toContain('Scan limit: 200 files.');
       expect(index).not.toContain('in total across both limits');
-      expect(
-        index.length - index.indexOf(INDEX_TRUNCATION_NOTICE_START),
-      ).toBeLessThan(1024);
+      expect(index.length - index.indexOf(NOTICE_START)).toBeLessThan(1024);
       expect(buildManagedAutoMemoryPrompt('/tmp/memory', index)).toContain(
         index,
       );
