@@ -69,6 +69,12 @@ import java.util.regex.Pattern;
 public class ManagedSessionStore {
     private static final int STORAGE_VERSION = 1;
     private static final ObjectMapper CSI_JSON = new ObjectMapper();
+    private static final ObjectMapper CSI_TERMINAL_JSON = CSI_JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
+            .disable(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
+            .disable(com.fasterxml.jackson.databind.DeserializationFeature.ACCEPT_FLOAT_AS_INT);
     private static final int MAX_ID_BYTES = 512;
     private static final int MAX_TEXT_BYTES = 4096;
     // Hot paths touch the tenant-wide guard rows only on admission, and
@@ -579,7 +585,7 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
@@ -594,7 +600,7 @@ public class ManagedSessionStore {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -701,9 +707,9 @@ public class ManagedSessionStore {
         var continuation = lockCsiContinuation(tenantId, sessionId);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
-            csiOriginal.requireAdmission();
+            csiOriginal.requireContinuation();
         }
-        HeadRow head = requireHeartbeatHead(tenantId, sessionId);
+        HeadRow head = continuation == null ? requireHeartbeatHead(tenantId, sessionId) : requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         if (authority == null) {
             requireNoLifecycleClaim(tenantId, sessionId);
@@ -717,6 +723,7 @@ public class ManagedSessionStore {
                 writerToken, now, !cleanup);
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
+        requireCsiLease(continuation, epochMillis(head.writerLeaseUntil()), epochMillis(leaseUntil));
         jdbc.update(
                 "UPDATE ma_session_head SET writer_lease_until = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                 leaseUntil.getTime(),
@@ -795,7 +802,7 @@ public class ManagedSessionStore {
         var continuation = lockCsiContinuation(tenantId, sessionId);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
-            csiOriginal.requireAdmission();
+            csiOriginal.requireContinuation();
         }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
@@ -817,6 +824,7 @@ public class ManagedSessionStore {
                     "The Managed Session already has a different recovery"
                             + " block.");
         }
+        requireCsiWriterCurrent(continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update(
                 "UPDATE ma_session_head SET recovery_status = ?, recovery_detail_code = ?,"
                     + " gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
@@ -869,7 +877,7 @@ public class ManagedSessionStore {
         var continuation = lockCsiContinuation(tenantId, sessionId);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
-            csiOriginal.requireAdmission();
+            csiOriginal.requireContinuation();
         }
         HeadRow csiHead = csiOriginal == null ? null : requireHeadForUpdate(tenantId, sessionId);
         requireCsiWriter(csiOriginal, csiHead);
@@ -998,6 +1006,10 @@ public class ManagedSessionStore {
                         sessionId,
                         closureReader,
                         hostedReferences);
+                if ("hosted.cleanup".equals(event.path("kind").asText())) {
+                    HostedCleanupReferences.apply(jdbc, tenantId, request.workspaceId(), sessionId,
+                            event.path("payload"), reader, revision, now.getTime());
+                }
             }
         }
         boolean v2 = authority != null && jdbc.queryForObject(
@@ -1136,6 +1148,7 @@ public class ManagedSessionStore {
                         + " journal_revision = ?, committed_sequence = ?,"
                         + " wake_pending = wake_pending OR ?,"
                         + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
+                        + " cleanup_head_revision = CASE WHEN cleanup_head_revision = ? THEN ? ELSE cleanup_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
                         + " latest_checkpoint_resource_id = COALESCE(?,"
                         + " latest_checkpoint_resource_id),"
@@ -1147,7 +1160,7 @@ public class ManagedSessionStore {
                         + " AND session_id = ?",
                 revision, request.lastSequence(),
                 wakeInput,
-                head.journalRevision(), revision, request.commitDigest(),
+                head.journalRevision(), revision, head.journalRevision(), revision, request.commitDigest(),
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 activation == null ? head.activationId()
@@ -1357,7 +1370,16 @@ public class ManagedSessionStore {
                             if (original == null) {
                                 throw nativeReadConflict();
                             }
-                            original.requireAdmission();
+                            if (original.state() == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.DRAINING) {
+                                jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                                    JdbcCsiActivationAdmission.requireCheckpointContinuationRead(
+                                            org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection),
+                                            original, continuation.progress(), resourceId);
+                                    return null;
+                                });
+                            } else {
+                                original.requireAdmission();
+                            }
                             HeadRow head = requireHeadForUpdate(tenantId, sessionId);
                             requireHeadScope(head, tenantId, workspaceId, sessionId);
                             requireCsiWriter(original, head);
@@ -1388,7 +1410,7 @@ public class ManagedSessionStore {
                                             started,
                                             ToolPublicationRetentionStore.READ_BUDGET_MILLIS);
                             requireCsiLease(continuation, expires, expires);
-                            long readBindingVersion = original.version();
+                            long readBindingVersion = continuation.progress().sealedBindingVersion() == null ? original.version() : continuation.progress().sealedBindingVersion();
                             var evidence =
                                     CSI_JSON.createObjectNode()
                                             .put("read_id", id)
@@ -1779,7 +1801,7 @@ public class ManagedSessionStore {
         var continuation = lockCsiContinuation(tenantId, sessionId);
         var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
-            csiOriginal.requireAdmission();
+            csiOriginal.requireContinuation();
         }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
@@ -1901,6 +1923,130 @@ public class ManagedSessionStore {
                 now.getTime());
     }
 
+    record TerminalCandidate(CommitTransactionRequest request,
+            com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TerminalProof proof, String writerTokenSha256) {
+    }
+
+    void requireCsiApplicationCredential(java.sql.Connection target,
+            com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Authority authority,
+            String writerToken) throws SQLException {
+        authority.requireConnection(target);
+        if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(
+                org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(target), jdbc.getDataSource())) {
+            throw nativeReadConflict();
+        }
+        var scope = authority.original().request().getScope();
+        String session = authority.original().request().getIsolationKey();
+        requireCredential(scope.getTenantId(), scope.getWorkspaceId(), session, writerToken);
+        requireCsiJournalIsolation();
+        HeadRow head = requireHeadForUpdate(scope.getTenantId(), session);
+        requireHeadScope(head, scope.getTenantId(), scope.getWorkspaceId(), session);
+        requireCsiWriter(authority.original(), head);
+        if (!secureEquals(head.leaseTokenHash(), tokenHash(writerToken))) {
+            throw nativeReadConflict();
+        }
+    }
+
+    void requireCsiHistoricalCredential(String tenant, String workspace, String session, String token, String retainedHash) {
+        requireCredential(tenant, workspace, session, token);
+        String presented = tokenHash(token);
+        if (retainedHash == null || !retainedHash.matches("[0-9a-f]{64}") || !secureEquals(retainedHash, presented)) {
+            throw nativeReadConflict();
+        }
+    }
+
+    TerminalCandidate preflightCsiTerminal(java.sql.Connection target,
+            com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Authority authority,
+            String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
+        authority.requirePreCut(target);
+        if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(
+                org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(target), jdbc.getDataSource())
+                || bindings == null || !bindings.usesDataSource(jdbc.getDataSource())
+                || exactBody == null || exactBody.length == 0 || exactBody.length > 128 * 1024) {
+            throw nativeReadConflict();
+        }
+        var original = authority.original();
+        CommitTransactionRequest request = csiTerminalRequest(exactBody);
+        String tenant = original.request().getScope().getTenantId();
+        String session = original.request().getIsolationKey();
+        validateScope(tenant, request.workspaceId(), session);
+        requireCredential(tenant, request.workspaceId(), session, writerToken);
+        requireCsiJournalIsolation();
+        validateCommit(request);
+        HeadRow head = requireHeadForUpdate(tenant, session);
+        requireHeadScope(head, tenant, request.workspaceId(), session);
+        requireCsiWriter(original, head);
+        requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+        validateHead(head, request);
+        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, CSI_JSON.valueToTree(request), bindings);
+        return new TerminalCandidate(request, proof, head.leaseTokenHash());
+    }
+
+    String commitCsiTerminal(java.sql.Connection target,
+            com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Authority authority,
+            String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
+        authority.requireConnection(target);
+        if (authority.stage() != com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.FROZEN) {
+            throw nativeReadConflict();
+        }
+        var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationInventory.MAX_BYTES);
+        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), 128 * 1024);
+        if (!java.util.Arrays.equals(saved, exactBody)
+                || !com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(saved)
+                        .equals(frozen.path("preparedCommitSha256").textValue())) {
+            throw nativeReadConflict();
+        }
+        var candidate = preflightCsiTerminal(target, authority, writerToken, exactBody, bindings);
+        var request = candidate.request();
+        String tenant = authority.original().request().getScope().getTenantId();
+        String session = authority.original().request().getIsolationKey();
+        HeadRow head = requireHeadForUpdate(tenant, session);
+        var validated = validateCommit(request);
+        Timestamp now = databaseNow();
+        String writtenAt = now.toInstant().toString();
+        long revision = increment(head.journalRevision(), "journal revision");
+        Runnable fence = () -> {
+            try {
+                authority.requireCurrentTime(target);
+            } catch (SQLException error) {
+                throw new org.springframework.dao.DataAccessResourceFailureException("Original terminal time is unavailable", error);
+            }
+            requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+        };
+        commitResources(sessionScopeKey(tenant, session), tenant, session, request, revision, now, validated.resources(), fence);
+        fence.run();
+        persistTransaction(tenant, session, candidate.writerTokenSha256(), request, revision, validated, now);
+        fence.run();
+        int changed = jdbc.update("UPDATE ma_session_head SET state = 'SEALED',"
+                        + " journal_revision = ?, wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END, committed_sequence = ?, last_commit_digest = ?,"
+                        + " activation_phase = 'released', activation_head_revision = ?, gmt_modified = ?"
+                        + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'ACTIVE'"
+                        + " AND journal_revision = ? AND committed_sequence = ? AND last_commit_digest = ?",
+                revision, head.journalRevision(), revision, candidate.proof().terminalSequence(), request.commitDigest(), revision, now.getTime(),
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), tenant, session,
+                head.journalRevision(), head.committedSequence(), head.lastCommitDigest());
+        if (changed != 1) {
+            throw nativeReadConflict();
+        }
+        authority.requireCurrentTime(target);
+        return writtenAt;
+    }
+
+    private static CommitTransactionRequest csiTerminalRequest(byte[] bytes) {
+        WorkspaceCsiApplicationJson.object(bytes, 128 * 1024);
+        try {
+            return CSI_TERMINAL_JSON.readValue(bytes, CommitTransactionRequest.class);
+        } catch (IOException malformed) {
+            throw invalid("Invalid original terminal request.");
+        }
+    }
+
+    static CommitTransactionRequest validateCsiTerminalBytes(byte[] bytes) {
+        var request = csiTerminalRequest(bytes);
+        validateCommit(request);
+        return request;
+    }
+
     private void commitResources(String scopeKey, String tenantId,
             String sessionId, CommitTransactionRequest request,
             long revision, Timestamp now,
@@ -1969,7 +2115,7 @@ public class ManagedSessionStore {
         }
     }
 
-    private ValidatedCommit validateCommit(
+    private static ValidatedCommit validateCommit(
             CommitTransactionRequest request) {
         validateStableId(request.transactionId(), "transactionId");
         validateText(request.operation(), "operation", MAX_TEXT_BYTES);
@@ -2323,13 +2469,23 @@ public class ManagedSessionStore {
                             var original =
                                     JdbcCsiFilesRetirementGuard.lockManagedSession(
                                             target, tenantId, sessionId);
+                            if (original != null) {
+                                requireCsiJournalIsolation();
+                            }
                             return original == null
                                     ? null
                                     : new CsiContinuation(
                                             original,
                                             com.alibaba.qwen.code.runtimebroker
-                                                    .JdbcCsiReadyAdmission.lock(target, original));
+                                                    .JdbcCsiApplicationProgress.lock(target, original));
                         });
+    }
+
+    private void requireCsiJournalIsolation() {
+        if (journalEventTransport != null) {
+            throw conflict("csi_journal_transport_unsupported",
+                    "The private CSI lane requires an isolated journal without an event transport.");
+        }
     }
 
     private void requireCsiCurrentTime(CsiContinuation continuation) {
@@ -2390,7 +2546,7 @@ public class ManagedSessionStore {
 
     private record CsiContinuation(
             JdbcCsiFilesRetirementGuard.Original original,
-            com.alibaba.qwen.code.runtimebroker.JdbcCsiReadyAdmission.Admission progress) {}
+            com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationProgress.Continuation progress) {}
 
     private static void requireCsiWriter(
             JdbcCsiFilesRetirementGuard.Original original, HeadRow head) {

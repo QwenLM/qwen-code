@@ -14,6 +14,10 @@ import {
 import { HistoricalTranscriptPageTable } from '../daemon/session/transcript-page-table';
 import type { MessageListHandle, MessageListProps } from './MessageList';
 
+vi.mock('../hooks/useMessageDeletion', () => ({
+  useMessageDeletion: () => undefined,
+}));
+
 const observed = vi.hoisted(() => ({
   store: undefined as DaemonHistoryNavigationStore | undefined,
   props: undefined as MessageListProps | undefined,
