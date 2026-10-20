@@ -2,9 +2,9 @@
 
 [English](2026-10-19-automation-publication-fault-gates.md) | [简体中文](2026-10-19-automation-publication-fault-gates.zh-CN.md)
 
-Status: slice 1 is partially delivered. `drop-ack-after-write` runs green
-against the packaged stack; `fail-before-write` and `timeout` are scoped here
-but not implemented, and slice 2 (publisher death) is untouched.
+Status: slice 1 is delivered. All three in-process arms — `fail-before-write`,
+`drop-ack-after-write` and `timeout` — run green against the packaged stack.
+Slice 2 (publisher death) is scoped here and untouched.
 
 Issue: #14446, the FG11 tracker. The tracker's gate table names FG11f as one
 of the two slices the round owes. FG11c is delivered; this is the remainder.
