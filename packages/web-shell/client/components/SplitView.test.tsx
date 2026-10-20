@@ -1809,6 +1809,21 @@ describe('SplitView', () => {
       setOtherWorkspace({ sessions: {}, queriedCwds: [], notReadyCwds: [] });
       await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
       expect(onPanesChange).toHaveBeenLastCalledWith(['s1', 'b1']);
+      // The parent acks the prune by re-seeding the pane set without s2.
+      act(() => {
+        root!.render(
+          <I18nProvider language="en">
+            <SplitView
+              sessionIds={['s1', 'b1']}
+              onPanesChange={onPanesChange}
+              onExit={() => {}}
+            />
+          </I18nProvider>,
+        );
+      });
+      await flushAsync();
+      // b1's pane — title and session details — survives from the last-seen
+      // summary even though its workspace is no longer advertised.
       expect(titles()).toEqual(['One', 'Beta']);
       expect(sessionDetails()).toEqual(['s1', 'b1']);
     });
@@ -1896,16 +1911,31 @@ describe('SplitView', () => {
     });
 
     it('does not prune a fan-out pane whose page never landed', async () => {
-      // A page that never landed (whatever the reason) is not proof of
-      // absence: the pane is kept until the workspace can answer.
+      // A page that never (re-)landed is not proof of absence: a pane whose
+      // workspace is known but can't answer is kept, not pruned.
       connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+      setOtherWorkspace({
+        sessions: {
+          '/wsB': [
+            { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+          ],
+        },
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
       const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 'b1'], onPanesChange });
+      await flushAsync();
+      expect(panes()).toHaveLength(2);
+      // /wsB goes not-ready and its page never lands again: b1 leaves the
+      // merged list, but its workspace can't prove anything, so the pane
+      // stays. (b1's cwd is known from the list — a cold-mount pane with an
+      // unknown cwd would instead become a probe candidate.)
       setOtherWorkspace({
         sessions: {},
         queriedCwds: ['/wsB'],
         notReadyCwds: ['/wsB'],
       });
-      render({ sessionIds: ['s1', 'b1'], onPanesChange });
       await flushAsync();
       expect(onPanesChange).not.toHaveBeenCalled();
       expect(panes()).toHaveLength(2);

@@ -187,15 +187,18 @@ describe('useScopedSessions', () => {
   });
 
   it('forwards the page-completeness markers from the scoped page', async () => {
+    // A fresh cwd: the catalog store is shared across this file's tests, and
+    // reusing /secondary would serve its cached page (no markers) instead of
+    // fetching.
     listWorkspaceSessionsPage.mockResolvedValue({
       sessions: [
-        { sessionId: 'secondary', workspaceCwd: '/secondary' },
+        { sessionId: 'secondary', workspaceCwd: '/markers' },
       ] satisfies DaemonSessionSummary[],
       nextCursor: 'cursor-2',
       truncated: true,
       liveMergeFailed: true,
     });
-    render('/secondary');
+    render('/markers');
     await act(async () => {
       await listWorkspaceSessionsPage.mock.results[0]?.value;
     });
@@ -217,13 +220,15 @@ describe('useScopedSessions', () => {
       if (calls === 1) {
         return {
           sessions: [
-            { sessionId: 'secondary', workspaceCwd: '/secondary' },
+            { sessionId: 'secondary', workspaceCwd: '/stale-refresh' },
           ] satisfies DaemonSessionSummary[],
         };
       }
       throw new Error('refresh failed');
     });
-    render('/secondary');
+    // A fresh cwd: reusing a cached entry would skip the initial fetch (the
+    // reload would then be call #1, i.e. the successful one).
+    render('/stale-refresh');
     await act(async () => {
       await listWorkspaceSessionsPage.mock.results[0]?.value;
     });
