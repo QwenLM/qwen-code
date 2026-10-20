@@ -1016,6 +1016,7 @@ export interface ConfirmationRequest {
 }
 
 export interface LoopDetectionConfirmationRequest {
+  cause?: string;
   onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
 }
 

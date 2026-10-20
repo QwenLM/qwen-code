@@ -4364,6 +4364,41 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('prefers the cause label for a loop stop and falls back without one', () => {
+    const loopError = (loop?: { loopType: string; loopReason?: string }) => ({
+      id: 'err-loop',
+      kind: 'error' as const,
+      source: 'turn_error' as const,
+      errorKind: 'loop_detected' as const,
+      text: 'internal fallback',
+      ...(loop ? { loop } : {}),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const labels = {
+      loopDetected: 'Generic loop guidance.',
+      loopDetectedFor: (loop: { loopType?: string; loopReason?: string }) =>
+        loop.loopReason ? `Cause: ${loop.loopReason}` : undefined,
+    };
+
+    const [withCause] = transcriptBlocksToDaemonMessages(
+      [loopError({ loopType: 'turn_tool_call_cap', loopReason: 'backstop' })],
+      { labels },
+    );
+    const [unknownCause] = transcriptBlocksToDaemonMessages(
+      [loopError({ loopType: 'turn_tool_call_cap' })],
+      { labels },
+    );
+    const [noLoop] = transcriptBlocksToDaemonMessages([loopError()], {
+      labels,
+    });
+
+    expect(withCause.content).toBe('Cause: backstop');
+    expect(unknownCause.content).toBe('Generic loop guidance.');
+    expect(noLoop.content).toBe('Generic loop guidance.');
+  });
+
   it('renders model stream interruption errors from structured errorKind labels', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [

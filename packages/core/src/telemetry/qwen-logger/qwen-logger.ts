@@ -872,6 +872,15 @@ export class QwenLogger {
       properties: {
         prompt_id: event.prompt_id,
         error_type: event.loop_type,
+        ...(event.loop_reason !== undefined
+          ? { loop_reason: event.loop_reason }
+          : {}),
+        ...(event.tool_call_count !== undefined
+          ? { tool_call_count: event.tool_call_count }
+          : {}),
+        ...(event.tool_call_limit !== undefined
+          ? { tool_call_limit: event.tool_call_limit }
+          : {}),
       },
     });
 

@@ -39,5 +39,32 @@ describe('LoopDetectionConfirmation', () => {
     expect(output).toContain('model.maxToolCallsPerTurn');
     expect(output).toContain('suppresses everything');
     expect(output).toContain('settings.json');
+    expect(output).not.toContain('Cause:');
+  });
+
+  it('shows the cause of the stop when it is known', () => {
+    const { lastFrame } = renderWithProviders(
+      <LoopDetectionConfirmation
+        cause="the provider replayed a tool call id that had already run"
+        onComplete={onComplete}
+      />,
+    );
+    const output = lastFrame()!.toString();
+
+    expect(output).toContain('Cause: the provider replayed a tool call id');
+    expect(output).toContain('A potential loop was detected');
+  });
+
+  it('quotes setting names in the cause like the note does', () => {
+    const { lastFrame } = renderWithProviders(
+      <LoopDetectionConfirmation
+        cause="the turn reached the limit set by `model.maxToolCallsPerTurn` (3)"
+        onComplete={onComplete}
+      />,
+    );
+    const output = lastFrame()!.toString();
+
+    expect(output).toContain('"model.maxToolCallsPerTurn" (3).');
+    expect(output).not.toContain('`');
   });
 });

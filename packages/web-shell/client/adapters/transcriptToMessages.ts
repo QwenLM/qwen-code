@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
+  DaemonLoopStop,
   QwenAgentMessageMeta,
   DaemonTranscriptBlock,
   DaemonTextTranscriptBlock,
@@ -65,6 +66,8 @@ interface TranscriptMessageLabels {
   branchSuccess?: (name: string) => string;
   modelStreamInterrupted?: string;
   loopDetected?: string;
+  /** Text for a loop stop whose cause is known; undefined falls back. */
+  loopDetectedFor?: (loop: DaemonLoopStop) => string | undefined;
 }
 
 interface TranscriptMessageOptions {
@@ -264,7 +267,11 @@ function getErrorDisplayText(
   labels?: TranscriptMessageLabels,
 ): string {
   if (block.errorKind === 'loop_detected') {
-    return labels?.loopDetected ?? block.text;
+    return (
+      (block.loop ? labels?.loopDetectedFor?.(block.loop) : undefined) ??
+      labels?.loopDetected ??
+      block.text
+    );
   }
   if (
     block.errorKind === 'model_stream_interrupted' ||

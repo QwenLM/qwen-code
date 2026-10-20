@@ -37,6 +37,8 @@ import {
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   goalPauseReasonForFailure,
   LlmEventType as ServerLlmEventType,
+  LoopReason,
+  LoopType,
   MessageSenderType,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   SendMessageType,
@@ -9335,6 +9337,10 @@ describe('useLlmStream', () => {
       'Duplicate provider tool call id "tool-history"',
     );
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+    // The breaker stops through the loop dialog, which names the replay.
+    expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
+      'the provider replayed a tool call id that had already run',
+    );
   });
 
   it('does not deduplicate tool calls without provider ids in the TUI stream', async () => {
@@ -20137,6 +20143,57 @@ describe('useLlmStream', () => {
         {
           type: 'info',
           text: 'A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('names the cause of the stop in the dialog and the message after "keep"', async () => {
+      const mockLoopDetectionService = {
+        disableForSession: vi.fn(),
+      };
+      const mockClient = {
+        ...new MockedLlmClientClass(mockConfig),
+        getLoopDetectionService: () => mockLoopDetectionService,
+      };
+      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.LoopDetected,
+            value: {
+              loopType: LoopType.TURN_TOOL_CALL_CAP,
+              loopReason: LoopReason.EXPLICIT_CAP,
+              toolCallCount: 4,
+              toolCallLimit: 3,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test query');
+      });
+
+      await waitFor(() => {
+        expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
+          'the turn reached the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+        );
+      });
+
+      await act(async () => {
+        result.current.loopDetectionConfirmationRequest?.onComplete({
+          userSelection: 'keep',
+        });
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: 'info',
+          text: 'Loop detection halted the run (turn_tool_call_cap: the turn reached the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)). Raise `model.maxToolCallsPerTurn`, or set it to 0 to disable the cap.',
         },
         expect.any(Number),
       );

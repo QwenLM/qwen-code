@@ -2549,6 +2549,96 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('keeps the loop detector and its reason on loop-detected turn errors', () => {
+    const turnError = {
+      id: 48,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'Tool-call loop protection stopped this turn.',
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
+        promptId: 'prompt-1',
+      },
+    } as const;
+    const loop = {
+      loopType: 'turn_tool_call_cap',
+      loopReason: 'explicit_cap',
+      toolCallCount: 4,
+      toolCallLimit: 3,
+    };
+
+    expect(normalizeDaemonEvent(turnError)).toMatchObject([
+      { type: 'error', errorKind: 'loop_detected', loop },
+    ]);
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100 }),
+      normalizeDaemonEvent(turnError),
+      { now: 101 },
+    );
+    expect(state.blocks).toMatchObject([
+      { kind: 'error', errorKind: 'loop_detected', loop },
+    ]);
+  });
+
+  it('keeps a loop type without numbers and drops malformed ones', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 49,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stopped',
+        errorKind: 'loop_detected',
+        loopType: 'invalid_tool_params_stagnation',
+        toolCallCount: 'many',
+      },
+    });
+
+    expect(event).toMatchObject({
+      loop: { loopType: 'invalid_tool_params_stagnation' },
+    });
+    expect(
+      event && 'loop' in event ? event.loop : undefined,
+    ).not.toHaveProperty('toolCallCount');
+  });
+
+  it('adds no loop detail to turn errors that name no detector', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 50,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stopped',
+        errorKind: 'loop_detected',
+      },
+    });
+
+    expect(event).not.toHaveProperty('loop');
+  });
+
+  it('adds no loop detail to turn errors of another kind', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 51,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stream ended',
+        errorKind: 'model_stream_interrupted',
+        loopType: 'turn_tool_call_cap',
+      },
+    });
+
+    expect(event).not.toHaveProperty('loop');
+  });
+
   it('keeps older daemon terminated turn error text unchanged', () => {
     expect(
       normalizeDaemonEvent({

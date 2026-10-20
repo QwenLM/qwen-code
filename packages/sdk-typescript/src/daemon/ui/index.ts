@@ -77,6 +77,7 @@ export {
 } from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
+  DaemonLoopStop,
   DaemonShellTranscriptBlock,
   DaemonTranscriptTimingMeta,
   DaemonUserShellTranscriptBlock,
