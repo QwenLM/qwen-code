@@ -575,7 +575,9 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       // costing the turn; resuming at or before `matchStart` would spin the
       // `/g` scan, so fall back to the match end.
       TOOL_CALL_PATTERN.lastIndex =
-        openTagEndOffset === -1 ? match.index + match[0].length : paramsStart;
+        openTagEndOffset === -1
+          ? match.index + match[0].length
+          : match.index + openTagEndOffset;
       continue;
     }
     // A value the block quotes a call in owns the flat close that landed

@@ -1506,6 +1506,24 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     });
   });
 
+  it('does not rescan a rejected block whose parameter never closes', () => {
+    // The resume point has to be past the open tag the cross-check derived:
+    // the flat boundary lands inside the body, and rescanning from there
+    // matches a nested call this block never accepted. The nested call escapes
+    // the value-span skip because its enclosing parameter never closes.
+    const text =
+      `${OPEN} name='weird">\n` +
+      `${PARAM_OPEN} name="p">it's` +
+      invoke('rm', param('cmd', 'rm -rf /tmp/x')) +
+      '\n\n';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
   it('rejects only the truncated block before a quoted-value advance', () => {
     // The boundary cross-check reads nothing the advance produces, so it must
     // run first: a block whose boundary is untrustworthy is rejected locally
