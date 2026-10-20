@@ -7624,7 +7624,6 @@ export class HostedWorkspaceToolTurn {
     let asked = false;
     for (const [index, request] of requests.entries()) {
       if (index < nextOrdinal) continue;
-      const settings = await this.readApprovalSettings();
       if (
         refusals[index] ||
         (request.call.name === 'skill' && this.skills !== undefined) ||
@@ -7635,7 +7634,11 @@ export class HostedWorkspaceToolTurn {
             request.call.name === 'exit_plan_mode'
           ) &&
           (this.hookAllowed.has(request.call.callId) ||
-            !hostedApprovalAsks(settings, request.call.name, globProfile)))
+            !hostedApprovalAsks(
+              await this.readApprovalSettings(),
+              request.call.name,
+              globProfile,
+            )))
       )
         continue;
       asked = true;
