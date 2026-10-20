@@ -105,6 +105,22 @@ describe('execution tool facade', () => {
     expect(prepare).toHaveBeenCalledTimes(2);
   });
 
+  it("prepares with the scheduler's call id the invocation carries", async () => {
+    const file = await writeWorkspaceFile('call-id.txt', 'content\n');
+    const prepare = vi.spyOn(environment, 'prepare');
+    const invocation = wrap().build({ file_path: file }) as ReturnType<
+      ReturnType<typeof wrap>['build']
+    > & { setCallId(id: string): void };
+    invocation.setCallId('model-call-1');
+    await invocation.execute(signal);
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls[0]![0]).toMatchObject({
+      callId: 'model-call-1',
+    });
+    // The environment-facing id stays the invocation's own.
+    expect(prepare.mock.calls[0]![0].id).not.toBe('model-call-1');
+  });
+
   it('prepares once when the parameters did not change', async () => {
     const file = await writeWorkspaceFile('same.txt', 'same\n');
     const prepare = vi.spyOn(environment, 'prepare');
@@ -397,6 +413,46 @@ describe('execution tool facade', () => {
       persistedOutputFiles: [],
       resultFilePaths: [],
     });
+  });
+
+  it.each([
+    ['a declared size', { chars: 120_000, estimatedTokens: 30_000 }],
+    ['an explicit unknown', null],
+  ])(
+    'carries %s through the wrapper unchanged',
+    async (_title, rawOutputSize) => {
+      const file = await writeWorkspaceFile('file.txt', 'content');
+      vi.spyOn(environment, 'execute').mockResolvedValueOnce({
+        llmContent: 'bounded body',
+        returnDisplay: 'bounded body',
+        outputBudgetApplied: true,
+        rawOutputSize,
+      });
+
+      const result = await run(wrap(), file);
+
+      // Byte-for-byte, including `null`: the wrapper must not coalesce the
+      // producer's declared pre-reduction size (#13652 R4-4).
+      expect(result.rawOutputSize).toEqual(rawOutputSize);
+    },
+  );
+
+  it('carries a producer-declared truncation bit through the wrapper', async () => {
+    const file = await writeWorkspaceFile('file.txt', 'content');
+    vi.spyOn(environment, 'execute').mockResolvedValueOnce({
+      llmContent: 'bounded body',
+      returnDisplay: 'bounded body',
+      outputBudgetApplied: true,
+      rawOutputSize: null,
+      truncatedByProducer: true,
+    });
+
+    const result = await run(wrap(), file);
+
+    // The SSH environment bounds its own body; dropping this bit at the facade
+    // is what losing the truncation fact looked like (#14742).
+    expect(result.rawOutputSize).toBeNull();
+    expect(result.truncatedByProducer).toBe(true);
   });
 
   it.each([false, true])(

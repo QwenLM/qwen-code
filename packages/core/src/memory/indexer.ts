@@ -30,10 +30,13 @@ import {
 } from './scan.js';
 import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
+import {
+  INDEX_TRUNCATION_NOTICE,
+  MAX_INDEX_LINE_CHARS,
+  MAX_INDEX_LINES,
+  trimIndexToBudget,
+} from './index-budget.js';
 
-const MAX_INDEX_LINE_CHARS = 150;
-const MAX_INDEX_LINES = 200;
-const MAX_INDEX_BYTES = 25_000;
 const MAX_INDEX_FIELD_CHARS = 120;
 // The description is the only optional part of an entry, so it absorbs all the
 // shortening. A hook that would have to be CUT below this length is not worth
@@ -111,7 +114,7 @@ function sanitizeIndexField(value: string): string {
 const PATH_TARGET_SAFE = /[A-Za-z0-9._~-]/;
 // Printable non-ASCII also stays RAW: a Markdown destination accepts it, and
 // encoding it would expand one CJK char to nine — a few ordinary non-ASCII
-// paths would then spend the whole `MAX_INDEX_BYTES` budget and evict every
+// paths would then spend the whole index budget and evict every
 // other entry. Still encoded: whitespace (a destination may not contain any,
 // and `\s` covers the non-ASCII spaces a filename may legally hold), C0/C1
 // controls, ASCII punctuation, EVERY invisible format character — the
@@ -150,7 +153,7 @@ const utf8Encoder = new TextEncoder();
  * stays a usable path.
  * The path is deliberately NOT shortened: a truncated target points at a file
  * that does not exist, and a dead link costs more than a long line. Overall
- * index size stays bounded by `MAX_INDEX_BYTES` in {@link assembleIndex}.
+ * index size stays bounded by the character budget in {@link assembleIndex}.
  */
 function encodeIndexPathTarget(value: string): string {
   let out = '';
@@ -217,43 +220,19 @@ function docIndexLine(
 
 /**
  * Assemble pre-built index lines into the final MEMORY.md body, enforcing the
- * line-count and byte-size caps and appending a truncation warning when either
+ * line-count and character caps and appending a truncation warning when either
  * trips. Each entry is exactly one line (descriptions are single-line).
  */
 function assembleIndex(lines: string[]): string {
   const raw = lines.join('\n');
   const wasLineTruncated = lines.length > MAX_INDEX_LINES;
-  let truncated = wasLineTruncated
-    ? lines.slice(0, MAX_INDEX_LINES).join('\n')
-    : raw;
-
-  if (truncated.length > MAX_INDEX_BYTES) {
-    // Reserve space for entries within the normal line budget before letting
-    // long links use the remainder. Keep the original output order.
-    const entries = truncated.split('\n');
-    const kept = new Set<number>();
-    let size = 0;
-    for (const limit of [MAX_INDEX_LINE_CHARS, MAX_INDEX_BYTES]) {
-      for (const [index, line] of entries.entries()) {
-        if (kept.has(index) || line.length > limit) {
-          continue;
-        }
-        const next = size + (kept.size > 0 ? 1 : 0) + line.length;
-        if (next > MAX_INDEX_BYTES) {
-          continue;
-        }
-        size = next;
-        kept.add(index);
-      }
-    }
-    truncated = entries.filter((_, index) => kept.has(index)).join('\n');
-  }
+  const truncated = trimIndexToBudget(lines);
 
   if (!wasLineTruncated && truncated.length === raw.length) {
     return truncated;
   }
 
-  return `${truncated}\n\n> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.`;
+  return `${truncated}${INDEX_TRUNCATION_NOTICE}`;
 }
 
 export function buildManagedAutoMemoryIndex(

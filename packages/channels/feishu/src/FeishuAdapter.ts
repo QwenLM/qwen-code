@@ -10,6 +10,7 @@ import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
+  sanitizeLogText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
 import {
@@ -2752,24 +2753,50 @@ export class FeishuChannel extends ChannelBase {
                 );
                 if (media) {
                   const dir = join(tmpdir(), 'channel-files', randomUUID());
-                  mkdirSync(dir, { recursive: true });
-                  const rawName = basename(content.fileName).replace(/\0/g, '');
-                  const safeName =
-                    rawName.replace(/[^\w.-]/g, '_').replace(/^\.+/, '_') ||
-                    `feishu_file_${Date.now()}`;
-                  const filePath = join(dir, safeName);
-                  writeFileSync(filePath, media.buffer);
-                  downloadedFileDir = dir;
+                  try {
+                    mkdirSync(dir, { recursive: true, mode: 0o700 });
+                    const rawName = basename(content.fileName).replace(
+                      /\0/g,
+                      '',
+                    );
+                    const safeName =
+                      rawName.replace(/[^\w.-]/g, '_').replace(/^\.+/, '_') ||
+                      `feishu_file_${Date.now()}`;
+                    const filePath = join(dir, safeName);
+                    writeFileSync(filePath, media.buffer, { mode: 0o600 });
+                    downloadedFileDir = dir;
 
-                  envelope.attachments = [
-                    ...(envelope.attachments || []),
-                    {
-                      type: 'file',
-                      filePath,
-                      mimeType: media.mimeType,
-                      fileName: safeName,
-                    },
-                  ];
+                    envelope.attachments = [
+                      ...(envelope.attachments || []),
+                      {
+                        type: 'file',
+                        filePath,
+                        mimeType: media.mimeType,
+                        fileName: safeName,
+                      },
+                    ];
+                  } catch (error) {
+                    try {
+                      rmSync(dir, { recursive: true, force: true });
+                    } catch {
+                      downloadedFileDir = dir;
+                    }
+                    process.stderr.write(
+                      `[Feishu:${this.name}] Cannot store file, delivering the text without it: ${sanitizeLogText(
+                        error instanceof Error ? error.message : String(error),
+                        300,
+                      )}\n`,
+                    );
+                    if (
+                      envelope.syntheticText &&
+                      (envelope.attachments?.length ?? 0) === 0
+                    ) {
+                      // Keep any quoted context prepended to the placeholder.
+                      envelope.text =
+                        envelope.text.slice(0, -cleanText.length) +
+                        '(User sent media but download failed)';
+                    }
+                  }
                 }
               }
             }
@@ -2780,10 +2807,10 @@ export class FeishuChannel extends ChannelBase {
               if (downloadedFileDir) {
                 try {
                   rmSync(downloadedFileDir, { recursive: true, force: true });
+                  downloadedFileDir = undefined;
                 } catch {
                   /* best-effort cleanup */
                 }
-                downloadedFileDir = undefined;
               }
               return false;
             }

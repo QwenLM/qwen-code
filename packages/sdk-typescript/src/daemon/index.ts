@@ -295,6 +295,8 @@ export type {
   DaemonSettingsReloadedEvent,
   DaemonSettingsChangedData,
   DaemonSettingsChangedEvent,
+  DaemonSessionMessagesDeletedData,
+  DaemonSessionMessagesDeletedEvent,
   DaemonSessionRewoundData,
   DaemonSessionRewoundEvent,
   DaemonSessionBranchedData,
@@ -465,6 +467,8 @@ export type {
   DaemonChannelManagementOptions,
   DaemonChannelWorkerGroupSnapshot,
   DaemonChannelWorkerSnapshot,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
@@ -473,6 +477,7 @@ export type {
   DaemonMidTurnMessageSummary,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -490,6 +495,7 @@ export type {
   DaemonSkillToggleMutation,
   DaemonSkillToggleMutationSkill,
   DaemonSkillToggleResult,
+  DaemonSkillRefreshResult,
   DaemonSkillScope,
   DaemonSkillInstallSource,
   DaemonSkillInstallRequest,
@@ -896,3 +902,47 @@ export type { DaemonBackgroundTurn } from './types.js';
 
 export { isShellResultDisplay } from './shellResult.js';
 export type { ShellResultDisplay } from './shellResult.js';
+
+export {
+  QWEN_AGENT_MESSAGE_META_KEY,
+  parseQwenAgentMessageMeta,
+} from './session-agents.js';
+export type {
+  QwenAgentMessageMeta,
+  SessionAgentAuthor,
+  SessionAgentChangedFrame,
+  SessionAgentEventFrame,
+  SessionAgentPermissionPrompt,
+  SessionAgentProgram,
+  SessionAgentRunFrame,
+  SessionAgentRunStatus,
+  SessionAgentStep,
+  SessionAgentTerminalStatus,
+  SessionSquad,
+  SessionSquadLeaderIssue,
+  SessionSquadMember,
+  SessionSquadOutcome,
+  SessionSquadView,
+} from './session-agents.js';
+
+export {
+  createExecutionLifecycleState,
+  extractExecutionLifecycle,
+  reduceExecutionLifecycle,
+} from './ui/execution-lifecycle.js';
+export type {
+  DaemonExecutionLifecycle,
+  ExecutionLifecycleEntry,
+  ExecutionLifecycleState,
+} from './ui/execution-lifecycle.js';
+
+export {
+  createToolLifecycleState,
+  extractToolLifecycle,
+  reduceToolLifecycle,
+} from './ui/tool-lifecycle.js';
+export type {
+  DaemonToolLifecycle,
+  ToolLifecycleEntry,
+  ToolLifecycleState,
+} from './ui/tool-lifecycle.js';

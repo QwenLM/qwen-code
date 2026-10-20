@@ -423,7 +423,6 @@ function mediaBlockParseError(
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
-  'POST /session/:id/side-task',
   'POST /session/:id/fork',
 ] as const;
 type PrimaryOnlyLiveSessionRoute =
@@ -796,9 +795,9 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
-  // Agent sessions are created by the dispatcher in-process, never through
-  // this route. Accepting the source here would let a client relabel a
-  // session it restores so the dispatcher sends a real run into it.
+  // Agent sessions are created by the session-agents orchestrator
+  // in-process, never through this route. Accepting the source here would let
+  // a client relabel a session it restores so a real run is sent into it.
   if (
     body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE ||
     body['sourceType'] === AGENT_SESSION_SOURCE_TYPE
@@ -842,10 +841,16 @@ function parseRequestedSessionSource(
   return source;
 }
 
+export type ResolveSubagentSessionRuntime = (
+  res: Response,
+  route: string,
+  parentSessionId: string,
+) => Promise<WorkspaceRuntime | undefined>;
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
-): void {
+): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -1896,6 +1901,19 @@ export function registerSessionRoutes(
     });
   };
 
+  const sendStandaloneActionUnsupported = (
+    res: Response,
+    route: string,
+    sessionId: string,
+  ): void => {
+    res.status(400).json({
+      error: 'This action is not supported in a standalone session.',
+      code: 'unsupported_action',
+      sessionId,
+      route,
+    });
+  };
+
   const isStandaloneOwner = (
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1950,6 +1968,7 @@ export function registerSessionRoutes(
       options: {
         cwdBound?: 'always' | 'rewind-files' | 'sync-output-language';
         promptAdmission?: boolean;
+        rejectStandalone?: boolean;
       } = {},
     ): RequestHandler =>
     async (req, res) => {
@@ -1959,6 +1978,10 @@ export function registerSessionRoutes(
         const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
         if (!owner) return;
         const { runtime, standalone } = owner;
+        if (options.rejectStandalone && standalone) {
+          sendStandaloneActionUnsupported(res, route, sessionId);
+          return;
+        }
         const cwdBound =
           options.cwdBound === 'always' ||
           (options.cwdBound === 'rewind-files' &&
@@ -2326,6 +2349,44 @@ export function registerSessionRoutes(
     return throwMissingActiveTranscript();
   };
 
+  const resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime = async (
+    res,
+    route,
+    parentSessionId,
+  ) => {
+    const owner = workspaceRegistry.resolveLiveSessionOwner(parentSessionId);
+    if (owner.kind !== 'not_found') {
+      return requireSessionRuntime({
+        sessionId: parentSessionId,
+        route,
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+    }
+    try {
+      return await resolveTranscriptSessionRuntime(
+        res,
+        route,
+        parentSessionId,
+        false,
+      );
+    } catch (error) {
+      if (
+        error instanceof SessionNotFoundError &&
+        error.code === 'session_not_found' &&
+        (workspaceRegistry.primaryEntry.state !== 'active' ||
+          !workspaceRegistry.primaryEntry.current)
+      ) {
+        logSessionRoutingFailure(route, 'workspace_runtime_unavailable', {
+          sessionId: parentSessionId,
+        });
+        return requirePrimarySessionRuntime(workspaceRegistry, res);
+      }
+      throw error;
+    }
+  };
+
   const resolveSessionAnyStateRuntime = async (
     res: Response,
     route: string,
@@ -2612,6 +2673,20 @@ export function registerSessionRoutes(
     return undefined;
   };
 
+  const parseRequireIdle = (
+    req: Request,
+    res: Response,
+  ): boolean | undefined => {
+    const value: unknown = safeBody(req)['requireIdle'];
+    if (value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    res.status(400).json({
+      error: '`requireIdle` must be a boolean',
+      code: 'invalid_request',
+    });
+    return undefined;
+  };
+
   // Mirrors the bridge's displayName control-character rule (ESLint forbids
   // control-char regexes).
   const hasControlCharacter = (value: string): boolean =>
@@ -2762,6 +2837,7 @@ export function registerSessionRoutes(
     route: string,
     sessionIds: string[],
     resolveConflicts = false,
+    requireIdle = false,
   ) => {
     const run = async (
       runtime: WorkspaceRuntime,
@@ -2784,6 +2860,7 @@ export function registerSessionRoutes(
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
               resolveConflicts,
+              requireIdle,
               assertCanMutate,
             }),
           ),
@@ -2853,12 +2930,7 @@ export function registerSessionRoutes(
         if (!owner) return;
         const { runtime, standalone } = owner;
         if (options.rejectStandalone && standalone) {
-          res.status(400).json({
-            error: 'This action is not supported in a standalone session.',
-            code: 'unsupported_action',
-            sessionId,
-            route,
-          });
+          sendStandaloneActionUnsupported(res, route, sessionId);
           return;
         }
         if (
@@ -3782,17 +3854,15 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const runtime = requireSessionRuntime({
-          sessionId: virtualKey.parentSessionId,
-          route,
-          res,
-          workspaceRegistry,
-          daemonLog,
-        });
-        if (!runtime) return;
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         try {
+          const runtime = await resolveSubagentSessionRuntime(
+            res,
+            route,
+            virtualKey.parentSessionId,
+          );
+          if (!runtime) return;
           const session = await runOwnerRuntimeActivity(runtime, () =>
             virtualSubagentSessions.load(runtime, sessionId, clientId),
           );
@@ -5394,15 +5464,13 @@ export function registerSessionRoutes(
       });
       return;
     }
-    const runtime = requireSessionRuntime({
-      sessionId,
-      route,
-      res,
-      workspaceRegistry,
-      daemonLog,
-    });
-    if (!runtime) return;
     try {
+      const runtime = await resolveSubagentSessionRuntime(
+        res,
+        route,
+        sessionId,
+      );
+      if (!runtime) return;
       await runOwnerRuntimeActivity(runtime, async () => {
         const resolved = await virtualSubagentSessions.resolve(
           runtime,
@@ -5997,7 +6065,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/side-task',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/side-task',
       async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
@@ -6857,15 +6925,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/context',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/context',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -6929,15 +6995,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/supported-commands',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/supported-commands',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -7528,6 +7592,9 @@ export function registerSessionRoutes(
         const promptId = crypto.randomUUID();
         const result = await runtime.bridge.continueSession(sessionId, {
           ...(clientId !== undefined ? { clientId } : {}),
+          ...(typeof req.body?.confirmCancellation === 'string'
+            ? { confirmCancellation: req.body.confirmCancellation }
+            : {}),
           promptId,
         });
         if (daemonLog && result.accepted) {
@@ -8236,17 +8303,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/heartbeat',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/heartbeat',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             sessionId,
@@ -8287,17 +8352,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/detach',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/detach',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(204).end();
         });
@@ -8365,6 +8428,7 @@ export function registerSessionRoutes(
             runtime.bridge.closeSession(
               sessionId,
               clientId !== undefined ? { clientId } : undefined,
+              { cancelReason: 'user' },
             ),
           ),
         ),
@@ -8413,6 +8477,8 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
     const resolveConflicts = parseResolveConflicts(req, res);
     if (resolveConflicts === undefined) return;
+    const requireIdle = parseRequireIdle(req, res);
+    if (requireIdle === undefined) return;
     if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     try {
@@ -8422,6 +8488,7 @@ export function registerSessionRoutes(
         'POST /sessions/archive',
         uniqueIds,
         resolveConflicts,
+        requireIdle,
       );
       if (!operation) return;
       const { result } = operation;
@@ -8503,6 +8570,8 @@ export function registerSessionRoutes(
       if (uniqueIds === undefined) return;
       const resolveConflicts = parseResolveConflicts(req, res);
       if (resolveConflicts === undefined) return;
+      const requireIdle = parseRequireIdle(req, res);
+      if (requireIdle === undefined) return;
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const operation = await archiveSessions(
@@ -8511,6 +8580,7 @@ export function registerSessionRoutes(
           route,
           uniqueIds,
           resolveConflicts,
+          requireIdle,
         );
         if (!operation) return;
         const { result } = operation;
@@ -9981,6 +10051,26 @@ export function registerSessionRoutes(
     ),
   );
 
+  // Deliver the queued mid-turn messages now: the agent cuts a streaming
+  // model response short instead of waiting for its next tool boundary,
+  // unless that response has started a tool call.
+  app.post(
+    '/session/:id/mid-turn-messages/send-now',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/mid-turn-messages/send-now',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.sendMidTurnMessagesNow(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
   app.delete(
     '/session/:id/mid-turn-messages/:messageId',
     mutate(),
@@ -10193,6 +10283,54 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/message-groups',
+    withOwnerReadSession(
+      'GET /session/:id/message-groups',
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.getMessageGroups(sessionId));
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/messages/delete',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/messages/delete',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const snapshot = body['snapshot'];
+        const groupIds = body['groupIds'];
+        if (
+          typeof snapshot !== 'string' ||
+          snapshot.length === 0 ||
+          !Array.isArray(groupIds) ||
+          groupIds.length === 0 ||
+          !groupIds.every((id) => typeof id === 'string' && id.length > 0) ||
+          new Set(groupIds).size !== groupIds.length
+        ) {
+          res.status(400).json({
+            error: 'A snapshot and distinct non-empty groupIds are required',
+            code: 'invalid_message_groups',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.deleteMessageGroups(
+              sessionId,
+              { snapshot, groupIds },
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/rewind/snapshots',
     withOwnerReadSession(
       'GET /session/:id/rewind/snapshots',
@@ -10367,4 +10505,5 @@ export function registerSessionRoutes(
       { cwdBound: 'sync-output-language' },
     ),
   );
+  return { resolveSubagentSessionRuntime };
 }

@@ -56,6 +56,58 @@ function responseMock(): {
   return { response: response as unknown as Response, set, status, json };
 }
 
+describe('message deletion errors', () => {
+  it('does not certify a later request as persisted while context recovery is required', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reload the session', {
+        errorKind: 'session_history_context_unavailable',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reload the session',
+      code: 'session_history_context_unavailable',
+    });
+  });
+
+  it('preserves committed deletion identities in the 503 response', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reopen the session', {
+        errorKind: 'message_deletion_context_unavailable',
+        deletedGroupIds: ['group'],
+        deletedPromptIds: ['prompt'],
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reopen the session',
+      code: 'message_deletion_context_unavailable',
+      persisted: true,
+      deletedGroupIds: ['group'],
+      deletedPromptIds: ['prompt'],
+    });
+  });
+
+  it('reports invalid stored history separately from invalid selections', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32602, 'Invalid history', {
+        errorKind: 'message_history_invalid',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid history',
+      code: 'message_history_invalid',
+    });
+  });
+});
+
 describe('session attachment upload errors', () => {
   it('records storage failures with their cause without exposing it to clients', () => {
     const { response, status, json } = responseMock();
@@ -626,6 +678,51 @@ describe('sendBridgeError session writer errors', () => {
         'This session cannot be resumed with the current execution engine.',
       code: 'session_execution_engine_unavailable',
       errorKind: 'session_execution_engine_unavailable',
+    });
+  });
+
+  it('maps a Managed engine quarantine to HTTP 503 with the reason kept', () => {
+    const { response, status, json } = responseMock();
+    const error = new RequestError(
+      -32024,
+      "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      { errorKind: 'managed_engine_quarantined' },
+    );
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      code: 'managed_engine_quarantined',
+      errorKind: 'managed_engine_quarantined',
+    });
+  });
+
+  it('answers the service-level quarantine code 503, not the conflict ladder', () => {
+    // StandaloneSessionServiceError('managed_engine_quarantined') is how a
+    // liftable refusal reaches a daemon route after the bindAndRelease
+    // translation; it must satisfy 503=retry-later the same way the raw
+    // child refusal does, never fall to the default 409.
+    const { response, status, json } = responseMock();
+    const error = new StandaloneSessionServiceError(
+      'managed_engine_quarantined',
+      'session-1',
+      'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
+      true,
+    );
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
+      code: 'managed_engine_quarantined',
+      errorKind: 'managed_engine_quarantined',
+      retryable: true,
+      sessionId: 'session-1',
     });
   });
 

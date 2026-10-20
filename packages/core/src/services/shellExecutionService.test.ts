@@ -923,6 +923,7 @@ describe('ShellExecutionService', () => {
       });
 
       expect(result.rawOutput.length).toBe(10);
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
       expect(result.output).not.toContain('cdefg');
@@ -940,6 +941,7 @@ describe('ShellExecutionService', () => {
       );
 
       expect(result.rawOutput.toString()).toBe('12345678ab');
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
       expect(result.output).not.toContain('cdefg');
@@ -952,6 +954,7 @@ describe('ShellExecutionService', () => {
       });
 
       expect(result.rawOutput.length).toBe(10);
+      expect(result.outputCaptureLimitExceeded).toBe(false);
       expect(result.output).toBe('1234567890');
       expect(result.output).not.toContain(CAP_NOTICE);
     });
@@ -2475,6 +2478,7 @@ describe('ShellExecutionService child_process fallback', () => {
       const result = await handle.result;
 
       expect(result.rawOutput.length).toBe(10);
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
       expect(result.output).not.toContain('cdefg');
@@ -2490,6 +2494,7 @@ describe('ShellExecutionService child_process fallback', () => {
       });
 
       expect(result.rawOutput.length).toBe(10);
+      expect(result.outputCaptureLimitExceeded).toBe(false);
       expect(result.output).toBe('1234567890');
       expect(result.output).not.toContain(CAP_NOTICE);
     });
@@ -3536,6 +3541,37 @@ describe.each([
   }
 
   if (usePty) {
+    it('retains discarded-output provenance when cancelling an owned PTY', async () => {
+      const abort = new AbortController();
+      const handle = await exec('owned fixture', {
+        signal: abort.signal,
+        usePty: true,
+        config: { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      });
+      pty.onData.mock.calls[0][0]('12345678abcdefg');
+      mockProcessKill.mockImplementation((_pid, signal) => {
+        if (signal === 'SIGTERM') {
+          markProcessExited(pid);
+          setTimeout(() => {
+            pty.onExit.mock.calls[0][0]({ exitCode: 17, signal: 0 });
+          }, 100);
+        }
+        return true;
+      });
+      abort.abort();
+      await vi.runAllTimersAsync();
+      const result = await handle.result;
+      expect(result.outputCaptureLimitExceeded).toBe(true);
+      expect(result.rawOutput.toString()).toBe('12345678ab');
+      expect(result.output).toContain(CAP_NOTICE);
+      expect(result.aborted).toBe(true);
+      expect(result.exitCode).toBe(17);
+      expect(result.signal).toBeNull();
+      expect(result.error).toBeNull();
+      expect(mockProcessKill).not.toHaveBeenCalledWith(-pid, 'SIGKILL');
+      expect(ownsProcess()).toBe(false);
+    });
+
     it('retains native exit evidence deferred after confirmed group cleanup', async () => {
       const abort = new AbortController();
       const handle = await start(abort.signal);

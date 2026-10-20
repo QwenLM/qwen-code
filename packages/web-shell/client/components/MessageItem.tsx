@@ -42,7 +42,10 @@ import { BtwMessage } from './messages/BtwMessage';
 import { UserShellMessage } from './messages/UserShellMessage';
 import { InsightProgress } from './InsightProgress';
 import { InsightReady } from './InsightReady';
-import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
+import type {
+  AttachmentPreviewRequest,
+  DaemonAssistantMessage,
+} from '../adapters/messageTypes';
 import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
 
 interface MessageItemProps {
@@ -67,6 +70,8 @@ interface MessageItemProps {
    * owns the edit lifecycle — then the inline editor stays closed.
    */
   onEditUserMessage?: () => boolean | void;
+  onDeleteMessage?: () => void;
+  deleteMessageDisabled?: boolean;
   /**
    * Send the text the user confirmed in the inline editor. Resolves `false`
    * when the resend was refused or failed; the editor stays open then.
@@ -111,6 +116,8 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onEditUserMessage,
+  onDeleteMessage,
+  deleteMessageDisabled,
   onSubmitUserMessageEdit,
   onBranchSession,
   branchRecordId,
@@ -211,6 +218,7 @@ export const MessageItem = memo(function MessageItem({
             onEditCancel={closeUserMessageEditor}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
+            author={message.author}
           />
         );
       case 'assistant':
@@ -218,6 +226,7 @@ export const MessageItem = memo(function MessageItem({
           <AssistantMessage
             content={message.content}
             author={message.author}
+            agentMessage={message.agentMessage}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
@@ -423,6 +432,9 @@ export const MessageItem = memo(function MessageItem({
           : undefined
       }
       editTitle={t('userMessage.edit')}
+      onDelete={onDeleteMessage}
+      deleteDisabled={deleteMessageDisabled}
+      deleteTitle={t('messageDelete.entry')}
       onOpenTurnCalls={
         openTurnCalls && turnCallsTurnId
           ? () => openTurnCalls(turnCallsTurnId)
@@ -480,6 +492,8 @@ function areMessageItemPropsEqual(
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onDeleteMessage !== next.onDeleteMessage) return false;
+  if (prev.deleteMessageDisabled !== next.deleteMessageDisabled) return false;
   if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
     return false;
   if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
@@ -528,6 +542,29 @@ function areAssistantTurnFooterInfosEqual(
   );
 }
 
+/** Re-parsed on every projection, so compared by what renders. */
+function agentMessagesEqual(
+  prev: DaemonAssistantMessage['agentMessage'],
+  next: DaemonAssistantMessage['agentMessage'],
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.status === next.status &&
+    prev.error === next.error &&
+    prev.totalTokens === next.totalTokens &&
+    prev.squadOutcome === next.squadOutcome &&
+    prev.author?.squadName === next.author?.squadName &&
+    prev.author?.memberSquadName === next.author?.memberSquadName &&
+    (prev.steps ?? []).length === (next.steps ?? []).length &&
+    (prev.steps ?? []).every(
+      (step, index) =>
+        step.title === next.steps?.[index]?.title &&
+        step.status === next.steps?.[index]?.status,
+    )
+  );
+}
+
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
@@ -549,7 +586,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'assistant' &&
         prev.content === next.content &&
-        prev.isStreaming === next.isStreaming
+        prev.isStreaming === next.isStreaming &&
+        agentMessagesEqual(prev.agentMessage, next.agentMessage)
       );
     case 'thinking':
       return (

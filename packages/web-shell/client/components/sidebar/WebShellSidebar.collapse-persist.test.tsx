@@ -2036,7 +2036,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       ),
     ).not.toBeNull();
   });
-  it('keeps the Home tree mounted and opens only on click', async () => {
+  it('previews the complete Home column without expanding or navigating', async () => {
     const onCollapsedChange = vi.fn();
     const onOpenHome = vi.fn();
     renderSidebar(false, { layout: 'rail' });
@@ -2054,18 +2054,86 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const home = container.querySelector<HTMLElement>(
       '[data-web-shell-home-trigger]',
     )!;
-    act(() =>
-      home.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
-    );
+    const hover = new PointerEvent('pointerover', { bubbles: true });
+    Object.defineProperty(hover, 'pointerType', { value: 'mouse' });
+    act(() => home.dispatchEvent(hover));
+    await flushSidebar();
+    const preview = document.querySelector('[data-web-shell-home-popover]');
+    expect(preview).not.toBeNull();
+    expect(preview!.textContent).toContain('Qwen Code');
+    expect(preview!.textContent).toContain('New task');
+    expect(preview!.textContent).toContain('Release notes');
+    expect(
+      document.querySelectorAll('[data-web-shell-home-column]'),
+    ).toHaveLength(1);
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    expect(onOpenHome).not.toHaveBeenCalled();
     expect(onCollapsedChange).not.toHaveBeenCalled();
     act(() => click(home));
     expect(onCollapsedChange).toHaveBeenCalledWith(false);
     expect(onOpenHome).toHaveBeenCalledOnce();
     renderSidebar(false, { layout: 'rail' });
     await flushSidebar();
-    expect(column.hidden).toBe(false);
+    expect(
+      container.querySelector<HTMLElement>('[data-web-shell-home-column]')!
+        .hidden,
+    ).toBe(false);
+    expect(document.querySelector('[data-web-shell-home-popover]')).toBeNull();
     expect(groupHeader('Backend').getAttribute('aria-expanded')).toBe('false');
   });
+
+  it.each(['channels', 'live'])(
+    'previews Home while %s stays selected',
+    async (activePage) => {
+      const onOpenHome = vi.fn();
+      const capabilities = {
+        ...organizationCapabilities,
+        features: [
+          ...organizationCapabilities.features,
+          'session_source_metadata',
+        ],
+      };
+      connection.capabilities = capabilities;
+      workspace.capabilities = capabilities;
+      renderSidebar(true, {
+        layout: 'rail',
+        activePage,
+        showLive: true,
+        onOpenLive: vi.fn(),
+        onOpenHome,
+      });
+      await flushSidebar();
+      expect(
+        container
+          .querySelector('[data-web-shell-sidebar-section]')
+          ?.getAttribute('data-web-shell-sidebar-section'),
+      ).toBe(activePage);
+      const home = container.querySelector('[data-web-shell-home-trigger]')!;
+      const hover = new PointerEvent('pointerover', { bubbles: true });
+      Object.defineProperty(hover, 'pointerType', { value: 'mouse' });
+      act(() => home.dispatchEvent(hover));
+      await flushSidebar();
+      expect(
+        document.querySelector(
+          '[data-web-shell-home-popover] [data-web-shell-sidebar-section="home"]',
+        ),
+      ).not.toBeNull();
+      expect(
+        document.querySelector('[data-web-shell-home-popover]')!.textContent,
+      ).toContain('New task');
+      expect(
+        container
+          .querySelector('button[aria-current="page"]')
+          ?.getAttribute('aria-label'),
+      ).toBe(activePage === 'live' ? 'Live' : 'Channels');
+      expect(onOpenHome).not.toHaveBeenCalled();
+      renderSidebar(false, { layout: 'single' });
+      await flushSidebar();
+      expect(
+        document.querySelector('[data-web-shell-home-popover]'),
+      ).toBeNull();
+    },
+  );
 
   it('keeps functional navigation selected while Home is hidden', async () => {
     const onCollapsedChange = vi.fn();
@@ -2395,7 +2463,10 @@ describe('WebShellSidebar rail navigation', () => {
       home.dispatchEvent(hover);
     });
     await flushSidebar();
-    expect(document.querySelector('[role="tooltip"]')).not.toBeNull();
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(
+      'Home',
+    );
+    expect(document.querySelector('[data-web-shell-home-popover]')).toBeNull();
 
     renderSidebar(false, { layout: 'single' });
     await flushSidebar();

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import {
+  SERVE_CONTROL_EXT_METHODS,
+  SERVE_STATUS_EXT_METHODS,
+} from '@qwen-code/acp-bridge/status';
 import {
   CommandKind,
   type NonInteractiveSlashCommandPolicy,
@@ -27,12 +30,14 @@ export function isSshSessionCommandAllowed(
 }
 
 const unsupportedSessionMethods = new Set<string>([
+  SERVE_STATUS_EXT_METHODS.sessionMessageGroups,
   SERVE_CONTROL_EXT_METHODS.sessionCd,
   SERVE_CONTROL_EXT_METHODS.sessionBranch,
   SERVE_CONTROL_EXT_METHODS.sessionSideTask,
   SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
   SERVE_CONTROL_EXT_METHODS.sessionBtw,
   SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+  SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete,
   SERVE_CONTROL_EXT_METHODS.sessionRewind,
   SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
   SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd,

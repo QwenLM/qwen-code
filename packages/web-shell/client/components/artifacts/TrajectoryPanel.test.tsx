@@ -19,6 +19,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import { TrajectoryPanel } from './TrajectoryPanel';
+import { createTrajectoryPageLoader } from '../../trajectory/transcriptPageLoader';
+import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context';
+import {
+  createTrajectoryLiveStore,
+  type TrajectoryLiveStore,
+} from '../../trajectory/trajectory-live-store';
+import styles from './TrajectoryPanel.module.css';
 import type {
   TrajectoryPageLoader,
   TrajectoryPageResult,
@@ -129,15 +136,25 @@ afterEach(() => {
 
 async function render(
   loadPage: TrajectoryPageLoader | undefined,
+  liveStore: TrajectoryLiveStore | null = null,
+  historyGapRevision = 0,
+  shadow = false,
 ): Promise<HTMLElement> {
   const container = document.createElement('div');
-  document.body.appendChild(container);
+  const host = shadow ? document.createElement('div') : container;
+  document.body.appendChild(host);
+  if (shadow) host.attachShadow({ mode: 'open' }).append(container);
   const root = createRoot(container);
-  mounted.push({ root, container });
+  mounted.push({ root, container: host });
   await act(async () => {
     root.render(
       <I18nProvider language="en">
-        <TrajectoryPanel loadPage={loadPage} />
+        <TrajectoryLiveContext.Provider value={liveStore}>
+          <TrajectoryPanel
+            loadPage={loadPage}
+            historyGapRevision={historyGapRevision}
+          />
+        </TrajectoryLiveContext.Provider>
       </I18nProvider>,
     );
   });
@@ -216,7 +233,886 @@ const metricsOf = (container: HTMLElement) =>
     container.querySelectorAll('[data-testid="trajectory-row-metrics"]'),
   ).map((node) => node.textContent ?? '');
 
+describe('execution following', () => {
+  const followStatus = (container: HTMLElement) =>
+    text(container.querySelector('[data-testid="trajectory-follow-status"]'));
+  const returnButton = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-follow-return"]',
+    )!;
+  const event = (key: string, id: number): DaemonEvent => ({
+    v: 1,
+    id,
+    type: 'session_update',
+    data: {
+      sessionUpdate: 'agent_message_chunk',
+      _meta: {
+        executionLifecycle: {
+          v: 1,
+          kind: 'request',
+          phase: 'started',
+          executionId: key,
+          sessionId: 's',
+          promptId: 'p',
+          model: key,
+          startedAt: 1_000 + id,
+        },
+      },
+    },
+  });
+  async function setup(shadow = false) {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, {
+      sessionId: 's',
+      scope: 'scope',
+      epoch: 'epoch',
+      events: [],
+      incomplete: false,
+    });
+    store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+    store.ingest(owner, event('initial', 1));
+    const read = vi.fn(async () => page(REAL_EVENTS));
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: read },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store, 0, shadow);
+    return { container, read, store, owner };
+  }
+  const pause = async (container: HTMLElement) =>
+    act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-follow-pause"]',
+        )!
+        .click(),
+    );
+
+  it.each([false, true])(
+    'refreshes even the latest window before resuming, preserving return focus (shadow=%s)',
+    async (shadow) => {
+      const { container, read, store, owner } = await setup(shadow);
+      expect(followStatus(container)).toBe('Following');
+      await act(async () => store.ingest(owner, event('new', 2)));
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(followStatus(container)).toBe('Following');
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      expect(followStatus(container)).toBe('Paused');
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).not.toBeNull();
+      let complete!: (result: TrajectoryPageResult) => void;
+      read.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      const button = returnButton(container);
+      await act(async () => {
+        button.focus();
+        button.click();
+      });
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(followStatus(container)).toBe('Refreshing history…');
+      expect(button.getAttribute('aria-disabled')).toBe('true');
+      await act(async () => complete(page(REAL_EVENTS)));
+      expect(followStatus(container)).toBe('Following');
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
+          .scrollTop,
+      ).toBe(SCROLL_HEIGHT);
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(button);
+    },
+  );
+
+  it('keeps the reading filter after failure and clears it only on successful return', async () => {
+    const { container, read } = await setup();
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'model');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(followStatus(container)).toBe('Paused');
+    read.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Paused');
+    expect(input.value).toBe('model');
+    expect(container.textContent).toContain('offline');
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Following');
+    expect(input.value).toBe('');
+    expect(
+      container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
+        .scrollTop,
+    ).toBe(SCROLL_HEIGHT);
+  });
+
+  it('cancels resumption when the user reads while history is loading', async () => {
+    const { container, read } = await setup();
+    await pause(container);
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-executions"] [role="grid"]',
+    )!;
+    await act(async () =>
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
+      ),
+    );
+    await act(async () => complete(page(REAL_EVENTS)));
+    expect(followStatus(container)).toBe('Paused');
+  });
+
+  it.each([
+    { input: 'upward wheel', deltaY: -180, top: 420 },
+    { input: 'downward wheel', deltaY: 180, top: 780 },
+    { input: 'scrollbar', deltaY: undefined, top: 420 },
+  ])('cancels a pending return on $input reading', async ({ deltaY, top }) => {
+    const { container, read, store, owner } = await setup();
+    await act(async () => {
+      for (let id = 2; id <= 40; id++)
+        store.ingest(owner, event(`execution-${id}`, id));
+    });
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-executions"] [role="grid"]',
+    )!;
+    Object.defineProperty(grid, 'clientHeight', { value: 136 });
+    await act(async () => {
+      grid.scrollTop = 600;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(followStatus(container)).toBe('Paused');
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Refreshing history…');
+    await act(async () => store.ingest(owner, event('during-return', 41)));
+    expect(grid.scrollTop).toBe(634);
+    await act(async () => grid.dispatchEvent(new Event('scroll')));
+    expect(followStatus(container)).toContain('Refreshing history…');
+    await act(async () => {
+      if (deltaY !== undefined)
+        grid.dispatchEvent(new WheelEvent('wheel', { deltaY, bubbles: true }));
+      grid.scrollTop = top;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(followStatus(container)).toContain('Paused');
+    await act(async () => complete(page(REAL_EVENTS)));
+    expect(followStatus(container)).toBe('Paused');
+    expect(grid.scrollTop).toBe(top);
+  });
+
+  it.each(['wheel', 'pointerdown', 'PageUp', 'PageDown', ' '])(
+    'keeps layout scrolling separate from history reading with %j',
+    async (input) => {
+      const { container, read } = await setup();
+      const grid = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-rows"]',
+      )!;
+      let complete!: (result: TrajectoryPageResult) => void;
+      read.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+      await act(async () => returnButton(container).click());
+      await act(async () => {
+        grid.scrollTop = 600;
+        grid.dispatchEvent(new Event('scroll'));
+      });
+      expect(followStatus(container)).toBe('Refreshing history…');
+      await act(async () =>
+        grid.dispatchEvent(
+          input === 'wheel'
+            ? new WheelEvent('wheel', { deltaY: -180, bubbles: true })
+            : input === 'pointerdown'
+              ? new MouseEvent('pointerdown', { bubbles: true })
+              : new KeyboardEvent('keydown', { key: input, bubbles: true }),
+        ),
+      );
+      expect(followStatus(container)).toBe('Paused');
+      await act(async () => complete(page(REAL_EVENTS)));
+      expect(followStatus(container)).toBe('Paused');
+    },
+  );
+
+  it('pauses on connection loss and does not announce replay as newly arrived execution', async () => {
+    const { container, store, owner } = await setup();
+    await act(async () => store.reconnect(owner));
+    expect(followStatus(container)).toBe('Paused');
+    await act(async () => {
+      store.ingest(owner, event('replayed', 2));
+      store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+    });
+    expect(followStatus(container)).toBe('Paused');
+    expect(container.querySelector('[data-status="running"]')).toBeNull();
+    await act(async () => store.ingest(owner, event('live', 3)));
+    expect(followStatus(container)).toContain('Execution list updated');
+    await act(async () => returnButton(container).click());
+    expect(followStatus(container)).toBe('Following');
+  });
+
+  it('discards an old loader return when switching sessions', async () => {
+    const { container, read, store } = await setup();
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    const loader = createTrajectoryPageLoader(
+      {
+        getSessionTranscriptPage: async () =>
+          page([userText('new session', 'new')]),
+      },
+      'other',
+      'scope',
+    );
+    await act(async () =>
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <TrajectoryLiveContext.Provider value={store}>
+            <TrajectoryPanel loadPage={loader} />
+          </TrajectoryLiveContext.Provider>
+        </I18nProvider>,
+      ),
+    );
+    await pause(container);
+    await act(async () => complete(page(REAL_EVENTS)));
+    expect(followStatus(container)).toBe('Paused');
+    expect(container.textContent).toContain('new session');
+    expect(
+      container.querySelector('[data-testid="trajectory-execution-row"]'),
+    ).toBeNull();
+  });
+
+  it('keeps a concurrent connection loss from resuming a completed return', async () => {
+    const { container, read, store, owner } = await setup();
+    let complete!: (result: TrajectoryPageResult) => void;
+    read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await act(async () => returnButton(container).click());
+    await act(async () => {
+      store.reconnect(owner);
+      complete(page(REAL_EVENTS));
+    });
+    expect(followStatus(container)).toBe('Paused');
+  });
+
+  it('returns from a historical window to the latest end without requiring live support', async () => {
+    const loadPage: TrajectoryPageLoader = async ({ cursor }) => {
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `page-${index}`)], {
+        hasMore: true,
+        nextCursor: String(index + 1),
+      });
+    };
+    const container = await render(loadPage);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-older"]',
+        )!
+        .click(),
+    );
+    expect(followStatus(container)).toBe('Paused');
+    expect(container.textContent).toContain('page-7');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-latest"]',
+        )!
+        .click(),
+    );
+    expect(followStatus(container)).toBe('Waiting for live updates');
+    expect(container.textContent).toContain('page-0');
+    expect(container.textContent).not.toContain('page-7');
+    expect(
+      container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
+        .scrollTop,
+    ).toBe(SCROLL_HEIGHT);
+  });
+});
+
 describe('TrajectoryPanel', () => {
+  it.each([false, true])(
+    'does not recover old execution focus into a different loader (shadow=%s)',
+    async (shadow) => {
+      const store = createTrajectoryLiveStore();
+      const seed = (sessionId: string) =>
+        store.begin(
+          {},
+          {
+            sessionId,
+            scope: 'scope',
+            incomplete: false,
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'agent_message_chunk',
+                  _meta: {
+                    executionLifecycle: {
+                      v: 1,
+                      kind: 'request',
+                      phase: 'started',
+                      executionId: 'selected',
+                      sessionId,
+                      promptId: 'p',
+                      model: 'model',
+                      startedAt: 10,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        );
+      const client = {
+        getSessionTranscriptPage: async () => page(REAL_EVENTS),
+      };
+      seed('old');
+      const container = await render(
+        createTrajectoryPageLoader(client, 'old', 'scope'),
+        store,
+        0,
+        shadow,
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      const close = container.querySelector<HTMLButtonElement>(
+        '[aria-label="Close details"]',
+      )!;
+      close.focus();
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(close);
+      const focus = vi.fn();
+      container.addEventListener('focusin', focus);
+      await act(async () => {
+        seed('new');
+        mounted.at(-1)!.root.render(
+          <I18nProvider language="en">
+            <TrajectoryLiveContext.Provider value={store}>
+              <TrajectoryPanel
+                loadPage={createTrajectoryPageLoader(client, 'new', 'scope')}
+              />
+            </TrajectoryLiveContext.Provider>
+          </I18nProvider>,
+        );
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="trajectory-execution-row"]'),
+      ).not.toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
+
+  it('discloses incomplete lifecycle details separately from page truncation', async () => {
+    const store = createTrajectoryLiveStore();
+    store.begin(
+      {},
+      { sessionId: 's', scope: 'scope', events: [], incomplete: true },
+    );
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain(
+      'Lifecycle details may be incomplete or outside the retained limit.',
+    );
+  });
+
+  it('updates one execution through terminal state without refreshing or moving history', async () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, {
+      sessionId: 's',
+      scope: 'scope',
+      epoch: 'epoch',
+      events: [],
+      incomplete: false,
+    });
+    store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+    const getSessionTranscriptPage = vi.fn(async () => page(REAL_EVENTS));
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    const history = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    history.scrollTop = 240;
+    act(() => history.dispatchEvent(new Event('scroll', { bubbles: true })));
+    const totals = container.querySelector(
+      '[data-testid="trajectory-totals"]',
+    )!.textContent;
+    const lifecycle = {
+      v: 1,
+      kind: 'request',
+      phase: 'started',
+      executionId: 'new',
+      sessionId: 's',
+      promptId: 'p',
+      model: 'new-model',
+      startedAt: Date.now(),
+    };
+    const event = (value: object, id: number): DaemonEvent => ({
+      v: 1,
+      id,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: { executionLifecycle: value },
+      },
+    });
+    await act(async () => store.ingest(owner, event(lifecycle, 1)));
+    let rows = container.querySelectorAll<HTMLElement>(
+      '[data-testid="trajectory-execution-row"]',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.dataset.status).toBe('running');
+    const key = rows[0]!.dataset.executionKey;
+    const historyRow = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-row-request"]',
+    )!;
+    await act(async () => historyRow.click());
+    expect(historyRow.getAttribute('aria-selected')).toBe('true');
+    await act(async () => rows[0]!.click());
+    expect(historyRow.getAttribute('aria-selected')).toBe('false');
+    expect(rows[0]!.getAttribute('aria-selected')).toBe('true');
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]')!
+        .textContent,
+    ).toContain('new-model');
+    await act(async () =>
+      store.ingest(
+        owner,
+        event(
+          {
+            ...lifecycle,
+            phase: 'ended',
+            endedAt: lifecycle.startedAt + 50,
+            durationMs: 50,
+            outcome: 'success',
+          },
+          2,
+        ),
+      ),
+    );
+    rows = container.querySelectorAll<HTMLElement>(
+      '[data-testid="trajectory-execution-row"]',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.dataset.executionKey).toBe(key);
+    expect(rows[0]!.dataset.status).toBe('success');
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]')!
+        .textContent,
+    ).toContain('Succeeded');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Close details"]')!
+        .click(),
+    );
+    expect(document.activeElement).toBe(
+      container.querySelector(
+        '[data-testid="trajectory-executions"] [role="grid"]',
+      ),
+    );
+    expect(getSessionTranscriptPage).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="trajectory-totals"]')!.textContent,
+    ).toBe(totals);
+    expect(history.scrollTop).toBe(240);
+  });
+
+  it('does not reopen details when a vanished execution returns to history', async () => {
+    let present = true;
+    const lifecycleEvent: DaemonEvent = {
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: {
+          executionLifecycle: {
+            v: 1,
+            kind: 'request',
+            phase: 'ended',
+            executionId: 'history-only',
+            sessionId: 's',
+            promptId: 'p',
+            model: 'history-model',
+            startedAt: 10,
+            endedAt: 20,
+            durationMs: 10,
+            outcome: 'success',
+          },
+        },
+      },
+    };
+    const loader = createTrajectoryPageLoader(
+      {
+        getSessionTranscriptPage: async () =>
+          page(present ? [lifecycleEvent] : []),
+      },
+      's',
+      'scope',
+    );
+    const container = await render(loader);
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-execution-row"]')!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).not.toBeNull();
+    const refresh = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Refresh"]',
+    )!;
+    present = false;
+    await act(async () => refresh.click());
+    expect(
+      container.querySelector('[data-testid="trajectory-execution-row"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    refresh.focus();
+    present = true;
+    await act(async () => refresh.click());
+    expect(
+      container.querySelector('[data-testid="trajectory-execution-row"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(refresh);
+  });
+
+  it.each(
+    [false, true].flatMap((shadow) =>
+      (['grid', 'collapsed', 'outside'] as const).map((target) => ({
+        shadow,
+        target,
+      })),
+    ),
+  )(
+    'recovers focused details on execution eviction ($target, shadow=$shadow)',
+    async ({ shadow, target }) => {
+      const store = createTrajectoryLiveStore();
+      const owner = {};
+      store.begin(owner, {
+        sessionId: 's',
+        scope: 'scope',
+        epoch: 'epoch',
+        events: [],
+        incomplete: false,
+      });
+      store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+      const event = (id: number): DaemonEvent => ({
+        v: 1,
+        id: id + 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            executionLifecycle: {
+              v: 1,
+              kind: 'request',
+              phase: 'ended',
+              executionId: `execution-${id}`,
+              sessionId: 's',
+              promptId: 'p',
+              model: 'model',
+              startedAt: id,
+              endedAt: id + 1,
+              durationMs: 1,
+              outcome: 'success',
+            },
+          },
+        },
+      });
+      store.ingest(owner, event(0));
+      const loader = createTrajectoryPageLoader(
+        { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+        's',
+        'scope',
+      );
+      const container = await render(loader, store, 0, shadow);
+      await act(async () =>
+        container
+          .querySelector<HTMLElement>(
+            '[data-testid="trajectory-execution-row"]',
+          )!
+          .click(),
+      );
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-executions"] button[aria-expanded]',
+      )!;
+      if (target === 'collapsed') await act(async () => toggle.click());
+      const details = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-inspector"]',
+      )!;
+      const refresh = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Refresh"]',
+      )!;
+      const close = details.querySelector<HTMLButtonElement>(
+        '[aria-label="Close details"]',
+      )!;
+      (target === 'outside' ? refresh : close).focus();
+      await act(async () => {
+        for (let id = 1; id <= 256; id++) store.ingest(owner, event(id));
+      });
+      expect(
+        container.querySelector('[data-testid="trajectory-inspector"]'),
+      ).toBeNull();
+      expect(
+        (container.getRootNode() as Document | ShadowRoot).activeElement,
+      ).toBe(
+        target === 'outside'
+          ? refresh
+          : target === 'collapsed'
+            ? toggle
+            : container.querySelector(
+                '[data-testid="trajectory-executions"] [role="grid"]',
+              ),
+      );
+    },
+  );
+
+  it('returns focus to the recent toggle when closing details with its grid collapsed', async () => {
+    const store = createTrajectoryLiveStore();
+    store.begin(
+      {},
+      {
+        sessionId: 's',
+        scope: 'scope',
+        incomplete: false,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                executionLifecycle: {
+                  v: 1,
+                  kind: 'request',
+                  phase: 'started',
+                  executionId: 'selected',
+                  sessionId: 's',
+                  promptId: 'p',
+                  model: 'model',
+                  startedAt: 10,
+                },
+              },
+            },
+          },
+        ],
+      },
+    );
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-execution-row"]')!
+        .click(),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-executions"] button[aria-expanded]',
+    )!;
+    await act(async () => toggle.click());
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-executions"] [role="grid"]',
+      ),
+    ).toBeNull();
+    const close = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Close details"]',
+    )!;
+    close.focus();
+    await act(async () =>
+      close.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+        }),
+      ),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('shows the matched live request lifecycle in recorded details', async () => {
+    const lifecycle = {
+      v: 1,
+      kind: 'request',
+      phase: 'ended',
+      executionId: 'exec-matched',
+      sessionId: 's',
+      promptId: 'p',
+      model: 'model',
+      startedAt: 10,
+      endedAt: 20,
+      durationMs: 10,
+      outcome: 'success',
+    };
+    const store = createTrajectoryLiveStore();
+    store.begin(
+      {},
+      {
+        sessionId: 's',
+        scope: 'scope',
+        incomplete: false,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: { executionLifecycle: lifecycle },
+            },
+          },
+        ],
+      },
+    );
+    const loader = createTrajectoryPageLoader(
+      {
+        getSessionTranscriptPage: async () =>
+          page([
+            timingFrame(
+              {
+                kind: 'request',
+                executionId: 'exec-matched',
+                promptId: 'p',
+                model: 'model',
+                startedAt: 10,
+                durationMs: 10,
+                status: 'ok',
+              },
+              'record',
+            ),
+          ]),
+      },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-selected"] + button',
+        )!
+        .click(),
+    );
+    const details = container.querySelector(
+      '[data-testid="trajectory-inspector"] pre',
+    );
+    expect(details?.textContent).toContain('"executionId": "exec-matched"');
+    expect(details?.textContent).toContain('"outcome": "success"');
+  });
+
+  it('keeps the gap warning after failed refresh until a successful refresh', async () => {
+    let failLatest = false;
+    const loader = vi.fn(async ({ cursor }: { cursor?: string }) => {
+      if (!cursor && failLatest) throw new Error('offline');
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `record-${index}`)], {
+        hasMore: index < 7,
+        nextCursor: String(index + 1),
+      });
+    });
+    const container = await render(loader, null, 1);
+    failLatest = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain('History may have changed while disconnected');
+    failLatest = false;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(loader).toHaveBeenCalledTimes(9);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).not.toContain('History may have changed while disconnected');
+  });
+
   it('opens record details and invalidates them when a refreshed window reuses the key', async () => {
     let textValue = 'first payload';
     let failRefresh = false;
@@ -474,6 +1370,28 @@ describe('TrajectoryPanel', () => {
     ).not.toContain('7.8s');
   });
 
+  it.each(['cancelled', 'canceled'])('mutes a %s tool row', async (status) => {
+    const container = await render(async () =>
+      page([
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'cancel-call',
+            title: 'Cancelled operation',
+            status,
+          },
+        } as unknown as DaemonEvent,
+      ]),
+    );
+    const badge = container.querySelector(
+      '[data-testid="trajectory-row-tool"] .' + styles.badge,
+    )!;
+    expect(badge).not.toBeNull();
+    expect(badge.classList.contains(styles.toneMuted)).toBe(true);
+  });
+
   it('marks a failed request', async () => {
     const container = await render(async () =>
       page([
@@ -539,9 +1457,9 @@ describe('TrajectoryPanel', () => {
     });
     const container = await render(async () => pending);
 
-    expect(text(container.querySelector('[role="status"]'))).toContain(
-      'Loading',
-    );
+    expect(
+      text(container.querySelector(`.${styles.placeholder}[role="status"]`)),
+    ).toContain('Loading');
     await act(async () => {
       release(page([userText('done', 'rec-1')]));
     });
@@ -551,9 +1469,9 @@ describe('TrajectoryPanel', () => {
   it('renders an empty session without a grid', async () => {
     const container = await render(async () => page([]));
 
-    expect(text(container.querySelector('[role="status"]'))).toContain(
-      'No records',
-    );
+    expect(
+      text(container.querySelector(`.${styles.placeholder}[role="status"]`)),
+    ).toContain('No records');
     expect(container.querySelector('[role="grid"]')).toBeNull();
   });
 
@@ -1154,16 +2072,16 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain('shell_output');
   });
 
-  it('says the page left history out, outside the scrolled rows', async () => {
+  it('explains a missing history cursor outside the scrolled rows', async () => {
     const container = await render(async () =>
       page(REAL_EVENTS, { hasMore: true }),
     );
     const scroll = container.querySelector('[role="grid"]') as HTMLElement;
     const notice = container.querySelector(
-      '[data-testid="trajectory-truncated"]',
+      '[data-testid="trajectory-older-failed"]',
     );
 
-    expect(text(notice)).toContain('most recent records');
+    expect(text(notice)).toContain('page cursor did not advance');
     // Inside the scrolled box its height would offset every virtual row from
     // the coordinates the virtualizer hands out.
     expect(scroll.contains(notice)).toBe(false);
@@ -1222,9 +2140,9 @@ describe('TrajectoryPanel', () => {
       await act(async () => {});
 
       expect(container.querySelector('[role="grid"]')).toBeNull();
-      expect(text(container.querySelector('[role="status"]'))).toContain(
-        '1 page so far',
-      );
+      expect(
+        text(container.querySelector(`.${styles.placeholder}[role="status"]`)),
+      ).toContain('1 page so far');
 
       await act(async () => {
         releaseOlder(page(prompts('older', 1)));
@@ -1296,16 +2214,16 @@ describe('TrajectoryPanel', () => {
     });
 
     it('does not start a second walk while one is under way', async () => {
-      let releaseNewest: ((value: TrajectoryPageResult) => void) | undefined;
+      let releaseOlder: ((value: TrajectoryPageResult) => void) | undefined;
       let reads = 0;
       const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
         reads += 1;
-        if (cursor) throw new Error('down');
-        if (reads === 1) {
+        if (cursor && reads === 2) throw new Error('down');
+        if (!cursor) {
           return page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' });
         }
         return new Promise<TrajectoryPageResult>((resolve) => {
-          releaseNewest = resolve;
+          releaseOlder = resolve;
         });
       });
       const container = await render(loadPage);
@@ -1326,7 +2244,7 @@ describe('TrajectoryPanel', () => {
       expect(loadPage.mock.calls.length).toBe(during);
 
       await act(async () => {
-        releaseNewest?.(page(prompts('newer', 1)));
+        releaseOlder?.(page(prompts('newer', 1)));
       });
     });
   });
@@ -1589,3 +2507,576 @@ describe('collapsible trajectory', () => {
     expect(fold(container).getAttribute('aria-expanded')).toBe('true');
   });
 });
+
+describe('trajectory diagnostic filters', () => {
+  const events = () => [
+    userText('Check configuration', 'search-user'),
+    timingFrame(
+      {
+        kind: 'request',
+        durationMs: 1000,
+        startedAt: 1760000000000,
+        model: 'qwen-search',
+        status: 'ok',
+      },
+      'search-request',
+    ),
+    toolCall('search-call', 'read_file', 'Unique needle', 'search-tool'),
+    toolCall('other-call', 'run_shell', 'Another operation', 'other-tool'),
+  ];
+  const inputOf = (container: HTMLElement) =>
+    container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  const typeQuery = async (container: HTMLElement, value: string) => {
+    const input = inputOf(container);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
+  const button = (container: HTMLElement, name: string) =>
+    Array.from(container.querySelectorAll('button')).find(
+      (element) => element.textContent === name,
+    )!;
+  const fold = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-row-request"] button',
+    )!;
+
+  it('does not report results or navigate when no diagnostic filter is applied', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    const filters = container.querySelector('[data-trajectory-filters]')!;
+    expect(filters.textContent).not.toContain('matching records');
+    expect(button(container, 'Next').disabled).toBe(true);
+    expect(button(container, 'Previous').disabled).toBe(true);
+    const input = inputOf(container);
+    await act(async () => {
+      button(container, 'Next').click();
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await typeQuery(container, 'needle');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    expect(filters.textContent).not.toContain('Result');
+  });
+
+  it('does not offer folding when a matching request has no visible descendants', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    await typeQuery(container, 'qwen-search');
+    const request = container.querySelector(
+      '[data-testid="trajectory-row-request"]',
+    )!;
+    expect(request.textContent).not.toContain('0 records collapsed');
+    expect(request.querySelector('button')).toBeNull();
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it.each(['ArrowLeft', 'ArrowRight'])(
+    'ignores %s on a matching request without visible descendants',
+    async (key) => {
+      const container = await render(async () => page(events()));
+      const initiallyCollapsed = key === 'ArrowRight';
+      if (initiallyCollapsed) await act(async () => fold(container).click());
+      await typeQuery(container, 'qwen-search');
+      const request = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-row-request"]',
+      )!;
+      expect(request.querySelector('button')).toBeNull();
+      await act(async () => request.click());
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () =>
+        container.querySelector('[role="grid"]')!.dispatchEvent(event),
+      );
+      expect(event.defaultPrevented).toBe(false);
+      await act(async () => button(container, 'Clear filters').click());
+      expect(fold(container).getAttribute('aria-expanded')).toBe(
+        String(!initiallyCollapsed),
+      );
+    },
+  );
+
+  it('drops temporary folds when the query changes directly', async () => {
+    const container = await render(async () => page(events()));
+    await typeQuery(container, 'needle');
+    await act(async () => fold(container).click());
+    await typeQuery(container, 'Unique');
+    expect(
+      container.querySelector('[data-testid="trajectory-range-status"]')
+        ?.textContent,
+    ).toContain('including context');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    await act(async () => button(container, 'Clear filters').click());
+    expect(
+      container.querySelector('[data-testid="trajectory-range-status"]'),
+    ).toBeNull();
+  });
+
+  it('clears filters from the inspector notice and retains the selected tool', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    await act(async () => button(container, 'View details').click());
+    await typeQuery(container, 'qwen-search');
+    const inspector = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-inspector"]',
+    )!;
+    expect(inspector.textContent).toContain('Unique needle');
+    await act(async () => button(inspector, 'Clear filters').click());
+    expect(inputOf(container).value).toBe('');
+    expect(inspector.textContent).toContain('Unique needle');
+    expect(inspector.textContent).not.toContain('does not match');
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-row-tool"][data-selected="true"]',
+      )?.textContent,
+    ).toContain('Unique needle');
+  });
+
+  it('wraps two direct matches and retains manual folds in the same query', async () => {
+    const container = await render(async () =>
+      page([
+        ...events(),
+        userText('Second turn', 'search-user-2'),
+        timingFrame(
+          {
+            kind: 'request',
+            durationMs: 500,
+            model: 'qwen-second',
+            status: 'ok',
+          },
+          'search-request-2',
+        ),
+        toolCall(
+          'search-call-2',
+          'read_file',
+          'Second needle',
+          'search-tool-2',
+        ),
+      ]),
+    );
+    await typeQuery(container, 'needle');
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 1 / 2');
+    await act(async () => fold(container).click());
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 2 / 2');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 1 / 2');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    await act(async () => button(container, 'Previous').click());
+    expect(container.textContent).toContain('Result 2 / 2');
+  });
+
+  it('keeps a coverage slot mounted when refresh crosses the body budget', async () => {
+    let large = false;
+    const container = await render(async () =>
+      page([
+        userText(large ? 'x'.repeat(8193) : 'short', 'coverage-user'),
+        ...events(),
+      ]),
+    );
+    const filters = container.querySelector('[data-trajectory-filters]')!;
+    const children = filters.children.length;
+    expect(filters.textContent).not.toContain('excluded from search');
+    large = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(filters.children.length).toBe(children);
+    expect(filters.textContent).toContain('excluded from search (1 record)');
+  });
+
+  it('keeps request context, restores base folding and does not resurrect temporary overrides', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    await typeQuery(container, 'needle');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-row-request"]')
+        ?.getAttribute('data-context'),
+    ).toBe('true');
+    expect(container.textContent).toContain('1 matching record');
+    await act(async () => fold(container).click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    expect(container.textContent).toContain('1 matching record');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await typeQuery(container, 'needle');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+  });
+
+  it('keeps hidden inspector identity and copy content, then reveals from overview', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    await act(async () => button(container, 'View details').click());
+    const inspector = () =>
+      container.querySelector('[data-testid="trajectory-inspector"]')!;
+    await typeQuery(container, 'qwen-search');
+    expect(inspector().textContent).toContain('Unique needle');
+    expect(inspector().textContent).toContain(
+      'This record does not match the current filters.',
+    );
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(0);
+    const span = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-span"][data-row-key="req:search-request"]',
+    )!;
+    expect(span).not.toBeNull();
+    // The request is itself a match, so selecting it preserves the query.
+    await act(async () => {
+      span.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 0 }),
+      );
+      span.dispatchEvent(
+        new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 0 }),
+      );
+    });
+    expect(inputOf(container).value).toBe('qwen-search');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(2);
+  });
+
+  it('navigates only direct matches, retains input focus and expands temporarily folded hits', async () => {
+    const container = await render(async () => page(events()));
+    await typeQuery(container, 'needle');
+    await act(async () => fold(container).click());
+    const input = inputOf(container);
+    input.focus();
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(input);
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-row-tool"][data-selected="true"]',
+      )?.textContent,
+    ).toContain('Unique needle');
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-row-request"]')
+        ?.getAttribute('data-selected'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('Result 1 / 1');
+    await typeQuery(container, 'no such text');
+    expect(
+      container.querySelector('[data-testid="trajectory-filter-empty"]'),
+    ).not.toBeNull();
+    expect(button(container, 'Next').disabled).toBe(true);
+  });
+
+  it('preserves filters across refresh and clears them immediately on loader change', async () => {
+    let fail = false;
+    const container = await render(async () =>
+      fail ? page([], { replayError: 'offline' }) : page(events()),
+    );
+    await typeQuery(container, 'needle');
+    fail = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(inputOf(container).value).toBe('needle');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    fail = false;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(inputOf(container).value).toBe('needle');
+    await act(async () =>
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <TrajectoryPanel loadPage={async () => page(events())} />
+        </I18nProvider>,
+      ),
+    );
+    expect(inputOf(container).value).toBe('');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(2);
+  });
+});
+
+it('reveals a request when its independent filter and time contexts have an empty intersection', async () => {
+  const container = await render(async () =>
+    page([
+      userText('Inspect', 'intersection-user'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 1000,
+          startedAt: 1760000000000,
+          model: 'intersection-model',
+          status: 'ok',
+        },
+        'intersection-request',
+      ),
+      toolCall(
+        'intersection-call',
+        'read_file',
+        'intersection-needle',
+        'intersection-tool',
+      ),
+      timingFrame(
+        {
+          kind: 'tool',
+          durationMs: 1000,
+          startedAt: 1760000002000,
+          callId: 'intersection-call',
+          toolName: 'read_file',
+          toolStatus: 'success',
+        },
+        'intersection-timing',
+      ),
+    ]),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+      .click(),
+  );
+  await act(async () =>
+    [...container.querySelectorAll('button')]
+      .find((button) => button.textContent === 'View details')!
+      .click(),
+  );
+  const input = container.querySelector<HTMLInputElement>(
+    'input[type="search"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection-needle');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const plot = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-plot"]',
+  )!;
+  const rect = vi
+    .spyOn(plot, 'getBoundingClientRect')
+    .mockReturnValue({ left: 0, right: 1000, width: 1000 } as DOMRect);
+  await act(async () => {
+    plot.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }),
+    );
+    plot.dispatchEvent(
+      new MouseEvent('pointermove', { bubbles: true, clientX: 400 }),
+    );
+    plot.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 400 }),
+    );
+  });
+  expect(
+    container.querySelector('[data-testid="trajectory-filter-empty"]'),
+  ).not.toBeNull();
+  expect(
+    container.querySelector('[data-trajectory-filters]')?.textContent,
+  ).toContain('0 matching records');
+  expect(
+    [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Next',
+    )?.disabled,
+  ).toBe(true);
+  const inspector = container.querySelector(
+    '[data-testid="trajectory-inspector"]',
+  )!;
+  expect(inspector.textContent).toContain('does not match the current filters');
+  expect(inspector.textContent).not.toContain('outside the selected time');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  expect(
+    container.querySelector('[data-trajectory-filters] [role="status"]')
+      ?.textContent,
+  ).toBe('Result 1 / 1');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection-needle');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const span = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-span"][data-row-key="req:intersection-request"]',
+  )!;
+  await act(async () => {
+    span.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 100 }),
+    );
+    span.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 100 }),
+    );
+  });
+  expect(input.value).toBe('');
+  expect(
+    container.querySelector(
+      '[data-testid="trajectory-row-request"][data-selected="true"]',
+    ),
+  ).not.toBeNull();
+  expect(
+    container.querySelector('[data-testid="trajectory-range-status"]'),
+  ).not.toBeNull();
+  rect.mockRestore();
+});
+
+it('retains filters when overview reveals a context request hidden only by a collapsed turn', async () => {
+  const container = await render(async () =>
+    page([
+      userText('Inspect', 'context-user'),
+      timingFrame(
+        {
+          kind: 'request',
+          durationMs: 1000,
+          startedAt: 1760000000000,
+          model: 'context-model',
+          status: 'ok',
+        },
+        'context-request',
+      ),
+      toolCall(
+        'context-call',
+        'Only child matches',
+        'Only child matches',
+        'context-tool',
+      ),
+    ]),
+  );
+  const input = container.querySelector<HTMLInputElement>(
+    'input[type="search"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'Only child matches');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-turn"] button',
+      )!
+      .click(),
+  );
+  expect(
+    container.querySelector('[data-testid="trajectory-row-request"]'),
+  ).toBeNull();
+  const span = container.querySelector<HTMLElement>(
+    '[data-testid="trajectory-span"][data-row-key="req:context-request"]',
+  )!;
+  await act(async () => {
+    span.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 0 }),
+    );
+    span.dispatchEvent(
+      new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 0 }),
+    );
+  });
+  expect(input.value).toBe('Only child matches');
+  expect(
+    container.querySelector(
+      '[data-testid="trajectory-row-request"][data-selected="true"]',
+    ),
+  ).not.toBeNull();
+});
+
+it.each([false, true])(
+  'retries the failed cursor when the initial prefix has no visible rows (filtered=%s)',
+  async (filtered) => {
+    let olderFails = true;
+    const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+      if (!cursor) {
+        return page(filtered ? REAL_EVENTS : [], {
+          hasMore: true,
+          nextCursor: 'c1',
+        });
+      }
+      if (olderFails) throw new Error('socket hang up');
+      return page([userText('Recovered older row', 'recovered-row')]);
+    });
+    const container = await render(loadPage);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    if (filtered) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, 'no-such-trajectory-text');
+        input!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
+    expect(container.querySelector('[role="grid"]')).toBeNull();
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-older-retry"]',
+    )!;
+    expect(retry).not.toBeNull();
+    expect(retry.getAttribute('aria-disabled')).toBe('false');
+    olderFails = false;
+    await act(async () => retry.click());
+    expect(loadPage.mock.calls.map(([request]) => request.cursor)).toEqual([
+      undefined,
+      'c1',
+      'c1',
+    ]);
+    expect(
+      container.querySelector('[data-testid="trajectory-older-retry"]'),
+    ).toBeNull();
+    if (filtered) expect(input!.value).toBe('no-such-trajectory-text');
+    else expect(container.querySelector('[role="grid"]')).not.toBeNull();
+  },
+);

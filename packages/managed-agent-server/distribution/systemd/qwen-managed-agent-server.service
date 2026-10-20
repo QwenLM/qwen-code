@@ -1,0 +1,36 @@
+[Unit]
+Description=Qwen Managed Agent control plane
+Documentation=file:/opt/qwen-managed-agent/docs/deployment.md
+After=network-online.target
+Wants=network-online.target
+# The Hosted Harness must be running before Sessions are admitted. Wants, not
+# Requires: the control plane adopts a restarted Harness without restarting.
+After=qwen-hosted-harness.service
+Wants=qwen-hosted-harness.service
+
+[Service]
+Type=simple
+User=qwen-managed-agent
+Group=qwen-managed-agent
+WorkingDirectory=/opt/qwen-managed-agent
+EnvironmentFile=/etc/qwen-managed-agent/server.env
+ExecStart=/opt/qwen-managed-agent/bin/qwen-managed-agent-server
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+# Workers are separate processes and must survive a Broker restart. The
+# default control-group kill would terminate them with the server.
+KillMode=process
+KillSignal=SIGTERM
+# Creates /var/lib/qwen-managed-agent owned by the service account.
+StateDirectory=qwen-managed-agent
+StateDirectoryMode=0750
+# Adjust ReadWritePaths when the Workspace lives elsewhere.
+ReadWritePaths=/var/lib/qwen-managed-agent /srv/qwen-workspace
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
