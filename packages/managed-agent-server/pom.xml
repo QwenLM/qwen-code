@@ -505,8 +505,11 @@
                                  Verify step to 161 minutes; the FG11f
                                  publication cell adds 82 s (2x its measured
                                  41.1 s), so the fork moves to 9127 s and the
-                                 Verify step to 163 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9127</forkedProcessTimeoutInSeconds>
+                                 Verify step to 163 minutes; the FG11f assigning
+                                 arms add 242 s (2x their measured 121.2 s), so
+                                 the fork moves to 9369 s and the Verify step to
+                                 167 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9369</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

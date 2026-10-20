@@ -105,6 +105,7 @@ class HostedAutomationFaultGatesIT {
     // FG11f: the publication case faults the physical object write and keeps
     // whatever the store accepted, so the assertions read the same bytes.
     private HostedGateTestSupport.PublicationFaults publicationFaults;
+    private String forcedArm;
     private final Map<String, byte[]> publicationObjects = new ConcurrentHashMap<>();
     private final AtomicInteger shellSteps = new AtomicInteger();
     // Fronts the Session Store for the Harness when a test asks for it before booting, and
@@ -1084,12 +1085,30 @@ class HostedAutomationFaultGatesIT {
     // arm faults the physical object write. The store never rewrites the
     // object and never re-runs the Shell, so these assertions read what it
     // kept rather than assuming a retry the store does not drive.
+    // The two refusing arms run through the same body: what differs is the
+    // fault injected into the physical put, and CI must exercise each one
+    // rather than only whichever the property selects by default.
+    @Test
+    @Timeout(600)
+    void fg11fPublicationFailsBeforeWriteOnMySql() throws Exception {
+        forcedArm = "fail-before-write";
+        fg11fPublicationFaultsSettleOnceOnMySql();
+    }
+
+    @Test
+    @Timeout(600)
+    void fg11fPublicationTimesOutOnMySql() throws Exception {
+        forcedArm = "timeout";
+        fg11fPublicationFaultsSettleOnceOnMySql();
+    }
+
     @Test
     @Timeout(600)
     void fg11fPublicationFaultsSettleOnceOnMySql() throws Exception {
         assumeTrue(anySelected("fg11f", "drop-ack-after-write", "fail-before-write", "timeout"));
-        String arm = List.of("drop-ack-after-write", "fail-before-write", "timeout").stream()
-                .filter(name -> selected("fg11f", name)).findFirst().orElse("drop-ack-after-write");
+        String arm = forcedArm != null ? forcedArm
+                : List.of("drop-ack-after-write", "fail-before-write", "timeout").stream()
+                        .filter(name -> selected("fg11f", name)).findFirst().orElse("drop-ack-after-write");
         publicationFaults = publicationFaults(arm);
         boot("fg11f");
         String definition = request("POST", "/v1/agents", Map.of(

@@ -465,7 +465,7 @@ describe('Hosted real-process gates', () => {
   it.each([
     // Step ceilings today (161 + 10 + 20 + 50): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 243, 256],
+    ['hosted-harness-mysql', 247, 260],
     // Nineteen failover arms at 10 each.
     ['hosted-failover-e2e', 190, 205],
   ])(
@@ -674,12 +674,13 @@ describe('Hosted real-process gates', () => {
       // lost-reply cell adds 150 s, so the fork moves to 9045 and the Verify
       // step to 161 minutes; the FG11f publication cell adds 82 s (2x its
       // measured 41.1 s), so the fork moves to 9127 and the step to 163
-      // minutes):
+      // minutes; the FG11f refusing arms add 242 s (2x their measured 121.2 s),
+      // so the fork moves to 9369 and the step to 167 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(9127);
+        expect(forkSeconds).toBe(9369);
       }
     },
   );
@@ -744,12 +745,13 @@ describe('Hosted real-process gates', () => {
   // cell adds 150s, so it becomes 7959s; the FG11d disabled-span cell adds
   // 336s (2x its measured 168.1s), so it becomes 8295s; the FG13f failClosed
   // lost-reply cell adds 150s, so it becomes 8445s; the FG11f publication
-  // cell adds 82s, so it becomes 8527s. The largest
+  // cell adds 82s, so it becomes 8527s; the FG11f refusing arms add 242s, so
+  // it becomes 8769s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 8527;
+  const hostedForkHealthySeconds = 8769;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
