@@ -2208,6 +2208,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // persistent suggestion panel as if the user had cycled.
       if (key.ctrl && key.name === 'u') {
         exportCompletion.reset();
+        // BaseTextInput empties the buffer on this key; a clipboard read
+        // started before the clear must not land in it afterwards.
+        submitEpochRef.current += 1;
       }
 
       // Ctrl+C with completion active — also reset completion state

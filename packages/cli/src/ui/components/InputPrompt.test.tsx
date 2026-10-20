@@ -2098,6 +2098,40 @@ describe('InputPrompt', () => {
       }
     });
 
+    it('drops a clipboard read that resolves after Ctrl+U cleared the line', async () => {
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
+      let resolveRead: (value: string | null) => void = () => {};
+      vi.mocked(clipboardUtils.readClipboardText).mockImplementation(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveRead = resolve;
+          }),
+      );
+      mockBuffer.text = 'typed prompt';
+      mockBuffer.lines = ['typed prompt'];
+      mockBuffer.cursor = [0, 'typed prompt'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+      // BaseTextInput empties the buffer on Ctrl+U; the read started above
+      // must not land in the line the user just killed.
+      stdin.write('\x15');
+      await wait();
+      resolveRead('late clipboard text');
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith(
+        'late clipboard text',
+        expect.anything(),
+      );
+      unmount();
+    });
+
     it('drops a clipboard read that resolves after the prompt was cleared with ESC ESC', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
       let resolveRead: (value: string | null) => void = () => {};
