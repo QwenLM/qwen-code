@@ -90,17 +90,22 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('skips the install-time prepare build in the daemon-e2e lane', () => {
-    const install = step(job('daemon-e2e'), 'Install Node.js dependencies');
-    // The lane builds and bundles explicitly, so prepare's copy compiles the
-    // whole workspace a second time in the same job — the duplicated compile
-    // that exhausted the heap in #14823.
-    expect(install).toContain("QWEN_SKIP_PREPARE: '1'");
-    expect(step(job('daemon-e2e'), 'Build Qwen Code')).toContain(
-      "run: 'npm run build'",
+  it('keeps the daemon E2E install from rebuilding what its next steps build', () => {
+    // prepare would build and bundle the tree during install, then the two
+    // explicit steps below repeat both. #14861 failed inside that install-path
+    // build, so the install stays an install and the build steps below stay
+    // the only place this job compiles.
+    const steps = parse(workflow).jobs['daemon-e2e'].steps;
+    const install = steps.find(
+      (s) => s.name === 'Install Node.js dependencies',
     );
-    expect(step(job('daemon-e2e'), 'Bundle Qwen Code')).toContain(
-      "run: 'npm run bundle'",
+    expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
+    const names = steps.map((s) => s.name);
+    expect(names.indexOf('Build Qwen Code')).toBeGreaterThan(
+      names.indexOf('Install Node.js dependencies'),
+    );
+    expect(names.indexOf('Bundle Qwen Code')).toBeGreaterThan(
+      names.indexOf('Build Qwen Code'),
     );
   });
 
