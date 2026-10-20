@@ -35,14 +35,16 @@ export const FETCH_TIMEOUT_MS = 5000;
  * Sentinel error thrown when `fetchInfo()` does not resolve within
  * `FETCH_TIMEOUT_MS`. `npm view` is bounded by the `timeout` option passed to
  * `execFile` (see `runGlobalNpm`), but we still race it here as a second,
- * independent bound so a slow / unreachable registry (corporate proxy,
- * offline network, DNS failure) can never hang the check indefinitely. Race
+ * independent bound so a slow check (corporate proxy, offline network, DNS
+ * failure) can never hang indefinitely. The budget covers the whole
+ * `fetchInfo()` path: spawning node, booting the npm CLI, and the registry
+ * round-trip, so a timeout does not show the registry itself was slow. Race
  * the call against a bounded timer and surface a real error so `/update` can
  * report "check failed" instead of silently returning "up to date". The
  * `distTag` is carried on the message so an oncall reading logs can tell
- * which registry endpoint stalled — the nightly path fires two concurrent
- * fetches, and only one of them may be blocked (e.g. a corporate proxy that
- * lets `nightly` through but not `latest`). Related: #6857.
+ * which concurrent fetch stalled, not where it stalled: the nightly path
+ * fires two concurrent fetches, and only one of them may be blocked.
+ * Related: #6857.
  */
 export class UpdateCheckTimeoutError extends Error {
   readonly distTag?: string;
