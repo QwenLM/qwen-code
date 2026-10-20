@@ -7080,7 +7080,16 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`);
 
         expect(skillsRes.status).toBe(200);
-        expect(skillsRes.body).toEqual(skills);
+        expect(skillsRes.body).toEqual({
+          ...skills,
+          snapshot: {
+            observedAt: expect.any(Number),
+            ageMs: expect.any(Number),
+            stale: expect.any(Boolean),
+            refreshing: false,
+          },
+        });
+        expect(skillsRes.body.snapshot.ageMs).toBeGreaterThanOrEqual(0);
         expect(providersRes.status).toBe(200);
         expect(providersRes.body).toMatchObject({
           v: 1,
