@@ -373,6 +373,18 @@ describe('GrepTool', () => {
       }
     });
 
+    it('declares its raw size unknown once it bounds its own output', async () => {
+      // The scheduler measures an undeclared producer body itself. A bounded
+      // render must not be offered as its own pre-reduction size (#13652 R2-5).
+      const whole = await run({ pattern: 'world' });
+      expect(whole.llmContent).not.toContain('truncated');
+      expect(whole.rawOutputSize).toBeUndefined();
+
+      const bounded = await run({ pattern: 'world', limit: 1 });
+      expect(bounded.llmContent).toContain('truncated');
+      expect(bounded.rawOutputSize).toBeNull();
+    });
+
     it('should find matches in a specific path', async () => {
       const result = await run({ pattern: 'world', path: 'sub' });
       expectContent(

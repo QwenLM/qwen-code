@@ -10,6 +10,78 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('reads tool details through the authenticated WebShell route and preserves empty output', async () => {
+    const details = {
+      input: { command: 'true' },
+      output: '',
+      truncated: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(details));
+    const abort = new AbortController();
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      getHeaders: () => ({
+        'X-Qwen-Tenant-Id': 'tenant',
+        'X-Qwen-Actor-Id': 'actor',
+      }),
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.toolDetails!.get('session-1', 'item-1', {
+        clientId: 'client',
+        signal: abort.signal,
+      }),
+    ).toEqual(details);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/tool-details/get',
+    );
+    expect(JSON.parse(String(request?.body))).toEqual({
+      sessionId: 'session-1',
+      itemId: 'item-1',
+    });
+    expect(request?.signal).toBe(abort.signal);
+    expect(new Headers(request?.headers).get('X-Qwen-Tenant-Id')).toBe(
+      'tenant',
+    );
+    expect(new Headers(request?.headers).get('X-Qwen-Actor-Id')).toBe('actor');
+  });
+
+  it('reads the selected Session Skill catalog with authenticated cancellable requests', async () => {
+    const catalog = {
+      skills: [{ name: 'review', description: 'Published review.' }],
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(catalog));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+    });
+    const abort = new AbortController();
+    expect(
+      await provider.skills!.list('session-a', {
+        clientId: 'client',
+        signal: abort.signal,
+      }),
+    ).toEqual(catalog);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/session-skills/query',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.signal).toBe(abort.signal);
+    expect(init?.credentials).toBe('include');
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({ sessionId: 'session-a' });
+  });
   it('preserves Workspace registration keys and validates directory and operation identities', async () => {
     const operation = {
       operationId: 'registration-a',
