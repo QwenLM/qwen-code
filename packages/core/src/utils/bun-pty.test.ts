@@ -726,16 +726,52 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
 });
 
 describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
-  const armFsCapture = (): (() => void) => {
+  const live: Array<ReturnType<typeof spawn>> = [];
+  const ownedSpawn: typeof spawn = (...args) => {
+    const pty = spawn(...args);
+    live.push(pty);
+    return pty;
+  };
+
+  const armFsCapture = (): (() => Promise<void>) => {
+    const baseline = getPtyBudgetStats();
     fsCapture.armed = true;
     fsCapture.reads = [];
     fsCapture.writes = [];
     fsCapture.closes = [];
-    return () => {
-      fsCapture.armed = false;
-      fsCapture.reads = [];
-      fsCapture.writes = [];
-      fsCapture.closes = [];
+    return async () => {
+      const errors: unknown[] = [];
+      try {
+        // Finish every captured operation while capture still owns it. EIO
+        // stops the pump and write drain without dispatching another I/O.
+        while (fsCapture.writes.length > 0 || fsCapture.reads.length > 0) {
+          const callbacks = [
+            ...fsCapture.writes.splice(0),
+            ...fsCapture.reads.splice(0),
+          ];
+          for (const held of callbacks) {
+            try {
+              held.callback(eio(), 0);
+            } catch (error) {
+              errors.push(error);
+            }
+          }
+        }
+        try {
+          await cleanupPtys(live, baseline);
+        } catch (error) {
+          errors.push(error);
+        }
+      } finally {
+        fsCapture.armed = false;
+        fsCapture.reads = [];
+        fsCapture.writes = [];
+        fsCapture.closes = [];
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(errors, 'Captured PTY cleanup failed');
+      }
     };
   };
 
@@ -751,7 +787,7 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
   const eio = () => Object.assign(new Error('read EIO'), { code: 'EIO' });
 
   const spawnAndTripWriteCap = () => {
-    const pty = spawn('/bin/sh', ['-c', 'sleep 30'], {
+    const pty = ownedSpawn('/bin/sh', ['-c', 'sleep 30'], {
       limits: { writeQueueBytes: 64 * 1024 },
     });
     const errors: Error[] = [];
@@ -766,8 +802,8 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
     return pty;
   };
 
-  it('defers the fd close while a write is still owned by the threadpool', () => {
-    const disarm = armFsCapture();
+  it('defers the fd close while a write is still owned by the threadpool', async () => {
+    const cleanup = armFsCapture();
     const baseline = getPtyBudgetStats().activePtys;
     try {
       const pty = spawnAndTripWriteCap();
@@ -793,12 +829,12 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
       expect(closesOf()).toBe(1);
       expectFdClosed(pty);
     } finally {
-      disarm();
+      await cleanup();
     }
   });
 
-  it('defers the fd close while a read is still owned by the threadpool', () => {
-    const disarm = armFsCapture();
+  it('defers the fd close while a read is still owned by the threadpool', async () => {
+    const cleanup = armFsCapture();
     const baseline = getPtyBudgetStats().activePtys;
     try {
       const pty = spawnAndTripWriteCap();
@@ -819,17 +855,19 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
       expect(closesOf()).toBe(1);
       expectFdClosed(pty);
     } finally {
-      disarm();
+      await cleanup();
     }
   });
 
-  it('enforces the process-wide write-queue budget across ptys', () => {
-    const disarm = armFsCapture();
+  it('enforces the process-wide write-queue budget across ptys', async () => {
+    const cleanup = armFsCapture();
     const original = processPtyBudget.totalWriteQueueBytes;
-    processPtyBudget.totalWriteQueueBytes = 96 * 1024;
+    const baseline = getPtyBudgetStats();
+    const limit = baseline.writeQueueBytes + 96 * 1024;
+    processPtyBudget.totalWriteQueueBytes = limit;
     try {
-      const a = spawn('/bin/sh', ['-c', 'sleep 30']);
-      const b = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const a = ownedSpawn('/bin/sh', ['-c', 'sleep 30']);
+      const b = ownedSpawn('/bin/sh', ['-c', 'sleep 30']);
       const aErrors: Error[] = [];
       a.on('error', (error: Error) => aErrors.push(error));
       const bErrors: Error[] = [];
@@ -841,16 +879,20 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
       const chunk = Buffer.alloc(4096, 0x57);
       for (let i = 0; i < 16; i += 1) a.write(chunk);
       expect(aErrors).toHaveLength(0);
-      expect(getPtyBudgetStats().writeQueueBytes).toBe(64 * 1024);
+      expect(getPtyBudgetStats().writeQueueBytes).toBe(
+        baseline.writeQueueBytes + 64 * 1024,
+      );
 
       for (let i = 0; i < 16; i += 1) b.write(chunk);
       expect(bErrors).toHaveLength(1);
       const error = bErrors[0] as PtyLimitError;
       expect(error.code).toBe('QWEN_PTY_WRITE_LIMIT');
       expect(error.limitKind).toBe('write-queue-process');
-      expect(error.limit).toBe(96 * 1024);
+      expect(error.limit).toBe(limit);
       expect(a.stats.resourceFailed).toBe(false);
-      expect(getPtyBudgetStats().writeQueueBytes).toBe(64 * 1024);
+      expect(getPtyBudgetStats().writeQueueBytes).toBe(
+        baseline.writeQueueBytes + 64 * 1024,
+      );
 
       // Settle the held writes, then the held reads, so both fds close.
       for (const held of fsCapture.writes.splice(0)) {
@@ -862,21 +904,24 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
       for (const held of fsCapture.reads.splice(0)) {
         held.callback(eio(), 0);
       }
-      expect(getPtyBudgetStats().writeQueueBytes).toBe(0);
+      expect(getPtyBudgetStats().writeQueueBytes).toBe(
+        baseline.writeQueueBytes,
+      );
       expectFdClosed(a);
       expectFdClosed(b);
-      a.kill();
-      b.kill();
     } finally {
-      disarm();
-      processPtyBudget.totalWriteQueueBytes = original;
+      try {
+        await cleanup();
+      } finally {
+        processPtyBudget.totalWriteQueueBytes = original;
+      }
     }
   });
 
-  it('keeps pumping when a data-listener failure is re-thrown by an error listener', () => {
-    const disarm = armFsCapture();
+  it('keeps pumping when a data-listener failure is re-thrown by an error listener', async () => {
+    const cleanup = armFsCapture();
     try {
-      const pty = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const pty = ownedSpawn('/bin/sh', ['-c', 'sleep 30']);
       const delivered: string[] = [];
       let throwOnce = true;
       pty.onData((data) => {
@@ -912,16 +957,15 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
 
       fsCapture.reads.shift()!.callback(eio(), 0);
       expectFdClosed(pty);
-      pty.kill();
     } finally {
-      disarm();
+      await cleanup();
     }
   });
 
   it('retries an EAGAIN write on a timer instead of spinning the event loop', async () => {
-    const disarm = armFsCapture();
+    const cleanup = armFsCapture();
     try {
-      const pty = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const pty = ownedSpawn('/bin/sh', ['-c', 'sleep 30']);
       const errors: Error[] = [];
       pty.on('error', (error: Error) => errors.push(error));
       pty.write('keystroke');
@@ -956,16 +1000,15 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(fsCapture.writes).toHaveLength(writesAtClose);
       expectFdClosed(pty);
-      pty.kill();
     } finally {
-      disarm();
+      await cleanup();
     }
   });
 
-  it('treats a write EIO as the expected teardown race and reports nothing', () => {
-    const disarm = armFsCapture();
+  it('treats a write EIO as the expected teardown race and reports nothing', async () => {
+    const cleanup = armFsCapture();
     try {
-      const pty = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const pty = ownedSpawn('/bin/sh', ['-c', 'sleep 30']);
       const errors: Error[] = [];
       pty.on('error', (error: Error) => errors.push(error));
       pty.write('keystroke');
@@ -984,16 +1027,15 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
 
       fsCapture.reads.shift()!.callback(eio(), 0);
       expectFdClosed(pty);
-      pty.kill();
     } finally {
-      disarm();
+      await cleanup();
     }
   });
 
-  it('reports a non-teardown write error with its errno code preserved', () => {
-    const disarm = armFsCapture();
+  it('reports a non-teardown write error with its errno code preserved', async () => {
+    const cleanup = armFsCapture();
     try {
-      const pty = spawn('/bin/sh', ['-c', 'sleep 30']);
+      const pty = ownedSpawn('/bin/sh', ['-c', 'sleep 30']);
       const errors: Error[] = [];
       pty.on('error', (error: Error) => errors.push(error));
       pty.write('keystroke');
@@ -1012,9 +1054,8 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
 
       fsCapture.reads.shift()!.callback(eio(), 0);
       expectFdClosed(pty);
-      pty.kill();
     } finally {
-      disarm();
+      await cleanup();
     }
   });
 });

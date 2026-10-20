@@ -5,7 +5,7 @@
  */
 
 import { expect } from 'vitest';
-import { getPtyBudgetStats } from './bun-pty.js';
+import { getPtyBudgetStats, type PtyBudgetStats } from './bun-pty.js';
 
 export async function waitFor(
   predicate: () => boolean,
@@ -21,17 +21,36 @@ export async function waitFor(
 
 export async function cleanupPtys(
   live: Array<{ kill(): void }>,
+  baseline: PtyBudgetStats = {
+    activePtys: 0,
+    pausedHoldBytes: 0,
+    writeQueueBytes: 0,
+  },
 ): Promise<void> {
-  for (const pty of live.splice(0)) pty.kill();
-  expect(
-    await waitFor(() => {
-      const stats = getPtyBudgetStats();
-      return (
-        stats.activePtys === 0 &&
-        stats.pausedHoldBytes === 0 &&
-        stats.writeQueueBytes === 0
-      );
-    }, 5_000),
-    'PTY budgets did not drain after cleanup',
-  ).toBe(true);
+  const errors: unknown[] = [];
+  for (const pty of live.splice(0)) {
+    try {
+      pty.kill();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  try {
+    expect(
+      await waitFor(() => {
+        const stats = getPtyBudgetStats();
+        return (
+          stats.activePtys === baseline.activePtys &&
+          stats.pausedHoldBytes === baseline.pausedHoldBytes &&
+          stats.writeQueueBytes === baseline.writeQueueBytes
+        );
+      }, 5_000),
+      'PTY budgets did not drain after cleanup',
+    ).toBe(true);
+    expect(getPtyBudgetStats()).toEqual(baseline);
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, 'PTY cleanup failed');
 }
