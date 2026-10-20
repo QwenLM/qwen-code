@@ -95,7 +95,6 @@ const AUDIO_EXTENSIONS = new Set(['.m4a', '.mp3', '.ogg', '.wav']);
 const DOWNLOAD_ONLY_EXTENSIONS = new Set([
   ...OFFICE_DOCUMENT_EXTENSIONS,
   ...AUDIO_EXTENSIONS,
-  '.pdf',
   '.mp4',
   '.mov',
   '.webm',
@@ -109,11 +108,23 @@ export function isExcelFile(
   workspacePath?: string,
   mimeType?: string,
 ): boolean {
-  const extension = pathExtension(workspacePath);
+  const extension = workspaceFileExtension(workspacePath);
   return extension
     ? extension === '.xlsx'
     : normalizeArtifactMimeType(mimeType) ===
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
+export function isPdfArtifact(artifact: {
+  kind?: string;
+  workspacePath?: string;
+  mimeType?: string;
+}): boolean {
+  return (
+    workspaceFileExtension(artifact.workspacePath) === '.pdf' ||
+    normalizeArtifactMimeType(artifact.mimeType) === 'application/pdf' ||
+    artifact.kind === 'pdf'
+  );
 }
 
 export function isDownloadOnlyWorkspaceArtifact(artifact: {
@@ -122,7 +133,7 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   mimeType?: string;
 }): boolean {
   if (isExcelFile(artifact.workspacePath, artifact.mimeType)) return false;
-  const extension = pathExtension(artifact.workspacePath);
+  const extension = workspaceFileExtension(artifact.workspacePath);
   const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   if (
     extension === '.svg' ||
@@ -132,6 +143,7 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
     return true;
   }
   if (
+    isPdfArtifact(artifact) ||
     getArtifactImageMimeType(artifact) ||
     extension === '.md' ||
     extension === '.markdown' ||
@@ -145,7 +157,6 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   if (
     artifact.kind === 'image' ||
     artifact.kind === 'document' ||
-    artifact.kind === 'pdf' ||
     artifact.kind === 'video' ||
     artifact.kind === 'audio'
   ) {
@@ -155,8 +166,11 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
 }
 
 export function pathExtension(workspacePath?: string): string {
-  const path = (workspacePath ?? '').split(/[?#]/, 1)[0];
-  const name = path.split(/[/\\]/).pop() ?? '';
+  return workspaceFileExtension((workspacePath ?? '').split(/[?#]/, 1)[0]);
+}
+
+function workspaceFileExtension(workspacePath?: string): string {
+  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }
