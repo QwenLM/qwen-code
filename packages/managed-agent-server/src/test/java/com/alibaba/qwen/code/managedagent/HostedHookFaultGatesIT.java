@@ -588,10 +588,11 @@ class HostedHookFaultGatesIT {
                 .ignoreExceptionsMatching(e -> e instanceof java.net.ConnectException
                         || e instanceof CannotAcquireLockException)
                 .failFast(() -> {
-            if (modelFailure.get() != null) {
-                throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
-            }
-        }).untilAsserted(assertion::execute);
+                    if (modelFailure.get() != null) {
+                        throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
+                    }
+                })
+                .untilAsserted(assertion::execute);
     }
 
     private static String quote(String text) {
