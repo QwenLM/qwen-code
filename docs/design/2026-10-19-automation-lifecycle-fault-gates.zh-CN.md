@@ -2,7 +2,8 @@
 
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
-状态：第 1 片部分交付。`disable-span` 已实现并实跑绿；其余两格与第 2 片已定界但未实现。
+状态：`disable-span` 与按 run 的取消格已实现并实跑绿；`retire-at-intent`、
+`close-queued-input` 与取消矩阵的其余部分已定界但未实现。
 
 Issue：#14446，FG11 tracker。`d` 行记载按 run 取消已由 #14526 实现，并声明
 retire、disable、close 与 round 级取消矩阵并未因该合并而结清。
@@ -50,6 +51,9 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 - schedule、未来 slot、兄弟 run 与前台工作不受影响；
 - 在任何尝试之前被取消的排队 input 结算且不调用模型，自然完成的 run 保留
   其结果；
+- `cancel-stops-only-the-target` 已交付：把 wake turn 扣在模型上时，公开 task
+  cancel 让 task 与 run 在一秒内结算为 `cancelled`，schedule 保持 `live`；反之在
+  收到 `202` 后立刻释放模型，turn 会先跑完——本格避开的正是这个顺序。
 - 同一 key 的重试复用原 operation 与 run，被扣住的 cancel 绝不重投。
 
 #14526 已实现按 run 取消；第 2 片在它周围钉住 round 级矩阵。
