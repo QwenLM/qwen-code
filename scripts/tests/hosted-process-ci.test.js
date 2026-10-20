@@ -463,9 +463,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (166 + 10 + 20 + 50): Verify, the Broker fault
+    // Step ceilings today (166 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 246, 259],
+    ['hosted-harness-mysql', 256, 269],
     // Nineteen failover arms at 10 each.
     ['hosted-failover-e2e', 190, 205],
   ])(
@@ -598,8 +598,10 @@ describe('Hosted real-process gates', () => {
   it.each([
     ['Verify Hosted Java, Spring and MySQL processes', 'hosted-harness-mysql'],
     ['Verify O4 filesystem process and capacity gates', 'o4-mysql-gates'],
+    ['Run Runtime Broker fault gates', 'fault-gates'],
+    ['Verify Hosted admission gates', 'hosted-harness-gates'],
   ])(
-    'keeps the %s step ceiling above its failsafe fork timeout',
+    'keeps the %s step ceiling above its fork timeout',
     (stepName, profile) => {
       const run = java.jobs['hosted-harness-mysql'].steps.find(
         (step) => step.name === stepName,
@@ -615,9 +617,9 @@ describe('Hosted real-process gates', () => {
       // A step killed before its fork leaves no per-test failure lines, so
       // the main-CI failure analyzer can only file an undiagnosable
       // per-commit issue (#13503 for the Hosted verify step, #13684 for the
-      // O4 gates). The ceiling must cover the fork plus the wrapped
-      // compile/spotbugs/checkstyle work — 600 s is the wrap both
-      // steps actually carry, so a step trim or fork bump reddens this row.
+      // O4 gates). Reserve 600 s beyond the fork for compilation and report
+      // teardown, plus spotbugs/checkstyle on the verify steps, so a step
+      // trim or fork bump reddens this row.
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
       );
@@ -672,15 +674,17 @@ describe('Hosted real-process gates', () => {
       // minutes; the FG11d disabled-span cell adds 336 s, so the fork moves
       // to 8895 and the Verify step to 159 minutes; the FG13f failClosed
       // lost-reply cell adds 150 s, so the fork moves to 9045 and the Verify
-      // step to 161 minutes; the FG13b Hook intent store-rejection cell adds
-      // 150 s, so the fork moves to 9195 and the Verify step to 164 minutes; the FG13b
-      // Hook dispatch store-rejection cell adds 150 s, so the fork moves to
-      // 9345 and the Verify step to 166 minutes):
+      // step to 161 minutes; the FG12d refused-release cell adds 6 s, so the
+      // fork moves to 9051 and the Verify step stays 161 minutes; the FG13b
+      // Hook intent store-rejection cell adds 150 s, so the fork moves to
+      // 9201 and the Verify step to 164 minutes; the FG13b Hook dispatch
+      // store-rejection cell adds 150 s, so the fork moves to 9351 and the
+      // Verify step to 166 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(9345);
+        expect(forkSeconds).toBe(9351);
       }
     },
   );
@@ -744,14 +748,15 @@ describe('Hosted real-process gates', () => {
   // lost-reply cell adds 150s, so it becomes 7809s; the FG13f deny lost-reply
   // cell adds 150s, so it becomes 7959s; the FG11d disabled-span cell adds
   // 336s (2x its measured 168.1s), so it becomes 8295s; the FG13f failClosed
-  // lost-reply cell adds 150s, so it becomes 8445s; the FG13b Hook intent
-  // store-rejection cell adds 150s, so it becomes 8595s; the FG13b Hook
-  // dispatch store-rejection cell adds 150s, so it becomes 8745s. The largest
+  // lost-reply cell adds 150s, so it becomes 8445s; the FG12d refused-release
+  // cell adds 6s, so it becomes 8451s; the FG13b Hook intent store-rejection
+  // cell adds 150s, so it becomes 8601s; the FG13b Hook dispatch
+  // store-rejection cell adds 150s, so it becomes 8751s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 8745;
+  const hostedForkHealthySeconds = 8751;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

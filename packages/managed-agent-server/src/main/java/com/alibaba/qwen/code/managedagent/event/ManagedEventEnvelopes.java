@@ -49,11 +49,13 @@ public final class ManagedEventEnvelopes {
     // Number.MAX_SAFE_INTEGER - 1: the schema's sequence ceiling (the TypeScript
     // assert rejects exactly MAX_SAFE_INTEGER as "cannot advance").
     static final long MAX_SEQUENCE = 9007199254740990L;
+    private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
 
+    public static final String KIND_WAKE_REQUESTED = "wake.requested";
     // Ordered (the failure message joins it) — the frozen contract's 20-kind
     // vocabulary in fixture order.
     static final List<String> KINDS = List.of(
-            "input.accepted", "wake.requested", "activation.changed",
+            "input.accepted", KIND_WAKE_REQUESTED, "activation.changed",
             "model.attempt", "message.committed", "tool.intent",
             "action.changed", "tool.receipt", "checkpoint.committed",
             "context.compacted", "cancel.requested", "turn.settled",
@@ -130,16 +132,7 @@ public final class ManagedEventEnvelopes {
         if (row == null || !row.isObject()) {
             fail("publicEvent must be a plain JSON object.");
         }
-        if (row.size() != PUBLIC_EVENT_ROW_KEYS.size()) {
-            fail("publicEvent must have exactly the keys "
-                    + String.join(", ", PUBLIC_EVENT_ROW_KEYS) + ".");
-        }
-        for (String name : PUBLIC_EVENT_ROW_KEYS) {
-            if (!row.has(name)) {
-                fail("publicEvent must have exactly the keys "
-                        + String.join(", ", PUBLIC_EVENT_ROW_KEYS) + ".");
-            }
-        }
+        requireExactKeys(row, PUBLIC_EVENT_ROW_KEYS, "publicEvent");
         long sequence = finiteInteger(row.get("sequence"),
                 "publicEvent.sequence");
         if (sequence < 1) {
@@ -153,12 +146,9 @@ public final class ManagedEventEnvelopes {
             stableId(turnId, "publicEvent.turnId");
         }
         String type = publicKind(row.get("type"), "publicEvent.type");
-        ObjectNode bound = JsonNodeFactory.instance.objectNode();
-        for (String name : PUBLIC_EVENT_ROW_KEYS) {
-            bound.set(name, row.get(name));
-        }
-        var listed = JsonNodeFactory.instance.arrayNode().add(bound);
-        requireDepth(listed, 0);
+        // The row holds exactly the bound keys, so it is digested as is; it
+        // sits at depth 1 inside the digested list.
+        requireDepth(row, 1);
         ManagedEventEnvelope candidate = new ManagedEventEnvelope(
                 FORMAT_VERSION,
                 stableId(row.get("sessionId"), "publicEvent.sessionId"),
@@ -169,8 +159,7 @@ public final class ManagedEventEnvelopes {
                 stableId(row.get("eventId"), "publicEvent.eventId"),
                 type,
                 timeMs(row.get("createdAt"), "publicEvent.createdAt"),
-                new ManagedEventEnvelope.PayloadRef(sha256Hex(canonicalJson(
-                        listed))));
+                new ManagedEventEnvelope.PayloadRef(digest(row)));
         // The envelope's own rules (the workspace id among them) decide last,
         // exactly as the TypeScript derivation re-parses what it built.
         return parse(toTree(candidate));
@@ -182,9 +171,8 @@ public final class ManagedEventEnvelopes {
      * marker's transaction-wide eventsDigest uses.
      */
     public static String digest(JsonNode event) {
-        String encoded = canonicalJson(
-                JsonNodeFactory.instance.arrayNode().add(event));
-        return sha256Hex(encoded);
+        return DigestUtils.sha256Hex(canonicalJson(
+                JsonNodeFactory.instance.arrayNode().add(event)));
     }
 
     /**
@@ -224,27 +212,13 @@ public final class ManagedEventEnvelopes {
                         + "\".");
             }
         });
-        if (value.size() != ENVELOPE_KEYS.size()) {
-            fail("envelope must have exactly the keys "
-                    + String.join(", ", ENVELOPE_KEYS) + ".");
-        }
-        for (String name : ENVELOPE_KEYS) {
-            if (!value.has(name)) {
-                fail("envelope must have exactly the keys "
-                        + String.join(", ", ENVELOPE_KEYS) + ".");
-            }
-        }
-        value.fieldNames().forEachRemaining(name -> {
-            if (!ENVELOPE_KEYS.contains(name)) {
-                fail("envelope must have exactly the keys "
-                        + String.join(", ", ENVELOPE_KEYS) + ".");
-            }
-        });
+        requireExactKeys(value, ENVELOPE_KEYS, "envelope");
         JsonNode v = value.get("v");
         if (v == null || !v.isNumber() || v.doubleValue() != FORMAT_VERSION) {
             fail("envelope.v must be " + FORMAT_VERSION + ".");
         }
-        long sequence = sequence(value.get("sequence"));
+        long sequence = finiteInteger(value.get("sequence"),
+                "envelope.sequence");
         if (sequence < 1) {
             fail("envelope.sequence must start at 1.");
         }
@@ -305,55 +279,54 @@ public final class ManagedEventEnvelopes {
     // --- canonical JSON (mirrors canonicalManagedSessionJson) ---
 
     static String canonicalJson(JsonNode node) {
+        StringBuilder sb = new StringBuilder();
+        appendCanonicalJson(sb, node);
+        return sb.toString();
+    }
+
+    // One builder for the whole tree, so a nested value is never copied once
+    // per enclosing container.
+    private static void appendCanonicalJson(StringBuilder sb, JsonNode node) {
         if (node == null || node.isNull()) {
-            return "null";
-        }
-        if (node.isArray()) {
-            StringBuilder sb = new StringBuilder("[");
+            sb.append("null");
+        } else if (node.isArray()) {
+            sb.append('[');
             for (int i = 0; i < node.size(); i++) {
                 if (i > 0) {
                     sb.append(',');
                 }
-                sb.append(canonicalJson(node.get(i)));
+                appendCanonicalJson(sb, node.get(i));
             }
-            return sb.append(']').toString();
-        }
-        if (node.isObject()) {
-            StringBuilder sb = new StringBuilder("{");
+            sb.append(']');
+        } else if (node.isObject()) {
             List<String> names = new ArrayList<>();
             node.fieldNames().forEachRemaining(names::add);
             // JavaScript's default Array.sort compares UTF-16 code units,
             // which is exactly Java's String.compareTo on char values.
             names.sort(Comparator.naturalOrder());
-            boolean first = true;
-            for (String name : names) {
-                if (!first) {
+            sb.append('{');
+            for (int i = 0; i < names.size(); i++) {
+                if (i > 0) {
                     sb.append(',');
                 }
-                first = false;
-                sb.append(jsonString(name)).append(':')
-                        .append(canonicalJson(node.get(name)));
+                appendJsonString(sb, names.get(i));
+                sb.append(':');
+                appendCanonicalJson(sb, node.get(names.get(i)));
             }
-            return sb.append('}').toString();
-        }
-        return primitiveJson(node);
-    }
-
-    private static String primitiveJson(JsonNode node) {
-        if (node.isTextual()) {
-            return jsonString(node.textValue());
-        }
-        if (node.isBoolean()) {
-            return node.booleanValue() ? "true" : "false";
-        }
-        if (node.isNumber()) {
+            sb.append('}');
+        } else if (node.isTextual()) {
+            appendJsonString(sb, node.textValue());
+        } else if (node.isBoolean()) {
+            sb.append(node.booleanValue() ? "true" : "false");
+        } else if (node.isNumber()) {
             // JSON.stringify has only doubles: an integer above 2^53 renders
             // from its nearest double (rounding), never as exact digits, so
             // the canonical bytes match the TypeScript side.
-            return jsNumberToString(node.doubleValue());
+            sb.append(jsNumberToString(node.doubleValue()));
+        } else {
+            throw new IllegalArgumentException(
+                    "unsupported JSON node type: " + node.getNodeType());
         }
-        throw new IllegalArgumentException(
-                "unsupported JSON node type: " + node.getNodeType());
     }
 
     /**
@@ -368,6 +341,11 @@ public final class ManagedEventEnvelopes {
         if (!Double.isFinite(d)) {
             throw new IllegalArgumentException(
                     "non-finite number in digest input");
+        }
+        if (d == Math.rint(d) && Math.abs(d) < 0x1p53) {
+            // A safe integer is exact and its ulp is at most 1, so no shorter
+            // decimal round-trips: its own digits are the ECMAScript form.
+            return Long.toString((long) d);
         }
         String sign = d < 0 ? "-" : "";
         double a = Math.abs(d);
@@ -437,8 +415,8 @@ public final class ManagedEventEnvelopes {
     }
 
     /** String escaping exactly as JSON.stringify (non-ASCII kept raw). */
-    private static String jsonString(String s) {
-        StringBuilder sb = new StringBuilder("\"");
+    private static void appendJsonString(StringBuilder sb, String s) {
+        sb.append('"');
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             switch (c) {
@@ -464,34 +442,27 @@ public final class ManagedEventEnvelopes {
                     sb.append("\\t");
                     break;
                 default:
-                    if (c < 0x20) {
-                        sb.append(String.format("\\u%04x", (int) c));
-                    } else if (Character.isHighSurrogate(c)
-                            && (i + 1 >= s.length()
-                                    || !Character.isLowSurrogate(
-                                            s.charAt(i + 1)))) {
-                        // JSON.stringify escapes an unpaired surrogate as a
-                        // lowercase backslash-u escape; emitting it raw would
-                        // become a replacement char in UTF-8 and change the digest.
-                        sb.append(String.format("\\u%04x", (int) c));
-                    } else if (Character.isLowSurrogate(c)
-                            && (i == 0 || !Character.isHighSurrogate(
-                                    s.charAt(i - 1)))) {
+                    // JSON.stringify escapes an unpaired surrogate as a
+                    // lowercase backslash-u escape; emitting it raw would
+                    // become a replacement char in UTF-8 and change the digest.
+                    if (c < 0x20 || isUnpairedSurrogate(s, i)) {
                         sb.append(String.format("\\u%04x", (int) c));
                     } else {
                         sb.append(c);
                     }
             }
         }
-        return sb.append('"').toString();
+        sb.append('"');
     }
 
-    private static String sha256Hex(String s) {
-        try {
-            return DigestUtils.sha256Hex(s.getBytes(StandardCharsets.UTF_8));
-        } catch (IllegalArgumentException error) {
-            throw new IllegalStateException(error);
+    private static boolean isUnpairedSurrogate(String s, int i) {
+        char c = s.charAt(i);
+        if (Character.isHighSurrogate(c)) {
+            return i + 1 >= s.length()
+                    || !Character.isLowSurrogate(s.charAt(i + 1));
         }
+        return Character.isLowSurrogate(c)
+                && (i == 0 || !Character.isHighSurrogate(s.charAt(i - 1)));
     }
 
     // --- per-field validation (mirrors the TypeScript asserts) ---
@@ -503,21 +474,13 @@ public final class ManagedEventEnvelopes {
      * `Number.isSafeInteger` accepts them on the TypeScript side.
      */
     private static long finiteInteger(JsonNode node, String label) {
-        if (node == null || !node.isNumber()) {
-            fail(label + " must be a non-negative safe integer.");
-        }
-        double value = node.doubleValue();
-        if (!Double.isFinite(value) || value != Math.rint(value)) {
-            fail(label + " must be a non-negative safe integer.");
-        }
-        if (value < 0 || value > MAX_SEQUENCE) {
+        double value = node == null || !node.isNumber() ? Double.NaN
+                : node.doubleValue();
+        if (!Double.isFinite(value) || value != Math.rint(value)
+                || value < 0 || value > MAX_SEQUENCE) {
             fail(label + " must be a non-negative safe integer.");
         }
         return (long) value;
-    }
-
-    private static long sequence(JsonNode node) {
-        return finiteInteger(node, "envelope.sequence");
     }
 
     private static long timeMs(JsonNode node, String label) {
@@ -543,12 +506,7 @@ public final class ManagedEventEnvelopes {
             }
             // The TypeScript valid-UTF-8 round-trip check rejects unpaired
             // surrogates; mirror it by the pairing rule.
-            if (Character.isHighSurrogate(c) && (i + 1 >= id.length()
-                    || !Character.isLowSurrogate(id.charAt(i + 1)))) {
-                fail(label + " must be valid UTF-8 text.");
-            }
-            if (Character.isLowSurrogate(c) && (i == 0
-                    || !Character.isHighSurrogate(id.charAt(i - 1)))) {
+            if (isUnpairedSurrogate(id, i)) {
                 fail(label + " must be valid UTF-8 text.");
             }
         }
@@ -589,11 +547,21 @@ public final class ManagedEventEnvelopes {
 
     private static String digestValue(JsonNode node) {
         if (node == null || !node.isTextual()
-                || !node.textValue().matches("[0-9a-f]{64}")) {
+                || !DIGEST.matcher(node.textValue()).matches()) {
             fail("envelope.payloadRef.digest must be a lowercase SHA-256 hex"
                     + " digest.");
         }
         return node.textValue();
+    }
+
+    // An object node's names are unique, so the right size with every key
+    // present leaves no room for an extra one.
+    private static void requireExactKeys(JsonNode node, List<String> keys,
+            String label) {
+        if (node.size() != keys.size() || !keys.stream().allMatch(node::has)) {
+            fail(label + " must have exactly the keys " + String.join(", ", keys)
+                    + ".");
+        }
     }
 
     /**

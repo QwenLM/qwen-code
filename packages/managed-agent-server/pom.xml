@@ -502,15 +502,20 @@
                                  159 minutes. The FG13f failClosed lost-reply
                                  cell adds 150 s: the healthy sum becomes
                                  8445 s, so the fork moves to 9045 s and the
-                                 Verify step to 161 minutes. The FG13b Hook
+                                 Verify step to 161 minutes. The FG12d
+                                 forwarded-refusal case added by this PR
+                                 measures 5.8 s and adds 6 s at this ledger's
+                                 granularity: the healthy sum becomes 8451 s,
+                                 so the fork moves to 9051 s and the Verify
+                                 step stays 161 minutes. The FG13b Hook
                                  intent store-rejection cell adds 150 s: the
-                                 healthy sum becomes 8595 s, so the fork moves
-                                 to 9195 s and the Verify step to 164
+                                 healthy sum becomes 8601 s, so the fork moves
+                                 to 9201 s and the Verify step to 164
                                  minutes. The FG13b Hook dispatch
                                  store-rejection cell adds 150 s: the healthy
-                                 sum becomes 8745 s, so the fork moves to
-                                 9345 s and the Verify step to 166 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9345</forkedProcessTimeoutInSeconds>
+                                 sum becomes 8751 s, so the fork moves to
+                                 9351 s and the Verify step to 166 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9351</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
