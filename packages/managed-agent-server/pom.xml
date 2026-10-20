@@ -403,12 +403,14 @@
                                  becomes 3874 s and the fork 4484 s,
                                  which the Verify step's 90 minutes
                                  still wrap. The FG12a MCP reply-loss
-                                 letter (HostedMcpReplyLossIT, three
-                                 cases) measures 5.1-7.4 s healthy
+                                 letter (HostedMcpReplyLossIT, eight
+                                 cases) measures 5.1-11.7 s healthy
                                  locally on macOS JDK 21 + MariaDB
-                                 10.11 (~15 s budgeted at 2x): the
-                                 healthy sum becomes 3889 s, so the
-                                 fork moves to 4499 s. The FG12c MCP
+                                 10.11 (15 s budgeted; the latest
+                                 11.66 s run is ~1.3x, so raising the
+                                 ceiling is a follow-up): the healthy
+                                 sum becomes 3889 s, so the fork moves
+                                 to 4499 s. The FG12c MCP
                                  restart matrix (HostedMcpRestartFault
                                  GatesIT, five process-kill cases)
                                  measures ~49 s healthy locally (~98 s
