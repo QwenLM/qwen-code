@@ -475,9 +475,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (179 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (181 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 269, 282],
+    ['hosted-harness-mysql', 271, 284],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -699,7 +699,7 @@ describe('Hosted real-process gates', () => {
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10080);
+        expect(forkSeconds).toBe(10230);
       }
     },
   );
@@ -773,13 +773,14 @@ describe('Hosted real-process gates', () => {
   // refusing-arms cells add 242s, so it becomes 9165s; the FG13b Hook result
   // store-rejection cell adds 150s, so it becomes 9315s; the FG13b Hook
   // plan-result store-rejection cell adds 150s, so it becomes 9465s; the FG11d
-  // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s. The
+  // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s; the FG13e
+  // Hook stream-gap cell adds 150s, so it becomes 9630s. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9480;
+  const hostedForkHealthySeconds = 9630;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -851,6 +852,7 @@ describe('Hosted real-process gates', () => {
       'HostedHookCancelFaultGatesIT',
       'HostedHookFaultGatesIT',
       'HostedHookReplyLossFaultGatesIT',
+      'HostedHookStreamGapIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
       'HostedMcpResultDeliveryIT',

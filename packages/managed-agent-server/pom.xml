@@ -536,8 +536,11 @@
                                  measured 7.4 s), so the fork moves to 10080 s
                                  and the Verify step to 179 minutes: 10680 s of
                                  fork plus wrap is exactly 178, so 179 is what
-                                 keeps the margin. -->
-                            <forkedProcessTimeoutInSeconds>10080</forkedProcessTimeoutInSeconds>
+                                 keeps the margin. The FG13e Hook stream-gap
+                                 cell adds 150 s: the healthy sum becomes
+                                 9630 s, so the fork moves to 10230 s and the
+                                 Verify step to 181 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10230</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
