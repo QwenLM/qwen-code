@@ -40,7 +40,10 @@ function record(event, fields = {}) {
   });
 }
 
-const solo = signalMode === 'hook-solo' || signalMode === 'hook-deny';
+const solo =
+  signalMode === 'hook-solo' ||
+  signalMode === 'hook-deny' ||
+  signalMode === 'hook-fail';
 
 if (mode === 'child') {
   // FG13d: the graceful pass signals every member; this descendant has to
@@ -89,6 +92,12 @@ if (mode === 'child') {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   const deny = signalMode === 'hook-deny';
+  // FG13f: a failed evaluation is what failClosed wraps. The process exits
+  // without a decision so the receipt is a failure, not a deny.
+  if (signalMode === 'hook-fail') {
+    record('hook.fail', { eventName: value.hook_event_name });
+    process.exit(1);
+  }
   record(lifecycle ? 'hook.done' : deny ? 'hook.deny' : 'hook.allow', {
     eventName: value.hook_event_name,
   });

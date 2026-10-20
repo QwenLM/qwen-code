@@ -467,6 +467,53 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13fFailClosedReplyLossReplaysTheBlockedFailureOnMySql() throws Exception {
+        boot("60000", "1000", "hook-fail");
+        // The failure is settled before the reply is dropped. The wrapped
+        // decision is the harness's, so the rule matches the worker's raw
+        // settled failure rather than the reason text it has not added yet.
+        proxy.arm(HostedSessionRelayForwardingProxy.Rule.dropResponse(
+                (method, path, body) -> path.contains("/control")
+                        && body.contains("\"kind\":\"hook-status\""),
+                reply -> reply.contains("\"state\":\"settled\"")
+                        && reply.contains("\"success\":false"),
+                "hook-fail-settled-reply"));
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_FAILCLOSED_LOSS");
+        waitFor(() -> assertThat(events("hook.call")).hasSize(1));
+        // The dropped settled reply leaves the honest unknown first.
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText()).isEqualTo("recovery_blocked");
+            assertThat(execution.at("/run/execution").asText()).isEqualTo("outcome_unknown");
+        });
+        assertThat(events("hook.fail")).hasSize(1);
+        assertThat(events("hook.allow")).isEmpty();
+        // A later read of the same operation settles the wrapped failure.
+        String executionId = hookExecution(session).path("hookExecutionId").asText();
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
+        });
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
+        assertThat(events("hook.call")).hasSize(1);
+        JsonNode failed = hookResult(session);
+        assertThat(failed.path("success").asBoolean()).isFalse();
+        assertThat(failed.at("/output/continue").asBoolean()).isFalse();
+        assertThat(failed.at("/output/decision").asText()).isEqualTo("block");
+        assertThat(failed.at("/output/reason").asText()).isEqualTo("Hook evaluation failed.");
+        assertThat(modelRequests.toString()).doesNotContain(PROOF);
+        assertThat(Files.readString(temporary.resolve("proxy.log")))
+                .contains("PROXY dropped hook-fail-settled-reply");
+        assertThat(modelFailure.get()).isNull();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
