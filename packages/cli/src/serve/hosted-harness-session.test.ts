@@ -7012,14 +7012,17 @@ describe('Hosted Harness no-tool session', () => {
             payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
           })
           .expect(202);
-        await vi.waitFor(async () => {
-          const blocked = await status();
-          expect(blocked.body.hasActivePrompt).toBe(false);
-          expect(blocked.body.recoveryBlocked).toBe(true);
-          expect(blocked.body.recoveryReason).toBe(
-            'managed_session_store_unavailable',
-          );
-        });
+        await vi.waitFor(
+          async () => {
+            const blocked = await status();
+            expect(blocked.body.hasActivePrompt).toBe(false);
+            expect(blocked.body.recoveryBlocked).toBe(true);
+            expect(blocked.body.recoveryReason).toBe(
+              'managed_session_store_unavailable',
+            );
+          },
+          { timeout: SETTLE_TIMEOUT_MS },
+        );
         expect(settlementAttempts).toBe(1);
         storeUnavailable = false;
         const appended = append.mock.calls.length;
@@ -7037,14 +7040,17 @@ describe('Hosted Harness no-tool session', () => {
           .send({ managedSessionStore: store(), driveRuntimeRecovery: true });
         expect(redriven.status).toBe(409);
         expect(redriven.body.code).toBe('hosted_turn_recovery_required');
-        await vi.waitFor(async () => {
-          const blocked = await status();
-          expect(blocked.body.hasActivePrompt).toBe(false);
-          expect(blocked.body.recoveryBlocked).toBe(true);
-          expect(blocked.body.recoveryReason).toBe(
-            'managed_session_store_unavailable',
-          );
-        });
+        await vi.waitFor(
+          async () => {
+            const blocked = await status();
+            expect(blocked.body.hasActivePrompt).toBe(false);
+            expect(blocked.body.recoveryBlocked).toBe(true);
+            expect(blocked.body.recoveryReason).toBe(
+              'managed_session_store_unavailable',
+            );
+          },
+          { timeout: SETTLE_TIMEOUT_MS },
+        );
         expect(state.model).toHaveBeenCalledOnce();
         expect(append).toHaveBeenCalledTimes(appended);
         if (preparationFailure) {
