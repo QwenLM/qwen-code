@@ -582,6 +582,14 @@ class FakeBridge {
     this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
   }
+  async getSessionTaskRuntime(sessionId: string, taskId: string) {
+    return {
+      v: 1 as const,
+      sessionId,
+      taskId,
+      runtime: { outputTail: 'ready' },
+    };
+  }
   async getSessionAgentsStatus(sessionId: string) {
     return { sessionId, tasks: [] };
   }
@@ -9280,6 +9288,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         includeWorkflows: true,
       });
     });
+
+    it.each([
+      { sessionId: 'sess-1', taskId: 'bg_1', owned: true, valid: true },
+      { sessionId: 'sess-1', taskId: '', owned: true, valid: false },
+      { sessionId: 'sess-1', taskId: 123, owned: true, valid: false },
+      {
+        sessionId: 'other-session',
+        taskId: 'bg_1',
+        owned: false,
+        valid: false,
+      },
+    ])(
+      '_qwen/session/task_runtime validates ownership and task id: $sessionId / $taskId',
+      async ({ sessionId, taskId, owned, valid }) => {
+        const read = vi.spyOn(bridge, 'getSessionTaskRuntime');
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/new',
+          params: {},
+        });
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 58,
+          method: '_qwen/session/task_runtime',
+          params: { sessionId, taskId },
+        });
+        const frames = await takeFrames(await streamRes, 2);
+        if (valid) {
+          expect(frames[1]).toMatchObject({
+            result: { sessionId, taskId, runtime: { outputTail: 'ready' } },
+          });
+          expect(read).toHaveBeenCalledWith(sessionId, taskId);
+        } else {
+          expect(frames[1]).toMatchObject({
+            error: {
+              code: -32602,
+              message: expect.stringContaining(owned ? 'taskId' : 'not owned'),
+            },
+          });
+          expect(read).not.toHaveBeenCalled();
+        }
+        read.mockRestore();
+      },
+    );
 
     it('_qwen/session/tasks/cancel forwards the task and trusted client context', async () => {
       const connId = await initialize();

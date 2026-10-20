@@ -498,6 +498,12 @@ const {
       hasMore: false,
     }),
     getWorkspaceSessionLiveState: vi.fn(),
+    sessionTaskRuntime: vi.fn().mockResolvedValue({
+      v: 1,
+      sessionId: 'nested-session',
+      taskId: 'shell-1',
+      runtime: { outputTail: 'restored output' },
+    }),
     sessionTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -621,6 +627,7 @@ const {
     listSources: vi
       .fn<() => Promise<SessionSourcesResult>>()
       .mockResolvedValue({ revision: 0, sources: [] }),
+    getTaskRuntime: vi.fn(),
     getTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -2672,7 +2679,11 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
 });
 vi.doMock('./components/messages/TasksStatusMessage', async () => {
   const React = await import('react');
+  const actual = await vi.importActual<
+    typeof import('./components/messages/TasksStatusMessage')
+  >('./components/messages/TasksStatusMessage');
   return {
+    shellTaskPanelTitle: actual.shellTaskPanelTitle,
     TasksStatusMessage: (props: {
       planTodos?: Array<{ id: string }>;
       agentTools?: Array<{ callId: string }>;
@@ -7497,6 +7508,19 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.sessionTasks).toHaveBeenLastCalledWith(
       'nested-session',
     );
+    const restored = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'shell',
+    );
+    expect(restored?.kind).toBe('shell');
+    if (restored?.kind !== 'shell')
+      throw new Error('Shell tab was not restored');
+    expect(restored.title).toBe('npm');
+    await restored.sessionActions!.getTaskRuntime('shell-1');
+    expect(mockWorkspace.client.sessionTaskRuntime).toHaveBeenCalledWith(
+      'nested-session',
+      'shell-1',
+    );
+    expect(mockSessionActions.getTaskRuntime).not.toHaveBeenCalled();
   });
 
   it('does not restart current-session task restoration on transcript updates', async () => {
@@ -18775,12 +18799,12 @@ describe('App session callbacks', () => {
       status: 'running',
       startTime: 1_000,
       runtimeMs: 5_000,
-      command: 'npm run dev',
+      command: '/opt/bin/node server.js',
       cwd: '/tmp/project',
       pid: 42,
     };
     testState.backgroundTasks = [shell];
-    const { container } = renderApp();
+    const { container, rerender } = renderApp();
 
     act(() => {
       testState.latestChatEditorProps?.onChatWidthModeChange?.('wide');
@@ -18796,7 +18820,7 @@ describe('App session callbacks', () => {
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="environment-panel"] ul button',
       ),
-    ).find((button) => button.textContent?.includes('npm run dev'));
+    ).find((button) => button.textContent?.includes('/opt/bin/node server.js'));
 
     act(() => shellButton?.click());
 
@@ -18805,11 +18829,14 @@ describe('App session callbacks', () => {
         '[data-testid="environment-panel"]:not([hidden])',
       ),
     ).not.toBeNull();
-    expect(
-      container.querySelector('button[title="npm run dev"]'),
-    ).not.toBeNull();
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
+    testState.backgroundTasks = [{ ...shell, runtimeMs: 8000 }];
+    rerender();
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
+    act(() => shellButton?.click());
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
     expect(container.textContent).toContain('/tmp/project');
-    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(2);
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(3);
   });
 
   it('restores the environment panel open state per session', () => {

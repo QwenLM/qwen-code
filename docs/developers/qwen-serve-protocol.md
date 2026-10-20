@@ -2491,6 +2491,43 @@ top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
 
+### `GET /session/:id/tasks/:taskId/runtime`
+
+On-demand detail for one shell task. `GET /session/:id/tasks` carries lifecycle
+facts only; this route reads the captured output file and probes the process
+tree, so an open detail panel asks for it separately.
+
+The ACP method is `_qwen/session/task_runtime`, with `sessionId` and `taskId`
+parameters. Both transports resolve the live session owner; ACP also requires
+the connection to own the session.
+
+The path's `taskId` is resolved against the session's own shell registry;
+callers never pass a file path.
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "taskId": "bg_0123abcd",
+  "runtime": {
+    "memoryBytes": 104857600,
+    "outputBytes": 65536,
+    "outputModifiedAt": 1700000000000,
+    "outputTail": "ready in 120ms\n",
+    "outputTailTruncated": true
+  }
+}
+```
+
+`runtime` is `null` when the task is unknown, has been evicted, or is not a
+shell task. `memoryBytes` is the resident set of the shell's process tree,
+sampled only while the task is running; shared pages are counted once per
+process, and a container sandbox may expose only the wrapper process.
+`outputTail` is capped at the same 8 KiB limit used by the completion
+notification, and `outputTailTruncated` marks a tail that starts mid-file.
+`outputError` is set when the file cannot be read; fields from a part that did
+succeed may still be present.
+
 ### `POST /session/:id/tasks/:taskId/workflow-action`
 
 Controls a workflow run, or starts a new one. The ACP method is

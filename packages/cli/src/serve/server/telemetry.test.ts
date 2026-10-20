@@ -1141,19 +1141,19 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  // Message group reads and deletion resolve the live session owner in the
-  // handler, preserving the two pre-resolved routes.
-  it('contains 82 unique routes with the audited 80/2 attribution split', () => {
+  // Shell runtime and message group routes resolve the live session owner
+  // in the handler, preserving the two pre-resolved routes.
+  it('contains 83 unique routes with the audited 81/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(82);
-    expect(new Set(keys).size).toBe(82);
+    expect(keys).toHaveLength(83);
+    expect(new Set(keys).size).toBe(83);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(80);
+    ).toHaveLength(81);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
