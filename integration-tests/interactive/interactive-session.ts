@@ -90,10 +90,14 @@ export class InteractiveSession {
   private rawOutput = '';
   private pendingWrite: Promise<void> = Promise.resolve();
   private closed = false;
+  private readonly exited: Promise<void>;
 
   private constructor(ptyProcess: pty.IPty, terminal: Terminal) {
     this.ptyProcess = ptyProcess;
     this.terminal = terminal;
+    this.exited = new Promise<void>((resolve) => {
+      ptyProcess.onExit(() => resolve());
+    });
 
     ptyProcess.onData((data) => {
       this.rawOutput += data;
@@ -313,6 +317,18 @@ export class InteractiveSession {
     } catch {
       // Process may have already exited
     }
+    // kill() only delivers the signal; the CLI can still be flushing state
+    // into the test directory. Wait for the exit event so a following case
+    // that reuses the directory cannot race those writes.
+    let exitTimeout: NodeJS.Timeout | undefined;
+    await Promise.race([
+      this.exited,
+      new Promise<void>((resolve) => {
+        exitTimeout = setTimeout(resolve, 5_000);
+      }),
+    ]);
+    if (exitTimeout) clearTimeout(exitTimeout);
+    await this.flush();
     this.terminal.dispose();
   }
 }
