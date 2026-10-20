@@ -809,6 +809,11 @@ describe('hasNonFinalTopLevelBackgroundOperator', () => {
     expectEach(hasNonFinalTopLevelBackgroundOperator, true, [
       'tail -f app.log & echo ok',
       'tail -f app.log & # watch',
+      // A bare CR or NBSP is an ordinary word character to bash, so `>\r&` is a
+      // redirect to a file named `\r` followed by a background operator, not the
+      // `>&` dup-redirect that reading `\r` as whitespace made it look like.
+      'echo x >\r& rm -rf /tmp/x',
+      'echo x >\u00a0& rm -rf /tmp/x',
     ]);
   });
 

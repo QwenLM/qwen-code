@@ -1176,10 +1176,13 @@ export function hasNonFinalTopLevelBackgroundOperator(
   let inBackticks = false;
   let commandSubstitutionDepth = 0;
 
+  // Bash skips only space, tab and newline when it locates the character
+  // before an `&`, so `/\s/` here read a bare CR or NBSP as spacing and mistook
+  // `echo x >\r& y` for a `>&` redirect instead of a background operator.
   const previousNonWhitespace = (index: number): string | undefined => {
     for (let i = index - 1; i >= 0; i--) {
       const char = command[i];
-      if (char !== undefined && !/\s/.test(char)) return char;
+      if (char !== undefined && !isBashWordSeparator(char)) return char;
     }
     return undefined;
   };
