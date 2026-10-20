@@ -1138,7 +1138,7 @@ function getModelFacingToolName(request: ToolCallRequestInfo): string {
 // not apply here — these are not terminal strings to "fix" for column width.
 /** Directive injected when a tool call repeatedly fails validation. */
 const RETRY_LOOP_STOP_DIRECTIVE =
-  '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
+  '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times. ' +
   'STOP retrying the same approach. Re-examine the tool schema and parameter requirements, then try a ' +
   'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
   'instead of retrying.';
@@ -3156,7 +3156,7 @@ export class CoreToolScheduler {
       );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
-      // "<toolName>:<errorMessage>"; retain counters only for tools actually
+      // "<toolName>:<causeClass>"; retain counters only for tools actually
       // present in the current batch. Keeping every tracked tool's counters
       // whenever any current request matched caused stale counts for
       // unrelated tools to survive and fire RETRY LOOP DETECTED prematurely
@@ -3187,7 +3187,14 @@ export class CoreToolScheduler {
       ): number => {
         const key = `${toolName}:${causeClass}`;
         const existingCount = retryErrorsRecordedInBatch.get(key);
-        if (existingCount !== undefined) {
+        // Write back only while the class is still live: an intervening
+        // different-cause recording in this batch legitimately restarted the
+        // count, and resurrecting the stale one would hand the call the
+        // stop directive on a count the declared semantics had just reset.
+        if (
+          existingCount !== undefined &&
+          this.validationRetryCounts.has(key)
+        ) {
           for (const trackedKey of this.validationRetryCounts.keys()) {
             if (trackedKey.startsWith(`${toolName}:`)) {
               this.validationRetryCounts.delete(trackedKey);
@@ -3445,13 +3452,14 @@ export class CoreToolScheduler {
               reqInfo.name,
               truncated ? 'truncation' : 'incomplete-args',
             );
-            // The directive is appended after the rejectionMessage key was
-            // recorded: recordRetryableToolError prunes the tool's other keys,
-            // so folding the directive into the key would reset the count at
-            // the threshold. And the incomplete-args arm must not reuse
-            // RETRY_LOOP_STOP_DIRECTIVE: this guard rejects before
-            // buildInvocation, so validation never ran and "failed validation
-            // ... re-examine the tool schema" would misdiagnose the cause.
+            // The directive is appended after the count was recorded under
+            // the cause class: recordRetryableToolError prunes the tool's
+            // other classes, so folding the directive into the class would
+            // reset the count at the threshold. And the incomplete-args arm
+            // must not reuse RETRY_LOOP_STOP_DIRECTIVE: this guard rejects
+            // before buildInvocation, so validation never ran and "failed
+            // validation ... re-examine the tool schema" would misdiagnose
+            // the cause.
             const truncationError = new Error(
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
                 ? `${rejectionMessage}${

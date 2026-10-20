@@ -126,10 +126,10 @@ export async function resolveDeferredToolCall(
         `"${invocation.params.name}" matches more than one registered tool by case (${resolved.join(', ')}). Call tool_call with the exact name.`,
       ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
-      // The requested name is stable across repeats of this same ambiguity —
-      // keying the retry counter on it keeps distinct targets in distinct
-      // buckets even when resolution cannot pick one (#13073).
-      targetName: invocation.params.name,
+      // Every casing of one ambiguity lowercases to the same key, so the
+      // counter keys on that lowered form rather than the raw input, which
+      // would split one ambiguity across casings (#13073).
+      targetName: invocation.params.name.toLowerCase(),
     };
   }
   if (resolved !== undefined) {
