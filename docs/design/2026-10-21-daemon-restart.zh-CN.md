@@ -12,18 +12,20 @@
 
 ```bash
 qwen daemon restart [--port <port>] [--token <token>]
-                     [--web | --no-web] [--require-auth]
+                     [--web | --no-web] [--require-auth] [--force]
 ```
 
-注册多个 daemon 时必须传 `--port`。`auth: bearer` 的 daemon 必须提供 `--token` 或 `QWEN_SERVER_TOKEN`。
+注册多个 daemon 时必须传 `--port`。对 bearer daemon，或对 `auth: none` daemon 显式请求 `--require-auth` 时，必须提供 `--token` 或 `QWEN_SERVER_TOKEN`。
 
 ## 行为
 
 - 只选择一个 discovery record；无 daemon 或多 daemon 未指定 `--port` 均报错。
-- 对 bearer daemon，**先解析 token 再 stop**；缺少 token 时不能杀掉可用 daemon。
-- 通过现有 `daemon stop` 路径停止，保留 PID/启动时间/命令行校验与 Windows 的 `--force` 要求。
+- 停止前拒绝 HTTPS discovery URL。`daemon start` 无法恢复 TLS 设置，restart 不能把加密 listener 降级为明文 HTTP。
+- 停止前解析并校验 bearer token。这同时覆盖记录为 bearer 的 daemon，以及对 `auth: none` daemon 显式 `--require-auth` 的加固；token 会保留在子进程环境中。
+- 通过现有 `daemon stop` 路径停止，保留 PID/启动时间/命令行校验。Windows 上只有操作者传 `restart --force` 时才转发 `--force`；restart 不代替操作者确认硬杀。
 - 通过现有 `daemon start --wait` 路径启动，复用记录的 port、hostname 与 workspaces；新进程报告 runtime serving 后才返回。
-- `auth: none` 时从子进程环境移除 `QWEN_SERVER_TOKEN`，避免 restart 静默加上 bearer 认证。
+- 对 JavaScript/TypeScript 入口保留 `process.execArgv`，使 `npm run dev -- daemon restart` 保留 loader。
+- `auth: none` 且未请求 `--require-auth` 时，从子进程环境移除 `QWEN_SERVER_TOKEN`，避免 restart 静默加上 bearer 认证。
 
 ## 安全与失败
 

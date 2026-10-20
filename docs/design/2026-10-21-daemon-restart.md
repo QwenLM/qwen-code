@@ -12,18 +12,20 @@ English | [中文](2026-10-21-daemon-restart.zh-CN.md)
 
 ```bash
 qwen daemon restart [--port <port>] [--token <token>]
-                     [--web | --no-web] [--require-auth]
+                     [--web | --no-web] [--require-auth] [--force]
 ```
 
-`--port` is required when more than one daemon is registered. `--token` is required for a `auth: bearer` daemon; `QWEN_SERVER_TOKEN` is the preferred source.
+`--port` is required when more than one daemon is registered. For a bearer daemon, or when `--require-auth` is requested for an `auth: none` daemon, `--token` or `QWEN_SERVER_TOKEN` is required.
 
 ## Behavior
 
 - Select exactly one discovery record. No daemon or multiple daemons without `--port` is an error.
-- Resolve the bearer token **before** stopping a bearer daemon. A missing token must not kill a working daemon.
-- Stop through the existing `daemon stop` path, including PID/start-time/command checks and the Windows `--force` requirement.
+- Reject an HTTPS discovery URL before stopping. `daemon start` cannot restore TLS settings, so restart must not downgrade an encrypted listener to plain HTTP.
+- Resolve and validate the bearer token **before** stopping. This covers both a recorded bearer daemon and an explicit `--require-auth` hardening of an `auth: none` daemon. The token is retained in the child environment.
+- Stop through the existing `daemon stop` path, including PID/start-time/command-line checks. On Windows, `--force` is passed only when the operator passes `restart --force`; restart never acknowledges the hard kill on the operator's behalf.
 - Start through the existing `daemon start --wait` path with the recorded port, hostname, and workspaces. The new process must report the runtime as serving before restart returns.
-- For `auth: none`, remove `QWEN_SERVER_TOKEN` from the child environment so restart does not silently add bearer auth.
+- Preserve `process.execArgv` for JavaScript/TypeScript entries so `npm run dev -- daemon restart` keeps its loader.
+- For `auth: none` without `--require-auth`, remove `QWEN_SERVER_TOKEN` from the child environment so restart does not silently add bearer auth.
 
 ## Safety and failure
 

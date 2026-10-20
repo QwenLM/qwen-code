@@ -78,6 +78,7 @@ interface RestartArgs {
   token?: string;
   web: boolean;
   'require-auth': boolean;
+  force?: boolean;
 }
 
 interface StartArgs {
@@ -1187,60 +1188,61 @@ async function handleStop(argv: StopArgs): Promise<void> {
   if (failed) process.exitCode = 1;
 }
 
-async function handleRestart(argv: RestartArgs): Promise<void> {
-  ignoreBrokenPipe();
-  const { entries } = readDaemonDiscoveries();
-  const error = selectionError(entries, { port: argv.port });
-  if (error) {
-    writeStderrLine(`qwen daemon: ${error}`);
-    process.exitCode = 1;
-    return;
+export interface DaemonRestartPlan {
+  error?: string;
+  command?: string;
+  stopArgs?: string[];
+  startArgs?: string[];
+  env?: NodeJS.ProcessEnv;
+}
+
+export function buildDaemonRestartPlan(
+  record: DaemonDiscoveryRecord,
+  options: {
+    token?: string;
+    web: boolean;
+    requireAuth: boolean;
+    force?: boolean;
+  },
+  entry: string,
+  execArgv: readonly string[] = process.execArgv,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): DaemonRestartPlan {
+  let protocol = '';
+  try {
+    protocol = new URL(record.url).protocol;
+  } catch {
+    // An unparseable record was already rejected by the discovery reader.
   }
-  const selected = selectDaemonEntries(entries, { port: argv.port });
-  if (selected.length !== 1) {
-    writeStderrLine(
-      'qwen daemon: restart needs exactly one registered daemon; pass --port.',
-    );
-    process.exitCode = 1;
-    return;
+  if (protocol === 'https:') {
+    return {
+      error:
+        'restarting an HTTPS daemon is not supported; restart it with qwen serve and the original TLS settings.',
+    };
   }
 
-  const record = selected[0]!.record;
+  const requireAuth = options.requireAuth || record.auth === 'bearer';
   const token =
-    argv.token?.trim() || process.env['QWEN_SERVER_TOKEN']?.trim() || undefined;
-  if (record.auth === 'bearer' && !token) {
-    writeStderrLine(
-      'qwen daemon: restarting a bearer daemon requires --token or QWEN_SERVER_TOKEN.',
-    );
-    process.exitCode = 1;
-    return;
+    options.token?.trim() || baseEnv['QWEN_SERVER_TOKEN']?.trim() || undefined;
+  if (requireAuth && !token) {
+    return {
+      error:
+        'restarting a bearer daemon requires --token or QWEN_SERVER_TOKEN.',
+    };
   }
 
-  const entry = resolveCliEntry();
-  if (!entry) {
-    writeStderrLine(
-      'qwen daemon: cannot determine the CLI entry; restart requires the qwen CLI.',
-    );
-    process.exitCode = 1;
-    return;
-  }
   const javaScriptEntry = isJavaScriptEntry(entry);
   const command = javaScriptEntry ? process.execPath : entry;
-  const prefix = javaScriptEntry ? [entry] : [];
-  const env = { ...process.env };
-  if (record.auth === 'bearer') {
+  const prefix = javaScriptEntry ? [...execArgv, entry] : [];
+  const env = { ...baseEnv };
+  if (requireAuth) {
     env['QWEN_SERVER_TOKEN'] = token!;
   } else {
     delete env['QWEN_SERVER_TOKEN'];
   }
 
   const stopArgs = [...prefix, 'daemon', 'stop', '--port', String(record.port)];
-  if (process.platform === 'win32') stopArgs.push('--force');
-  const stopped = spawnSync(command, stopArgs, { stdio: 'inherit', env });
-  if (stopped.status !== 0) {
-    process.exitCode = 1;
-    return;
-  }
+  if (options.force) stopArgs.push('--force');
 
   const startArgs = [
     ...prefix,
@@ -1259,11 +1261,68 @@ async function handleRestart(argv: RestartArgs): Promise<void> {
   for (const workspace of workspaces) {
     startArgs.push('--workspace', workspace);
   }
-  if (argv.web === false) startArgs.push('--no-web');
-  if (argv['require-auth'] || record.auth === 'bearer') {
-    startArgs.push('--require-auth');
+  if (!options.web) startArgs.push('--no-web');
+  if (requireAuth) startArgs.push('--require-auth');
+
+  return { command, stopArgs, startArgs, env };
+}
+
+async function handleRestart(argv: RestartArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const { entries } = readDaemonDiscoveries();
+  const error = selectionError(entries, { port: argv.port });
+  if (error) {
+    writeStderrLine(`qwen daemon: ${error}`);
+    process.exitCode = 1;
+    return;
   }
-  const started = spawnSync(command, startArgs, { stdio: 'inherit', env });
+  const selected = selectDaemonEntries(entries, { port: argv.port });
+  if (selected.length !== 1) {
+    writeStderrLine(
+      'qwen daemon: restart needs exactly one registered daemon; pass --port.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const entry = resolveCliEntry();
+  if (!entry) {
+    writeStderrLine(
+      'qwen daemon: cannot determine the CLI entry; restart requires the qwen CLI.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const plan = buildDaemonRestartPlan(
+    selected[0]!.record,
+    {
+      token: argv.token,
+      web: argv.web,
+      requireAuth: argv['require-auth'],
+      force: argv.force,
+    },
+    entry,
+  );
+  if (plan.error) {
+    writeStderrLine(`qwen daemon: ${plan.error}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const stopped = spawnSync(plan.command!, plan.stopArgs!, {
+    stdio: 'inherit',
+    env: plan.env,
+  });
+  if (stopped.status !== 0) {
+    process.exitCode = 1;
+    return;
+  }
+
+  const started = spawnSync(plan.command!, plan.startArgs!, {
+    stdio: 'inherit',
+    env: plan.env,
+  });
   if (started.status !== 0) process.exitCode = 1;
 }
 
@@ -1416,6 +1475,11 @@ const restartCommand: CommandModule<unknown, RestartArgs> = {
         type: 'boolean',
         default: false,
         describe: 'Require the bearer token even on loopback',
+      })
+      .option('force', {
+        type: 'boolean',
+        default: false,
+        describe: 'Pass --force to daemon stop (Windows hard kill)',
       }),
   handler: async (argv) => {
     await handleRestart(argv);

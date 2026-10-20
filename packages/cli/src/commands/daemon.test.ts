@@ -31,6 +31,7 @@ vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
 import {
   buildDaemonStartArgs,
   buildDaemonStartEnv,
+  buildDaemonRestartPlan,
   canonicalizeStartWorkspaces,
   daemonCommand,
   formatDaemonAge,
@@ -92,6 +93,75 @@ describe('qwen daemon command', () => {
     expect(mockYargs.command.mock.calls.map((call) => call[0].command)).toEqual(
       ['start', 'status', 'logs', 'stop', 'restart'],
     );
+  });
+
+  it('refuses an HTTPS daemon before stopping it', () => {
+    const plan = buildDaemonRestartPlan(
+      { ...entry(4170).record, url: 'https://127.0.0.1:4170' },
+      { web: true, requireAuth: false },
+      '/opt/qwen/index.js',
+      [],
+      {},
+    );
+    expect(plan.error).toContain('HTTPS');
+    expect(plan.stopArgs).toBeUndefined();
+  });
+
+  it('requires a token before hardening an auth-none daemon', () => {
+    const plan = buildDaemonRestartPlan(
+      entry(4170).record,
+      { web: true, requireAuth: true },
+      '/opt/qwen/index.js',
+      [],
+      {},
+    );
+    expect(plan.error).toContain('requires --token');
+    expect(plan.stopArgs).toBeUndefined();
+  });
+
+  it('keeps an explicit token when hardening an auth-none daemon', () => {
+    const plan = buildDaemonRestartPlan(
+      entry(4170).record,
+      { token: 'secret', web: true, requireAuth: true },
+      '/opt/qwen/index.js',
+      [],
+      {},
+    );
+    expect(plan.error).toBeUndefined();
+    expect(plan.env?.['QWEN_SERVER_TOKEN']).toBe('secret');
+    expect(plan.startArgs).toContain('--require-auth');
+  });
+
+  it('adds --force only when restart explicitly asks for it', () => {
+    const plain = buildDaemonRestartPlan(
+      entry(4170).record,
+      { web: true, requireAuth: false },
+      '/opt/qwen/index.js',
+      [],
+      {},
+    );
+    expect(plain.stopArgs).not.toContain('--force');
+
+    const forced = buildDaemonRestartPlan(
+      entry(4170).record,
+      { web: true, requireAuth: false, force: true },
+      '/opt/qwen/index.js',
+      [],
+      {},
+    );
+    expect(forced.stopArgs).toContain('--force');
+  });
+
+  it('preserves Node loader arguments for a TypeScript entry', () => {
+    const plan = buildDaemonRestartPlan(
+      entry(4170).record,
+      { web: true, requireAuth: false },
+      '/opt/qwen/index.ts',
+      ['--import', 'tsx'],
+      {},
+    );
+    expect(plan.stopArgs?.slice(0, 2)).toEqual(['--import', 'tsx']);
+    expect(plan.stopArgs?.[2]).toBe('/opt/qwen/index.ts');
   });
 
   it('builds a detached serve invocation for a JavaScript entry', () => {
