@@ -19,7 +19,6 @@ import type {
   HookEventName,
 } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { supportsMatchers } from '../components/hooks/constants.js';
 import { normalizeMatcher } from '../components/hooks/matcherGrouping.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
@@ -27,7 +26,7 @@ import { MessageType } from '../types.js';
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
 import {
   getProjectHooksApprovalState,
-  isProjectHooksPendingApproval,
+  getProjectHooksRoot,
 } from '../../config/hook-approvals.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 
@@ -79,20 +78,22 @@ async function reloadHooksFromSettings(
     ),
   );
   // An edited project hooks block has a new hash and so no approval: keep it
-  // out of the registry and let the approval dialog ask again.
-  const projectHooks = settings.getProjectHooks();
-  const projectRoot = config.getWorkingDir();
-  const pending =
-    !config.getBareMode() &&
-    !config.isSafeMode() &&
-    config.getApprovalMode() !== ApprovalMode.YOLO &&
-    isProjectHooksPendingApproval(projectHooks, projectRoot);
-  config.setProjectHooksPendingApproval(pending);
+  // out of the registry and let the approval dialog ask again. Keyed like
+  // startup, by the project the settings came from, not the live cwd.
+  const gated = config.isProjectHooksApprovalGated();
+  const state = gated
+    ? getProjectHooksApprovalState(
+        settings.getProjectHooks(),
+        getProjectHooksRoot(settings),
+      )
+    : undefined;
+  if (gated) {
+    config.setProjectHooksPendingApproval(
+      state !== undefined && state !== 'approved',
+    );
+  }
   await hookSystem.reload();
-  if (
-    pending &&
-    getProjectHooksApprovalState(projectHooks, projectRoot) === 'pending'
-  ) {
+  if (state === 'pending') {
     appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
   }
   if (!systemReloaded) {

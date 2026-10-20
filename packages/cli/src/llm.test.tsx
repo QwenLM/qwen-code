@@ -172,6 +172,7 @@ vi.mock('./config/config.js', () => ({
     getSandbox: vi.fn(() => false),
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
+    isProjectHooksPendingApproval: () => false,
     isLspEnabled: () => false,
     getLspClient: () => undefined,
     getWarnings: vi.fn(() => []),
@@ -566,6 +567,7 @@ describe('llm.tsx main function', () => {
       callOrder.push('loadCliConfig');
       return {
         isInteractive: () => false,
+        isProjectHooksPendingApproval: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -678,6 +680,7 @@ describe('llm.tsx main function', () => {
       ).toBeUndefined();
       return {
         isInteractive: () => false,
+        isProjectHooksPendingApproval: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -769,6 +772,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -886,6 +890,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -990,6 +995,7 @@ describe('llm.tsx main function', () => {
       async () =>
         ({
           isInteractive: () => false,
+          isProjectHooksPendingApproval: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -1762,6 +1768,7 @@ describe('llm.tsx main function', () => {
     };
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2059,6 +2066,7 @@ describe('llm.tsx main function', () => {
     let initialized = false;
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2305,6 +2313,7 @@ describe('llm.tsx main function', () => {
 
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => 'hello',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2698,6 +2707,7 @@ describe('llm.tsx main function', () => {
 
     const configStub = {
       isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,

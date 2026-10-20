@@ -113,6 +113,12 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import {
+  getProjectHooksApprovalState,
+  getProjectHooksHeadlessWarning,
+  getProjectHooksRoot,
+  getSeparatedHookSettings,
+} from './config/hook-approvals.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
@@ -725,11 +731,7 @@ export async function main() {
         undefined,
         [],
         // Pass separated hooks for proper source attribution
-        {
-          systemHooks: settings.getSystemHooks(),
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
+        getSeparatedHookSettings(settings),
         buildDisabledSkillNamesProvider(settings),
         undefined,
         undefined,
@@ -1067,11 +1069,7 @@ export async function main() {
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution
-      {
-        systemHooks: settings.getSystemHooks(),
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
+      getSeparatedHookSettings(settings),
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
@@ -1536,7 +1534,12 @@ export async function main() {
       if (yoloWarning) writeStderrLine(yoloWarning);
       if (config.isProjectHooksPendingApproval()) {
         writeStderrLine(
-          'Project hooks in .qwen/settings.json were not loaded: they are not approved for this folder. Run qwen interactively here to review them.',
+          getProjectHooksHeadlessWarning(
+            getProjectHooksApprovalState(
+              settings.getProjectHooks(),
+              getProjectHooksRoot(settings),
+            ),
+          ),
         );
       }
     }

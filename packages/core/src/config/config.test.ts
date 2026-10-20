@@ -1241,6 +1241,34 @@ describe('Server Config (config.ts)', () => {
       expect(config.getProjectHooks()).toBe(projectHooks);
     });
 
+    it.each([
+      ['not gated', undefined, false, false],
+      ['gated and approved', false, true, false],
+      ['gated and pending', true, true, true],
+    ])(
+      'reports a session that is %s',
+      (_label, projectHooksPendingApproval, gated, pending) => {
+        const config = makeConfig({ projectHooksPendingApproval });
+        expect(config.isProjectHooksApprovalGated()).toBe(gated);
+        expect(config.isProjectHooksPendingApproval()).toBe(pending);
+      },
+    );
+
+    it('withholds the legacy merged hooks from both getters while pending', () => {
+      const config = makeConfig({
+        hooks: projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBeUndefined();
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(projectHooks);
+    });
+
     it('keeps a mid-session gate after the hooks are replaced', () => {
       const config = makeConfig({ projectHooks });
       config.setProjectHooksPendingApproval(true);

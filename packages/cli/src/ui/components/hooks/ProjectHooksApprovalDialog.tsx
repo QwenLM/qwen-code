@@ -10,25 +10,32 @@ import { theme } from '../../semantic-colors.js';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { fitHookLines } from '../../../config/hook-approvals.js';
 
 export enum ProjectHooksApprovalChoice {
   APPROVE = 'approve',
   REJECT = 'reject',
+  /** Esc: no decision is stored, so the next start asks again. */
+  DISMISS = 'dismiss',
 }
+
+/** Rows the dialog needs besides the hook list. */
+export const PROJECT_HOOKS_DIALOG_CHROME_ROWS = 16;
 
 interface ProjectHooksApprovalDialogProps {
   /** One line per configured hook, e.g. `SessionStart  ./setup.sh`. */
   lines: string[];
+  availableTerminalHeight?: number;
   onSelect: (choice: ProjectHooksApprovalChoice) => void;
 }
 
 export const ProjectHooksApprovalDialog: React.FC<
   ProjectHooksApprovalDialogProps
-> = ({ lines, onSelect }) => {
+> = ({ lines, availableTerminalHeight, onSelect }) => {
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        onSelect(ProjectHooksApprovalChoice.REJECT);
+        onSelect(ProjectHooksApprovalChoice.DISMISS);
       }
     },
     { isActive: true },
@@ -41,11 +48,18 @@ export const ProjectHooksApprovalDialog: React.FC<
       key: 'approve',
     },
     {
-      label: 'Reject (esc)',
+      label: 'Reject',
       value: ProjectHooksApprovalChoice.REJECT,
       key: 'reject',
     },
   ];
+  const shown =
+    availableTerminalHeight === undefined
+      ? lines
+      : fitHookLines(
+          lines,
+          availableTerminalHeight - PROJECT_HOOKS_DIALOG_CHROME_ROWS,
+        );
 
   return (
     <Box flexDirection="column">
@@ -70,7 +84,7 @@ export const ProjectHooksApprovalDialog: React.FC<
         </Box>
 
         <Box flexDirection="column" marginBottom={1}>
-          {lines.map((line, index) => (
+          {shown.map((line, index) => (
             <Text key={`${index}-${line}`} color={theme.text.primary}>
               {`  ${line}`}
             </Text>
@@ -78,6 +92,7 @@ export const ProjectHooksApprovalDialog: React.FC<
         </Box>
 
         <RadioButtonSelect items={options} onSelect={onSelect} isFocused />
+        <Text color={theme.text.secondary}>Esc to decide later</Text>
       </Box>
     </Box>
   );

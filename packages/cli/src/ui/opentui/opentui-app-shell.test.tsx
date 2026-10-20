@@ -85,6 +85,10 @@ const mocks = vi.hoisted(() => {
     /** The gated-server queue the shell's approval hook reports. */
     mcpQueue: [] as Array<Record<string, unknown>>,
     handleMcpApprovalSelect: vi.fn(),
+    hooksApprovalProps: null as Record<string, unknown> | null,
+    /** Hook lines the project hooks approval hook reports as pending. */
+    pendingHookLines: null as string[] | null,
+    handleProjectHooksApprovalSelect: vi.fn(),
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
     loadingProps: null as Record<string, unknown> | null,
@@ -270,6 +274,10 @@ vi.mock('./dialogs-confirm.js', () => ({
     mocks.state.mcpApprovalProps = props;
     return 'mcp-approval';
   },
+  OpenTuiProjectHooksApprovalDialog: (props: Record<string, unknown>) => {
+    mocks.state.hooksApprovalProps = props;
+    return 'hooks-approval';
+  },
 }));
 vi.mock('../hooks/useMcpApproval.js', () => ({
   useMcpApproval: () => ({
@@ -282,9 +290,12 @@ vi.mock('../hooks/useMcpApproval.js', () => ({
 }));
 vi.mock('../hooks/use-project-hooks-approval.js', () => ({
   useProjectHooksApproval: () => ({
-    isProjectHooksApprovalDialogOpen: false,
-    pendingProjectHooks: undefined,
-    handleProjectHooksApprovalSelect: vi.fn(),
+    isProjectHooksApprovalDialogOpen: mocks.state.pendingHookLines !== null,
+    pendingProjectHooks: mocks.state.pendingHookLines
+      ? { hooks: {}, lines: mocks.state.pendingHookLines }
+      : undefined,
+    handleProjectHooksApprovalSelect:
+      mocks.state.handleProjectHooksApprovalSelect,
   }),
 }));
 vi.mock('./exit-lifecycle.js', () => ({
@@ -352,6 +363,9 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
     mocks.state.bannerProps = null;
     mocks.state.footerProps = null;
     mocks.state.loadingProps = null;
@@ -965,6 +979,55 @@ describe('OpenTuiApp shell wiring', () => {
     }
     onSelect('approve');
     expect(mocks.state.handleMcpApprovalSelect).toHaveBeenCalledWith('approve');
+  });
+
+  it('shows the project hooks approval below MCP, above a parked tool call, without the footer', async () => {
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('hooks-approval')).toBeNull();
+  });
+
+  it('routes the project hooks choice to the approval hook', async () => {
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('hooks-approval')).toBeTruthy();
+    expect(screen.queryByText('tool-confirm')).toBeNull();
+    expect(screen.queryByText('footer')).toBeNull();
+    expect(mocks.state.hooksApprovalProps?.['lines']).toEqual([
+      'SessionStart  ./setup.sh',
+    ]);
+    const onSelect = mocks.state.hooksApprovalProps?.['onSelect'] as
+      | ((choice: string) => void)
+      | undefined;
+    if (typeof onSelect !== 'function') {
+      throw new Error('hooks approval dialog was not given onSelect');
+    }
+    onSelect('approve');
+    expect(mocks.state.handleProjectHooksApprovalSelect).toHaveBeenCalledWith(
+      'approve',
+    );
   });
 
   it('passes streaming state and interrupt through to the composer', async () => {
@@ -1812,6 +1875,9 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
   function fakeConfig(
@@ -2071,6 +2137,9 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
   const layoutOf = (

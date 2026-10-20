@@ -9,45 +9,17 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   getProjectHooksApprovalState,
+  getProjectHooksRoot,
   loadHookApprovals,
+  summarizeProjectHooks,
 } from '../../config/hook-approvals.js';
 import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 
 export interface PendingProjectHooks {
   hooks: Record<string, unknown>;
-  /** One display line per configured hook. */
+  /** One sanitized display line per configured hook. */
   lines: string[];
-}
-
-function describeHook(hook: Record<string, unknown>): string {
-  switch (hook['type']) {
-    case 'command':
-      return String(hook['command'] ?? '');
-    case 'http':
-      return `http ${String(hook['url'] ?? '')}`;
-    default:
-      return String(hook['type'] ?? 'unknown');
-  }
-}
-
-export function summarizeProjectHooks(
-  hooks: Record<string, unknown>,
-): string[] {
-  const lines: string[] = [];
-  for (const [event, definitions] of Object.entries(hooks)) {
-    if (!Array.isArray(definitions)) continue;
-    for (const definition of definitions) {
-      const matcher = definition?.matcher ? `[${definition.matcher}]` : '';
-      const entries = Array.isArray(definition?.hooks) ? definition.hooks : [];
-      for (const hook of entries) {
-        if (hook && typeof hook === 'object') {
-          lines.push(`${event}${matcher}  ${describeHook(hook)}`);
-        }
-      }
-    }
-  }
-  return lines;
 }
 
 /**
@@ -56,7 +28,8 @@ export function summarizeProjectHooks(
  * `.qwen/settings.json` can declare arbitrary commands, so they load only
  * after the user approves this exact configuration. Approving persists the
  * hash-bound decision, un-gates the hooks for this session and reloads the
- * registry; rejecting persists the rejection and leaves them unloaded.
+ * registry; rejecting persists the rejection; dismissing (Esc) leaves the
+ * decision open until the next start.
  */
 export const useProjectHooksApproval = (
   config: Config,
@@ -69,7 +42,8 @@ export const useProjectHooksApproval = (
     const hooks = settings.getProjectHooks();
     if (
       !hooks ||
-      getProjectHooksApprovalState(hooks, config.getWorkingDir()) !== 'pending'
+      getProjectHooksApprovalState(hooks, getProjectHooksRoot(settings)) !==
+        'pending'
     ) {
       return undefined;
     }
@@ -98,17 +72,17 @@ export const useProjectHooksApproval = (
   const handleProjectHooksApprovalSelect = useCallback(
     async (choice: ProjectHooksApprovalChoice) => {
       if (!pending) return;
-      const root = config.getWorkingDir();
+      const root = getProjectHooksRoot(settings);
       if (choice === ProjectHooksApprovalChoice.APPROVE) {
         await loadHookApprovals().setState(root, pending.hooks, 'approved');
         config.setProjectHooksPendingApproval(false);
         await config.getHookSystem()?.reload();
-      } else {
+      } else if (choice === ProjectHooksApprovalChoice.REJECT) {
         await loadHookApprovals().setState(root, pending.hooks, 'rejected');
       }
       setPending(undefined);
     },
-    [config, pending],
+    [config, settings, pending],
   );
 
   return {

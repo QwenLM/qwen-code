@@ -5618,45 +5618,74 @@ describe('loadCliConfig with includeDirectories', () => {
 
   describe('project hooks approval gate', () => {
     const projectHooks = { SessionStart: [{ hooks: [] }] };
+    const cwd = path.resolve(path.sep, 'home', 'user', 'project');
+    const gateParam = () =>
+      mockConfigConstructorParams.mock.lastCall?.[0]
+        .projectHooksPendingApproval;
+
+    beforeEach(() => {
+      vi.mocked(isProjectHooksPendingApproval).mockReturnValue(true);
+    });
 
     it.each([
-      ['default mode', [], true],
-      ['yolo mode', ['--yolo'], false],
-      ['safe mode', ['--safe-mode'], false],
-    ])(
-      'in %s gates unapproved project hooks: %s',
-      async (_label, flags, gated) => {
-        vi.mocked(isProjectHooksPendingApproval).mockReturnValue(true);
+      ['default mode', [], {}, true],
+      ['--yolo', ['--yolo'], {}, undefined],
+      ['--approval-mode yolo', ['--approval-mode', 'yolo'], {}, undefined],
+      ['--safe-mode', ['--safe-mode'], {}, undefined],
+      ['--bare', ['--bare'], {}, undefined],
+      ['disableAllHooks', [], { disableAllHooks: true }, undefined],
+      ['a settings-only yolo', [], { tools: { approvalMode: 'yolo' } }, true],
+    ] as const)(
+      'with %s, an unapproved block gives projectHooksPendingApproval=%s',
+      async (_label, flags, settings, expected) => {
         process.argv = ['node', 'script.js', ...flags];
         const argv = await parseArguments();
-        const cwd = path.resolve(path.sep, 'home', 'user', 'project');
 
-        await loadCliConfig({}, argv, cwd, undefined, { projectHooks });
+        await loadCliConfig(settings as Settings, argv, cwd, undefined, {
+          projectHooks,
+        });
 
-        expect(
-          mockConfigConstructorParams.mock.lastCall?.[0]
-            .projectHooksPendingApproval,
-        ).toBe(gated);
-        if (gated) {
-          expect(isProjectHooksPendingApproval).toHaveBeenCalledWith(
-            projectHooks,
-            cwd,
-          );
-        }
+        expect(gateParam()).toBe(expected);
       },
     );
+
+    it('keys the decision by the project that supplied the hooks', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const root = path.resolve(path.sep, 'home', 'user', 'repo');
+
+      await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksRoot: root,
+      });
+
+      expect(isProjectHooksPendingApproval).toHaveBeenCalledWith(
+        projectHooks,
+        root,
+      );
+    });
+
+    it('gates the merged hooks when no separated scopes are supplied', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig({ hooks: projectHooks }, argv, cwd);
+
+      expect(isProjectHooksPendingApproval).toHaveBeenCalledWith(
+        projectHooks,
+        cwd,
+      );
+      expect(gateParam()).toBe(true);
+    });
 
     it('does not gate approved project hooks', async () => {
       vi.mocked(isProjectHooksPendingApproval).mockReturnValue(false);
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
 
-      await loadCliConfig({}, argv, undefined, undefined, { projectHooks });
+      await loadCliConfig({}, argv, cwd, undefined, { projectHooks });
 
-      expect(
-        mockConfigConstructorParams.mock.lastCall?.[0]
-          .projectHooksPendingApproval,
-      ).toBe(false);
+      expect(gateParam()).toBe(false);
     });
   });
 

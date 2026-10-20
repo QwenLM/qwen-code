@@ -82,7 +82,11 @@ import { normalizePastedText } from './input-prompt-model.js';
 import { caretSpans, useLineEdit } from './line-edit.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
-import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
+import {
+  PROJECT_HOOKS_DIALOG_CHROME_ROWS,
+  ProjectHooksApprovalChoice,
+} from '../components/hooks/ProjectHooksApprovalDialog.js';
+import { fitHookLines } from '../../config/hook-approvals.js';
 import { computeHeaderCap } from '../components/messages/AskUserQuestionDialog.js';
 import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import { t } from '../../i18n/index.js';
@@ -1485,7 +1489,7 @@ export function OpenTuiProjectHooksApprovalDialog(
   props: OpenTuiProjectHooksApprovalProps,
 ) {
   const { lines, onSelect } = props;
-  const { width } = useTerminalDimensions();
+  const { width, height } = useTerminalDimensions();
   const select = useDialogSelect<DialogListItem<ProjectHooksApprovalChoice>>({
     items: PROJECT_HOOKS_APPROVAL_OPTIONS,
     onSelect: (value) => onSelect(value),
@@ -1493,7 +1497,7 @@ export function OpenTuiProjectHooksApprovalDialog(
 
   useKeyboard((key) => {
     if (toOriginalKey(key).name === 'escape') {
-      onSelect(ProjectHooksApprovalChoice.REJECT);
+      onSelect(ProjectHooksApprovalChoice.DISMISS);
     }
   });
 
@@ -1512,11 +1516,13 @@ export function OpenTuiProjectHooksApprovalDialog(
             </text>
           </box>
           <box flexDirection="column" marginBottom={1}>
-            {lines.map((line, index) => (
-              <text key={`${index}-${line}`} fg={C.text}>
-                {`  ${line}`}
-              </text>
-            ))}
+            {fitHookLines(lines, height - PROJECT_HOOKS_DIALOG_CHROME_ROWS).map(
+              (line, index) => (
+                <text key={`${index}-${line}`} fg={C.text}>
+                  {`  ${line}`}
+                </text>
+              ),
+            )}
           </box>
           <DialogSelect
             items={PROJECT_HOOKS_APPROVAL_OPTIONS}
@@ -1528,10 +1534,11 @@ export function OpenTuiProjectHooksApprovalDialog(
               <text fg={isSelected ? C.accent : C.text}>
                 {item.value === ProjectHooksApprovalChoice.APPROVE
                   ? t('Approve these hooks')
-                  : t('Reject (esc)')}
+                  : t('Reject')}
               </text>
             )}
           />
+          <text fg={C.dim}>{t('Esc to decide later')}</text>
         </box>
       </DialogFrame>
     </box>

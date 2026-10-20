@@ -326,8 +326,9 @@ ${escapeXml(entry.description)}
  * frontmatter hooks — may be applied. A project skill is discovered from
  * `<repo>/.qwen/skills/` regardless of folder trust because its body only
  * influences the model, but its side effects grant tool approvals or run
- * repo-supplied commands, so they need a trusted folder: the same gate
- * `Config.getProjectHooks()` applies to settings-file hooks. User, extension
+ * repo-supplied commands, so they need a trusted folder. Settings-file
+ * project hooks additionally need the user's approval
+ * (`Config.getProjectHooks()`); skill frontmatter hooks do not yet. User, extension
  * and bundled skills are not repo-controlled and are unaffected.
  */
 export function canApplySkillSideEffects(

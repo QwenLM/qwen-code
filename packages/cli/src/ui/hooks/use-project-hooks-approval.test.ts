@@ -12,10 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import {
-  summarizeProjectHooks,
-  useProjectHooksApproval,
-} from './use-project-hooks-approval.js';
+import { useProjectHooksApproval } from './use-project-hooks-approval.js';
 import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 import {
@@ -39,12 +36,15 @@ describe('useProjectHooksApproval', () => {
       setProjectHooksPendingApproval: (value: boolean) => {
         pending = value;
       },
-      getWorkingDir: () => dir,
+      getWorkingDir: () => path.join(dir, 'elsewhere'),
       getHookSystem: () => ({ reload }),
     } as unknown as Config;
   };
   const makeSettings = (projectHooks: Record<string, unknown> | undefined) =>
-    ({ getProjectHooks: () => projectHooks }) as unknown as LoadedSettings;
+    ({
+      getProjectHooks: () => projectHooks,
+      workspace: { path: path.join(dir, '.qwen', 'settings.json') },
+    }) as unknown as LoadedSettings;
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'use-hooks-approval-'));
@@ -130,6 +130,23 @@ describe('useProjectHooksApproval', () => {
     expect(loadHookApprovals().getState(dir, hooks)).toBe('rejected');
   });
 
+  it('dismiss closes without storing a decision, so the next start asks again', async () => {
+    const config = makeConfig();
+    const settings = makeSettings(hooks);
+    const { result } = renderHook(() =>
+      useProjectHooksApproval(config, settings),
+    );
+    await act(() =>
+      result.current.handleProjectHooksApprovalSelect(
+        ProjectHooksApprovalChoice.DISMISS,
+      ),
+    );
+    expect(result.current.isProjectHooksApprovalDialogOpen).toBe(false);
+    expect(pending).toBe(true);
+    resetHookApprovalsForTesting();
+    expect(loadHookApprovals().getState(dir, hooks)).toBe('pending');
+  });
+
   it('re-evaluates when a hooks reload leaves the block pending', () => {
     pending = false;
     const config = makeConfig();
@@ -143,29 +160,5 @@ describe('useProjectHooksApproval', () => {
       appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
     });
     expect(result.current.isProjectHooksApprovalDialogOpen).toBe(true);
-  });
-});
-
-describe('summarizeProjectHooks', () => {
-  it('lists every hook with its event, matcher and target', () => {
-    expect(
-      summarizeProjectHooks({
-        PreToolUse: [
-          {
-            matcher: 'Bash',
-            hooks: [
-              { type: 'command', command: 'lint.sh' },
-              { type: 'http', url: 'https://hooks.test/pre' },
-            ],
-          },
-        ],
-        Stop: [{ hooks: [{ type: 'prompt', prompt: 'Review' }] }],
-        bogus: 'not an array',
-      }),
-    ).toEqual([
-      'PreToolUse[Bash]  lint.sh',
-      'PreToolUse[Bash]  http https://hooks.test/pre',
-      'Stop  prompt',
-    ]);
   });
 });

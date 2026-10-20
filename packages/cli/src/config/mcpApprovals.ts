@@ -16,6 +16,7 @@ import {
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
+import { normalizeProjectRoot } from './approval-project-root.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export const MCP_APPROVALS_FILENAME = 'mcpApprovals.json';
@@ -53,20 +54,6 @@ export function getMcpApprovalsPath(): string {
   // Resolve lazily on every call (mirrors getTrustedFoldersPath): a top-level
   // const would be stale after home-env overrides are applied.
   return path.join(Storage.getGlobalQwenDir(), MCP_APPROVALS_FILENAME);
-}
-
-/**
- * Keys are stored normalized so the same project resolves consistently. On
- * Windows, paths are case-insensitive but the entry points that produce a
- * project root disagree on casing: the CLI keeps `process.cwd()` as typed
- * (`D:\project`) while IDE integrations hand over VS Code's
- * `workspaceFolders[0].uri.fsPath`, which lowercases the drive letter
- * (`d:\project`). Fold case on win32 — same convention as
- * `getProjectHash()`/`sanitizeCwd()`. See issue #9775.
- */
-export function normalizeProjectRoot(projectRoot: string): string {
-  const resolved = path.resolve(projectRoot);
-  return os.platform() === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 function isApprovalRecordMap(

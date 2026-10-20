@@ -1507,10 +1507,10 @@ export interface ConfigParameters {
    */
   pendingMcpServers?: string[];
   /**
-   * The workspace's project hooks have no approval bound to their current
-   * configuration (pending or rejected). `getProjectHooks()` skips them until
-   * `setProjectHooksPendingApproval(false)`; a repository must not run
-   * commands the user never reviewed.
+   * Settings-file project hooks have no approval bound to their current
+   * configuration (pending or rejected); `getProjectHooks()` withholds them
+   * until `setProjectHooksPendingApproval(false)`. `undefined` means the
+   * session does not gate them (bare, safe, all hooks off, `--yolo`).
    */
   projectHooksPendingApproval?: boolean;
   noBrowser?: boolean;
@@ -2971,7 +2971,7 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
-  private projectHooksPendingApproval: boolean;
+  private projectHooksPendingApproval?: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
@@ -3450,8 +3450,7 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
-    this.projectHooksPendingApproval =
-      params.projectHooksPendingApproval ?? false;
+    this.projectHooksPendingApproval = params.projectHooksPendingApproval;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
     this.mcpToolIdleTimeoutMs =
@@ -8645,7 +8644,11 @@ export class Config {
   }
 
   isProjectHooksPendingApproval(): boolean {
-    return this.projectHooksPendingApproval;
+    return this.projectHooksPendingApproval === true;
+  }
+
+  isProjectHooksApprovalGated(): boolean {
+    return this.projectHooksPendingApproval !== undefined;
   }
 
   /**
@@ -11215,7 +11218,7 @@ export class Config {
     if (!this.isTrustedFolder()) {
       return undefined;
     }
-    if (this.projectHooksPendingApproval) {
+    if (this.projectHooksPendingApproval === true) {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
@@ -11234,8 +11237,12 @@ export class Config {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
+    // It may carry workspace hooks, so it shares the project approval gate.
     const hooks =
-      this.userHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
+      this.userHooks ??
+      (this.hasScopedHooks() || this.projectHooksPendingApproval === true
+        ? undefined
+        : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 

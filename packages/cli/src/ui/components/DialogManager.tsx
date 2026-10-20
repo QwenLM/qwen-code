@@ -153,6 +153,7 @@ export const DialogManager = ({
     return (
       <ProjectHooksApprovalDialog
         lines={uiState.pendingProjectHooks.lines}
+        availableTerminalHeight={constrainedDialogHeight}
         onSelect={uiActions.handleProjectHooksApprovalSelect}
       />
     );

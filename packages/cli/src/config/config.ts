@@ -1666,6 +1666,8 @@ export async function loadCliConfig(
     systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
+    /** Project whose `.qwen/settings.json` supplied `projectHooks`; defaults to `cwd`. */
+    projectHooksRoot?: string;
   },
   /**
    * Live-read provider for the set of disabled skill names. Forwarded to
@@ -2510,12 +2512,20 @@ export async function loadCliConfig(
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
   // Project hooks are gated like project MCP servers (#4615): a cloned
-  // repository's `.qwen/settings.json` must not run commands unreviewed.
+  // repository's `.qwen/settings.json` must not run commands unreviewed. Only
+  // a YOLO asked for on the command line skips it — a workspace can set
+  // `tools.approvalMode` itself. Without separated scopes core serves the
+  // merged block, so that is what gets gated.
+  const commandLineYolo =
+    approvalMode === ApprovalMode.YOLO &&
+    (argv.approvalMode !== undefined || argv.yolo === true);
   const projectHooksPendingApproval =
-    !bareMode &&
-    !safeMode &&
-    approvalMode !== ApprovalMode.YOLO &&
-    isProjectHooksPendingApproval(hooksConfig?.projectHooks, cwd);
+    bareMode || safeMode || settings.disableAllHooks || commandLineYolo
+      ? undefined
+      : isProjectHooksPendingApproval(
+          hooksConfig ? hooksConfig.projectHooks : settings.hooks,
+          hooksConfig?.projectHooksRoot ?? cwd,
+        );
   const advisorModel =
     bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 

@@ -37,8 +37,7 @@ describe('hooksCommand', () => {
     getHookSystem: ReturnType<typeof vi.fn>;
     setHooksFromSettings: ReturnType<typeof vi.fn>;
     setProjectHooksPendingApproval: ReturnType<typeof vi.fn>;
-    getApprovalMode: ReturnType<typeof vi.fn>;
-    getWorkingDir: ReturnType<typeof vi.fn>;
+    isProjectHooksApprovalGated: ReturnType<typeof vi.fn>;
     getBareMode: ReturnType<typeof vi.fn>;
     isSafeMode: ReturnType<typeof vi.fn>;
     getTopTierMcpServers: ReturnType<typeof vi.fn>;
@@ -56,8 +55,7 @@ describe('hooksCommand', () => {
     mockConfig = {
       setHooksFromSettings: vi.fn(),
       setProjectHooksPendingApproval: vi.fn(),
-      getApprovalMode: vi.fn().mockReturnValue('default'),
-      getWorkingDir: vi.fn().mockReturnValue('/work/dir'),
+      isProjectHooksApprovalGated: vi.fn().mockReturnValue(false),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
       getTopTierMcpServers: vi.fn(),
@@ -173,6 +171,8 @@ describe('hooksCommand', () => {
         safeMode?: boolean;
         bareMode?: boolean;
         hookSystem?: 'none';
+        gated?: boolean;
+        projectHooks?: Record<string, unknown>;
       } = {},
     ) {
       const hookSystem = {
@@ -190,7 +190,9 @@ describe('hooksCommand', () => {
           .mockReturnValue(opts.hookSystem === 'none' ? undefined : hookSystem),
         setHooksFromSettings: vi.fn(),
         setProjectHooksPendingApproval: vi.fn(),
-        getApprovalMode: vi.fn().mockReturnValue('default'),
+        isProjectHooksApprovalGated: vi
+          .fn()
+          .mockReturnValue(opts.gated ?? false),
         getBareMode: vi.fn().mockReturnValue(opts.bareMode ?? false),
         isSafeMode: vi.fn().mockReturnValue(opts.safeMode ?? false),
         getTopTierMcpServers: vi.fn(),
@@ -206,7 +208,8 @@ describe('hooksCommand', () => {
             reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
             getSystemHooks: () => systemHooks,
             getUserHooks: () => userHooks,
-            getProjectHooks: () => projectHooks,
+            getProjectHooks: () => opts.projectHooks ?? projectHooks,
+            workspace: { path: '/work/repo/.qwen/settings.json' },
           },
         },
       });
@@ -227,6 +230,7 @@ describe('hooksCommand', () => {
         [[SettingScope.User, SettingScope.Workspace]],
         [[SettingScope.System, SettingScope.SystemDefaults]],
       ]);
+      expect(config.getWorkingDir).not.toHaveBeenCalled();
       expect(config.setHooksFromSettings).toHaveBeenCalledWith({
         systemHooks,
         userHooks,
@@ -239,6 +243,10 @@ describe('hooksCommand', () => {
       ).toBeLessThan(hookSystem.reload.mock.invocationCallOrder[0]);
     });
 
+    const runnable = {
+      SessionStart: [{ hooks: [{ type: 'command', command: './setup.sh' }] }],
+    };
+
     it.each([
       ['unapproved', undefined, true, true],
       ['rejected', 'rejected', true, false],
@@ -247,15 +255,14 @@ describe('hooksCommand', () => {
       'gates %s project hooks before the registry reloads',
       async (_label, decision, gated, prompted) => {
         if (decision) {
-          await loadHookApprovals().setState(
-            '/work/dir',
-            projectHooks,
-            decision,
-          );
+          await loadHookApprovals().setState('/work/repo', runnable, decision);
         }
         const onPending = vi.fn();
         appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
-        const { context, config, hookSystem } = makeReloadContext();
+        const { context, config, hookSystem } = makeReloadContext({
+          gated: true,
+          projectHooks: runnable,
+        });
 
         await hooksCommand.action!(context, '');
 
@@ -267,8 +274,21 @@ describe('hooksCommand', () => {
           config.setProjectHooksPendingApproval.mock.invocationCallOrder[0],
         ).toBeLessThan(hookSystem.reload.mock.invocationCallOrder[0]);
         expect(onPending).toHaveBeenCalledTimes(prompted ? 1 : 0);
+        expect(config.getWorkingDir).not.toHaveBeenCalled();
       },
     );
+
+    it('leaves a session that does not gate project hooks (bare, safe, --yolo) ungated', async () => {
+      const onPending = vi.fn();
+      appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
+      const { context, config } = makeReloadContext({ projectHooks: runnable });
+
+      await hooksCommand.action!(context, '');
+
+      appEvents.off(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
+      expect(config.setProjectHooksPendingApproval).not.toHaveBeenCalled();
+      expect(onPending).not.toHaveBeenCalled();
+    });
 
     it('does not file a repository-authored external-context server under system hooks', async () => {
       const { context, config } = makeReloadContext();
