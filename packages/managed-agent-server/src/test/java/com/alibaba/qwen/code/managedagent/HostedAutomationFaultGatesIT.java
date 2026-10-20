@@ -105,6 +105,8 @@ class HostedAutomationFaultGatesIT {
     // FG11f: the publication case faults the physical object write and keeps
     // whatever the store accepted, so the assertions read the same bytes.
     private HostedGateTestSupport.PublicationFaults publicationFaults;
+    // Cases that close a Session need the Workspace lifecycle the guard gates.
+    private boolean workspaceLifecycle;
     private final Map<String, byte[]> publicationObjects = new ConcurrentHashMap<>();
     private final Map<String, Integer> physicalPuts = new ConcurrentHashMap<>();
     private final AtomicInteger publicationFaultsSeen = new AtomicInteger();
@@ -1348,6 +1350,33 @@ class HostedAutomationFaultGatesIT {
                 .noneMatch(prompt -> prompt.contains("FG11D_INTENT"));
     }
 
+    // FG11d: a Session carrying a live definition is closed, and its slots stop
+    // firing — each records `skipped` for `session_not_active` with no model Turn.
+    // This pins today's behaviour rather than changing it.
+    @Test
+    @Timeout(600)
+    void fg11dClosedSessionSkipsItsSlotsOnMySql() throws Exception {
+        workspaceLifecycle = true;
+        boot("fg11d");
+        String session = createSession("close-queued");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_CLOSE", "* * * * *"), "fg11d-close-base", 202).path("id").asText();
+        String close = request("POST", "/v1/agents/sessions/" + session + "/close", null, "fg11d-close", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(request("GET",
+                "/v1/agents/sessions/" + session + "/operations/" + close, null, null, 200)
+                .path("status").asText()).as("the close completes").isEqualTo("completed"));
+        waiting().atMost(Duration.ofSeconds(200)).untilAsserted(() -> assertThat(jdbc.queryForList(
+                "SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ?"
+                        + " AND outcome = 'skipped'", String.class, tenant, id))
+                .as("a closed Session's slot is skipped").isNotEmpty());
+        assertThat(jdbc.queryForMap("SELECT outcome, reason FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND outcome = 'skipped' ORDER BY gmt_create LIMIT 1", tenant, id))
+                .as("the skip names the closed Session").containsEntry("reason", "session_not_active");
+        assertThat(modelPrompts).as("no Turn starts for a closed Session")
+                .noneMatch(prompt -> prompt.contains("FG11D_CLOSE"));
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
@@ -1359,9 +1388,7 @@ class HostedAutomationFaultGatesIT {
         temporary = temporary.toRealPath();
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
         Files.createDirectory(temporary.resolve("broker"));
-        if (publicationFaults != null) {
-            // Durable local-process mode refuses a Runtime state directory
-            // any other account can read; a public Shell Session needs it.
+        if (publicationFaults != null || workspaceLifecycle) {
             Files.setPosixFilePermissions(temporary.resolve("broker"),
                     java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
         }
@@ -1521,9 +1548,9 @@ class HostedAutomationFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.durable-local-process="
-                        + (publicationFaults != null),
+                        + (publicationFaults != null || workspaceLifecycle),
                 "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
-                        + (publicationFaults != null
+                        + (publicationFaults != null || workspaceLifecycle
                                 || "Linux".equals(System.getProperty("os.name"))),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
@@ -1566,7 +1593,8 @@ class HostedAutomationFaultGatesIT {
         // Registration must follow the same condition as the guard itself: the
         // guard allows Linux and macOS, and a public Shell wake turn verifies
         // the registered root before any execution.
-        if (publicationFaults != null || "Linux".equals(System.getProperty("os.name"))) {
+        if (publicationFaults != null || workspaceLifecycle
+                || "Linux".equals(System.getProperty("os.name"))) {
             spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }

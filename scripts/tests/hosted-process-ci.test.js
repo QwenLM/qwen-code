@@ -475,9 +475,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (179 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (181 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 269, 282],
+    ['hosted-harness-mysql', 271, 284],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -702,7 +702,7 @@ describe('Hosted real-process gates', () => {
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10118);
+        expect(forkSeconds).toBe(10252);
       }
     },
   );
@@ -779,13 +779,14 @@ describe('Hosted real-process gates', () => {
   // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s; the
   // FG12f delivery entry moves from 30s to 50s at 2x (four cases, 24.16s
   // measured), so it becomes 9500s; the FG11d retire-at-intent cell adds 18s
-  // (2x its measured 8.6s), so it becomes 9518s. The
+  // (2x its measured 8.6s), so it becomes 9518s; the FG11d close-queued cell
+  // adds 134s (2x its measured 67.2s), so it becomes 9652s. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9518;
+  const hostedForkHealthySeconds = 9652;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

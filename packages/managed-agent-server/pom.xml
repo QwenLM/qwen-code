@@ -544,8 +544,13 @@
                                  retire-at-intent cell adds 18 s (2x its measured
                                  8.6 s): the healthy sum becomes 9518 s, so the
                                  fork moves to 10118 s and the 179-minute step
-                                 still wraps (10718 s of fork plus wrap). -->
-                            <forkedProcessTimeoutInSeconds>10118</forkedProcessTimeoutInSeconds>
+                                 still wraps (10718 s of fork plus wrap). The
+                                 FG11d close-queued cell adds 134 s (2x its
+                                 measured 67.2 s): the healthy sum becomes
+                                 9652 s, so the fork moves to 10252 s and the
+                                 Verify step to 181 minutes (10852 s of fork
+                                 plus wrap). -->
+                            <forkedProcessTimeoutInSeconds>10252</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
