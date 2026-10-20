@@ -2004,7 +2004,7 @@ public class ManagedAgentStore implements AgentStateStore {
     // ever takes the row, nothing re-sends it, and only the reconciler
     // settles it, from the kind's own keyed evidence.
     private static final String ACCEPTANCE_UNKNOWN_KINDS =
-            "('TASK_CANCEL', 'SUBMIT_INPUT', 'RENAME')";
+            "('TASK_CANCEL', 'SUBMIT_INPUT', 'CANCEL', 'RENAME')";
     // For these it is a published wait on a precondition of an operation
     // whose acceptance is known: the lifecycle coordinator re-drives it, and
     // keyed effect receipts keep the re-drive from repeating an effect.

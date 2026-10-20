@@ -122,6 +122,75 @@ describe('local history restoration', () => {
     updatedAt: 0,
   });
 
+  it('matches prompt-only live anchors with record-backed replay anchors', () => {
+    const local = block('local', 'local-command:stats');
+    const store = createDaemonTranscriptStore({
+      blocks: [{ ...block('replay', 'p'), sourceRecordIds: ['record-p'] }],
+    });
+    restoreLocalDeletionBlocks(store, [local, block('live', 'p')]);
+    expect(store.getSnapshot().blocks.map((item) => item.id)).toEqual([
+      'local',
+      'replay',
+    ]);
+  });
+
+  it('uses current order when a failed reload cache has no surviving anchors', () => {
+    const local = block('local', 'local-command:stats');
+    const store = createDaemonTranscriptStore();
+    restoreLocalDeletionBlocks(store, [
+      block('old-a', 'old-a'),
+      local,
+      block('old-b', 'old-b'),
+    ]);
+    store.reset({ blocks: [block('new-a', 'new-a'), block('new-b', 'new-b')] });
+    restoreLocalDeletionBlocks(store, [
+      local,
+      block('live-a', 'new-a'),
+      block('live-b', 'new-b'),
+    ]);
+    expect(store.getSnapshot().blocks.map((item) => item.id)).toEqual([
+      'local',
+      'new-a',
+      'new-b',
+    ]);
+  });
+
+  it.each([
+    { kind: 'user', type: 'user.text.delta', field: 'activeUserBlockId' },
+    {
+      kind: 'assistant',
+      type: 'assistant.text.delta',
+      field: 'activeAssistantBlockId',
+    },
+    {
+      kind: 'thought',
+      type: 'thought.text.delta',
+      field: 'activeThoughtBlockId',
+    },
+  ] as const)(
+    'preserves the surviving streaming $kind anchor',
+    ({ kind, type, field }) => {
+      const store = createDaemonTranscriptStore();
+      store.dispatch([
+        { type: 'user.text.delta', promptId: 'old', text: 'old' },
+      ]);
+      store.dispatch([
+        { type: 'user.text.delta', promptId: 'live', text: 'live' },
+      ]);
+      store.dispatch([{ type, promptId: 'live', text: 'first' }]);
+      const active = store.getSnapshot()[field];
+      expect(active).toBeDefined();
+      removeDeletedMessageBlocks(store, [], ['old']);
+      expect(store.getSnapshot()[field]).toBe(active);
+      store.dispatch([{ type, promptId: 'live', text: 'next' }]);
+      expect(
+        store.getSnapshot().blocks.filter((item) => item.kind === kind),
+      ).toHaveLength(1);
+      removeDeletedMessageBlocks(store, [], ['live']);
+      expect(store.getSnapshot()[field]).toBeUndefined();
+    },
+  );
+
   it('keeps local blocks between surviving prompts and preserves IDs on replay collisions', () => {
     const local = block('user-2', 'local-command:tools');
     const before = [
@@ -236,6 +305,7 @@ describe('local history restoration', () => {
     ]);
     expect(store.getSnapshot().blocks).toEqual([local]);
     const afterFailure = store.getSnapshot().blocks;
+    restoreLocalDeletionBlocks(store, afterFailure);
     store.reset({
       blocks: [block('new-before', 'A'), block('new-after', 'B')],
     });

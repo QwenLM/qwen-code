@@ -72,9 +72,9 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
 const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
-// Merging main 87dcc4a7 with grouped deletion's shared error copy measures
-// 2,031,340 bytes; the 2,033,500 ceiling leaves 2,160 bytes of margin.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_033_500;
+// Merging main d21060e8 with grouped deletion measures 2,035,965 JS bytes
+// (CSS is separate); this ceiling leaves 4,035 bytes of margin.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_040_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

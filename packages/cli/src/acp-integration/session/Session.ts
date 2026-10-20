@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
@@ -4655,10 +4656,8 @@ export class Session implements SessionContext {
       this.historyMutationActive = false;
       if (this.disposed) return;
       this.#activeWorkChanged();
-      if (!this.pendingDeletedApiPromptIds) {
-        void this.#drainCronQueue();
-        void this.#drainNotificationQueue();
-      }
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
     };
   }
 
@@ -5095,9 +5094,7 @@ export class Session implements SessionContext {
     llmClient.getChat().setCompletedToolCallIds(restored.completedToolCallIds);
     const fileHistory = this.config.getFileHistoryService();
     fileHistory.restoreFromSnapshots(
-      fileHistory
-        .getSnapshots()
-        .filter((snapshot) => !removed.has(snapshot.promptId)),
+      removeFileHistorySnapshots(fileHistory.getSnapshots(), removed),
     );
     this.pendingDeletedApiPromptIds = undefined;
   }
@@ -10831,6 +10828,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
@@ -10847,6 +10845,7 @@ export class Session implements SessionContext {
 
   async #drainCronQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
@@ -12100,6 +12099,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.notificationProcessing) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
@@ -12122,6 +12122,7 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {

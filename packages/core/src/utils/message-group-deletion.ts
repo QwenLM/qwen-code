@@ -15,6 +15,9 @@ import type {
 } from '../services/chatRecordingService.js';
 import { prepareTranscriptRecords } from './transcript-records.js';
 
+import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
+import { removeFileHistorySnapshots } from './file-history-snapshots.js';
+
 export interface MessageGroup {
   id: string;
   promptId?: string;
@@ -77,8 +80,9 @@ export function parseMessageGroupTranscript(text: string): ChatRecord[] {
     if (prepared.diagnostics.some((item) => item.affectsCompleteness)) {
       throw new Error('Incomplete transcript');
     }
-    const byId = new Map(records.map((record) => [record.uuid, record]));
-    if (byId.size !== records.length) throw new Error('Duplicate identities');
+    const byId = new Map(
+      records.toReversed().map((record) => [record.uuid, record]),
+    );
     // Also check abandoned branches, whose edges a physical rewrite retains.
     const checked = new Set<string>();
     for (const record of records) {
@@ -424,7 +428,9 @@ export function deleteTranscriptMessageGroups(
       .map((record) => record.promptId)
       .filter((id): id is string => typeof id === 'string' && id.length > 0),
   );
-  const byId = new Map(records.map((record) => [record.uuid, record]));
+  const byId = new Map(
+    records.toReversed().map((record) => [record.uuid, record]),
+  );
   const displayCommandRecords = new Set(
     selected
       .filter((group) =>
@@ -467,6 +473,25 @@ export function deleteTranscriptMessageGroups(
       );
     }
   }
+  const fileHistory = new Map<string, SerializedFileHistorySnapshot>();
+  for (const record of active) {
+    if (record.type !== 'system' || record.subtype !== 'file_history_snapshot')
+      continue;
+    const payload = record.systemPayload as FileHistorySnapshotRecordPayload;
+    if (!Array.isArray(payload?.snapshots)) {
+      throw new MessageGroupDeletionError(
+        'invalid_history',
+        'Invalid file history snapshot',
+      );
+    }
+    for (const snapshot of payload.snapshots)
+      fileHistory.set(snapshot.promptId, snapshot);
+  }
+  const survivingSnapshots = new Map(
+    removeFileHistorySnapshots([...fileHistory.values()], removedPromptIds).map(
+      (snapshot) => [snapshot.promptId, snapshot],
+    ),
+  );
   const rewritten = records
     .filter((record) => !removed.has(record.uuid))
     .map((record) => {
@@ -511,9 +536,16 @@ export function deleteTranscriptMessageGroups(
           ...rewritten,
           systemPayload: {
             ...payload,
-            snapshots: payload.snapshots.filter(
-              (snapshot) => !removedPromptIds.has(snapshot.promptId),
-            ),
+            snapshots: payload.snapshots
+              .filter((snapshot) => !removedPromptIds.has(snapshot.promptId))
+              .map((snapshot) => {
+                const endpoint = survivingSnapshots.get(
+                  snapshot.promptId,
+                )?.diffAfterBackups;
+                return endpoint
+                  ? { ...snapshot, diffAfterBackups: endpoint }
+                  : snapshot;
+              }),
           },
         };
       } else if (record.subtype === 'branch_checkpoint') {

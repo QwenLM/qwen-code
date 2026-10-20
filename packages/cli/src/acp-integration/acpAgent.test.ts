@@ -27629,6 +27629,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           isTurnIdle: liveIsTurnIdle,
           recoverMessageDeletionContext: vi.fn().mockResolvedValue(undefined),
           assertCanStartTurn: liveAssertCanStartTurn,
+          assertHistoryContextAvailable: vi.fn(),
           beginHistoryMutation: liveBeginHistoryMutation,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -27651,6 +27652,29 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     }) as AgentLike;
     return { agent, agentPromise };
   }
+
+  it('refuses a recap before reading unrecovered deleted history', async () => {
+    const innerConfig = makeLiveSessionInnerConfig(makeRecordingService());
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const live = vi.mocked(Session).mock.results.at(-1)!
+        .value as InstanceType<typeof Session>;
+      vi.mocked(live.assertHistoryContextAvailable).mockImplementation(() => {
+        throw new Error('session_history_context_unavailable');
+      });
+      innerConfig.getLlmClient.mockClear();
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRecap, {
+          sessionId: liveSessionId,
+        }),
+      ).rejects.toThrow('session_history_context_unavailable');
+      expect(innerConfig.getLlmClient).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('does not bind an unvalidated dead session id to debug context', async () => {
     const innerConfig = makeLiveSessionInnerConfig(null);

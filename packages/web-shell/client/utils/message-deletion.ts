@@ -80,36 +80,40 @@ export function removeDeletedMessageBlocks(
   const snapshot = store.getSnapshot();
   const local = new Set(localDeletionBlocks(snapshot.blocks));
   let removing = false;
+  const blocks = snapshot.blocks.filter((block) => {
+    if (local.has(block)) return true;
+    const selected =
+      groups.has(block.id) ||
+      block.sourceRecordIds?.some((id) => groups.has(id)) ||
+      (block.promptId !== undefined && prompts.has(block.promptId));
+    if (block.kind === 'user' || block.kind === 'user_shell' || block.promptId)
+      removing = selected === true;
+    if (selected) removing = true;
+    const reply = [
+      'assistant',
+      'thought',
+      'tool',
+      'shell',
+      'permission',
+      'error',
+      'prompt_cancelled',
+    ].includes(block.kind);
+    return !(selected || (removing && reply));
+  });
+  const retained = new Set(blocks.map((block) => block.id));
   store.reset({
     ...snapshot,
     retainedBytes: undefined,
-    activeUserBlockId: undefined,
-    activeAssistantBlockId: undefined,
-    activeThoughtBlockId: undefined,
-    blocks: snapshot.blocks.filter((block) => {
-      if (local.has(block)) return true;
-      const selected =
-        groups.has(block.id) ||
-        block.sourceRecordIds?.some((id) => groups.has(id)) ||
-        (block.promptId !== undefined && prompts.has(block.promptId));
-      if (
-        block.kind === 'user' ||
-        block.kind === 'user_shell' ||
-        block.promptId
-      )
-        removing = selected === true;
-      if (selected) removing = true;
-      const reply = [
-        'assistant',
-        'thought',
-        'tool',
-        'shell',
-        'permission',
-        'error',
-        'prompt_cancelled',
-      ].includes(block.kind);
-      return !(selected || (removing && reply));
-    }),
+    activeUserBlockId: retained.has(snapshot.activeUserBlockId ?? '')
+      ? snapshot.activeUserBlockId
+      : undefined,
+    activeAssistantBlockId: retained.has(snapshot.activeAssistantBlockId ?? '')
+      ? snapshot.activeAssistantBlockId
+      : undefined,
+    activeThoughtBlockId: retained.has(snapshot.activeThoughtBlockId ?? '')
+      ? snapshot.activeThoughtBlockId
+      : undefined,
+    blocks,
   });
 }
 
@@ -118,12 +122,11 @@ const pendingLocalHistory = new WeakMap<
   readonly (DaemonTranscriptBlock | string | undefined)[]
 >();
 
-function deletionBlockIdentity(block: DaemonTranscriptBlock) {
-  return block.sourceRecordIds?.[0]
-    ? `record:${block.sourceRecordIds[0]}:${block.kind}`
-    : block.promptId
-      ? `prompt:${block.promptId}:${block.kind}`
-      : undefined;
+function deletionBlockIdentities(block: DaemonTranscriptBlock) {
+  return [
+    ...(block.sourceRecordIds ?? []).map((id) => `record:${id}:${block.kind}`),
+    ...(block.promptId ? [`prompt:${block.promptId}:${block.kind}`] : []),
+  ];
 }
 
 export function restoreLocalDeletionBlocks(
@@ -134,14 +137,26 @@ export function restoreLocalDeletionBlocks(
   if (local.length === 0) return;
   const fresh = store.getSnapshot();
   const localIds = new Set(local.map((block) => block.id));
+  const repeated = new Set(
+    localDeletionBlocks(fresh.blocks)
+      .filter((block) => localIds.has(block.id))
+      .map((block) => block.id),
+  );
+  const blocks = fresh.blocks.filter((block) => !repeated.has(block.id));
   const saved = pendingLocalHistory.get(store);
   const savedLocalIds = new Set(
     saved?.flatMap((entry) =>
       entry && typeof entry === 'object' ? [entry.id] : [],
     ) ?? [],
   );
+  const freshIdentities = new Set(blocks.flatMap(deletionBlockIdentities));
   const reference =
-    saved && local.some((block) => savedLocalIds.has(block.id))
+    saved &&
+    local.some((block) => savedLocalIds.has(block.id)) &&
+    (blocks.length === 0 ||
+      saved.some(
+        (entry) => typeof entry === 'string' && freshIdentities.has(entry),
+      ))
       ? [
           ...saved.filter(
             (entry) =>
@@ -150,15 +165,9 @@ export function restoreLocalDeletionBlocks(
           ...local.filter((block) => !savedLocalIds.has(block.id)),
         ]
       : before.map((block) =>
-          localIds.has(block.id) ? block : deletionBlockIdentity(block),
+          localIds.has(block.id) ? block : deletionBlockIdentities(block)[0],
         );
   const remapped = new Map<string, string>();
-  const repeated = new Set(
-    localDeletionBlocks(fresh.blocks)
-      .filter((block) => localIds.has(block.id))
-      .map((block) => block.id),
-  );
-  const blocks = fresh.blocks.filter((block) => !repeated.has(block.id));
   if (blocks.length === 0) pendingLocalHistory.set(store, reference);
   else pendingLocalHistory.delete(store);
   for (const block of blocks) {
@@ -167,8 +176,7 @@ export function restoreLocalDeletionBlocks(
   }
   const indices = new Map(
     blocks.flatMap((block, index) => {
-      const key = deletionBlockIdentity(block);
-      return key ? [[key, index] as const] : [];
+      return deletionBlockIdentities(block).map((key) => [key, index] as const);
     }),
   );
   const slots: DaemonTranscriptBlock[][] = Array.from(

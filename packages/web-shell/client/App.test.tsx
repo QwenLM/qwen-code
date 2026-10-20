@@ -15215,6 +15215,36 @@ describe('App read-only local commands mid-turn', () => {
     },
   );
 
+  it('finishes an explicitly requested bug report after the session owner changes', async () => {
+    const onBugReport = vi.fn();
+    renderApp({ onBugReport });
+    await flush();
+    const preflight = deferred<null>();
+    mockWorkspaceActions.loadPreflight.mockReturnValueOnce(preflight.promise);
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/bug report title');
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+    expect(onBugReport).not.toHaveBeenCalled();
+    testState.ownerVersion += 1;
+    mockStore.dispatch.mockClear();
+    await act(async () => {
+      preflight.resolve(null);
+      await preflight.promise;
+    });
+    await flush();
+    expect(onBugReport).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'report title' }),
+    );
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        promptId: expect.stringMatching(/^local-command:/),
+      }),
+    ]);
+  });
+
   it('echoes /about when idle', async () => {
     renderApp({});
     await flush();

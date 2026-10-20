@@ -72,6 +72,7 @@ export function MessageTimestamp({
   );
   const openedByHover = useRef(false);
   const hoverFocus = useRef<HTMLElement | null>(null);
+  const restoreHoverFocus = useRef(false);
   const cancelClose = () => clearTimeout(closeTimer.current);
   const handleDirectInteraction = () => {
     cancelClose();
@@ -138,6 +139,7 @@ export function MessageTimestamp({
                     ? document.activeElement
                     : null;
                 openedByHover.current = true;
+                restoreHoverFocus.current = true;
                 setMenuOpen(true);
               }
             }}
@@ -164,9 +166,15 @@ export function MessageTimestamp({
           onPointerLeave={scheduleClose}
           onKeyDown={handleDirectInteraction}
           onPointerDown={handleDirectInteraction}
-          onFocusCapture={() => {
-            if (openedByHover.current)
+          onFocusCapture={(event) => {
+            if (
+              openedByHover.current &&
+              restoreHoverFocus.current &&
+              event.target === event.currentTarget
+            ) {
+              restoreHoverFocus.current = false;
               hoverFocus.current?.focus({ preventScroll: true });
+            }
           }}
           onFocusOutside={(event) => {
             if (openedByHover.current) event.preventDefault();

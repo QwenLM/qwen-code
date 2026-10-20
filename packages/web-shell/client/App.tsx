@@ -18575,12 +18575,12 @@ export function App({
                 );
               })
               .catch((error: unknown) => {
-                if (!owner.isCurrent()) return;
-                dispatchReadOnlyStatus(
-                  t('messageDelete.commandFailed'),
-                  undefined,
-                  localCommandId,
-                );
+                if (owner.isCurrent())
+                  dispatchReadOnlyStatus(
+                    t('messageDelete.commandFailed'),
+                    undefined,
+                    localCommandId,
+                  );
                 reportError(error, 'Failed to load status info');
               })
               .finally(() => finishLocalCommand(store, localCommandId));
@@ -18601,7 +18601,6 @@ export function App({
               : Promise.resolve([null, null] as const)
             )
               .then(([preflight, env]) => {
-                if (!owner.isCurrent()) return;
                 const sys = collectSystemInfo(preflight, env);
                 const qwenCodeVersion =
                   connectionRef.current.capabilities?.qwenCodeVersion || '';
@@ -18618,11 +18617,12 @@ export function App({
                     title: bugTitle,
                     systemInfo: sysInfo,
                   });
-                  dispatchReadOnlyStatus(
-                    t('bug.submitted'),
-                    undefined,
-                    localCommandId,
-                  );
+                  if (owner.isCurrent())
+                    dispatchReadOnlyStatus(
+                      t('bug.submitted'),
+                      undefined,
+                      localCommandId,
+                    );
                 } else {
                   const fields = Object.entries(sysInfo)
                     .filter(([, v]) => v)
@@ -18635,28 +18635,31 @@ export function App({
                   const win = window.open(url, '_blank');
                   if (win) {
                     win.opener = null;
-                    dispatchReadOnlyStatus(
-                      t('bug.submitted'),
-                      undefined,
-                      localCommandId,
-                    );
+                    if (owner.isCurrent())
+                      dispatchReadOnlyStatus(
+                        t('bug.submitted'),
+                        undefined,
+                        localCommandId,
+                      );
                   } else {
-                    dispatchReadOnlyStatus(
-                      t('bug.popupBlocked'),
-                      undefined,
-                      localCommandId,
-                    );
-                    pushToast('error', t('bug.popupBlocked'));
+                    if (owner.isCurrent())
+                      dispatchReadOnlyStatus(
+                        t('bug.popupBlocked'),
+                        undefined,
+                        localCommandId,
+                      );
+                    if (owner.isCurrent())
+                      pushToast('error', t('bug.popupBlocked'));
                   }
                 }
               })
               .catch((error: unknown) => {
-                if (!owner.isCurrent()) return;
-                dispatchReadOnlyStatus(
-                  t('messageDelete.commandFailed'),
-                  undefined,
-                  localCommandId,
-                );
+                if (owner.isCurrent())
+                  dispatchReadOnlyStatus(
+                    t('messageDelete.commandFailed'),
+                    undefined,
+                    localCommandId,
+                  );
                 reportError(error, t('bug.failed'));
               })
               .finally(() => finishLocalCommand(store, localCommandId));

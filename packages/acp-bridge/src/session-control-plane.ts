@@ -4620,7 +4620,7 @@ export function createSessionControlPlane(
   /**
    * Barrier check for the writers other than `sendPrompt`: a rewind restores
    * files under the session cwd, a fork agent runs tools there, a shell
-   * command executes in `effectiveCwd`, a branch mutates the session's
+   * command executes in `effectiveCwd`, a branch or message deletion mutates
    * persisted history, a cwd change moves the session inside the checkout, a
    * workflow action runs through the session's tool registry in that cwd, and
    * a goal control starts a turn that never passes `sendPrompt`. Each is

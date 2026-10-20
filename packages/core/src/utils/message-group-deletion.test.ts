@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { computeInitialTurnFromHistory } from '../services/session-turn-state.js';
 import type { Content } from '@google/genai';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import { SessionFileHistoryAccumulator } from '../services/session-file-history-state.js';
 import { CompressionStatus } from '../core/turn.js';
 import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
 import { prepareTranscriptRecords } from './transcript-records.js';
@@ -344,6 +345,94 @@ describe('message group deletion', () => {
     expect(() =>
       deleteTranscriptMessageGroups([prompt, compression], ['user'], anchor),
     ).toThrow('injected input ownership');
+  });
+
+  it('persists original diff endpoints without retaining deleted rewind identities', () => {
+    const snapshot = (promptId: string, version: number) => ({
+      promptId,
+      timestamp: '2026-10-15T00:00:00Z',
+      trackedFileBackups: {
+        'a.txt': {
+          backupFileName: `a@v${version}`,
+          version,
+          backupTime: '2026-10-15T00:00:00Z',
+        },
+      },
+    });
+    const history = ['a', 'b', 'c'].flatMap((id, index) => [
+      user(id, [null, 'fa', 'fb'][index]!),
+      record(`f${id}`, id, 'system', {
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: [snapshot(`api-${id}`, index + 1)] },
+      }),
+    ]);
+    const deleted = deleteTranscriptMessageGroups(
+      history,
+      ['b'],
+      anchor,
+    ).records;
+    const restored = new SessionFileHistoryAccumulator();
+    for (const entry of deleted) restored.add(entry);
+    expect(restored.finish()?.map((entry) => entry.promptId)).toEqual([
+      'api-a',
+      'api-c',
+    ]);
+    expect(restored.finish()?.[0]?.diffAfterBackups?.['a.txt']?.version).toBe(
+      2,
+    );
+    const again = deleteTranscriptMessageGroups(deleted, ['c'], {
+      ...anchor,
+      uuid: 'anchor2',
+    }).records;
+    const restoredAgain = new SessionFileHistoryAccumulator();
+    for (const entry of again) restoredAgain.add(entry);
+    expect(restoredAgain.finish()?.map((entry) => entry.promptId)).toEqual([
+      'api-a',
+    ]);
+    expect(
+      restoredAgain.finish()?.[0]?.diffAfterBackups?.['a.txt']?.version,
+    ).toBe(2);
+  });
+
+  it('accepts complete fragments and deletes every selected physical fragment', () => {
+    const question = user('u', null);
+    const first = record('a', 'u', 'assistant', {
+      message: { role: 'model', parts: [{ text: 'thought', thought: true }] },
+    });
+    const second = record('a', 'u', 'assistant', {
+      message: { role: 'model', parts: [{ text: 'answer' }] },
+    });
+    const next = user('next', 'a');
+    const records = parseMessageGroupTranscript(
+      [question, first, second, next]
+        .map((item) => JSON.stringify(item))
+        .join('\n') + '\n',
+    );
+    expect(
+      getTranscriptMessageGroups(records).map((group) => group.id),
+    ).toEqual(['u', 'next']);
+    const kept = deleteTranscriptMessageGroups(
+      records,
+      ['next'],
+      anchor,
+    ).records;
+    expect(kept.filter((item) => item.uuid === 'a')).toEqual([first, second]);
+    const deleted = deleteTranscriptMessageGroups(
+      records,
+      ['u'],
+      anchor,
+    ).records;
+    expect(deleted.map((item) => [item.uuid, item.parentUuid])).toEqual([
+      ['next', null],
+      ['anchor', 'next'],
+    ]);
+    expect(() =>
+      parseMessageGroupTranscript(
+        [question, first, { ...second, parentUuid: null }]
+          .map((item) => JSON.stringify(item))
+          .join('\n') + '\n',
+      ),
+    ).toThrow('incomplete');
   });
 
   it('rejects unknown groups and incomplete or cyclic history', () => {

@@ -927,7 +927,12 @@ test('message actions use a hoverable menu that also supports click and keyboard
     .hover();
   await page.waitForTimeout(180);
   await expect(menu).toBeVisible();
-  await expect(composer).toBeFocused();
+  const hoveredItem = menu.getByRole('menuitem', {
+    name: 'Edit message',
+    exact: true,
+  });
+  await expect(hoveredItem).toBeFocused();
+  await expect(hoveredItem).toHaveAttribute('data-highlighted', '');
   await page.screenshot({
     path: info.outputPath('actions-hover-mock-daemon.png'),
     fullPage: true,

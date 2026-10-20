@@ -13137,6 +13137,7 @@ class QwenAgent implements Agent {
         }
         debugLogger.debug(`recap ext-method received for session=${sessionId}`);
         const session = this.sessionOrThrow(sessionId);
+        session.assertHistoryContextAvailable();
         const config = session.getConfig();
         // v1: no cross-process abort plumbing. The bridge does not listen
         // for HTTP client disconnect and no AbortSignal is threaded through

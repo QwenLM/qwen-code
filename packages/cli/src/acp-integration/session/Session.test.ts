@@ -9022,6 +9022,45 @@ describe('Session', () => {
       await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
     });
 
+    it('retains background notifications without spending retries until deleted context recovers', async () => {
+      vi.useFakeTimers();
+      try {
+        mockChatRecordingService.deleteMessageGroups.mockResolvedValue({
+          deletedGroupIds: ['group'],
+          deletedPromptIds: ['prompt'],
+          removedApiPromptIds: [],
+        });
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue([]);
+        vi.mocked(mockChat.setHistory).mockImplementationOnce(() => {
+          throw new Error('context failed');
+        });
+        await expect(
+          session.deleteMessageGroups({ snapshot: 'v1', groupIds: ['group'] }),
+        ).rejects.toThrow('reopened');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(async () => createEmptyStream());
+        await session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'queued-after-delete',
+          status: 'completed',
+          kind: 'agent',
+        });
+        await vi.advanceTimersByTimeAsync(8_000);
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          (session as unknown as { notificationAdmissionDeferred: boolean })
+            .notificationAdmissionDeferred,
+        ).toBe(false);
+        await session.recoverMessageDeletionContext();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('rejects an active history mutation before touching storage', async () => {
       const release = session.beginHistoryMutation();
       await expect(

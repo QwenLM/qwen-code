@@ -2,9 +2,9 @@
 
 [English](2026-10-17-managed-operation-reconciliation.md) | [简体中文](2026-10-17-managed-operation-reconciliation.zh-CN.md)
 
-Status: phase 1 landed in #14443 (contract `1.59.0`), phase 2, the SSH Workspace registration, in #14456 (contract `1.60.0`), and phase 3, the Session title, in #14475. No phase changes the schema. Decision 9 landed in #14669 and decision 10 in #14681; the `CANCELLING`-lane cancel is implemented in this change. The cross-kill fault gate stays on #14166.
+Status: phase 1 landed in #14443 (contract `1.59.0`), phase 2, the SSH Workspace registration, in #14456 (contract `1.60.0`), and phase 3, the Session title, in #14475. No phase changes the schema. Decision 9 landed in #14669, decision 10 in #14681, the `CANCELLING`-lane cancel in #14694, and the cross-kill fault gate in #14750.
 
-This is slice **D7-2** of [#14122](https://github.com/QwenLM/qwen-code/issues/14122) (the D7 umbrella of [#12380](https://github.com/QwenLM/qwen-code/issues/12380), Stage D), tracked by [#14166](https://github.com/QwenLM/qwen-code/issues/14166). #12380 lets Stage D expose `java_durable` only with durable command delivery (D7-1, [#14168](https://github.com/QwenLM/qwen-code/issues/14168)) and original-command reconciliation (this slice). D7-3 ([#14167](https://github.com/QwenLM/qwen-code/issues/14167)), the opt-in profile, waits for both. The design note on #14166 classifies every site this slice touches.
+This is slice **D7-2** of [#14122](https://github.com/QwenLM/qwen-code/issues/14122) (the D7 umbrella of [#12380](https://github.com/QwenLM/qwen-code/issues/12380), Stage D), tracked by [#14166](https://github.com/QwenLM/qwen-code/issues/14166). #12380 lets Stage D expose `java_durable` only with durable command delivery (D7-1, [#14168](https://github.com/QwenLM/qwen-code/issues/14168)) and original-command reconciliation (this slice). D7-3 ([#14167](https://github.com/QwenLM/qwen-code/issues/14167)), the opt-in profile, landed in #14470 after both. The design note on #14166 classifies every site this slice touches.
 
 ## Problem
 
@@ -32,7 +32,7 @@ Two defects follow:
 
 - ~~`WORKSPACE_CREATE`~~: phase 2, below.
 - ~~`RENAME`'s `UNKNOWN` state and its reader (the Harness title revision)~~: phase 3, below.
-- ~~The Turn-level recovery reads and park~~: decisions 9 and 10, below. The fault gate that kills a Harness around a v2 execution stays on #14166.
+- ~~The Turn-level recovery reads and park~~: decisions 9 and 10, below; the gate that kills a Harness around a v2 execution landed in #14750.
 - Renaming the public `recovery_blocked` token for lifecycle waits. That is a contract change better made in D7-3, which exposes delivery state anyway.
 - Removing the never-written readers (`ma_turn.status = 'RECOVERY_BLOCKED'`, the Session-kind `UNKNOWN`) and folding the hand-written `INSERT INTO ma_operation` statements into one writer.
 
