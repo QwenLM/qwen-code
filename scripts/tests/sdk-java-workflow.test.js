@@ -97,10 +97,10 @@ describe('SDK Java self-hosted workflow guards', () => {
     // below stay the only place this job compiles.
     const steps = parse(workflow).jobs['daemon-e2e'].steps;
     const install = steps.find(
-      (step) => step.name === 'Install Node.js dependencies',
+      (s) => s.name === 'Install Node.js dependencies',
     );
     expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
-    const names = steps.map((step) => step.name);
+    const names = steps.map((s) => s.name);
     expect(names.indexOf('Build Qwen Code')).toBeGreaterThan(
       names.indexOf('Install Node.js dependencies'),
     );
