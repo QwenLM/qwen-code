@@ -120,9 +120,11 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       const isSlash = testCase.source === 'slash';
       rig = new TestRig();
       restoreNoProxy = applyContainerSandboxNoProxy();
-      // The marker keeps same-status cases from sharing a directory: CI sets
-      // KEEP_OUTPUT, so setup() would remove a directory the previous case's
-      // CLI is still writing and fail with ENOTEMPTY before the body runs.
+      // The marker keeps same-status cases from sharing a directory: the
+      // post-merge E2E legs set KEEP_OUTPUT (the no-AK PR gate that runs
+      // this file does not), so setup() there would remove the previous
+      // case's directory while its CLI is still writing, failing with
+      // ENOTEMPTY before the body runs.
       await rig.setup(
         `workflow-completion-${testCase.status}-${testCase.marker}`,
         {
