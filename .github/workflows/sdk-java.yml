@@ -203,6 +203,8 @@ jobs:
 
       # The fast tier runs the full module suite below, which loads the built
       # Core and CLI JavaScript, as mysql-integration's suite does.
+      # No QWEN_SKIP_PREPARE here on purpose: prepare's build is this step's
+      # product.
       - name: 'Build Managed Agent JavaScript prerequisites (fast tier)'
         if: "${{ inputs.tier == 'fast' }}"
         run: |-
@@ -1641,13 +1643,15 @@ jobs:
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
-    # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
-    # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
-    # about a minute. On the shared pool that setup is what stretches: npm ci
-    # measured 4.0-5.9 min across 11 green runs and 19.9/22.6 min on the two
-    # that died, which is the whole difference between them. At that factor the
-    # setup alone needs ~44 min, so 30 cancelled the job before a single
-    # assertion ran. Matches the release.yml quality_build tier
+    # 45, not 30: this job is ~90% setup. A quiet run is ~6.2 min end to end
+    # after #14891 stopped the install from running prepare's build: install
+    # 54s (network + `npm run generate`), `Build Qwen Code` 4m36s, `Bundle
+    # Qwen Code` 6s, Java daemon E2E 10s. On the shared pool the setup is what
+    # stretches: the install measured 4.0-5.9 min across 11 green runs and
+    # 19.9/22.6 min on the two that died before #14891, when prepare's build
+    # was inside it. That build is now `Build Qwen Code`, still unretried and
+    # the dominant term. 30 cancelled the job before a single assertion ran.
+    # Matches the release.yml quality_build tier
     # (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES, default 45).
     # The fast tier keeps 90 rather than 45. This budget was originally sized
     # for the post-job Maven cache save, which added 14-37 minutes on the
@@ -1656,7 +1660,7 @@ jobs:
     # of the 8 sdk-java.yml runs before it). #14396 has since suppressed that
     # save on self-hosted runners, so the save is no longer the reason. What
     # still justifies the headroom is frequency: the fast tier runs this leg on
-    # every touched PR push instead of nightly only, so it meets the ~44 min
+    # every touched PR push instead of nightly only, so it meets the
     # stretched-setup tail above far more often than a 45 ceiling leaves room
     # for.
     timeout-minutes: "${{ inputs.tier == 'fast' && 90 || 45 }}"
@@ -1826,7 +1830,7 @@ jobs:
           for attempt in 1 2 3; do
             if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
               if [[ "${attempt}" != "1" ]]; then
-                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — check the failure class before counting it toward #11726."
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — count this toward the #11726 install-transient recurrence threshold."
               fi
               break
             fi

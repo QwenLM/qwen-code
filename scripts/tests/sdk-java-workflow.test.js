@@ -107,6 +107,19 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(names.indexOf('Bundle Qwen Code')).toBeGreaterThan(
       names.indexOf('Build Qwen Code'),
     );
+    expect(names.indexOf('Run Java daemon E2E')).toBeGreaterThan(
+      names.indexOf('Bundle Qwen Code'),
+    );
+    // With prepare skipped these are the lane's only producers of dist/cli.js,
+    // so pin the commands and that nothing can make either optional.
+    const build = steps.find((step) => step.name === 'Build Qwen Code');
+    const bundle = steps.find((step) => step.name === 'Bundle Qwen Code');
+    for (const s of [build, bundle]) {
+      expect(s.if, s.name).toBeUndefined();
+      expect(s['continue-on-error'], s.name).toBeUndefined();
+    }
+    expect(build.run).toBe('npm run build');
+    expect(bundle.run).toBe('npm run bundle');
   });
 
   it('serializes latency-sensitive tests on each physical ECS host', () => {
@@ -1093,6 +1106,23 @@ describe('SDK Java install-transient retry', () => {
       'mysql-integration',
       'test',
     ]);
+  });
+
+  it.each(installs)(
+    '%s skips prepare only where an explicit build step follows',
+    (jobName, installStep) => {
+      if (jobName === 'daemon-e2e') return;
+      expect(installStep.env?.QWEN_SKIP_PREPARE, jobName).toBeUndefined();
+    },
+  );
+
+  it('counts the daemon E2E install warning toward the #11726 threshold', () => {
+    // daemon-e2e no longer runs prepare, so an absorbed failure here is always
+    // the install transient #11726 tracks, never a compile failure.
+    const [, installStep] = installs.find(
+      ([jobName]) => jobName === 'daemon-e2e',
+    );
+    expect(installStep.run).toContain('count this toward the #11726');
   });
 
   it.each(installs)('%s retries a transient install', (jobName, step) => {
