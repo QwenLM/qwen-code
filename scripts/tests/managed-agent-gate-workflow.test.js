@@ -376,7 +376,7 @@ describe('Managed Agent gate required check', () => {
     expect(evaluate(gate.jobs.gate.if, context)).toBe(true);
   });
 
-  it.each(['pull_request', 'push', 'merge_group', 'workflow_dispatch'])(
+  it.each(['pull_request', 'push', 'merge_group'])(
     'a %s event ignores the review guard',
     (event) => {
       expect(

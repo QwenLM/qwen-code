@@ -93,13 +93,13 @@ name is computed:
 | `pull_request`        | touched               | `Managed Agent fast tier`            |
 | `pull_request_review` | touched, full run     | `Managed Agent gate`                 |
 | `pull_request_review` | touched, no full run  | `Managed Agent review (no full run)` |
-| `pull_request_review` | not an approval       | no run, nothing reported             |
+| `pull_request_review` | not an approval       | every job skips, nothing reported    |
 | `push`, `merge_group` | touched               | `Managed Agent gate`                 |
 | any                   | tier selection failed | `Managed Agent gate` (fail)          |
 
-A review that is not an approval starts no job at all: it can never select a
-tier above `none`, so both `scope` and `gate` skip and the run finishes in
-seconds without taking a runner. It used to report
+A review that is not an approval starts no job: GitHub still creates the run,
+but it can never select a tier above `none`, so both `scope` and `gate` skip
+and it finishes in seconds without taking a runner. It used to report
 `Managed Agent review (no full run)` — a green check no rule reads — and now
 reports nothing.
 
