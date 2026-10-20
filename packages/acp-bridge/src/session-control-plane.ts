@@ -1049,6 +1049,9 @@ interface SessionEntry {
    * had an ACP load/resume response, so attaches return `state: {}`.
    */
   restoreState?: BridgeSessionState;
+  generatedUi?: BridgeSession['generatedUi'];
+  generatedUiReceiptKnown?: true;
+  generatedUiRefreshGeneration?: number;
   /** Response-mode `session/load` can return a partial replay prefix. */
   restoreReplayPartial?: true;
   restoreReplayError?: string;
@@ -5917,6 +5920,8 @@ export function createSessionControlPlane(
         }
       }
 
+      await refreshGeneratedUiStatus(entry);
+
       // Bd1zc: re-check that the entry is still live before returning.
       // The model/approval-mode calls yield and race against
       // `channel.exited` — if the child crashed during the model
@@ -5941,6 +5946,7 @@ export function createSessionControlPlane(
         attached: false,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.generatedUi ? { generatedUi: entry.generatedUi } : {}),
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
         ...(entry.sourceType
@@ -7741,6 +7747,82 @@ export function createSessionControlPlane(
     };
   }
 
+  const parseGeneratedUiStatus = (
+    value: unknown,
+  ): BridgeSession['generatedUi'] => {
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      Array.isArray(value) ||
+      !('version' in value) ||
+      value.version !== 1 ||
+      !('enabled' in value) ||
+      typeof value.enabled !== 'boolean'
+    )
+      return undefined;
+    const status: NonNullable<BridgeSession['generatedUi']> = {
+      version: 1,
+      enabled: value.enabled,
+    };
+    const reason = 'reason' in value ? value.reason : undefined;
+    if (
+      reason === 'setting-disabled' ||
+      reason === 'unsupported-runtime' ||
+      reason === 'workspace-untrusted' ||
+      reason === 'provider-conflict' ||
+      reason === 'assets-missing' ||
+      reason === 'policy-disabled'
+    )
+      status.reason = reason;
+    return status;
+  };
+
+  const setGeneratedUiStatus = (
+    entry: SessionEntry,
+    status: BridgeSession['generatedUi'],
+  ): void => {
+    entry.generatedUi = status;
+    if (!entry.restoreState) return;
+    const { generatedUi: _previous, ...meta } = entry.restoreState._meta ?? {};
+    entry.restoreState = {
+      ...entry.restoreState,
+      _meta: { ...meta, ...(status ? { generatedUi: status } : {}) },
+    };
+  };
+
+  const refreshGeneratedUiStatus = async (
+    entry: SessionEntry,
+  ): Promise<void> => {
+    if (!entry.generatedUiReceiptKnown) return;
+    const generation = (entry.generatedUiRefreshGeneration ?? 0) + 1;
+    entry.generatedUiRefreshGeneration = generation;
+    setGeneratedUiStatus(entry, undefined);
+    try {
+      const response = await requestSessionStatus<ServeSessionContextStatus>(
+        entry.sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionContext,
+        {},
+        Math.min(initTimeoutMs, 5_000),
+      );
+      if (
+        byId.get(entry.sessionId) !== entry ||
+        entry.generatedUiRefreshGeneration !== generation ||
+        response?.v !== STATUS_SCHEMA_VERSION ||
+        response.sessionId !== entry.sessionId
+      )
+        return;
+      const meta = response.state?.['_meta'];
+      const status = parseGeneratedUiStatus(
+        meta && typeof meta === 'object' && 'generatedUi' in meta
+          ? meta.generatedUi
+          : undefined,
+      );
+      setGeneratedUiStatus(entry, status);
+    } catch {
+      // Missing status support cannot revive the last enabled receipt.
+    }
+  };
+
   // A5: seed the snapshot caches from the agent's session-create response
   // (`newSession` / `loadSession` / `resumeSession` all return `models` +
   // `modes`). Without this the caches stay unset until the first change, so a
@@ -7755,6 +7837,7 @@ export function createSessionControlPlane(
   const seedSnapshotCaches = (
     entry: SessionEntry,
     resp: {
+      _meta?: Record<string, unknown> | null;
       models?: { currentModelId?: unknown } | null;
       modes?: {
         currentModeId?: unknown;
@@ -7762,6 +7845,11 @@ export function createSessionControlPlane(
       } | null;
     },
   ): void => {
+    const generatedUi = parseGeneratedUiStatus(resp._meta?.['generatedUi']);
+    if (generatedUi) {
+      entry.generatedUiReceiptKnown = true;
+      entry.generatedUi = generatedUi;
+    }
     const model = resp.models?.currentModelId;
     if (typeof model === 'string' && model.length > 0) {
       entry.currentModelId = model;
@@ -8503,6 +8591,7 @@ export function createSessionControlPlane(
       }
       const sourcePersisted = await applyRestoreSourceIfMissing(existing, req);
       try {
+        await refreshGeneratedUiStatus(existing);
         assertAttachableSessionEntry(req.sessionId, existing);
       } catch (error) {
         if (previousApprovalMode !== undefined) {
@@ -8524,6 +8613,7 @@ export function createSessionControlPlane(
         attached: true,
         clientId,
         createdAt: existing.createdAt,
+        ...(existing.generatedUi ? { generatedUi: existing.generatedUi } : {}),
         ...(existing.sourceType ? { sourceType: existing.sourceType } : {}),
         ...(existing.sourceId !== undefined
           ? { sourceId: existing.sourceId }
@@ -8697,6 +8787,7 @@ export function createSessionControlPlane(
       }
       const sourcePersisted = await applyRestoreSourceIfMissing(entry, req);
       try {
+        await refreshGeneratedUiStatus(entry);
         assertAttachableSessionEntry(restored.sessionId, entry);
       } catch (error) {
         if (previousApprovalMode !== undefined) {
@@ -8709,11 +8800,14 @@ export function createSessionControlPlane(
         await rollbackAttachRegistration(entry, clientId);
         throw error;
       }
+      const { generatedUi: _previousGeneratedUi, ...restoredState } = restored;
       return {
-        ...restored,
+        ...restoredState,
+        state: entry.restoreState ?? {},
         attached: true,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.generatedUi ? { generatedUi: entry.generatedUi } : {}),
         // Unlike the owner-side restore responses, the waiter has no
         // `restorePromptAdmitted` term; a prompt the owner parked while the
         // restore was in flight must still read as active here so the
@@ -9269,6 +9363,7 @@ export function createSessionControlPlane(
           req,
         );
         try {
+          await refreshGeneratedUiStatus(racedEntry);
           assertAttachableSessionEntry(req.sessionId, racedEntry);
         } catch (error) {
           if (previousApprovalMode !== undefined) {
@@ -9303,6 +9398,9 @@ export function createSessionControlPlane(
           attached: true,
           clientId,
           createdAt: racedEntry.createdAt,
+          ...(racedEntry.generatedUi
+            ? { generatedUi: racedEntry.generatedUi }
+            : {}),
           ...(racedEntry.sourceType
             ? { sourceType: racedEntry.sourceType }
             : {}),
@@ -9454,6 +9552,7 @@ export function createSessionControlPlane(
         ? await persistSessionSource(entry, daemonOwnedStandaloneRestore)
         : undefined;
       try {
+        await refreshGeneratedUiStatus(entry);
         assertAttachableSessionEntry(req.sessionId, entry);
       } catch (error) {
         if (previousApprovalMode !== undefined) {
@@ -9488,10 +9587,11 @@ export function createSessionControlPlane(
         attached: false,
         clientId,
         createdAt: entry.createdAt,
+        ...(entry.generatedUi ? { generatedUi: entry.generatedUi } : {}),
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
         ...(sourcePersisted !== undefined ? { sourcePersisted } : {}),
-        state: publicState,
+        state: entry.restoreState ?? {},
         ...(deferArtifactWorkspace || artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
@@ -10777,6 +10877,7 @@ export function createSessionControlPlane(
             );
           }
           try {
+            await refreshGeneratedUiStatus(existing);
             assertAttachableSessionEntry(existing.sessionId, existing);
           } catch (error) {
             if (previousApprovalMode !== undefined) {
@@ -10798,6 +10899,9 @@ export function createSessionControlPlane(
             attached: true,
             clientId,
             createdAt: existing.createdAt,
+            ...(existing.generatedUi
+              ? { generatedUi: existing.generatedUi }
+              : {}),
             ...(existing.sourceType ? { sourceType: existing.sourceType } : {}),
             ...(existing.sourceId !== undefined
               ? { sourceId: existing.sourceId }

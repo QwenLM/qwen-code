@@ -615,6 +615,7 @@ export type {
   SideTaskSessionRequest,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonGeneratedUiStatus,
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
   DaemonBranchInfo,

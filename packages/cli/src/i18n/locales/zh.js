@@ -7,6 +7,10 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI 生成式界面',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
+
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',

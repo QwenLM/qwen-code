@@ -18,7 +18,10 @@ import {
   TrajectoryLiveContext,
   useTrajectoryLiveSnapshot,
 } from '../../trajectory/trajectory-live-context.js';
-import { McpAppToolsContext } from '../../mcpAppHostContext.js';
+import {
+  McpAppToolsContext,
+  McpAppGeneratedUiContext,
+} from '../../mcpAppHostContext.js';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
@@ -18265,6 +18268,95 @@ describe('DaemonSessionProvider', () => {
       vi.useRealTimers();
     }
   });
+
+  it('exposes Generated UI only from the attached session and clears it with the owner', async () => {
+    const session = createMockSession({
+      session: { generatedUi: { version: 1, enabled: true } },
+    });
+    sdkMocks.sessions.push(session);
+    let capability: ContextType<typeof McpAppGeneratedUiContext>;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      capability = useContext(McpAppGeneratedUiContext);
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(capability).toEqual({
+      sessionId: session.sessionId,
+      status: { version: 1, enabled: true },
+    });
+    await act(async () => {
+      await requireActions(actions).clearSession();
+    });
+    expect(capability).toBeUndefined();
+  });
+
+  it.each(['success', 'failure', 'wrong owner'] as const)(
+    'clears Generated UI after a %s context refresh loses its receipt',
+    async (outcome) => {
+      const start = createDeferred<void>();
+      const refresh = createDeferred<DaemonSessionContextStatus>();
+      const initial = {
+        v: 1 as const,
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        state: {},
+        recovery: { kind: 'clean' as const, canContinue: false },
+      };
+      const context = vi
+        .fn()
+        .mockResolvedValueOnce(initial)
+        .mockImplementation(async () => {
+          try {
+            return await refresh.promise;
+          } finally {
+            // Match DaemonSessionClient.context()'s receipt invalidation.
+            session.session!['generatedUi'] = undefined;
+          }
+        });
+      const session = createMockSession({
+        session: { generatedUi: { version: 1, enabled: true } },
+        context,
+        lastEventId: 10,
+        async *events(opts) {
+          await start.promise;
+          yield {
+            v: 1,
+            id: 11,
+            type: 'turn_complete',
+            data: { promptId: 'observed', stopReason: 'end_turn' },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let capability: ContextType<typeof McpAppGeneratedUiContext>;
+      function Harness() {
+        capability = useContext(McpAppGeneratedUiContext);
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(capability?.status.enabled).toBe(true);
+      await act(async () => {
+        start.resolve();
+        await flushPromises();
+      });
+      expect(context).toHaveBeenCalledTimes(2);
+      expect(capability?.status.enabled).toBe(true);
+      await act(async () => {
+        if (outcome === 'failure') refresh.reject(new Error('context failed'));
+        else
+          refresh.resolve({
+            ...initial,
+            sessionId:
+              outcome === 'wrong owner' ? 'other-session' : initial.sessionId,
+          });
+        await flushPromises();
+      });
+      expect(capability).toBeUndefined();
+    },
+  );
 
   it('uses the current client id after an in-place session reattach', async () => {
     const session = createMockSession({});

@@ -2684,6 +2684,63 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('returns Generated UI state from the actual owning session Config', async () => {
+    const innerConfig = await setupSessionMocks('ui-owner-session');
+    const generatedUi = { version: 1 as const, enabled: true };
+    let effectiveGeneratedUi: {
+      version: 1;
+      enabled: boolean;
+      reason?: string;
+    } = generatedUi;
+    Object.assign(innerConfig, {
+      getBundledGeneratedUiStatus: () => effectiveGeneratedUi,
+      getSessionRuntimeBaseDir: () => Storage.getRuntimeBaseDir(),
+    });
+    Object.assign(mockConfig, {
+      getBundledGeneratedUiStatus: () => ({ version: 1, enabled: false }),
+    });
+    const experimental = { generatedUi: true };
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings({ mcpServers: {}, experimental }),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      const created = await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      expect(created).toMatchObject({
+        sessionId: 'ui-owner-session',
+        _meta: { generatedUi },
+      });
+      const context = () =>
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionContext, {
+          sessionId: 'ui-owner-session',
+        });
+      experimental.generatedUi = false;
+      await expect(context()).resolves.toMatchObject({
+        sessionId: 'ui-owner-session',
+        state: { _meta: { generatedUi } },
+      });
+      effectiveGeneratedUi = {
+        version: 1,
+        enabled: false,
+        reason: 'policy-disabled',
+      };
+      await expect(context()).resolves.toMatchObject({
+        sessionId: 'ui-owner-session',
+        state: { _meta: { generatedUi: effectiveGeneratedUi } },
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('passes trusted invocation context out of band and strips reserved metadata', async () => {
     await setupSessionMocks('trusted-session');
     const agentPromise = runAcpAgent(
@@ -25789,6 +25846,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // pins that the bootstrap path opts out of MCP discovery (so
       // bootstrap + per-session don't double-spawn N stdio servers).
       skipMcpDiscovery: true,
+      disableBundledGeneratedUi: true,
       // #5626 Phase 2: bootstrap (workspace-level) config binds the reverse
       // tool channel SDK callback so a runtime-added client-hosted MCP server
       // (`workspaceMcpRuntimeAdd` targets THIS manager) round-trips over the WS.
@@ -25919,6 +25977,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // pins that the bootstrap path opts out of MCP discovery (so
       // bootstrap + per-session don't double-spawn N stdio servers).
       skipMcpDiscovery: true,
+      disableBundledGeneratedUi: true,
       // #5626 Phase 2: bootstrap config binds the reverse-tool-channel SDK
       // callback (see the sibling bootstrap test for rationale).
       sendSdkMcpMessage: expect.any(Function),
@@ -31279,6 +31338,37 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
       mockConnectionState.resolve();
       await agentPromise;
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'returns the reconstructed Generated UI state on %s',
+    async (action) => {
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      const generatedUi = {
+        version: 1 as const,
+        enabled: false,
+        reason: 'setting-disabled' as const,
+      };
+      Object.assign(innerConfig, {
+        getBundledGeneratedUiStatus: () => generatedUi,
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      try {
+        const request = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        const response =
+          action === 'load'
+            ? await agent.loadSession(request)
+            : await agent.unstable_resumeSession(request);
+        expect(response).toMatchObject({ _meta: { generatedUi } });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
     },
   );
 
