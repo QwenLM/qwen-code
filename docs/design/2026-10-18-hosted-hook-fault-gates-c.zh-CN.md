@@ -24,10 +24,10 @@ Issue #14449 跟踪 FG13，即 Hosted Hook 两个域 `hook_registration` 与
    Harness 与 Broker 断连的各臂属于 FG9 的中继门禁，那里有专用代理。#13129 的
    "Broker/Runtime-owner" 措辞由本切片的 worker 丢失格子满足；独立 Broker
    重启需要另一套拓扑，属另一轮次。
-2. **worker SIGKILL 后的孤儿 Hook 单元：断言，而非要求平台清理。**
-   worker 被杀后，命令与其后代继续让单元保持有进程，且无 owner、无回执、无计时器。
-   worker 丢失的格子会在清理前断言该状态，再由测试清理杀掉单元。这样钉住的是
-   H2 已接受的限制本身，而不是要求产品回收单元（那是 #13133 的工作）。
+2. **worker 丢失的格子钉住回收契约，而不是孤儿单元。**
+   worker 被 SIGKILL 后，没有幸存者能结算记录，记录保持 `recovery_blocked` /
+   `outcome_unknown`；命令与其后代随 worker 一起被回收（#14502），单元到达
+   `populated 0`。该格同时断言这两部分，因此回收器回归而留下孤儿进程时门禁会变红。
 
 ## 测试装置
 
@@ -52,7 +52,7 @@ Issue #14449 跟踪 FG13，即 Hosted Hook 两个域 `hook_registration` 与
 | 用例                          | 注入                                                                           | 期望                                                                                                                                                                                                                                                                                                                                                           |
 | ----------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `harness-kill-during-command` | `PreToolUse` 命令 Hook 带存活后代保持运行；SIGKILL Harness；启动替换 Harness。 | 恰好一次物理调用。替换者的 load 回答被杀 Harness 的调用；命令仍持有时新 prompt 返回 409。随后把 Session 重新 attach 到替换者（被动恢复 load），通过 Harness 的认证状态路由读取该操作——该路由向记录里的原 `runtimeSessionId` 取证，用 worker 内存中的回执结算记录。记录结算为 `settled` 且有 result；单元到达 `populated 0`，结算时 worker 与 generation 不变。 |
-| `worker-kill-during-command`  | 同样的保持型 Hook；SIGKILL durable worker。                                    | 记录变为 `recovery_blocked` / `outcome_unknown`，绝不是 `settled` 或 `cancelled`。恰好一次物理调用。命令与后代作为无 owner 的有进程单元存活。关闭被拒（409 `turn_active` 或 503），Session 保持打开。generation 不被重铸。                                                                                                                                     |
+| `worker-kill-during-command`  | 同样的保持型 Hook；SIGKILL durable worker。                                    | 记录变为 `recovery_blocked` / `outcome_unknown`，绝不是 `settled` 或 `cancelled`。恰好一次物理调用。父进程死亡回收器杀死命令与后代并清空单元（`populated 0`）。关闭被拒（409 `turn_active` 或 503），Session 保持打开。generation 不被重铸。                                                                                                                   |
 | `command-kill`                | 命令运行中 SIGKILL，且无后代。                                                 | 在已保存的 `failClosed` 策略下得到 `non_blocking_error`：记录结算，读取绝不返回文件正文，模型看到 Hook 的阻断。单元为空。                                                                                                                                                                                                                                      |
 
 ## 变异见证
@@ -66,6 +66,9 @@ Issue #14449 跟踪 FG13，即 Hosted Hook 两个域 `hook_registration` 与
   `HostedHookRecoveryRequiredError` 之前的 `recovery_blocked` 提交。记录会停在
   `running`，状态断言失败。（这里删掉 owner 检查会被掩盖，因为任何查询失败都已
   回答 `outcome_unknown`；见证必须删掉那个如实提交。）
+- `worker-kill-during-command` 回收部分：从托管命令启动处删掉
+  `reapOnParentExit: true`。单元会继续保有命令与后代，`running` 与
+  `populated 0` 断言失败。
 - `command-kill`：让 `failClosed` 放行非成功结果。阻断断言失败。
 
 ## 非目标
