@@ -803,16 +803,18 @@ describe('Managed Runtime ledger', () => {
     it('parses table rows, skips the unparseable, and keeps the undatable', () => {
       const rows = testInternals.parseProcessTable(
         [
-          '  123   100 00:05 node worker.js managed-runtime-worker',
-          '  456   100 01:02:03 sleep 300',
+          '  123   100 00:05 S node worker.js managed-runtime-worker',
+          '  456   100 01:02:03 S sleep 300',
           'garbage line',
-          '  789   100 not-a-time whatever',
-          '  790   100 441077234-00:18:40 node wrapped.js',
+          '  789   100 not-a-time S whatever',
+          '  790   100 441077234-00:18:40 S node wrapped.js',
+          '  791   100 00:07 Z node zombie.js',
         ].join('\n'),
       );
       expect(rows.get(123)).toMatchObject({
         pgid: 100,
         runningMs: 5_000,
+        state: 'S',
         args: 'node worker.js managed-runtime-worker',
       });
       expect(rows.get(456)?.args).toBe('sleep 300');
@@ -824,6 +826,7 @@ describe('Managed Runtime ledger', () => {
         runningMs: undefined,
         args: 'node wrapped.js',
       });
+      expect(rows.get(791)).toMatchObject({ pgid: 100, state: 'Z' });
     });
 
     it.skipIf(!POSIX)(
@@ -832,6 +835,7 @@ describe('Managed Runtime ledger', () => {
         const table = queryProcessTable();
         const row = table.get(process.pid);
         expect(row).toBeDefined();
+        expect(row!.state).toBeDefined();
         expect(row!.args.length).toBeGreaterThan(0);
         expect(row!.runningMs).toBeGreaterThanOrEqual(0);
       },
@@ -1520,6 +1524,215 @@ describe('Managed Runtime ledger', () => {
       expect(signal).not.toHaveBeenCalledWith(202, 'SIGKILL');
       expect(existsSync(workFile)).toBe(false);
     });
+
+    it('resolves a group whose only member is a zombie', async () => {
+      // In a container whose ACP host is PID 1, a SIGKILLed group's members
+      // are reaped by no one and stay zombies: kill(-pgid, 0) answers
+      // 'alive' forever. A zombie runs nothing, so the identity judge proves
+      // the group gone instead of holding the engine quarantined for the
+      // container's life.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await sweepWorkerLedger(workFile, {
+        sys: {
+          platform: 'linux',
+          liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+          signal,
+          table: () =>
+            new Map([
+              [
+                202,
+                {
+                  pid: 202,
+                  pgid: 202,
+                  runningMs: 150_000,
+                  state: 'Z',
+                  args: 'defunct',
+                },
+              ],
+            ]),
+        },
+      });
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('keeps a live survivor accountable beside a zombie leader', async () => {
+      // Filtering zombies must not drop the group's still-running members:
+      // a zombie leader beside an old-enough survivor is still the recorded
+      // group and keeps its kill-and-prove path.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 150_000,
+                    state: 'Z',
+                    args: 'defunct',
+                  },
+                ],
+                [
+                  303,
+                  {
+                    pid: 303,
+                    pgid: 202,
+                    runningMs: 147_000,
+                    args: 'node our-shell-child.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it('keeps a multithreaded zombie leader accountable', async () => {
+      // EXIT_ZOMBIE with live sibling threads: procps prints `Zl` for the
+      // leader, and the group still runs work, so it must not be dropped as
+      // a plain zombie.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 150_000,
+                    state: 'Zl',
+                    args: 'node our-shell-leader.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it("keeps a zombie leader's age when a live survivor is younger", async () => {
+      // The zombie leader's start time still proves this is the recorded
+      // group; a child created after the record must not turn it 'unknown'
+      // and leave it running.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 150_000,
+                    state: 'Z',
+                    args: 'defunct',
+                  },
+                ],
+                [
+                  303,
+                  {
+                    pid: 303,
+                    pgid: 202,
+                    runningMs: 30_000,
+                    args: 'node young-child.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it.each([false, true])(
+      'treats a reused pgid with a young zombie leader as recycled (witnessed=%s)',
+      async (exitWitnessed) => {
+        // A younger zombie leader on the recorded pgid proves the original
+        // group is gone; without the leader row the verdict would be
+        // 'unknown', signalling an unrelated child in witnessed mode or
+        // holding the stale ledger in unwitnessed mode.
+        const workFile = path.join(root, 'ledger.json');
+        makeLedgerFile(workFile, { pid: 42424246 }, [
+          { pgid: 202, startedAt: Date.now() - 150_000 },
+        ]);
+        const signal = vi.fn(() => 'sent' as const);
+        await sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          ...(exitWitnessed ? { exitWitnessed: true } : {}),
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 30_000,
+                    state: 'Z',
+                    args: 'defunct',
+                  },
+                ],
+                [
+                  303,
+                  {
+                    pid: 303,
+                    pgid: 202,
+                    runningMs: 10_000,
+                    args: 'node unrelated.js',
+                  },
+                ],
+              ]),
+          },
+        });
+        expect(signal).not.toHaveBeenCalled();
+        expect(existsSync(workFile)).toBe(false);
+      },
+    );
 
     it('holds a leaderless group whose survivors are all younger than the record', async () => {
       // No live leader to date the group by and no survivor old enough to
