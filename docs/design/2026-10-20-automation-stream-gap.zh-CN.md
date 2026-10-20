@@ -93,8 +93,9 @@ tracker 的 FG11e 行点名三个场景；前两个不被上面的 journal 形�
   `ManagedEventStreamService` 把它转成一帧 resync。仍未解的问题更窄——哪些
   automation 事件类型会进入 Session 流，以及同一序号下如何区分「投影缺口」与
   「投影较慢」。
-- 客户端可见契约存在于 FG11 设计集之外的一份设计文档里：JSON 读以
-  `409 cursor_expired` 返回 `replay_floor_sequence` 与
+- 客户端可见契约存在于 FG11 设计集之外，写在
+  `docs/design/2026-09-27-managed-agent-event-replay.md`（含同版 `.zh-CN.md`）：
+  JSON 读以 `409 cursor_expired` 返回 `replay_floor_sequence` 与
   `snapshot_through_sequence`，流则发送一帧携带 `reload_snapshot` 的
   `agent.session.resync_required`，且刻意不带 `id`，使重连不会跳过客户端缺失的
   事件。仍未解的是 automation 消费者是否遵守 `reload_snapshot`。
