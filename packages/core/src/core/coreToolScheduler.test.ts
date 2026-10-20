@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getToolOutputProvenance,
+  measureToolOutput,
+} from '../tools/tool-output-size.js';
+import * as outputTruncation from '../tools/truncation.js';
+import * as sizeLoggers from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
@@ -254,6 +260,31 @@ vi.mock('../tools/modifiable-tool.js', async (importOriginal) => {
       modifyWithEditorOverride.value?.() ?? actual.modifyWithEditor(...args),
   };
 });
+
+// The vision bridge runs after a producer already settled, so it is the
+// reachable post-settlement step that can still throw.
+const bridgeRejection = vi.hoisted(() => ({
+  value: undefined as Error | undefined,
+}));
+
+vi.mock(
+  '../services/visionBridge/tool-result-vision-bridge.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../services/visionBridge/tool-result-vision-bridge.js')
+      >();
+    return {
+      ...actual,
+      bridgeToolResultImages: (
+        params: Parameters<typeof actual.bridgeToolResultImages>[0],
+      ) => {
+        if (bridgeRejection.value) return Promise.reject(bridgeRejection.value);
+        return actual.bridgeToolResultImages(params);
+      },
+    };
+  },
+);
 
 vi.mock('../telemetry/sdk.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../telemetry/sdk.js')>();
@@ -3627,7 +3658,9 @@ describe('CoreToolScheduler', () => {
     );
 
     expectStatus(completedCall, 'success');
-    expect(completedCall.response.responseParts).toEqual([
+    expect(
+      JSON.parse(JSON.stringify(completedCall.response.responseParts)),
+    ).toEqual([
       fnResponse(
         'malformedTool',
         { output: '(malformedTool completed with no output)' },
@@ -3871,6 +3904,75 @@ describe('CoreToolScheduler', () => {
     expect(outputOfTool(calls, 'defaultTool')).toBe('a'.repeat(8000));
   });
 
+  it('does not measure a self-bounded producer body as its own raw size', async () => {
+    // grep/ripGrep shorten their own render and then declare the raw size
+    // unknown: the pre-reduction size is no longer recoverable, and the
+    // scheduler must not certify the already-bounded body as the raw size
+    // (#13652 R2-5).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-unknown',
+      'prompt-grep-unknown',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+    expect(new ToolCallEvent(call).raw_content_length).toBeUndefined();
+
+    // Control: an ordinary producer that declares nothing is still measured
+    // from its own body, so the assertions above are not "never measured".
+    const { calls: plainCalls } = await runLoneTool(
+      toolReturning('plainTool', modelResult('plain body', 'plain body')),
+      'call-plain-raw',
+      'prompt-plain-raw',
+      { waitForCompletion: true },
+    );
+    expect(new ToolCallEvent(plainCalls[0]).raw_content_length).toBe(
+      'plain body'.length,
+    );
+  });
+
+  it('carries a producer-declared truncation bit when its raw size is unknown', async () => {
+    // A self-bounded producer cannot recover the pre-reduction size, but it
+    // knows it cut the body. Keep the bit instead of collapsing it into the
+    // unknown raw size (#14742).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+          truncatedByProducer: true,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-truncated',
+      'prompt-grep-truncated',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBe(true);
+    expect(new ToolCallEvent(call).truncated).toBe(true);
+  });
+
   /** Asserts lone tool `name` (Infinity budget) delivers `content` whole. */
   async function expectDeliveredWhole(name: string, content: string) {
     const { calls } = await runLoneTool(
@@ -3960,7 +4062,7 @@ describe('CoreToolScheduler', () => {
         toolReturning('budgetedTool', result, { maxOutputChars: 30_000 }),
         'c',
         'p',
-        { waitForCompletion: true },
+        { waitForCompletion: true, truncateToolOutputThreshold: 25000 },
       );
       return calls[0];
     }
@@ -6541,6 +6643,32 @@ describe('CoreToolScheduler', () => {
     expect(latestSpan('tool.alpha', 'call-alpha')?.ended).toBe(true);
   });
 
+  it('drops the producer raw size when a post-settlement step throws', async () => {
+    // A throw after `execute()` settled (here the vision bridge) replaces the
+    // producer's outcome with an error body, so that body must not inherit
+    // the producer's raw size or truncation status.
+    bridgeRejection.value = new Error('bridge failed');
+    try {
+      const { onAllToolCallsComplete } = await runReadBatch(
+        { alpha: textResult('p'.repeat(2000)) },
+        [valueRequest('alpha', 'a', 'prompt-post-settlement-throw')],
+      );
+
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'error');
+      expect(completed.response.error?.message).toContain('bridge failed');
+      const provenance = getToolOutputProvenance(
+        completed.response.responseParts[0],
+      );
+      expect(provenance).toBeDefined();
+      expect(provenance?.rawSize).toBeUndefined();
+      expect(provenance?.truncated).toBeUndefined();
+      expect(new ToolCallEvent(completed).raw_content_length).toBeUndefined();
+    } finally {
+      bridgeRejection.value = undefined;
+    }
+  });
+
   it('applies PostToolBatch stop decisions and preserves additional context', async () => {
     const alpha = deferred<ToolResult>();
     const executeB = vi.fn().mockResolvedValue(textResult('beta output'));
@@ -6598,6 +6726,13 @@ describe('CoreToolScheduler', () => {
       'halt'.length + 'batch context'.length + 2,
     );
     expect(lastCompletedCall.outcome).toBeUndefined();
+    const provenance = getToolOutputProvenance(
+      lastCompletedCall.response.responseParts[0],
+    );
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+    expect(provenance?.budget).toBeUndefined();
     expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
       'PostToolBatch hook stopped batch (2 calls): halt',
     );
@@ -7374,6 +7509,59 @@ describe('CoreToolScheduler with payload', () => {
 });
 
 describe('convertToFunctionResponse', () => {
+  it('carries pre-reduction producer sizes without inventing restored raw data', () => {
+    const [produced] = convertToFunctionResponse('shell', 'call', 'preview', {
+      rawOutputSize: { chars: 40000, estimatedTokens: 10000 },
+    });
+    expect(getToolOutputProvenance(produced)).toMatchObject({
+      rawSize: { chars: 40000, estimatedTokens: 10000 },
+      truncated: true,
+    });
+    const [restored] = convertToFunctionResponse('shell', 'call', 'preview');
+    expect(getToolOutputProvenance(restored)?.rawSize).toBeUndefined();
+  });
+
+  it('measures an undeclared body but keeps a declared null unknown', () => {
+    const cfg = {
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+    const [measured] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'complete body',
+      {},
+      cfg,
+    );
+    // Undeclared means an ordinary producer whose body is complete, so the
+    // ACP and speculation paths report the same raw size as the scheduler.
+    expect(getToolOutputProvenance(measured)?.rawSize?.chars).toBe(
+      'complete body'.length,
+    );
+    expect(getToolOutputProvenance(measured)?.truncated).toBe(false);
+
+    const [declared] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null },
+      cfg,
+    );
+    // A producer that bounds its own render still declares raw size unknown.
+    expect(getToolOutputProvenance(declared)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(declared)?.truncated).toBeUndefined();
+
+    // ...but when it also declares the cut itself, the bit survives.
+    const [cut] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null, truncatedByProducer: true },
+      cfg,
+    );
+    expect(getToolOutputProvenance(cut)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(cut)?.truncated).toBe(true);
+  });
+
   const toolName = 'testTool';
   const callId = 'call1';
 
@@ -7440,7 +7628,11 @@ describe('convertToFunctionResponse', () => {
       'Tool execution succeeded.',
     ],
   ])('%s', (_title, llmContent, output, parts) => {
-    expect(convertToFunctionResponse(toolName, callId, llmContent)).toEqual([
+    expect(
+      JSON.parse(
+        JSON.stringify(convertToFunctionResponse(toolName, callId, llmContent)),
+      ),
+    ).toEqual([
       {
         functionResponse: {
           name: toolName,
@@ -7491,6 +7683,33 @@ describe('convertToFunctionErrorResponse', () => {
       });
     },
   );
+
+  it('reports no raw size for the body the error path replaces', () => {
+    const content = [
+      { inlineData: { mimeType: 'image/png', data: 'base64...' } },
+    ] satisfies PartListUnion;
+    const cfg = {
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      content,
+      'image read failed',
+      cfg,
+    );
+
+    expect(part.functionResponse?.response).toEqual({
+      error: 'image read failed',
+    });
+    // The measured body was replaced by `error`, so its size must not travel
+    // as this response's pre-reduction raw size (#13652 R4-1).
+    const provenance = getToolOutputProvenance(part);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+  });
 
   it('prefers an existing error and preserves media and response fields', () => {
     const content = {
@@ -15169,5 +15388,67 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     ).resolves.not.toThrow();
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+  });
+});
+
+describe('persistence size attribution', () => {
+  it('counts retained media with the configured estimate', async () => {
+    const cfg = {
+      getTruncateToolOutputThreshold: () => 25000,
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+    const owner = Object.assign(Object.create(CoreToolScheduler.prototype), {
+      config: cfg,
+    }) as {
+      maybePersistLargeToolResult(
+        callId: string,
+        toolName: string,
+        content: PartListUnion,
+        budgetApplied: boolean,
+        promptId: string,
+      ): Promise<{ content: PartListUnion }>;
+    };
+    const persist = vi
+      .spyOn(outputTruncation, 'persistAndTruncateToolResult')
+      .mockResolvedValue({
+        content: 'preview',
+        outputFile: '/tmp/original.txt',
+        bytesWritten: 60000,
+      });
+    const log = vi
+      .spyOn(sizeLoggers, 'logToolResultSize')
+      .mockImplementation(() => {});
+    try {
+      const image = { inlineData: { mimeType: 'image/png', data: 'BASE64' } };
+      const input = [{ text: 'x'.repeat(60000) }, image];
+      const result = await owner.maybePersistLargeToolResult(
+        'media',
+        'mcp__image',
+        input,
+        false,
+        'p',
+      );
+      expect(result.content).toEqual([{ text: 'preview' }, image]);
+      const event = log.mock.calls[0][1];
+      expect(event.raw_estimated_tokens).toBe(
+        measureToolOutput(input, cfg).estimatedTokens,
+      );
+      expect(event.injected_estimated_tokens).toBe(
+        measureToolOutput(result.content, cfg).estimatedTokens,
+      );
+      expect(event.injected_estimated_tokens).toBeGreaterThanOrEqual(800);
+      expect(event.prompt_id).toBe('p');
+      await owner.maybePersistLargeToolResult(
+        'already',
+        'shell',
+        '<persisted-output>' + 'x'.repeat(60000),
+        false,
+        'p',
+      );
+      expect(persist).toHaveBeenCalledTimes(1);
+    } finally {
+      persist.mockRestore();
+      log.mockRestore();
+    }
   });
 });

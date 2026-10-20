@@ -10,6 +10,30 @@ import {
 import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+const approvalModesProbe = vi.hoisted(() => ({
+  cwd: undefined as string | undefined,
+  setting: undefined as unknown,
+}));
+vi.mock('./hooks/useApprovalModes', async () => {
+  const { resolveApprovalModes } = await import('./utils/planMode');
+  const { useMemo } = await import('react');
+  return {
+    useApprovalModes: (
+      cwd: string | undefined,
+      allowed: readonly string[] | undefined,
+    ) => {
+      approvalModesProbe.cwd = cwd;
+      // Identity-stable like the real hook's memo, so a fresh-but-equal host
+      // array only churns the result when App drops its stabilization.
+      const setting = approvalModesProbe.setting;
+      return useMemo(
+        () => resolveApprovalModes(allowed ?? (cwd ? setting : undefined)),
+        [allowed, cwd, setting],
+      );
+    },
+  };
+});
+
 const editorAddTags = vi.hoisted(() => vi.fn());
 import type {
   ContextUsageControls,
@@ -200,6 +224,8 @@ type ChatEditorTestProps = {
   skillsLoadError?: boolean;
   skillsLoaded?: boolean;
   currentMode?: string;
+  availableModes?: readonly string[];
+  onCycleMode?: () => void;
   planMode?: boolean;
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
@@ -11954,6 +11980,7 @@ beforeEach(() => {
   mockWorkspace.client.liveSetupStatus
     .mockReset()
     .mockResolvedValue({ enabled: false, install: { state: 'missing' } });
+  approvalModesProbe.setting = undefined;
   mockWorkspace.client.workspaceByCwd.mockReset();
   mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
     getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
@@ -15102,7 +15129,14 @@ describe('App read-only local commands mid-turn', () => {
     });
 
     expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/stats');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/stats',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('runs /about immediately while streaming and skips the echo', async () => {
@@ -15145,6 +15179,72 @@ describe('App read-only local commands mid-turn', () => {
     ]);
   });
 
+  it.each(['/about', '/status'])(
+    'does not append a late %s result after switching sessions',
+    async (command) => {
+      const { rerender } = renderApp({});
+      await flush();
+      const preflight = deferred<null>();
+      mockWorkspaceActions.loadPreflight.mockReturnValueOnce(preflight.promise);
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit(command);
+        await Promise.resolve();
+      });
+      const previousSession = mockConnection.sessionId;
+      try {
+        act(() => {
+          mockConnection.sessionId = 'session-switched';
+          testState.ownerVersion += 1;
+          rerender({});
+        });
+        mockStore.dispatch.mockClear();
+        await act(async () => {
+          preflight.resolve(null);
+          await preflight.promise;
+        });
+        await flush();
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+          expect.objectContaining({
+            clearActiveText: false,
+            promptId: expect.stringMatching(/^local-command:/),
+          }),
+        ]);
+      } finally {
+        mockConnection.sessionId = previousSession;
+      }
+    },
+  );
+
+  it('finishes an explicitly requested bug report after the session owner changes', async () => {
+    const onBugReport = vi.fn();
+    renderApp({ onBugReport });
+    await flush();
+    const preflight = deferred<null>();
+    mockWorkspaceActions.loadPreflight.mockReturnValueOnce(preflight.promise);
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/bug report title');
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+    expect(onBugReport).not.toHaveBeenCalled();
+    testState.ownerVersion += 1;
+    mockStore.dispatch.mockClear();
+    await act(async () => {
+      preflight.resolve(null);
+      await preflight.promise;
+    });
+    await flush();
+    expect(onBugReport).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'report title' }),
+    );
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        promptId: expect.stringMatching(/^local-command:/),
+      }),
+    ]);
+  });
+
   it('echoes /about when idle', async () => {
     renderApp({});
     await flush();
@@ -15156,7 +15256,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/about');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/about',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('runs /status immediately while streaming and skips the echo', async () => {
@@ -15210,7 +15317,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/status');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/status',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it.each(['/context', '/context detail', '/context -d'])(
@@ -15284,7 +15398,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/context');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/context',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('reports /stats load failures instead of swallowing them', async () => {
@@ -33872,6 +33993,28 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
   });
 
+  it('gives extension install usage and its echo one restorable local identity', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/extensions install';
+    await clickSubmit(container);
+    await flush();
+    const echo = mockStore.appendLocalUserMessage.mock.calls.find(
+      (call) => call[0] === '/extensions install',
+    );
+    expect(echo).toEqual([
+      '/extensions install',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
+    ]);
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'error',
+        promptId: echo![2].localCommandId,
+      }),
+    ]);
+  });
+
   it('does not open the extensions manager page with /extension manage', async () => {
     const { container } = renderApp();
     await flush();
@@ -41902,10 +42045,10 @@ describe('App session callbacks', () => {
     });
     expect(testState.latestModelManagement?.busy).toBe(true);
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-      },
+      }),
     ]);
 
     await act(async () => {
@@ -41937,6 +42080,7 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).toHaveBeenCalledWith([
       {
         type: 'status',
+        promptId: expect.stringMatching(/^local-command:/),
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
       },
     ]);
@@ -41977,16 +42121,16 @@ describe('App session callbacks', () => {
     });
 
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-      },
+      }),
     ]);
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'This change requires a restart to take effect.',
-      },
+      }),
     ]);
   });
 
@@ -45172,6 +45316,8 @@ describe('App /goal command', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
       '/goal ship it',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
     );
   });
 
@@ -45560,6 +45706,8 @@ describe('App /goal command', () => {
     expect(mockWorkspaceActions.controlGoal).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalledWith(
       '/goal first objective',
+      undefined,
+      expect.objectContaining({ localCommandId: expect.any(String) }),
     );
   });
 
@@ -45578,6 +45726,8 @@ describe('App /goal command', () => {
     expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalledWith(
       '/goal clear',
+      undefined,
+      expect.objectContaining({ localCommandId: expect.any(String) }),
     );
   });
 
@@ -48292,6 +48442,177 @@ describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
       globalThis.ResizeObserver = originalResizeObserver;
     }
   });
+});
+
+describe('approval mode allowlist', () => {
+  function configureModes(value: unknown) {
+    approvalModesProbe.setting = value;
+  }
+
+  it('defaults to all modes and resolves settings before passing choices to the composer', () => {
+    const { rerender } = renderApp();
+    expect(testState.latestChatEditorProps?.availableModes).toEqual([
+      'default',
+      'auto-edit',
+      'auto',
+      'yolo',
+    ]);
+    configureModes(['auto', 'default', 'plan', 'bogus', 'auto']);
+    rerender();
+    expect(testState.latestChatEditorProps?.availableModes).toEqual([
+      'default',
+      'auto',
+    ]);
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('passes the active workspace to the shared reader instead of using primary settings', () => {
+    testState.settings = [
+      {
+        key: 'ui.allowedApprovalModes',
+        type: 'array',
+        label: 'Modes',
+        category: 'UI',
+        requiresRestart: false,
+        default: [],
+        values: { effective: ['default'] },
+      },
+    ];
+    configureModes(['auto']);
+    mockConnection.workspaceCwd = '/secondary';
+    const { rerender } = renderApp();
+    expect(approvalModesProbe.cwd).toBe('/secondary');
+    expect(testState.latestChatEditorProps?.availableModes).toEqual(['auto']);
+    mockConnection.sessionContext = { kind: 'standalone' };
+    rerender();
+    expect(approvalModesProbe.cwd).toBeUndefined();
+    expect(testState.latestChatEditorProps?.availableModes).toEqual([
+      'default',
+      'auto-edit',
+      'auto',
+      'yolo',
+    ]);
+  });
+
+  it('lets a host override settings and update the choices to empty', async () => {
+    configureModes(['default']);
+    const { rerender } = renderApp({ allowedApprovalModes: ['auto'] });
+    expect(testState.latestChatEditorProps?.availableModes).toEqual(['auto']);
+    rerender({ allowedApprovalModes: [] });
+    expect(testState.latestChatEditorProps?.availableModes).toEqual([]);
+    act(() => testState.latestChatEditorProps?.onCycleMode?.());
+    await flush();
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('cycles the visible list from a hidden current mode and wraps', async () => {
+    mockConnection.currentMode = 'yolo';
+    const { rerender } = renderApp({
+      allowedApprovalModes: ['default', 'auto'],
+    });
+    expect(testState.latestChatEditorProps?.currentMode).toBe('yolo');
+    act(() => testState.latestChatEditorProps?.onCycleMode?.());
+    await flush();
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'default',
+      { planMode: false },
+    );
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledTimes(1);
+    mockConnection.currentMode = 'auto';
+    rerender();
+    act(() => testState.latestChatEditorProps?.onCycleMode?.());
+    await flush();
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledTimes(2);
+    expect(mockSessionActions.setApprovalMode).toHaveBeenLastCalledWith(
+      'default',
+      { planMode: false },
+    );
+  });
+
+  it('skips a singleton current mode and rejects hidden direct selections', async () => {
+    mockConnection.currentMode = 'auto';
+    renderApp({ allowedApprovalModes: ['auto'] });
+    act(() => {
+      testState.latestChatEditorProps?.onCycleMode?.();
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+    });
+    await flush();
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('keeps the resolved list identity stable across fresh-but-equal host arrays', () => {
+    const { rerender } = renderApp({
+      allowedApprovalModes: ['default', 'auto'],
+    });
+    const first = testState.latestChatEditorProps?.availableModes;
+    expect(first).toEqual(['default', 'auto']);
+    rerender({ allowedApprovalModes: ['default', 'auto'] });
+    expect(testState.latestChatEditorProps?.availableModes).toBe(first);
+  });
+
+  it('reports when a directly selected mode is not offered', async () => {
+    const onToast = vi.fn();
+    renderApp({ allowedApprovalModes: ['auto'], onToast });
+    act(() => testState.latestChatEditorProps?.onSelectMode?.('yolo'));
+    await flush();
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('not offered here: yolo'),
+    );
+  });
+
+  it('keeps reporting plan as unsupported when an allowlist is set', async () => {
+    const onToast = vi.fn();
+    renderApp({ allowedApprovalModes: ['auto'], onToast });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('plan');
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.setApprovalMode).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Unsupported execution approval mode: plan'),
+    );
+  });
+
+  it('keeps Plan toggling independent when no execution choices are offered', async () => {
+    mockConnection.currentMode = 'yolo';
+    renderApp({ allowedApprovalModes: [] });
+    act(() => testState.latestChatEditorProps?.onTogglePlan?.());
+    await flush();
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: true,
+    });
+  });
+
+  // The two CustomFooter sites sit in different layout branches, so each is
+  // rendered and observed separately: the mobile-bottom branch needs the
+  // empty-state welcome layout, the other is the default chat footer.
+  for (const mobileWelcomeFooterMiddle of [false, true]) {
+    it(`passes the restricted list to a host footer's mode choices (mobile welcome middle: ${mobileWelcomeFooterMiddle})`, async () => {
+      if (mobileWelcomeFooterMiddle) mockConnection.sessionId = undefined;
+      let footerModes: readonly string[] | undefined;
+      const renderFooter = (props: { availableModes: readonly string[] }) => {
+        footerModes = props.availableModes;
+        return null;
+      };
+      const { rerender } = renderApp({
+        allowedApprovalModes: ['default', 'auto'],
+        mobileWelcomeFooterMiddle,
+        renderFooter,
+      });
+      await flush();
+      expect(footerModes).toEqual(['default', 'auto']);
+      rerender({
+        allowedApprovalModes: [],
+        mobileWelcomeFooterMiddle,
+        renderFooter,
+      });
+      await flush();
+      expect(footerModes).toEqual([]);
+    });
+  }
 });
 
 describe('Managed home integration', () => {

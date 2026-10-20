@@ -19,7 +19,11 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  HostedToolRecoveryRequiredError,
+  HostedWorkspaceToolTurn,
+} from './hosted-workspace-tool-turn.js';
 import {
   answerResumedTurnCalls,
   settleCancelledCommandWaitRuns,
@@ -650,6 +654,42 @@ it('parks on the command checkpoint, answers from the reply, and marks it consum
   expect(settled.checkpoint.commandWait?.runs.every((run) => run.folded)).toBe(
     true,
   );
+});
+
+it('propagates an unsettled command append instead of answering the tool call', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const turn = createTurn();
+  const unsettled = new ManagedSessionAppendUnsettledError(
+    new Error('ack lost'),
+  );
+  const realRun = commands.runCommand.bind(commands);
+  const run = vi
+    .spyOn(commands, 'runCommand')
+    .mockImplementationOnce(async (params) => {
+      await realRun(params);
+      throw unsettled;
+    });
+  try {
+    const running = execute(turn, [
+      call({ subject: 'x', description: 'y' }, 'call-unsettled', 'task_create'),
+    ]);
+    const failure = await running.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect((failure as Error).cause).toBe(unsettled);
+    // The outbound landed; the failure is the store's, not the call's
+    // answer, so the parked wait stays for recovery.
+    expect(commands.command(commandIdOf('call-unsettled'))).toBeDefined();
+    const checkpoint = await runnableCheckpoint();
+    expect(checkpoint.continuation.phase).toBe('await_command');
+  } finally {
+    run.mockRestore();
+  }
 });
 
 it('answers a never-handed command as not sent when the wait bound ends', async () => {

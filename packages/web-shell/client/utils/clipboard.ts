@@ -65,7 +65,7 @@ function copyViaExecCommand(text: string): boolean {
   textarea.style.opacity = '0';
   textarea.setAttribute('readonly', '');
   // Append inside the enclosing Radix layer when the copy button lives in a
-  // dialog or popover: a body-appended textarea sits outside the FocusScope /
+  // dialog, menu or popover: an outside textarea leaves the FocusScope /
   // DismissableLayer, so the scope refocuses the button during select() and
   // execCommand copies nothing, or the focusin dismisses a popover mid-copy.
   let previousFocus = document.activeElement;
@@ -75,7 +75,7 @@ function copyViaExecCommand(text: string): boolean {
   let layer: Element | null = null;
   while (ancestor && !layer) {
     layer = ancestor.closest(
-      '[role="dialog"], [data-radix-popper-content-wrapper]',
+      '[role="dialog"], [role="menu"], [data-radix-popper-content-wrapper]',
     );
     const root = ancestor.getRootNode();
     ancestor = root instanceof ShadowRoot ? root.host : null;
