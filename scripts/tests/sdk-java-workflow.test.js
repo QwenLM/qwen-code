@@ -110,11 +110,14 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(names.indexOf('Run Java daemon E2E')).toBeGreaterThan(
       names.indexOf('Bundle Qwen Code'),
     );
-    for (const name of ['Build Qwen Code', 'Bundle Qwen Code']) {
+    for (const [name, run] of [
+      ['Build Qwen Code', 'npm run build'],
+      ['Bundle Qwen Code', 'npm run bundle'],
+    ]) {
       const explicit = steps.find((s) => s.name === name);
+      expect(explicit.run, name).toBe(run);
       expect(explicit['continue-on-error'], name).toBeUndefined();
       expect(explicit.if, name).toBeUndefined();
-      expect(explicit.run, name).not.toContain('|| true');
     }
   });
 
