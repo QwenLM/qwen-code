@@ -59,6 +59,8 @@ import {
   shouldOfferAssistantFeedback,
 } from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
+import { Checkbox } from './ui/checkbox';
+import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -98,6 +100,7 @@ const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
 export interface MessageListProps {
+  deletion?: MessageDeletionControls;
   messages: Message[];
   frozenViewport?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
@@ -2495,6 +2498,14 @@ interface TurnCollapseRowProps {
   onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
+function hasTurnMetadataRow(turn: TurnCollapseHead): boolean {
+  return (
+    turn.hiddenCount > 0 ||
+    turn.liveStartedAt !== undefined ||
+    hasNonDurationMetrics(turn)
+  );
+}
+
 const TurnCollapseRow = memo(function TurnCollapseRow({
   turnCollapse,
   onToggleCollapse,
@@ -2502,10 +2513,7 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
   const { t } = useI18n();
   const hasToggle = turnCollapse.hiddenCount > 0;
   const liveStartedAt = turnCollapse.liveStartedAt;
-  const showMetadataRow =
-    hasToggle ||
-    liveStartedAt !== undefined ||
-    hasNonDurationMetrics(turnCollapse);
+  const showMetadataRow = hasTurnMetadataRow(turnCollapse);
 
   const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
@@ -3029,6 +3037,7 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      deletion,
       frozenViewport = false,
       sessionKey,
       terminalBackgroundShellTaskIds,
@@ -5937,6 +5946,19 @@ export const MessageList = memo(
                   ? scrollToMessage
                   : undefined
               }
+              onDeleteMessage={
+                deletion &&
+                (deletion.active || !deletion.disabled) &&
+                deletion.canDelete(displayItem.message) &&
+                (displayItem.message.role === 'user' ||
+                  displayItem.message.localCommandId) &&
+                (displayItem.message.promptId ||
+                  displayItem.message.sourceRecordIds?.length ||
+                  displayItem.message.localCommandId)
+                  ? () => deletion.start(displayItem.message)
+                  : undefined
+              }
+              deleteMessageDisabled={deletion?.active}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
@@ -6050,6 +6072,7 @@ export const MessageList = memo(
         onAttachmentPreview,
         onInsightReportOpen,
         onEditUserMessage,
+        deletion,
         onSubmitUserMessageEdit,
         editableUserTurn,
         hasOlderHistory,
@@ -6138,12 +6161,82 @@ export const MessageList = memo(
       scheduleScrollOverflowReport();
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
+    const selectionByItem = useMemo(() => {
+      const selections = new Map<DisplayItem, string | undefined>();
+      if (!deletion?.active) return selections;
+      const groupOf = (item: DisplayItem) => {
+        const messageId =
+          item.type === 'message'
+            ? item.message.id
+            : item.type === 'turn_collapse'
+              ? item.turnCollapse.turnId
+              : item.turnId;
+        return (
+          deletion.groupByMessage.get(messageId) ??
+          deletion.groupByMessage.get(
+            summaryRunFirstMemberId(messageId) ?? messageId,
+          )
+        );
+      };
+      const replyGroups = new Set<string>();
+      for (const item of visibleItems) {
+        if (
+          item.type === 'turn_collapse' &&
+          hasTurnMetadataRow(item.turnCollapse)
+        ) {
+          const group = groupOf(item);
+          const key = group ?? item.turnCollapse.turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      let turnId = 'unowned';
+      for (const item of visibleItems) {
+        if (item.type === 'turn_collapse' || item.type === 'turn_outputs')
+          continue;
+        const group = groupOf(item);
+        if (item.type === 'message' && isTurnStartMessage(item.message)) {
+          turnId = item.message.id;
+          selections.set(item, group);
+        } else {
+          const key = group ?? turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      return selections;
+    }, [deletion, visibleItems]);
+
+    const renderSelection = (item: DisplayItem | undefined) => {
+      if (!deletion?.active || !item || !selectionByItem.has(item)) return null;
+      const groupId = selectionByItem.get(item);
+      return (
+        <Checkbox
+          className={styles.deletionCheckbox}
+          aria-label={t('messageDelete.selectGroup')}
+          title={!groupId ? t('messageDelete.unavailable') : undefined}
+          checked={groupId ? deletion.selected.has(groupId) : false}
+          disabled={
+            !groupId || deletion.disabled || !deletion.allowed.has(groupId)
+          }
+          onCheckedChange={() => {
+            if (groupId) deletion.toggle(groupId);
+          }}
+        />
+      );
+    };
+
     return (
       <McpAppSessionContext.Provider value={mcpAppSessionId}>
         <div
           ref={containerRef}
           className={joinClassNames(
             styles.list,
+            deletion?.active ? styles.deletionMode : undefined,
             hasHeader && centerWelcomeHeader
               ? styles.listWithWelcomeHeader
               : undefined,
@@ -6218,6 +6311,9 @@ export const MessageList = memo(
                     right: 0,
                   }}
                 >
+                  {renderSelection(
+                    visibleItems[virtualRow.index - headerOffset],
+                  )}
                   {renderVirtualItem(virtualRow.index)}
                 </div>
               ))}
@@ -6238,6 +6334,7 @@ export const MessageList = memo(
                   )}
                   data-web-shell-message-row
                 >
+                  {renderSelection(item)}
                   {renderVirtualItem(index)}
                 </div>
               );

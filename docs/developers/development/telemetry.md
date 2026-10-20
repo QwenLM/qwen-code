@@ -71,7 +71,7 @@ These settings can be overridden by environment variables or CLI flags.
 | `enabled`                         | `QWEN_TELEMETRY_ENABLED`                             | `--telemetry` / `--no-telemetry`                         | Enable or disable telemetry                                                                                                            | `true`/`false`    | `false`                 |
 | `target`                          | `QWEN_TELEMETRY_TARGET`                              | `--telemetry-target <local\|gcp>` _(deprecated)_         | Informational destination label; does not control exporter routing — set `otlpEndpoint` or `outfile` to configure where data is sent   | `"gcp"`/`"local"` | `"local"`               |
 | `otlpEndpoint`                    | `QWEN_TELEMETRY_OTLP_ENDPOINT`                       | `--telemetry-otlp-endpoint <URL>`                        | OTLP collector endpoint                                                                                                                | URL string        | `http://localhost:4317` |
-| `otlpProtocol`                    | `QWEN_TELEMETRY_OTLP_PROTOCOL`                       | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP transport protocol                                                                                                                | `"grpc"`/`"http"` | `"grpc"`                |
+| `otlpProtocol`                    | `QWEN_TELEMETRY_OTLP_PROTOCOL`                       | `--telemetry-otlp-protocol <grpc\|http>`                 | OTLP exporter protocol: `grpc` = gRPC/protobuf; `http` = HTTP/JSON                                                                     | `"grpc"`/`"http"` | `"grpc"`                |
 | `otlpTracesEndpoint`              | `QWEN_TELEMETRY_OTLP_TRACES_ENDPOINT`                | -                                                        | Per-signal endpoint override for traces (HTTP only)                                                                                    | URL string        | -                       |
 | `otlpLogsEndpoint`                | `QWEN_TELEMETRY_OTLP_LOGS_ENDPOINT`                  | -                                                        | Per-signal endpoint override for logs (HTTP only)                                                                                      | URL string        | -                       |
 | `otlpMetricsEndpoint`             | `QWEN_TELEMETRY_OTLP_METRICS_ENDPOINT`               | -                                                        | Per-signal endpoint override for metrics (HTTP only)                                                                                   | URL string        | -                       |
@@ -144,6 +144,11 @@ This setting does not disable sensitive data in OTel logs or other telemetry
 sinks; non-internal API response telemetry can populate `response_text`, so
 OTel logs, UI telemetry, and chat recording may receive response text
 independently of this setting. QwenLogger does not include `response_text`.
+
+**HTTP OTLP encoding:** `otlpProtocol: "http"` sends OTLP/JSON with
+`Content-Type: application/json` for traces, logs, and metrics. Use a collector
+or receiver that supports OTLP/HTTP JSON. The `http` value does not select
+OTLP/HTTP protobuf encoding.
 
 **HTTP OTLP signal routing:** When using HTTP protocol (`otlpProtocol: "http"`),
 Qwen Code automatically appends signal-specific paths (`/v1/traces`, `/v1/logs`,
@@ -771,7 +776,8 @@ The following events are logged:
   - **Attributes**: `prompt_id` (string), `finish_reason` (string), `result` (string)
 
 - `loop_detected`: Loop detected during agent execution. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
-  - **Attributes**: `loop_type` (string), `prompt_id` (string)
+  - **Attributes**: `loop_type` (string), `prompt_id` (string), `loop_reason` (string, optional), `tool_call_count` (int, optional), `tool_call_limit` (int, optional)
+  - `loop_reason` names the cause when one loop type covers several: `explicit_cap`, `backstop` or `stuck_repetition` for `turn_tool_call_cap`, and `repeated_call` or `provider_duplicate_id` for `global_tool_call_duplicate`. `tool_call_count` and `tool_call_limit` are set for `turn_tool_call_cap` only. `tool_call_count` is the count the cap compared with the limit; daemon/ACP sessions check the cap per batch before running it, so their count includes the whole skipped batch.
 
 - `kitty_sequence_overflow`: Kitty graphics protocol sequence exceeded buffer size. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
   - **Attributes**: `sequence_length` (int), `truncated_sequence` (string, first 20 chars)

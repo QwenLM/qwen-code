@@ -71,7 +71,7 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 
 ### 必需检查
 
-`gate` job 总会运行并报告层级结果。它的名字是计算出来的：
+`gate` job 为工作流启动的每次运行报告层级结果。它的名字是计算出来的：
 
 | 事件                  | 范围           | 名字                                 |
 | --------------------- | -------------- | ------------------------------------ |
@@ -79,8 +79,14 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 | `pull_request`        | 改到           | `Managed Agent fast tier`            |
 | `pull_request_review` | 改到，跑了全量 | `Managed Agent gate`                 |
 | `pull_request_review` | 改到，未跑全量 | `Managed Agent review (no full run)` |
+| `pull_request_review` | 非 approve     | 所有 job 跳过，不报告任何名字        |
 | `push`、`merge_group` | 改到           | `Managed Agent gate`                 |
 | 任意                  | 层级选择失败   | `Managed Agent gate`（失败）         |
+
+非 approve 的 review 不启动任何 job：GitHub 仍会创建这次运行，但它永远选不到 `none`
+以上的层级，因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。它以前会
+报告 `Managed Agent review (no full run)`——一条没有任何规则读取的绿色 check——现在
+什么也不报告。
 
 分支保护读取同名检查中最近一次更新的那个。因此改到路径的 PR 会一直显示
 `Managed Agent gate` 为 Expected，直到其 head 上的全量运行报告它；对这类 PR，只有
