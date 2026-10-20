@@ -699,7 +699,7 @@ describe('Hosted real-process gates', () => {
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(9793);
+        expect(forkSeconds).toBe(9823);
       }
     },
   );
@@ -769,14 +769,15 @@ describe('Hosted real-process gates', () => {
   // 8511s; the FG13b Hook intent store-rejection cell adds 150s, so it
   // becomes 8661s; the FG13b Hook dispatch store-rejection cell adds 150s,
   // so it becomes 8811s; the FG11f publication cell adds 82s, so it becomes
-  // 8893s; the FG13b Hook result store-rejection cell adds 150s, so it
-  // becomes 9043s; the FG13b Hook plan-result store-rejection cell adds
-  // 150s, so it becomes 9193s. The largest
+  // 8893s; the FG12f delivery cell adds 30s, so it becomes 8923s; the FG13b
+  // Hook result store-rejection cell adds 150s, so it becomes 9073s; the
+  // FG13b Hook plan-result store-rejection cell adds 150s, so it becomes
+  // 9223s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9193;
+  const hostedForkHealthySeconds = 9223;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -850,6 +851,7 @@ describe('Hosted real-process gates', () => {
       'HostedHookReplyLossFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
+      'HostedMcpResultDeliveryIT',
       'HostedMcpStoreFaultGatesIT',
       'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',

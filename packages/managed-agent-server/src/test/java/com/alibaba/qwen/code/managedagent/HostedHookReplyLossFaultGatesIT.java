@@ -291,9 +291,14 @@ class HostedHookReplyLossFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202).path("turn_id").asText();
     }
 
-    private String turnStatus(String session, String turn) throws Exception {
-        return api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn, null, null, 200)
-                .path("status").asText();
+    private HttpResponse<String> harnessStatus(String session, HarnessAttach attach) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
+                        + "/session/" + session + "/status"))
+                .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
+                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Harness-Protocol-Version", "1")
+                .header("X-Qwen-Harness-Boot-Id", attach.bootId()).GET().build();
+        return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     private JsonNode hookExecution(String session) {
@@ -580,20 +585,26 @@ class HostedHookReplyLossFaultGatesIT {
         StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_SETTLED, null);
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
-        String turn = submit(session, "FG13_STORE_SETTLE");
-        // The worker already ran the Hook. The store retries the refused
-        // commit, so keep the fault armed until the append has durably
-        // failed: the read below then has to recover rather than watch the
-        // original attempt land late.
+        submit(session, "FG13_STORE_SETTLE");
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        // The worker already ran the Hook. An exhausted append leaves the
+        // Turn recovery-blocked rather than failed, so quiescence is the
+        // end-of-attempt barrier: the read below then has to recover from
+        // the receipt rather than watch the original attempt land late.
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
-        waitFor(() -> assertThat(turnStatus(session, turn)).isEqualTo("failed"));
+        waitFor(() -> {
+            var probe = harnessStatus(session, attach);
+            assertThat(probe.statusCode()).as("harness status: %s", probe.body()).isEqualTo(200);
+            JsonNode body = json.readTree(probe.body());
+            assertThat(body.path("hasActivePrompt").asBoolean()).isFalse();
+            assertThat(body.path("recoveryBlocked").asBoolean()).isTrue();
+        });
         assertThat(events("hook.call")).as("physical calls").hasSize(1);
         JsonNode parked = hookExecution(session);
         assertThat(parked.path("resultRef").isNull()).as("unsettled record").isTrue();
         String executionId = parked.path("hookExecutionId").asText();
         StoreFaultGate.INSTANCE.clear();
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
-        assertThat(attach).as("Session attachment").isNotNull();
         // A later read takes the receipt the worker still holds and commits
         // the result without a second physical call.
         waitFor(() -> {
@@ -614,12 +625,20 @@ class HostedHookReplyLossFaultGatesIT {
         StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_PLAN_SETTLED, null);
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
-        String turn = submit(session, "FG13_STORE_PLAN_SETTLE");
+        submit(session, "FG13_STORE_PLAN_SETTLE");
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
         // The child settled; only the PreToolUse marker's own commit is
-        // refused. Keep the fault armed until the append has durably failed,
-        // then rebuild the marker from the saved receipts.
+        // refused. Quiescence is the end-of-attempt barrier, after which the
+        // marker is rebuilt from the saved receipts.
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
-        waitFor(() -> assertThat(turnStatus(session, turn)).isEqualTo("failed"));
+        waitFor(() -> {
+            var probe = harnessStatus(session, attach);
+            assertThat(probe.statusCode()).as("harness status: %s", probe.body()).isEqualTo(200);
+            JsonNode body = json.readTree(probe.body());
+            assertThat(body.path("hasActivePrompt").asBoolean()).isFalse();
+            assertThat(body.path("recoveryBlocked").asBoolean()).isTrue();
+        });
         assertThat(events("hook.call")).as("physical calls").hasSize(1);
         JsonNode marker = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
                 .filter(record -> "__plan__".equals(record.path("hookId").asText()))
@@ -629,8 +648,6 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(marker.path("resultRef").isNull()).as("unsettled marker").isTrue();
         String occurrenceId = marker.path("hookExecutionId").asText();
         StoreFaultGate.INSTANCE.clear();
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
-        assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var status = hookStatus(session, occurrenceId, attach);
             assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
