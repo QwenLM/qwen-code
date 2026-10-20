@@ -102,7 +102,13 @@ Repository identity lookup uses a bounded memo cache, cleared by the existing me
 root-cache reset, with runtime paths resolved separately. Ordinary scans skip this
 lookup entirely when the runtime has no imported-project-memory directory. Import
 writes refresh Git identity so cached recall paths cannot authorize stale targets.
-Git-layout changes require the same root-cache reset as ordinary project memory.
+Every cache hit checks the recorded filesystem dependencies, including absent Git
+markers, pointer files, linked-worktree registrations, and project symlinks. A
+changed dependency triggers fresh identity resolution; invalid registrations fail
+closed without returning the old imported root. Unchanged entries use metadata
+stats only, without repeating ancestor discovery, realpath resolution, or Git
+metadata reads. Dependency checks are not an atomic filesystem snapshot. Ordinary
+project-memory caching and isolation remain unchanged.
 
 ## Interfaces
 

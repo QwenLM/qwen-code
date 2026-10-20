@@ -30,55 +30,114 @@ function readMetadata(file: string): string {
 // a raw ENOENT. Never ACCEPT an unresolvable backlink: the equality check
 // against the real .git path is what stops a copied .git file from inheriting
 // another repository's imported-memory identity.
-function resolveMetadataPath(base: string, target: string): string {
+function resolveMetadataPath(
+  base: string,
+  target: string,
+  realpath: (file: string) => string,
+): string {
   const resolved = path.resolve(base, target);
   try {
-    return fs.realpathSync(resolved);
+    return realpath(resolved);
   } catch {
     return resolved;
   }
 }
 
-export function memoryImportRepositoryIdentity(projectRoot: string): string {
-  let current = fs.realpathSync(projectRoot);
+function dependencyStamp(file: string): string {
+  try {
+    const stat = fs.lstatSync(file, { bigint: true });
+    const identity = `${stat.dev}:${stat.ino}:${stat.mode}`;
+    return stat.isDirectory()
+      ? identity
+      : `${identity}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
+    throw error;
+  }
+}
+
+function dependenciesMatch(dependencies: Map<string, string>): boolean {
+  for (const [file, stamp] of dependencies) {
+    if (dependencyStamp(file) !== stamp) return false;
+  }
+  return true;
+}
+
+function resolveRepositoryIdentity(
+  projectRoot: string,
+  dependencies?: Map<string, string>,
+): string {
+  const observe = (file: string) => {
+    if (dependencies && !dependencies.has(file))
+      dependencies.set(file, dependencyStamp(file));
+  };
+  const observeParents = (file: string) => {
+    if (!dependencies) return;
+    let current = path.resolve(file);
+    while (true) {
+      observe(current);
+      const parent = path.dirname(current);
+      if (parent === current) return;
+      current = parent;
+    }
+  };
+  const realpath = (file: string) => {
+    observeParents(file);
+    const resolved = fs.realpathSync(file);
+    observeParents(resolved);
+    return resolved;
+  };
+  const metadata = (file: string) => {
+    observe(file);
+    return readMetadata(file);
+  };
+  let current = realpath(projectRoot);
   while (true) {
     const git = path.join(current, '.git');
+    observe(git);
     if (fs.existsSync(git)) {
       const stat = fs.lstatSync(git);
       if (stat.isSymbolicLink())
         throw new Error(
           'Symlinked Git metadata is not supported for memory import.',
         );
-      if (stat.isDirectory()) return fs.realpathSync(git);
-      const pointer = readMetadata(git);
+      if (stat.isDirectory()) return realpath(git);
+      const pointer = metadata(git);
       if (!pointer.startsWith('gitdir: '))
         throw new Error('Invalid Git directory pointer.');
-      const directory = fs.realpathSync(
-        path.resolve(current, pointer.slice(8)),
-      );
+      const directory = realpath(path.resolve(current, pointer.slice(8)));
       const common = path.join(directory, 'commondir');
-      if (!fs.existsSync(common)) return fs.realpathSync(current);
-      const commonDirectory = fs.realpathSync(
-        path.resolve(directory, readMetadata(common)),
+      observe(common);
+      if (!fs.existsSync(common)) return realpath(current);
+      const commonDirectory = realpath(
+        path.resolve(directory, metadata(common)),
       );
       const backlink = resolveMetadataPath(
         directory,
-        readMetadata(path.join(directory, 'gitdir')),
+        metadata(path.join(directory, 'gitdir')),
+        realpath,
       );
       if (
-        backlink !== fs.realpathSync(git) ||
-        fs.realpathSync(path.dirname(directory)) !==
-          fs.realpathSync(path.join(commonDirectory, 'worktrees'))
+        backlink !== realpath(git) ||
+        realpath(path.dirname(directory)) !==
+          realpath(path.join(commonDirectory, 'worktrees'))
       )
         throw new Error('Invalid linked worktree registration.');
       return commonDirectory;
     }
     const parent = path.dirname(current);
-    if (parent === current) return fs.realpathSync(projectRoot);
+    if (parent === current) return realpath(projectRoot);
     current = parent;
   }
 }
-const identities = new Map<string, string>();
+export function memoryImportRepositoryIdentity(projectRoot: string): string {
+  return resolveRepositoryIdentity(projectRoot);
+}
+const identities = new Map<
+  string,
+  { repository: string; dependencies: Map<string, string> }
+>();
 export function clearMemoryImportIdentityCache(): void {
   identities.clear();
 }
@@ -87,15 +146,21 @@ export function getImportedProjectMemoryRoot(
   refresh = false,
 ): string {
   const key = path.resolve(projectRoot);
-  let repository = refresh ? undefined : identities.get(key);
-  if (!repository) {
+  let entry = refresh ? undefined : identities.get(key);
+  if (!entry || !dependenciesMatch(entry.dependencies)) {
     identities.delete(key);
-    repository = memoryImportRepositoryIdentity(projectRoot);
+    const dependencies = new Map<string, string>();
+    const repository = resolveRepositoryIdentity(projectRoot, dependencies);
+    if (!dependenciesMatch(dependencies))
+      throw new Error(
+        'Git metadata changed while resolving memory import identity. Retry the operation.',
+      );
+    entry = { repository, dependencies };
     if (identities.size >= 256)
       identities.delete(identities.keys().next().value!);
-    identities.set(key, repository);
+    identities.set(key, entry);
   }
-  const identity = createHash('sha256').update(repository).digest('hex');
+  const identity = createHash('sha256').update(entry.repository).digest('hex');
   return path.join(
     Storage.getRuntimeBaseDir(),
     'imported-project-memory',

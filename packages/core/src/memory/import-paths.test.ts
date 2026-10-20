@@ -209,14 +209,73 @@ it('avoids Git walks without imports and memoizes identities independently of ru
       },
     );
     await fs.mkdir(path.join(project, '.git'));
-    expect(getImportedProjectMemoryRoot(project, true)).not.toBe(initial);
+    expect(getImportedProjectMemoryRoot(project)).not.toBe(initial);
     await fs.rm(path.join(project, '.git'), { recursive: true });
-    clearAutoMemoryRootCache();
     expect(getImportedProjectMemoryRoot(project)).toBe(initial);
     await fs.symlink(root, path.join(project, '.git'));
-    expect(() => getImportedProjectMemoryRoot(project, true)).toThrow(
-      'Symlinked',
-    );
+    expect(() => getImportedProjectMemoryRoot(project)).toThrow('Symlinked');
     expect(() => getImportedProjectMemoryRoot(project)).toThrow('Symlinked');
   });
+});
+
+it('invalidates a cached identity when an ancestor becomes a repository or the project symlink moves', async () => {
+  const parent = path.join(root, 'parent');
+  const project = path.join(parent, 'project');
+  const other = path.join(root, 'other');
+  const alias = path.join(root, 'alias');
+  await fs.mkdir(project, { recursive: true });
+  await fs.mkdir(other);
+  await fs.symlink(project, alias, 'dir');
+  const initial = getImportedProjectMemoryRoot(alias);
+  await fs.mkdir(path.join(parent, '.git'));
+  const repository = getImportedProjectMemoryRoot(parent);
+  expect(getImportedProjectMemoryRoot(alias)).toBe(repository);
+  expect(repository).not.toBe(initial);
+  await fs.unlink(alias);
+  await fs.symlink(other, alias, 'dir');
+  expect(getImportedProjectMemoryRoot(alias)).toBe(
+    getImportedProjectMemoryRoot(other),
+  );
+  expect(getImportedProjectMemoryRoot(alias)).not.toBe(repository);
+});
+
+it('revalidates cached linked worktree metadata without rereading unchanged registrations', async () => {
+  const project = path.join(root, 'project');
+  const common = path.join(root, 'common');
+  const replacement = path.join(root, 'replacement');
+  const registration = path.join(common, 'worktrees', 'linked');
+  const nextRegistration = path.join(replacement, 'worktrees', 'linked');
+  await Promise.all(
+    [project, registration, nextRegistration].map((dir) =>
+      fs.mkdir(dir, { recursive: true }),
+    ),
+  );
+  for (const dir of [registration, nextRegistration]) {
+    await fs.writeFile(path.join(dir, 'commondir'), '../..');
+    await fs.writeFile(path.join(dir, 'gitdir'), path.join(project, '.git'));
+  }
+  const pointer = path.join(project, '.git');
+  await fs.writeFile(pointer, `gitdir: ${registration}`);
+  const initial = getImportedProjectMemoryRoot(project);
+  const read = vi.spyOn(syncFs, 'readFileSync');
+  const realpath = vi.spyOn(syncFs, 'realpathSync');
+  for (let i = 0; i < 5; i++) {
+    expect(getImportedProjectMemoryRoot(project)).toBe(initial);
+  }
+  expect(read).not.toHaveBeenCalled();
+  expect(realpath).not.toHaveBeenCalled();
+  await fs.writeFile(pointer, `gitdir: ${nextRegistration}`);
+  const changed = getImportedProjectMemoryRoot(project);
+  expect(changed).not.toBe(initial);
+  await fs.writeFile(
+    path.join(nextRegistration, 'gitdir'),
+    path.join(root, 'missing'),
+  );
+  expect(() => getImportedProjectMemoryRoot(project)).toThrow(
+    'Invalid linked worktree',
+  );
+  await fs.writeFile(path.join(nextRegistration, 'gitdir'), pointer);
+  expect(getImportedProjectMemoryRoot(project)).toBe(changed);
+  await fs.rm(nextRegistration, { recursive: true });
+  expect(() => getImportedProjectMemoryRoot(project)).toThrow();
 });
