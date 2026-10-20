@@ -517,8 +517,11 @@
                                  Verify step to 165 minutes. The FG13b Hook
                                  dispatch store-rejection cell adds 150 s: the
                                  healthy sum becomes 8811 s, so the fork moves
-                                 to 9411 s and the Verify step to 167 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9411</forkedProcessTimeoutInSeconds>
+                                 to 9411 s and the Verify step to 167 minutes;
+                                 the FG11f publication cell adds 82 s, so the
+                                 fork moves to 9493 s and the Verify step to
+                                 169 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9493</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
