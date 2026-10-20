@@ -115,6 +115,42 @@ function transcriptEvents(turns: number, firstTurn = 1): DaemonEvent[] {
   return events;
 }
 
+/** Picks a facet in the toolbar's Filter popover, opening it when needed. */
+async function chooseFilter(
+  page: Page,
+  group: 'Record type' | 'Execution status',
+  option: string,
+) {
+  const popover = page.getByRole('dialog');
+  if (!(await popover.isVisible()))
+    await page
+      .locator('[data-trajectory-filters]')
+      .getByRole('button', { name: /^Filter/ })
+      .click();
+  await popover
+    .getByRole('radiogroup', { name: group })
+    .getByRole('radio', { name: option, exact: true })
+    .click();
+}
+
+async function expectFilter(
+  page: Page,
+  group: 'Record type' | 'Execution status',
+  option: string,
+) {
+  const popover = page.getByRole('dialog');
+  if (!(await popover.isVisible()))
+    await page
+      .locator('[data-trajectory-filters]')
+      .getByRole('button', { name: /^Filter/ })
+      .click();
+  await expect(
+    popover
+      .getByRole('radiogroup', { name: group })
+      .getByRole('radio', { name: option, exact: true }),
+  ).toBeChecked();
+}
+
 async function openTrajectory(
   page: Page,
   baseURL: string,
@@ -225,7 +261,7 @@ test.describe('trajectory panel', () => {
     const section = page.getByTestId('trajectory-executions');
     const grid = section.getByRole('grid');
     await expect(page.getByTestId('trajectory-follow-status')).toHaveText(
-      'Following',
+      'Live',
     );
     await expect(grid).toHaveAttribute('aria-rowcount', '40');
     expect(await grid.getByRole('row').count()).toBeLessThan(40);
@@ -236,9 +272,9 @@ test.describe('trajectory panel', () => {
     );
     await expect(grid.locator('[data-active="true"]')).toBeInViewport();
     await expect(grid).toHaveAttribute('aria-activedescendant', /.+/);
-    await page.getByTestId('trajectory-follow-return').click();
+    await page.getByTestId('trajectory-follow-status').click();
     await expect(page.getByTestId('trajectory-follow-status')).toHaveText(
-      'Following',
+      'Live',
     );
     const historyReads = () =>
       daemon.requests.filter((request) => /\/transcript$/.test(request.path))
@@ -268,9 +304,11 @@ test.describe('trajectory panel', () => {
     await daemon.sendEvent(execution(40));
     await expect(grid).toHaveAttribute('aria-rowcount', '41');
     await expect.poll(anchor).toEqual(held);
-    await expect(page.getByTestId('trajectory-follow-status')).toContainText(
-      'Execution list updated',
-    );
+    await expect(
+      page
+        .getByTestId('trajectory-jump-latest')
+        .getByRole('img', { name: 'New executions arrived' }),
+    ).toBeVisible();
     await page.getByRole('button', { name: 'Fullscreen' }).click();
     await expect.poll(anchor).toEqual(held);
     await page.getByRole('button', { name: 'Exit fullscreen' }).click();
@@ -284,10 +322,10 @@ test.describe('trajectory panel', () => {
     await section.getByRole('button', { name: /Recent executions/ }).click();
     await expect.poll(anchor).toEqual(held);
     expect(historyReads()).toBe(beforeReads);
-    const button = page.getByTestId('trajectory-follow-return');
+    const button = page.getByTestId('trajectory-follow-status');
     await button.click();
     await expect(page.getByTestId('trajectory-follow-status')).toHaveText(
-      'Following',
+      'Live',
     );
     await expect
       .poll(() => grid.evaluate((element) => element.scrollTop))
@@ -313,11 +351,6 @@ test.describe('trajectory panel', () => {
     const copy = inspector.getByRole('button', {
       name: 'Copy displayed content',
     });
-    expect(
-      await panel.evaluate(
-        (element) => element.scrollHeight - element.clientHeight,
-      ),
-    ).toBeGreaterThan(0);
     const box = (await panel.boundingBox())!;
     await page.mouse.move(box.x + 20, box.y + 20);
     await page.mouse.wheel(0, 600);
@@ -491,16 +524,15 @@ test.describe('trajectory panel', () => {
           const gridY = (await panel
             .getByTestId('trajectory-rows')
             .boundingBox())!.y;
-          const help = panel.locator('details summary');
-          await help.click();
-          await expect(panel.locator('details[open]')).toBeVisible();
+          await panel.getByTestId('trajectory-about').click();
+          await expect(page.getByRole('dialog')).toBeVisible();
           expect(
             (await panel.getByTestId('trajectory-rows').boundingBox())!.y,
           ).toBe(gridY);
-          await panel.screenshot({
+          await page.screenshot({
             path: resolve(output, `${language}-${theme}-metric-help.png`),
           });
-          await help.click();
+          await page.keyboard.press('Escape');
         }
       }
       if (language === 'zh-CN') {
@@ -554,9 +586,9 @@ test.describe('trajectory panel', () => {
     await expect(panel.getByTestId('trajectory-overview')).toContainText(
       'Recorded durations have no start time',
     );
-    await expect(panel.getByTestId('trajectory-context-notice')).toContainText(
-      'without start',
-    );
+    await panel.getByTestId('trajectory-about').click();
+    await expect(page.getByRole('dialog')).toContainText('without start');
+    await page.keyboard.press('Escape');
     const output = resolve(
       process.cwd(),
       '../../.qwen/e2e-tests/trajectory-pr1',
@@ -573,7 +605,8 @@ test.describe('trajectory panel', () => {
       });
     });
     await panel.getByRole('button', { name: 'Refresh' }).click();
-    await expect(panel.getByRole('alert')).toContainText(
+    await panel.getByTestId('trajectory-warnings').click();
+    await expect(page.getByRole('dialog')).toContainText(
       'Refresh failed; showing the last successful read',
     );
     await expect(panel.getByTestId('trajectory-rows')).toBeVisible();
@@ -735,7 +768,10 @@ test.describe('trajectory panel', () => {
     await expect(page.getByTestId('trajectory-older-failed')).toContainText(
       'the page cursor did not advance',
     );
-    await expect(page.getByTestId('trajectory-window-older')).toHaveAttribute(
+    // The same cursor cannot advance, so neither loading earlier records nor
+    // a retry is offered.
+    await expect(page.getByTestId('trajectory-window-older')).toHaveCount(0);
+    await expect(page.getByTestId('trajectory-older-retry')).toHaveAttribute(
       'aria-disabled',
       'true',
     );
@@ -1401,7 +1437,7 @@ test.describe('trajectory panel', () => {
       const panel = page.getByTestId('trajectory-panel');
       const older = panel.getByTestId('trajectory-window-older');
       const newer = panel.getByTestId('trajectory-window-newer');
-      const latest = panel.getByTestId('trajectory-window-latest');
+      const latest = panel.getByTestId('trajectory-follow-status');
       const evidence = resolve(
         process.cwd(),
         '../../.qwen/e2e-tests/pr5-evidence',
@@ -1430,9 +1466,7 @@ test.describe('trajectory panel', () => {
       await expect(panel.getByTestId('trajectory-filter-empty')).toBeVisible();
       await expect(older).toBeFocused();
       await expect(newer).toHaveAttribute('aria-disabled', 'true');
-      await expect(panel.getByTestId('trajectory-selected')).toContainText(
-        'Choose a record',
-      );
+      await expect(panel.locator('[data-selected="true"]')).toHaveCount(0);
       await panel
         .getByTestId('trajectory-filter-empty')
         .getByRole('button', { name: 'Clear filters', exact: true })
@@ -1445,29 +1479,32 @@ test.describe('trajectory panel', () => {
 
       await older.click();
       await expect(grid).toHaveAttribute('aria-rowcount', '100');
-      await expect(older).toHaveAttribute('aria-disabled', 'true');
-      await expect(older).toBeFocused();
+      await expect(older).toHaveCount(0);
+      await expect(panel.getByTestId('trajectory-older-bar')).toHaveText(
+        'Start of session',
+      );
+      await expect(grid).toBeFocused();
       await newer.click();
       await expect(grid).toHaveAttribute('aria-rowcount', '400');
       await expect(newer).toHaveAttribute('aria-disabled', 'true');
       expect(cursors.slice(-4)).toEqual(['c4', 'c5', 'c6', 'c7']);
       await latest.click();
       await expect(grid).toHaveAttribute('aria-rowcount', '400');
-      await expect(latest).toHaveCount(0);
+      await expect(latest).not.toHaveText('Earlier window');
       await expect(
         panel.getByRole('button', { name: 'Refresh', exact: true }),
       ).toBeVisible();
-      expect(cursors.slice(-4)).toEqual(['', 'c1', 'c2', 'c3']);
+      await expect
+        .poll(() => cursors.slice(-4))
+        .toEqual(['', 'c1', 'c2', 'c3']);
       await expect
         .poll(() =>
           page.evaluate(() => {
             const element = document.activeElement;
-            return (
-              [
-                'trajectory-window-status',
-                'trajectory-window-navigation',
-              ].includes(element?.getAttribute('data-testid') ?? '') ||
-              element?.getAttribute('aria-label') === 'Refresh'
+            // The pill keeps focus while it stays; the records take it when
+            // the pill goes away with the history state.
+            return ['trajectory-follow-status', 'trajectory-rows'].includes(
+              element?.getAttribute('data-testid') ?? '',
             );
           }),
         )
@@ -1497,8 +1534,11 @@ test.describe('trajectory panel', () => {
         .click();
       const before = await inspector.locator('pre').textContent();
       await panel.getByTestId('trajectory-window-older').click();
-      const error = panel.getByRole('alert');
+      const warnings = panel.getByTestId('trajectory-warnings');
+      await warnings.click();
+      const error = page.getByRole('dialog');
       await expect(error).toContainText('Transcript page is unavailable');
+      await page.keyboard.press('Escape');
       await expect(grid).toHaveAttribute('aria-rowcount', '400');
       await expect(inspector.locator('pre')).toHaveText(before!);
       await inspector
@@ -1516,10 +1556,13 @@ test.describe('trajectory panel', () => {
         path: resolve(evidence, 'failure-keeps-inspector-fixture-en.png'),
       });
       const calls = cursors.length;
+      await warnings.click();
       await error
         .getByRole('button', { name: 'Try again', exact: true })
         .click();
-      await expect(error).toHaveCount(0);
+      await expect(
+        page.getByText('Transcript page is unavailable'),
+      ).toHaveCount(0);
       await expect(inspector).toHaveCount(0);
       await expect(grid).toHaveAttribute('aria-rowcount', '400');
       expect(cursors.slice(calls)).toEqual(['c5', 'c6', 'c7']);
@@ -1583,9 +1626,8 @@ test.describe('trajectory panel', () => {
       release();
       await replied;
       await expect(grid).toHaveAttribute('aria-rowcount', '400');
-      await expect(
-        panel.getByTestId('trajectory-window-newer'),
-      ).toHaveAttribute('aria-disabled', 'true');
+      // Superseded by the refresh: still the latest window, with nothing newer.
+      await expect(panel.getByTestId('trajectory-window-newer')).toHaveCount(0);
       expect(cursors).not.toContain('c5');
       await grid.focus();
       await page.keyboard.press('Home');
@@ -1643,8 +1685,17 @@ test.describe('trajectory panel', () => {
           await expect
             .poll(async () => Math.round((await panel.boundingBox())!.width))
             .toBe(width);
-          for (const name of ['older', 'newer', 'latest']) {
-            const button = panel.getByTestId(`trajectory-window-${name}`);
+          // Load earlier opens the records, Newer closes them, and the pill
+          // returns to the latest window from anywhere.
+          for (const testId of [
+            'trajectory-window-older',
+            'trajectory-follow-status',
+            'trajectory-window-newer',
+          ]) {
+            await grid.evaluate((node, bottom) => {
+              node.scrollTop = bottom ? node.scrollHeight : 0;
+            }, testId === 'trajectory-window-newer');
+            const button = panel.getByTestId(testId);
             await expect(button).toBeInViewport();
             const box = (await button.boundingBox())!;
             const panelBox = (await panel.boundingBox())!;
@@ -1692,9 +1743,11 @@ test.describe('trajectory panel', () => {
         'aria-rowcount',
         String(3 * PAGE_TURNS * ROWS_PER_TURN),
       );
-      await expect(page.getByTestId('trajectory-totals')).toContainText(
+      await page.getByTestId('trajectory-about').click();
+      await expect(page.getByRole('dialog')).toContainText(
         `${3 * PAGE_TURNS} turns`,
       );
+      await page.keyboard.press('Escape');
       await expect(page.getByTestId('trajectory-truncated')).toHaveCount(0);
       // The oldest page's first turn is in the table, not only the newest's.
       await grid.click();
@@ -1820,11 +1873,11 @@ test.describe('trajectory panel', () => {
         'aria-rowcount',
         String(2 * PAGE_TURNS * ROWS_PER_TURN),
       );
-      await expect(bar).toHaveText('');
+      await expect(bar).toHaveText('Start of session');
 
       const after = await Promise.all([bar.boundingBox(), grid.boundingBox()]);
-      expect(before[0]!.height).toBe(26);
-      expect(after[0]!.height).toBe(26);
+      expect(before[0]!.height).toBe(34);
+      expect(after[0]!.height).toBe(34);
       expect(after[1]!.y).toBe(before[1]!.y);
     });
   });
@@ -1881,14 +1934,8 @@ test.describe('collapsible waterfall', () => {
       .getByRole('button', { name: /^Collapse/ })
       .click();
     await expect(grid).toHaveAttribute('aria-rowcount', '8');
-    const notice = page.getByTestId('trajectory-context-notice');
-    const noticeBox = (await notice.boundingBox())!;
-    const statusBox = (await page
-      .getByTestId('trajectory-range-status')
-      .boundingBox())!;
-    expect(statusBox.y).toBeGreaterThanOrEqual(noticeBox.y);
-    expect(statusBox.y + statusBox.height).toBeLessThanOrEqual(
-      noticeBox.y + noticeBox.height + 1,
+    await expect(page.getByTestId('trajectory-range-status')).toHaveText(
+      /^Visible records \d+ \/ window records 8/,
     );
     await expect(inspector).toContainText(
       'The group containing this record is collapsed.',
@@ -2000,10 +2047,10 @@ test.describe('trajectory search and filters', () => {
       transcriptPage: { events: transcriptEvents(2) },
     });
     const filters = page.locator('[data-trajectory-filters]');
-    await expect(filters.getByRole('status')).toBeEmpty();
+    await expect(filters.getByRole('status').first()).toBeEmpty();
     await expect(
       filters.getByRole('button', { name: 'Next', exact: true }),
-    ).toBeDisabled();
+    ).toHaveCount(0);
     const request = page.getByTestId('trajectory-row-request').first();
     await request.getByRole('button', { name: /^Collapse/ }).click();
     const search = page.getByRole('searchbox', {
@@ -2016,12 +2063,12 @@ test.describe('trajectory search and filters', () => {
     await search.fill('note-1.txt');
     await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(1);
     await filters
-      .getByRole('button', { name: 'Clear filters', exact: true })
+      .getByRole('button', { name: 'Clear search', exact: true })
       .click();
     await expect(
       request.getByRole('button', { name: /^Expand/ }),
     ).toBeVisible();
-    await expect(filters.getByRole('status')).toBeEmpty();
+    await expect(filters.getByRole('status').first()).toBeEmpty();
   });
 
   test('temporarily expands matches, navigates with input focus and restores folding @smoke', async ({
@@ -2053,7 +2100,7 @@ test.describe('trajectory search and filters', () => {
     ).toBeInViewport();
     await expect(page.getByTestId('trajectory-inspector')).toHaveCount(0);
     await page
-      .getByRole('button', { name: 'Clear filters', exact: true })
+      .getByRole('button', { name: 'Clear search', exact: true })
       .click();
     await expect(
       page
@@ -2088,10 +2135,8 @@ test.describe('trajectory search and filters', () => {
       name: 'Search loaded records',
     });
     await search.fill('qwen3.8-max');
-    await page.getByRole('combobox', { name: 'Record type' }).click();
-    await page.getByRole('option', { name: 'Requests', exact: true }).click();
-    await page.getByRole('combobox', { name: 'Execution status' }).click();
-    await page.getByRole('option', { name: 'Success', exact: true }).click();
+    await chooseFilter(page, 'Record type', 'Requests');
+    await chooseFilter(page, 'Execution status', 'Success');
     await expect(inspector).toContainText(
       'This record does not match the current filters.',
     );
@@ -2106,12 +2151,8 @@ test.describe('trajectory search and filters', () => {
       .locator(`[data-testid="trajectory-span"][data-row-key="${key}"]`)
       .click({ force: true });
     await expect(search).toHaveValue('');
-    await expect(
-      page.getByRole('combobox', { name: 'Record type' }),
-    ).toContainText('All types');
-    await expect(
-      page.getByRole('combobox', { name: 'Execution status' }),
-    ).toContainText('All statuses');
+    await expectFilter(page, 'Record type', 'All types');
+    await expectFilter(page, 'Execution status', 'All statuses');
     await expect(
       page.locator(
         `[data-testid="trajectory-row-tool"][data-row-key="${key}"][data-selected="true"]`,
@@ -2127,30 +2168,27 @@ test('intersects type and recorded status without treating context as a hit @smo
   await openTrajectory(page, String(testInfo.project.use.baseURL), {
     transcriptPage: { events: transcriptEvents(2) },
   });
-  await page.getByRole('combobox', { name: 'Record type' }).click();
-  await page.getByRole('option', { name: 'Tools', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Execution status' }).click();
-  await page.getByRole('option', { name: 'Success', exact: true }).click();
+  await chooseFilter(page, 'Record type', 'Tools');
+  await chooseFilter(page, 'Execution status', 'Success');
   await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(2);
   await expect(page.getByTestId('trajectory-row-request')).toHaveCount(2);
   await expect(
     page.getByTestId('trajectory-row-request').first(),
   ).toHaveAttribute('data-context', 'true');
   await expect(page.locator('[data-trajectory-filters]')).toContainText(
-    '2 matching records',
+    '2 matches',
   );
-  await page.getByRole('combobox', { name: 'Execution status' }).click();
-  await page.getByRole('option', { name: 'Failed', exact: true }).click();
+  await chooseFilter(page, 'Execution status', 'Failed');
   await expect(page.getByTestId('trajectory-filter-empty')).toBeVisible();
   await expect(
     page.getByRole('button', { name: 'Next', exact: true }),
   ).toBeDisabled();
+  // The open Filter popover covers the list.
+  await page.keyboard.press('Escape');
   await page
     .getByTestId('trajectory-filter-empty')
     .getByRole('button', { name: 'Clear filters', exact: true })
     .click();
   await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(2);
-  await expect(
-    page.getByRole('combobox', { name: 'Record type' }),
-  ).toContainText('All types');
+  await expectFilter(page, 'Record type', 'All types');
 });
