@@ -250,6 +250,13 @@ describe('qwen daemon command', () => {
       ),
     ).toContain('detail unavailable');
     expect(summarizeDaemonStatus({ v: 1 })).toBeUndefined();
+    expect(
+      summarizeDaemonStatus({
+        v: 1,
+        status: 'warning',
+        issues: [{ code: 'daemon_runtime_starting', message: 'starting' }],
+      })?.starting,
+    ).toBe(true);
   });
 
   it('reads daemon status detail over HTTP', async () => {
