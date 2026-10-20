@@ -614,7 +614,7 @@ class HostedHookReplyLossFaultGatesIT {
             assertThat(status.statusCode()).as("hook status: %s", status.body()).isEqualTo(200);
             assertThat(json.readTree(status.body()).path("state").asText()).isEqualTo("settled");
         });
-        assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled");
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state").asText()).isEqualTo("settled"));
         assertThat(events("hook.call")).as("physical calls").hasSize(1);
         StoreFaultGate.INSTANCE.clear();
     }
@@ -650,6 +650,14 @@ class HostedHookReplyLossFaultGatesIT {
                 .findFirst()
                 .orElseThrow();
         assertThat(marker.path("resultRef").isNull()).as("unsettled marker").isTrue();
+        // Without this the cell also passes when the child's own commit was
+        // the one refused: both leave the marker unsettled and the receipt
+        // replayable, so only a settled child proves which commit was hit.
+        JsonNode child = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
+                .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(child.path("resultRef").isNull()).as("child settled before the marker").isFalse();
         String occurrenceId = marker.path("hookExecutionId").asText();
         StoreFaultGate.INSTANCE.clear();
         waitFor(() -> {
