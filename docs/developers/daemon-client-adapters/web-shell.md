@@ -61,6 +61,16 @@ last event id on `DaemonSessionClient`, and reconnects the stream by default.
 Callers can disable that with `autoReconnect={false}` for tests or custom
 connection management.
 
+### Removing composer attachments
+
+In the desktop Web Shell composer, when the text body is empty and the caret
+is at its start with no selection, Backspace or Delete first removes a
+removable context tag using that key's existing order. If no removable context
+tag remains, it removes the last file attachment, or the last pasted image
+when there are no files. File and image attachments are retained while the
+text body is non-empty. Attachments can also be removed using their individual
+remove buttons.
+
 ## Browser Deployment Shapes
 
 ### Same-Origin Local POC
@@ -84,6 +94,12 @@ proxy daemon routes through the same origin or be served by the daemon. The
 daemon intentionally rejects arbitrary browser `Origin` requests.
 
 ## Rendering Responsibilities
+
+Web Shell highlights line-leading slash tokens such as `/review` in user
+messages with the same blue, bold treatment as the composer. Highlighting is
+derived from the recorded text, so it also applies when reopening a session.
+It is a syntax cue, not confirmation that a command exists or executed.
+Message text, clickable URLs, and annotated reference chips are preserved.
 
 The shared transcript model is semantic, not visual. UI clients decide how to
 render:

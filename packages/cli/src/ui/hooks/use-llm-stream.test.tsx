@@ -56,13 +56,14 @@ import type {
 } from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import { findLastSafeSplitPoint } from '../utils/markdown-utilities.js';
 import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { CronScheduler } from '@qwen-code/qwen-code-core/services/cronScheduler.js';
 
 // --- MOCKS ---
@@ -189,9 +190,9 @@ vi.mock('./shellCommandProcessor.js', () => ({
 
 vi.mock('./atCommandProcessor.js');
 
-vi.mock('../utils/markdownUtilities.js', async (importOriginal) => {
+vi.mock('../utils/markdown-utilities.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/markdownUtilities.js')>();
+    await importOriginal<typeof import('../utils/markdown-utilities.js')>();
   return {
     ...actual,
     // Only the split-point chooser is mocked so tests can drive commit
@@ -311,7 +312,11 @@ describe('useLlmStream', () => {
       vertexai: false,
       contextFileName: undefined,
       getToolRegistry: vi.fn(
-        () => ({ getToolSchemaList: vi.fn(() => []) }) as any,
+        () =>
+          ({
+            getToolSchemaList: vi.fn(() => []),
+            getAllToolNames: vi.fn(() => []),
+          }) as any,
       ),
       getProjectRoot: vi.fn(() => '/test/dir'),
       getFileCheckpointingEnabled: vi.fn(() => false),
@@ -505,7 +510,80 @@ describe('useLlmStream', () => {
     };
   };
 
+  describe('Mod startup admission', () => {
+    it.each([
+      ['@image.png describe', SendMessageType.UserQuery],
+      ['/tmp/image.png', SendMessageType.UserQuery],
+      ['/help', SendMessageType.Notification],
+      ['/help', SendMessageType.Teammate],
+      ['/help', SendMessageType.Retry],
+      ['/help', SendMessageType.Goal],
+      ['/help', SendMessageType.ToolResult],
+    ])(
+      'rejects %s (%s) before model or media preprocessing',
+      async (query, submitType) => {
+        const ready = Promise.reject(new Error('Mod startup failed'));
+        void ready.catch(() => {});
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+        try {
+          const { result } = renderTestHook();
+          await act(async () => {
+            await result.current.submitQuery(query, submitType);
+          });
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+          expect(handleAtCommandSpy).not.toHaveBeenCalled();
+          expect(mockRunVisionBridge).not.toHaveBeenCalled();
+          expect(mockStartNewPrompt).not.toHaveBeenCalled();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(mockAddItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: MessageType.ERROR,
+              text: expect.stringContaining('Mods failed to initialize'),
+            }),
+            expect.any(Number),
+          );
+        } finally {
+          owner.mockRestore();
+        }
+      },
+    );
+
+    it.each([SendMessageType.UserQuery, SendMessageType.Cron])(
+      'lets the slash dispatcher admit recovery commands for %s',
+      async (submitType) => {
+        const ready = Promise.reject(new Error('Mod startup failed'));
+        void ready.catch(() => {});
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+        mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+        try {
+          const { result } = renderTestHook();
+          await act(async () => {
+            await result.current.submitQuery('/help', submitType);
+          });
+          expect(mockHandleSlashCommand).toHaveBeenCalledOnce();
+          expect(mockHandleSlashCommand.mock.calls[0][0]).toBe('/help');
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(
+            mockAddItem.mock.calls.some(
+              ([item]) => item.type === MessageType.ERROR,
+            ),
+          ).toBe(false);
+        } finally {
+          owner.mockRestore();
+        }
+      },
+    );
+  });
+
   it('sends a hidden Goal turn without user admission side effects', async () => {
+    vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+      getAllToolNames: () => ['tool_search', 'tool_call'],
+    } as unknown as ReturnType<Config['getToolRegistry']>);
     const permit = {
       goalId: 'goal-1',
       revision: 3,
@@ -552,7 +630,6 @@ describe('useLlmStream', () => {
         'Continue working on the active Goal.',
         'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
         'In Direct mode: If the get_goal or update_goal tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
-        'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
         "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
         'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
         'This is a synthetic continuation turn. It contains no new real user input and cannot satisfy an objective condition that requires the user to send, confirm, choose, approve, or provide something.',
@@ -621,6 +698,7 @@ describe('useLlmStream', () => {
     });
 
     const syntheticPrompt = streamMock.mock.calls[0]?.[0] as string;
+    expect(syntheticPrompt).not.toContain('tool_search');
     // The objective now reaches the model, but only inside the delimited data
     // block, JSON-escaped, and under both anti-spoofing guard lines.
     expect(syntheticPrompt).toContain(
@@ -12706,10 +12784,79 @@ describe('useLlmStream', () => {
       // content before cancel; that's covered by a separate test below.)
       expect(info?.lastTurnUserItem).toEqual({
         id: expect.any(Number),
-        text: '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
+        // #11553: the envelope stays in the model prompt but not in the
+        // recorded user text the cancel handler restores.
+        text: 'what time is it?',
         submittedPrompt: 'what time is it?',
+        modelText:
+          '<system-reminder>managed</system-reminder>\n\nwhat time is it?',
       });
       expect(info?.canUndoLastLoggedUserMessage).toBe(true);
+    });
+
+    it('strips the envelope from the row when the submit carries no provenance', async () => {
+      // #11553: without `submittedPrompt` the strip is the only thing keeping
+      // the injected notice out of the row, so pin the row, the cancel
+      // identity and the model text in one case — an echo of metadata can no
+      // longer stand in for the strip.
+      const envelopeQuery =
+        '<system-reminder>managed</system-reminder>\n\nFirst query';
+      const cancelSubmitSpy = vi.fn();
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {});
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        cancelSubmitSpy,
+      );
+
+      await act(async () => {
+        result.current.submitQuery(envelopeQuery, SendMessageType.UserQuery);
+      });
+
+      expect(mockSendMessageStream.mock.calls[0][0]).toBe(envelopeQuery);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'user', text: 'First query' }),
+        expect.any(Number),
+      );
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      const info = cancelSubmitSpy.mock.calls[0][0];
+      expect(info?.lastTurnUserItem).toEqual({
+        id: expect.any(Number),
+        text: 'First query',
+        modelText: envelopeQuery,
+      });
+      expect(info?.lastTurnUserItem).not.toHaveProperty('submittedPrompt');
+    });
+
+    it('keeps an envelope-shaped slash argument in the recall log', async () => {
+      // A command's arguments may legitimately start with an envelope-shaped
+      // block, so the strip is skipped for slash commands on purpose.
+      const slashQuery = '/cmd <system-reminder>\narg\n</system-reminder>';
+      const mockLogMessage = vi.fn();
+      mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+      const { result } = renderTestHook([], undefined, undefined, undefined, {
+        logMessage: mockLogMessage,
+      } as any);
+
+      await act(async () => {
+        await result.current.submitQuery(slashQuery, SendMessageType.UserQuery);
+      });
+
+      expect(mockLogMessage).toHaveBeenCalledWith(
+        MessageSenderType.USER,
+        slashQuery,
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
 
     it('emits lastTurnUserItem: null for paths that do NOT add a user history item (Notification)', async () => {
@@ -19895,8 +20042,10 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
           submittedPrompt: 'First query',
+          modelText:
+            '<system-reminder>managed</system-reminder>\n\nFirst query',
         });
         expect(
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.canUndoLastLoggedUserMessage,
@@ -19989,8 +20138,10 @@ describe('useLlmStream', () => {
           cancelSubmitSpy.mock.calls.at(-1)?.[0]?.lastTurnUserItem,
         ).toEqual({
           id: expect.any(Number),
-          text: '<system-reminder>managed</system-reminder>\n\nFirst query',
+          text: 'First query',
           submittedPrompt: 'First query',
+          modelText:
+            '<system-reminder>managed</system-reminder>\n\nFirst query',
         });
       } finally {
         resolveFirstCall();

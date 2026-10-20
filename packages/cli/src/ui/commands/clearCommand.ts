@@ -7,6 +7,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   uiTelemetryService,
   SessionEndReason,
@@ -30,6 +31,8 @@ export const clearCommand: SlashCommand = {
     return t('Clear conversation history and free up context');
   },
   kind: CommandKind.BUILT_IN,
+  // Session rotation must finish before the UI admits another turn.
+  canCancel: false,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context, _args) => {
     const { config } = context.services;
@@ -95,7 +98,9 @@ export const clearCommand: SlashCommand = {
         }
       }
 
+      getInteractiveModSession(config)?.invalidateTools();
       const newSessionId = config.startNewSession();
+      await getInteractiveModSession(config)?.syncSession('clear');
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();

@@ -40,6 +40,16 @@ public final class HarnessRuntimeRecovery {
     }
 
     public boolean isContinuationReady() {
+        // await_agent: every wait run is observable (the relay ledger), so
+        // outcomes are always known; the continue route re-enters the wait
+        // and folds what the checkpoint still owes (#13708). H4e-b3's
+        // await_command waits are the same shape: the member's own
+        // session_command journal is the ledger, and every run's reply is
+        // durable evidence once it lands.
+        if ("await_agent".equals(phase) || "await_command".equals(phase)) {
+            return !executions.isEmpty() && executions.stream().allMatch(
+                    execution -> "known".equals(execution.getOutcome()));
+        }
         return "results_ready".equals(phase) && !executions.isEmpty()
                 && executions.stream().allMatch(execution ->
                         "known".equals(execution.getOutcome())
@@ -49,8 +59,12 @@ public final class HarnessRuntimeRecovery {
 
     public boolean isCancellationReady() {
         return ("await_runtime".equals(phase)
+                || "await_agent".equals(phase)
+                || "await_command".equals(phase)
                 || "results_ready".equals(phase)) && !executions.isEmpty()
                 && executions.stream().allMatch(execution ->
-                        "known".equals(execution.getOutcome()));
+                        "known".equals(execution.getOutcome())
+                                || "await_runtime".equals(phase)
+                                        && "unknown".equals(execution.getOutcome()));
     }
 }

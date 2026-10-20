@@ -28,12 +28,14 @@ import styles from './ToolApproval.module.css';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
 import { useWebShellCustomization } from '../../customization';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
   onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
   disabled?: boolean;
+  showBrowserNotifications?: boolean;
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
    * when it becomes the topmost (visible) one — on appearance, or when a panel/
@@ -255,6 +257,7 @@ export function ToolApproval({
   onConfirm,
   variant = 'inline',
   disabled = false,
+  showBrowserNotifications = false,
   keyboardActive = true,
   extraDescriptionId,
   planTodos = [],
@@ -274,6 +277,7 @@ export function ToolApproval({
           ? request.options.filter(
               (option) =>
                 option.id === 'restore_previous' ||
+                option.id === 'allow' ||
                 option.kind === 'reject_once' ||
                 option.kind === 'reject_always',
             )
@@ -304,7 +308,10 @@ export function ToolApproval({
         if (option.kind === 'allow_once') return t('approval.goal.confirm');
         if (option.kind === 'reject_once') return t('approval.goal.reject');
       }
-      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+      if (
+        hasPlanExecutionMode &&
+        (option.id === 'restore_previous' || option.id === 'allow')
+      ) {
         return t('approval.option.executePlan', {
           mode: t(`mode.label.${planExecutionMode}`),
         });
@@ -496,6 +503,18 @@ export function ToolApproval({
       ) {
         return;
       }
+      if (
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        !isEditableTarget(e.target) &&
+        ((e.key >= '1' && e.key <= '9') ||
+          ((e.key === 'Enter' || e.key === ' ') &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-permission-option]')))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       const count = displayOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
@@ -594,6 +613,11 @@ export function ToolApproval({
   const execWarningsDisplay = execWarningsText
     ? sanitizeControlChars(execWarningsText)
     : undefined;
+  // The content text is model- or peer-supplied as well, and this block renders
+  // it in the body, in the `title` tooltip and as the `aria-describedby`
+  // target. Neutralise the text only: `showsContent` above stays on the raw
+  // value so the IDREF is still gated by whether the element renders.
+  const contentDisplay = sanitizeControlChars(contentText);
   const questionText = isGoal
     ? t('approval.goal.hint')
     : showsPlanWorkflow
@@ -643,6 +667,7 @@ export function ToolApproval({
         <span className={styles.name} id={headingId}>
           {toolName}
         </span>
+        {showBrowserNotifications && <BrowserNotificationControl />}
       </div>
 
       {descriptionText && (
@@ -685,9 +710,9 @@ export function ToolApproval({
             isExitPlanApproval ? ` ${styles.planContent}` : ''
           }`}
           id={commandId}
-          title={contentText}
+          title={contentDisplay}
         >
-          {contentText}
+          {contentDisplay}
         </pre>
       ) : null}
 
