@@ -392,6 +392,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
+      // Self-managed paging may have capped this body under a threshold the
+      // scheduler never sees; re-reading just to count the dropped part is
+      // the allocation the paging avoids, so declare the raw size unknown
+      // instead of letting the scheduler measure the capped body (#13652 R5-1).
+      ...(result.isTruncated ? { rawOutputSize: null } : {}),
       returnDisplay: this.toToolResultDisplay(result),
     };
   }

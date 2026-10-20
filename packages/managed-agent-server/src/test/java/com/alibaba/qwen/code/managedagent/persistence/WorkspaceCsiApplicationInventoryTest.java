@@ -93,27 +93,6 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
-    void refusesAssociatedNodeEvidenceWithoutChangingThePublishedInventoryCodec() throws Exception {
-        var before = inspect();
-        for (boolean sameBinding : new boolean[] {true, false}) {
-            jdbc.update("INSERT INTO ma_csi_source (binding_id,runtime_generation,physical_key,reservation_id,"
-                    + "reservation_revision,configuration_json,phase,record_version,arm_bytes,arm_sequence,arm_hash)"
-                    + " VALUES (?,1,?, ?,1,'{}','ARMED',1,?,1,?)", sameBinding ? binding.getBindingId() : UUID.randomUUID().toString(),
-                    sameBinding ? "f".repeat(64) : intent.physicalKey(), intent.reservation().reservationId(), new byte[] {1}, "a".repeat(64));
-            var refused = inspect();
-            assertThat(refused.blockers()).singleElement().satisfies(blocker -> {
-                assertThat(blocker.table()).isEqualTo("ma_csi_source");
-                assertThat(blocker.code()).isEqualTo("node_evidence_retirement_unsupported");
-            });
-            assertThat(refused.tables()).hasSize(32);
-            jdbc.update("DELETE FROM ma_csi_source");
-        }
-        assertThat(inspect().bytes()).isEqualTo(before.bytes());
-        var canonical = WorkspaceCsiApplicationInventory.expectedImage(before.tables());
-        assertThat(WorkspaceCsiApplicationInventory.restoreCanonical(canonical.bytes()).bytes()).isEqualTo(canonical.bytes());
-    }
-
-    @Test
     void liveInventoryFindsForeignCanonicalResourceReferencesWithoutTheirParentSession() throws Exception {
         String resource = ManagedSessionStore.resourceKey(sessionScope(), "original-resource");
         byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);

@@ -57,28 +57,6 @@ class WorkspaceCsiRetirementStoreTest {
     }
 
     @Test
-    void refusesNodeEvidenceBeforeSealingOrCreatingRetirementProgress() {
-        ready();
-        for (boolean sameBinding : new boolean[] {true, false}) {
-            jdbc.update("INSERT INTO ma_csi_source (binding_id,runtime_generation,physical_key,reservation_id,"
-                    + "reservation_revision,configuration_json,phase,record_version,arm_bytes,arm_sequence,arm_hash)"
-                    + " VALUES (?,1,?, ?,1,'{}','ARMED',1,?,1,?)", sameBinding ? original.getBindingId() : UUID.randomUUID().toString(),
-                    sameBinding ? "f".repeat(64) : registration.physicalKey(), reservation.reservationId(), new byte[] {1}, "a".repeat(64));
-            var before = jdbc.queryForMap("SELECT * FROM ma_runtime_binding");
-            assertUnavailable(() -> store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString()));
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_binding")).isEqualTo(before);
-            assertThat(store.inspect(registration)).isEqualTo(reservation);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Integer.class)).isZero();
-            jdbc.update("DELETE FROM ma_csi_source");
-        }
-        jdbc.update("INSERT INTO ma_csi_source (binding_id,runtime_generation,physical_key,reservation_id,"
-                + "reservation_revision,configuration_json,phase,record_version,arm_bytes,arm_sequence,arm_hash)"
-                + " VALUES (?,1,?, ?,1,'{}','ARMED',1,?,1,?)", UUID.randomUUID().toString(), "f".repeat(64),
-                reservation.reservationId(), new byte[] {1}, "a".repeat(64));
-        assertThat(store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString())).isNotNull();
-    }
-
-    @Test
     void publicationReadsOriginalReservedAndRetirementInTheCallerTransaction() {
         ready();
         var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));

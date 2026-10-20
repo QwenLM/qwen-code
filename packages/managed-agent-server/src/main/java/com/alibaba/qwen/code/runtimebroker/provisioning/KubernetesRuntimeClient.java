@@ -16,13 +16,6 @@ public interface KubernetesRuntimeClient {
 
     CompletionStage<Map<String, Object>> create(String resource, String namespace, Map<String, Object> body);
 
-    /** Removes the sole source gate only from the exact original UID, version and spec. */
-    default CompletionStage<Map<String, Object>> releaseCsiSchedulingGate(String namespace, String podName,
-            String podUid, String resourceVersion, Map<String, Object> originalSpec) {
-        return java.util.concurrent.CompletableFuture.failedFuture(
-                new UnsupportedOperationException("Original CSI scheduling gate updates are unavailable"));
-    }
-
     /** Bounded current log segment; rotation and kubelet container selection are not proven here. */
     default CompletionStage<String> readCsiPodLog(String podName) {
         return java.util.concurrent.CompletableFuture.failedFuture(

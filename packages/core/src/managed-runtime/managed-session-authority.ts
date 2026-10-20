@@ -478,6 +478,10 @@ export class LocalManagedSessionAuthority {
   private queue: Promise<unknown> = Promise.resolve();
   private retirementPreparation?: Promise<readonly unknown[]>;
   private readonly eventIds = new Set<string>();
+  private readonly latestByKind = new Map<
+    ManagedSessionEventKind,
+    ManagedSessionEvent
+  >();
   /**
    * The first committed `tool.receipt` per execution call. Shell capture
    * resolves a call's receipt on every accept; scanning the whole log for it
@@ -748,7 +752,7 @@ export class LocalManagedSessionAuthority {
         authority.recordDomainEvent(event);
       }
       authority.recordRecoveryFacts(event, branches.has(event.eventId));
-      authority.indexReceipt(event);
+      authority.indexCommittedEvent(event);
     }
     await authority.rebuildExtensionRecords();
     if (options.retainVerifiedResources !== true)
@@ -842,10 +846,7 @@ export class LocalManagedSessionAuthority {
   lastEventOfKind(
     kind: ManagedSessionEventKind,
   ): ManagedSessionEvent | undefined {
-    for (let index = this.events.length - 1; index >= 0; index--) {
-      if (this.events[index].kind === kind) return this.events[index];
-    }
-    return undefined;
+    return this.latestByKind.get(kind);
   }
 
   /**
@@ -856,7 +857,8 @@ export class LocalManagedSessionAuthority {
     return this.receiptsByExecutionCall.get(executionCallId);
   }
 
-  private indexReceipt(event: ManagedSessionEvent): void {
+  private indexCommittedEvent(event: ManagedSessionEvent): void {
+    this.latestByKind.set(event.kind, event);
     if (event.kind !== 'tool.receipt') return;
     const executionCallId = event.payload['executionCallId'];
     if (
@@ -879,8 +881,11 @@ export class LocalManagedSessionAuthority {
     fromSequence: number,
     toSequence: number,
   ): readonly ManagedSessionEvent[] {
-    return this.events.filter(
-      (event) => event.sequence >= fromSequence && event.sequence <= toSequence,
+    if (!(fromSequence <= toSequence)) return [];
+    // Journal validation keeps every sequence from 1; no prefix is evicted.
+    return this.events.slice(
+      Math.max(0, Math.ceil(fromSequence) - 1),
+      Math.max(0, Math.floor(toSequence)),
     );
   }
 
@@ -899,9 +904,9 @@ export class LocalManagedSessionAuthority {
       throw new ManagedSessionRecordError('readEvents limit must be positive.');
     }
     const out: ManagedSessionEvent[] = [];
-    for (const event of this.events) {
-      if (event.sequence <= after) continue;
-      out.push(event);
+    const start = Math.max(0, Math.floor(after) || 0);
+    for (let index = start; index < this.events.length; index++) {
+      out.push(this.events[index]);
       if (out.length === limit) break;
     }
     return out;
@@ -3313,7 +3318,7 @@ export class LocalManagedSessionAuthority {
     for (const event of events) {
       this.events.push(event);
       this.eventIds.add(event.eventId);
-      this.indexReceipt(event);
+      this.indexCommittedEvent(event);
       if (event.kind === 'activation.changed') {
         this.activation = managedSessionActivationStateFrom(event);
       }

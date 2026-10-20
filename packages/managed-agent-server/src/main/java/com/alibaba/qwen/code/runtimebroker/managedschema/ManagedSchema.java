@@ -11,7 +11,7 @@ import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
 
-/** Explicit initializer for the fresh canonical database, independent of legacy bootstrap. */
+/** Explicit initializer for the fresh 32-table database, independent of legacy bootstrap. */
 public final class ManagedSchema {
     public static final String FLYWAY_LOCATION = "classpath:db/managed-schema";
     public static final String RESOURCE = "/db/managed-schema/V1__managed_schema.sql";
@@ -27,7 +27,6 @@ public final class ManagedSchema {
     public static final String CSI_APPLICATION_RETIREMENT =
             "/db/managed-schema/V12__csi_application_retirement.sql";
     public static final String WAKE_RECOVERY = "/db/managed-schema/V11__wake_recovery.sql";
-    public static final String CSI_NODE_SOURCE = "/db/managed-schema/V13__csi_node_source.sql";
     // Additive migrations over the published V1 baseline, in version order.
     public static final String SSH_WORKSPACE =
             "/db/managed-schema/V7__ssh_workspace_registration.sql";
@@ -38,8 +37,7 @@ public final class ManagedSchema {
             new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
             new Migration(7, SSH_WORKSPACE), new Migration(8, TURN_COMMAND_OPERATIONS),
             new Migration(9, RUNTIME_SESSION_HARNESS), new Migration(10, PLAN_MODE),
-            new Migration(11, WAKE_RECOVERY), new Migration(12, CSI_APPLICATION_RETIREMENT),
-            new Migration(13, CSI_NODE_SOURCE));
+            new Migration(11, WAKE_RECOVERY), new Migration(12, CSI_APPLICATION_RETIREMENT));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {
@@ -151,11 +149,6 @@ public final class ManagedSchema {
                                             + "\n"
                                             + table.group(3)));
         }
-        var tables = Pattern.compile("CREATE TABLE ma_[a-z_]+ \\(.*?\\) ENGINE=[^;]+;",
-                Pattern.DOTALL).matcher(extension);
-        while (tables.find()) {
-            ddl += "\n" + tables.group();
-        }
         var drops = Pattern.compile("DROP INDEX ([a-z_]+) ON (ma_[a-z_]+);").matcher(extension);
         while (drops.find()) {
             var index =
@@ -192,11 +185,7 @@ public final class ManagedSchema {
         for (int index = EXTENSIONS.size(); index >= 0; index--) {
             int version = index == 0 ? 1 : EXTENSIONS.get(index - 1).version();
             try {
-                if (version == CURRENT) {
-                    ManagedSchemaCatalog.validate(connection, ddl(version));
-                } else {
-                    ManagedSchemaCatalog.validateBaseline(connection, ddl(version));
-                }
+                ManagedSchemaCatalog.validate(connection, ddl(version));
                 return version;
             } catch (SQLException mismatch) {
                 if (current == null) {

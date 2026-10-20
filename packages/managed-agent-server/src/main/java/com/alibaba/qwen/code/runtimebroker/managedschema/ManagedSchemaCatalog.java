@@ -99,23 +99,12 @@ final class ManagedSchemaCatalog {
     }
 
     static void validate(Connection connection, String ddl) throws SQLException {
-        validate(connection, ddl, ManagedSchemaContract.TABLES);
-    }
-
-    static void validateBaseline(Connection connection, String ddl) throws SQLException {
-        var baseline = new HashSet<>(ManagedSchemaContract.TABLES);
-        baseline.remove("ma_csi_source");
-        validate(connection, ddl, baseline);
-    }
-
-    private static void validate(Connection connection, String ddl, Set<String> targetTables)
-            throws SQLException {
         Map<String, String> actual = tables(connection);
-        if (!actual.keySet().equals(targetTables)
+        if (!actual.keySet().equals(ManagedSchemaContract.TABLES)
                 || actual.values().stream()
                         .anyMatch(type -> type.toUpperCase(Locale.ROOT).contains("VIEW"))) {
             throw new SQLException(
-                    "Managed schema must contain exactly the declared target tables: " + actual.keySet());
+                    "Managed schema must contain exactly the 32 target tables: " + actual.keySet());
         }
         if ("MySQL".equals(connection.getMetaData().getDatabaseProductName())
                 || isMariaDb(connection)) {
@@ -126,7 +115,7 @@ final class ManagedSchemaCatalog {
                 statement.setString(1, schema(connection));
                 try (var result = statement.executeQuery()) {
                     while (result.next()) {
-                        if (targetTables.contains(lower(result.getString(1)))
+                        if (ManagedSchemaContract.TABLES.contains(lower(result.getString(1)))
                                 && !"InnoDB".equals(result.getString(2))) {
                             throw new SQLException(
                                     "Managed schema requires InnoDB: " + result.getString(1));
@@ -147,7 +136,7 @@ final class ManagedSchemaCatalog {
             validateChecks(connection, name, body);
             validateForeignKeys(connection, name, body, ddl);
         }
-        if (!declared.equals(targetTables)) {
+        if (!declared.equals(ManagedSchemaContract.TABLES)) {
             throw new SQLException(
                     "Canonical DDL table declarations differ from the target contract");
         }

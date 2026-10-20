@@ -6,7 +6,6 @@ import java.util.Set;
 public final class ManagedSchemaContract {
     public static final Set<String> TABLES =
             Set.of(
-                    "ma_csi_source",
                     "ma_session",
                     "ma_session_head",
                     "ma_turn",

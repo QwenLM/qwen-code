@@ -35,7 +35,7 @@ class ManagedSchemaTest {
                     + "'prompt','[]','digest','COMPLETED',1,1)");
         }
         ManagedSchema.initialize(source);
-        assertEquals(13, ManagedSchema.schemaVersion(source));
+        assertEquals(12, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_session")) {
                 assertTrue(row.next());
@@ -58,16 +58,16 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void initializesExactly33TablesAndValidatesWithoutRewriting() throws Exception {
+    void initializesExactly32TablesAndValidatesWithoutRewriting() throws Exception {
         DataSource source = source();
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(13, ManagedSchema.schemaVersion(source));
+        assertEquals(12, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
-            assertEquals(33, ManagedSchemaCatalog.tables(connection).size());
+            assertEquals(32, ManagedSchemaCatalog.tables(connection).size());
         }
     }
 
@@ -87,7 +87,7 @@ class ManagedSchemaTest {
                         () -> receipt(connection, "unsupported", "WORKSPACE_CREATE"));
             }
             ManagedSchema.initialize(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(12, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(connection, "new", "WORKSPACE_CREATE");
@@ -99,53 +99,6 @@ class ManagedSchemaTest {
                     assertThrows(SQLException.class, () -> receipt(connection, invalid, invalid));
                 }
             }
-        }
-    }
-
-    @Test
-    void upgradesPublishedV12WithOnlyTheSourceTableAndPreservesOriginalRows() throws Exception {
-        DataSource source = source();
-        Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
-                .target("12").load().migrate();
-        assertEquals(12, ManagedSchema.schemaVersion(source));
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            assertEquals(32, ManagedSchemaCatalog.tables(connection).size());
-            statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
-                    + " VALUES ('tenant','original','qwen-code',1,2)");
-        }
-        Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
-        ManagedSchema.validate(source);
-        assertEquals(13, ManagedSchema.schemaVersion(source));
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            assertEquals(ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
-            try (var row = statement.executeQuery("SELECT session_id,gmt_create,gmt_modified FROM ma_session")) {
-                assertTrue(row.next());
-                assertEquals("original", row.getString(1));
-                assertEquals(1, row.getLong(2));
-                assertEquals(2, row.getLong(3));
-            }
-            try (var row = statement.executeQuery("SELECT COUNT(*) FROM ma_csi_source")) {
-                assertTrue(row.next());
-                assertEquals(0, row.getLong(1));
-            }
-        }
-    }
-
-    @Test
-    void refusesAPartialSourceCatalogWithoutRepairingOrDroppingIt() throws Exception {
-        DataSource source = source();
-        Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION)
-                .target("12").load().migrate();
-        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("CREATE TABLE ma_csi_source (witness INT NOT NULL)");
-            statement.execute("INSERT INTO ma_csi_source VALUES (42)");
-        }
-        assertThrows(IllegalStateException.class, () -> ManagedSchema.schemaVersion(source));
-        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-        try (var connection = source.getConnection(); var statement = connection.createStatement();
-                var row = statement.executeQuery("SELECT witness FROM ma_csi_source")) {
-            assertTrue(row.next());
-            assertEquals(42, row.getInt(1));
         }
     }
 
@@ -248,8 +201,7 @@ class ManagedSchemaTest {
                         "ix_ma_runtime_storage_alias_state",
                         "ix_ma_session_storage_scope",
                         "ix_ma_head_workspace",
-                        "ix_ma_storage_owner_binding",
-                        "ix_ma_csi_source_physical")) {
+                        "ix_ma_storage_owner_binding")) {
             DataSource source = initialized();
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
@@ -628,10 +580,8 @@ class ManagedSchemaTest {
                                         !tables.isEmpty()
                                                 && ManagedSchemaContract.TABLES.containsAll(
                                                         tables)));
-        var originalDestinations = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
-        originalDestinations.remove("ma_csi_source");
         assertEquals(
-                originalDestinations,
+                ManagedSchemaContract.TABLES,
                 inventory.values().stream()
                         .flatMap(java.util.Collection::stream)
                         .collect(java.util.stream.Collectors.toSet()));

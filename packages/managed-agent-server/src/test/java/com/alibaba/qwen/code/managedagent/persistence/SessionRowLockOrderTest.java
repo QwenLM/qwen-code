@@ -289,8 +289,6 @@ class SessionRowLockOrderTest {
                     // method names without adding session/turn SQL.
                     Map.entry("WorkspaceCsiHostedMain.java",
                             Set.of("WorkspaceCsiHostedMain.required/1")),
-                    Map.entry("WorkspaceCsiNodeSourceStore.java",
-                            Set.of("Mutation.apply/1")),
                     Map.entry("WorkspaceCsiRuntimeAccess.java",
                             Set.of("WorkspaceCsiRuntimeAccess.attest/3",
                                     "WorkspaceCsiRuntimeAccess.request/0",
