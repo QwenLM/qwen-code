@@ -1350,12 +1350,14 @@ class HostedAutomationFaultGatesIT {
                 .noneMatch(prompt -> prompt.contains("FG11D_INTENT"));
     }
 
-    // FG11d: a Session carrying a live definition is closed, and its slots stop
-    // firing — each records `skipped` for `session_not_active` with no model Turn.
-    // This pins today's behaviour rather than changing it.
+    // FG11d: a Session carrying a live definition is closed, and the next slot
+    // records `skipped` for `session_not_active` with no model Turn. This pins
+    // today's behaviour rather than changing it; later slots reach the same
+    // admission refusal while the definition stays live, which the reason line
+    // tells apart from a retirement.
     @Test
     @Timeout(600)
-    void fg11dClosedSessionSkipsItsSlotsOnMySql() throws Exception {
+    void fg11dClosedSessionSkipsTheNextSlotOnMySql() throws Exception {
         workspaceLifecycle = true;
         boot("fg11d");
         String session = createSession("close-queued");
@@ -1374,15 +1376,11 @@ class HostedAutomationFaultGatesIT {
                 .path("status").asText()).as("the close completes").isEqualTo("completed"));
         // The close is what decides the slot's fate, so the scanner starts here.
         scannerHold.countDown();
-        waiting().atMost(Duration.ofSeconds(200)).untilAsserted(() -> assertThat(jdbc.queryForList(
-                "SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ?"
-                        + " AND outcome = 'skipped'", String.class, tenant, id))
-                .as("a closed Session's slot is skipped").isNotEmpty());
-        assertThat(jdbc.queryForMap("SELECT outcome, reason FROM ma_schedule_occurrence WHERE tenant_id = ?"
-                + " AND schedule_id = ? AND outcome = 'skipped' ORDER BY gmt_create LIMIT 1", tenant, id))
-                .as("the skip names the closed Session").containsEntry("reason", "session_not_active");
+        assertThat(awaitOccurrence(id, "skipped")).as("the skip names the closed Session")
+                .containsEntry("reason", "session_not_active");
         assertThat(modelPrompts).as("no Turn starts for a closed Session")
                 .noneMatch(prompt -> prompt.contains("FG11D_CLOSE"));
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-close-retire", 202);
     }
 
     private void boot(String letter) throws Exception {

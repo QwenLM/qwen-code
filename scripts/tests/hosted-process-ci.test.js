@@ -702,7 +702,9 @@ describe('Hosted real-process gates', () => {
       // the step to 169 minutes; the FG11d cancel cell adds 15 s (2x its
       // measured 7.4 s), so the fork moves to 10080 and the step to 179
       // minutes; the FG11d retire-at-intent cell adds 18 s (2x its measured
-      // 8.6 s), so the fork moves to 10098 and the step stays 179 minutes):
+      // 8.6 s), so the fork moves to 10118 and the step stays 179 minutes; the
+      // FG11d close-queued cell adds 134 s (2x its measured 67.2 s), so the
+      // fork moves to 10252 and the step to 181 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.

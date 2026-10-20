@@ -93,12 +93,16 @@ around it.
 - `close-*` needs the Workspace lifecycle, not merely a workspace-backed
   Session. Closing admits through `SessionLifecycleService.admit`, and the
   action store refuses a bound Session whose execution registry facts are
-  missing (`ManagedActionStore` answers `409 workspace_unavailable` with
-  `Hosted Workspace execution is not available.`), so the fixture arms three
-  things together: `durable-local-process`, an owner-private 0700 broker state
-  directory, and the storage guard's registration. With those the close
-  completes and the next slot records `skipped` for `session_not_active`; the
-  queued-input arm behind a held turn is left to a later cell.
+  missing: `ManagedActionStore` answers `409 workspace_unavailable` with
+  `Hosted Workspace execution is not available.`, which is neither
+  `WorkspaceExecutionStore`'s authority refusal nor `HarnessCoordinator`'s
+  workspace-files outage. Four armings make that check pass —
+  `durable-local-process`, an owner-private 0700 broker state directory,
+  `verified-workspace-recovery-enabled`, and the storage guard's registration,
+  which the third makes effective where the guard is not enabled by itself.
+  With those the close completes and the next slot records `skipped` for
+  `session_not_active`; the queued-input arm behind a held turn is left to a
+  later cell.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
   `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn kept

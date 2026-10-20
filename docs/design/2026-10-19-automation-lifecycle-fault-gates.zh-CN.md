@@ -71,12 +71,14 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   `not_started_proven`。本车道不执行那条分支，缺口在此保留，而不是被这一格当作
   已结清。
 - `close-*` 需要的是 Workspace 生命周期，而不只是一个带工作区的 Session。close 路由经
-  `SessionLifecycleService.admit` 准入，动作存储在缺失执行登记事实时拒绝绑定的 Session
-  （`ManagedActionStore` 抛 `409 workspace_unavailable`，消息
-  `Hosted Workspace execution is not available.`），因此夹具要同时打开三件事：
-  `durable-local-process`、owner-private 0700 的 broker 状态目录、以及存储 guard 的注册。
-  三者齐备后关闭会完成，其后的 slot 记 `skipped`/`session_not_active`；排在 held turn
-  之后的排队输入留给后续格子。
+  `SessionLifecycleService.admit` 准入，动作存储在缺失执行登记事实时拒绝绑定的 Session：
+  `ManagedActionStore` 抛 `409 workspace_unavailable`，消息
+  `Hosted Workspace execution is not available.`。这条既不是
+  `WorkspaceExecutionStore` 的授权拒绝，也不是 `HarnessCoordinator` 的 workspace-files
+  故障。让该检查通过的装配有四件：`durable-local-process`、owner-private 0700 的 broker
+  状态目录、`verified-workspace-recovery-enabled`，以及存储 guard 的注册——第三件才让
+  注册在 guard 不自启用的宿主上生效。四者齐备后关闭会完成，下一个 slot 记
+  `skipped`/`session_not_active`；排在 held turn 之后的排队输入留给后续格子。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
   接受。把 wake turn 一直扣在模型上时，取消会赢：task 与 run 都在一秒内结算为
