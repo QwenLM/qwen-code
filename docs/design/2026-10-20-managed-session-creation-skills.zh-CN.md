@@ -10,7 +10,7 @@ Managed Session 当前只能从已保存的 AgentDefinition 获取静态 Skills�
 
 创建请求接受可选 `skills` 数组，复用已有的 `name`、`description`、`body` 和可选 `base_directory` 字段。省略和空数组保持原行为。非空追加要求已授权的 Workspace 绑定，以及声明 `session-skills/2` 的 Harness。Skill 不改变工具、权限、模型或 Hook 配置。附件路径仍相对 Session 工作目录，通过选定 Runtime 访问。
 
-准入时解析原 AgentDefinition pin，把其 Skills 与追加项连接，使用现有规则校验完整目录：最多 256 个不同名称、紧凑 JSON 不超过 2 MiB、描述不超过 4 KiB、正文不超过 512 KiB。同名拒绝。AgentDefinition 默认目录保留原有 16 条、32 KiB 正文、48 KiB 总量上限，更大的格式由 Session 创建能力控制。请求摘要包含规范化后的追加项，同一个幂等键下修改内容会冲突；重试不会解析更新的定义。
+准入时解析原 AgentDefinition pin，把其 Skills 与追加项连接，使用现有规则校验完整目录：最多 256 个不同名称、紧凑 JSON 不超过 2 MiB、描述不超过 4 KiB、正文不超过 512 KiB。同名拒绝。AgentDefinition 准入保留原有 16 条、32 KiB 正文、48 KiB 总量上限，更大的格式由 Session 创建能力控制。两种来源共用 `managed-agent-skills` 资源类型，其共享资源校验器统一使用 2 MiB 上限；较小的定义限制在准入时执行。请求摘要包含规范化后的追加项，同一个幂等键下修改内容会冲突；重试不会解析更新的定义。
 
 在创建事务中，把最终目录及其 SHA-256 摘要保存到 Workspace 创建回执已有的 `result_json`。这是不可变的 Session 配置，不改变 AgentDefinition 身份，无须修改 SQL schema。通过现有 Session 索引读取回执，核验租户和 Session 身份并校验摘要。子会话在自身创建事务中复制最终目录，避免以后依赖父会话。没有快照的已有 Session 保持原定义读取行为。
 

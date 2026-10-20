@@ -70,6 +70,15 @@ class AgentDefinitionExtensionsTest {
         assertRefused("skills", () -> AgentDefinitionExtensions.skills(oversizedCatalog, true));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"model_invocable", "user_invocable"})
+    void invocationFlagsAreOnlyAcceptedOnSessionCatalogs(String field) {
+        var skill = new LinkedHashMap<>(SKILL);
+        skill.put(field, false);
+        assertRefused("skills", () -> AgentDefinitionExtensions.skills(List.of(skill), true));
+        assertThat(AgentDefinitionExtensions.sessionSkills(List.of(skill))).containsExactly(skill);
+    }
+
     @Test
     void sessionCatalogHasSeparateBoundsAndPreservesInvocationPolicy() {
         var skill = new LinkedHashMap<>(SKILL);
