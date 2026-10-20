@@ -579,7 +579,10 @@ class HostedExtensionsIT {
 
     private void waitFor(Duration timeout,
             org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(timeout).ignoreException(java.net.ConnectException.class).ignoreExceptionsInstanceOf(CannotAcquireLockException.class).failFast(() -> {
+        await().atMost(timeout)
+                .ignoreExceptionsMatching(e -> e instanceof java.net.ConnectException
+                        || e instanceof CannotAcquireLockException)
+                .failFast(() -> {
             if (modelFailure.get() != null) {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }

@@ -584,7 +584,10 @@ class HostedHookFaultGatesIT {
     }
 
     private void waitFor(org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(Duration.ofSeconds(60)).ignoreException(java.net.ConnectException.class).ignoreExceptionsInstanceOf(CannotAcquireLockException.class).failFast(() -> {
+        await().atMost(Duration.ofSeconds(60))
+                .ignoreExceptionsMatching(e -> e instanceof java.net.ConnectException
+                        || e instanceof CannotAcquireLockException)
+                .failFast(() -> {
             if (modelFailure.get() != null) {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }
