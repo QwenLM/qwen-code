@@ -3087,6 +3087,17 @@ export function createDaemonSessionActions({
       }
     },
 
+    async getTaskRuntime(taskId) {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      // Polled by an open detail panel; a transient failure is rendered
+      // inline there, so this must not raise a notice on every tick.
+      return await withActionTimeout(
+        session.taskRuntime(taskId),
+        'Get task runtime timed out',
+      );
+    },
+
     async getWorkflowTasks(opts) {
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');

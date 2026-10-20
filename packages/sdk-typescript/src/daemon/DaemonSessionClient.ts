@@ -63,6 +63,7 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -1198,6 +1199,14 @@ export class DaemonSessionClient {
 
   tasks(): Promise<DaemonSessionTasksStatus> {
     return this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  taskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus> {
+    return this.client.sessionTaskRuntime(
+      this.sessionId,
+      taskId,
+      this.clientId,
+    );
   }
 
   agents(signal?: AbortSignal): Promise<DaemonSessionAgentsStatus> {
