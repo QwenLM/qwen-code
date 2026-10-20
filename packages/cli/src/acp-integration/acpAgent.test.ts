@@ -33636,13 +33636,101 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       options,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
+    const notifications = vi
+      .fn<(method: string, params: Record<string, unknown>) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const connection = {
       get closed() {
         return mockConnectionState.promise;
       },
-    });
-    return { agent, agentPromise };
+      extNotification: notifications,
+    };
+    const agent = capturedAgentFactory!(connection);
+    return { agent, agentPromise, notifications };
   }
+
+  it.each(['success', 'sync-failure', 'delivery-failure'])(
+    'notifies owning sessions after MCP reload reconciliation: %s',
+    async (outcome) => {
+      const { agent, agentPromise, notifications } = await getAgent();
+      const internals = agent as unknown as {
+        workspaceMcpDiscoveryConfig: Config;
+        workspaceMcpDiscoveryPromise: Promise<void> | undefined;
+        workspaceMcpDiscoveryError: string | undefined;
+        sessions: Map<string, { getId: () => string; getConfig: () => Config }>;
+      };
+      internals.workspaceMcpDiscoveryConfig = mockConfig;
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const reconcile = vi.fn(async () => {
+        await pending;
+        if (outcome === 'sync-failure') throw new Error('discovery failed');
+      });
+      let finishPeer!: () => void;
+      const peerPending = new Promise<void>((resolve) => {
+        finishPeer = resolve;
+      });
+      const ownerConfig = {
+        ...mockConfig,
+        reinitializeMcpServers: reconcile,
+      } as unknown as Config;
+      const peerConfig = {
+        ...mockConfig,
+        reinitializeMcpServers: vi.fn(() => peerPending),
+      } as unknown as Config;
+      for (const [id, config] of [
+        ['owner-a', ownerConfig],
+        ['owner-b', peerConfig],
+      ] as const) {
+        internals.sessions.set(id, {
+          getId: () => id,
+          getConfig: () => config,
+        });
+      }
+      vi.mocked(loadSettings).mockReturnValue({
+        merged: { mcpServers: {}, mcp: { allowed: [] } },
+        forScope: vi.fn().mockReturnValue({ settings: {} }),
+      } as unknown as LoadedSettings);
+      if (outcome === 'delivery-failure') {
+        notifications.mockRejectedValueOnce(new Error('subscriber closed'));
+      }
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {}),
+        ).resolves.toEqual({ accepted: true });
+        await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
+        expect(notifications).not.toHaveBeenCalled();
+        finish();
+        await vi.waitFor(() =>
+          expect(peerConfig.reinitializeMcpServers).toHaveBeenCalledOnce(),
+        );
+        expect(notifications.mock.calls).toEqual([
+          ['qwen/notify/session/mcp-changed', { sessionId: 'owner-a' }],
+        ]);
+        finishPeer();
+        await internals.workspaceMcpDiscoveryPromise;
+        expect(ownerConfig.setAllowedMcpServers).toHaveBeenCalledWith([]);
+        expect(notifications.mock.calls).toEqual([
+          ['qwen/notify/session/mcp-changed', { sessionId: 'owner-a' }],
+          ['qwen/notify/session/mcp-changed', { sessionId: 'owner-b' }],
+        ]);
+        expect(internals.workspaceMcpDiscoveryError).toBe(
+          outcome === 'sync-failure'
+            ? 'Failed to synchronize MCP settings with live sessions'
+            : undefined,
+        );
+      } finally {
+        finish();
+        finishPeer();
+        await internals.workspaceMcpDiscoveryPromise;
+        internals.sessions.clear();
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   async function verifyDiscoveryProvenance(capability: string | undefined) {
     const mcpServers = {
