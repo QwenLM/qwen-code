@@ -34,8 +34,40 @@ import {
 describe('setGhHost / ghEnv', () => {
   afterEach(() => setGhHost(undefined));
 
-  it('defaults to inheriting the parent env untouched (undefined)', () => {
-    expect(ghEnv()).toBeUndefined();
+  it('inherits the parent env and sets no host by default', () => {
+    const env = ghEnv();
+    // Inherited keys survive — gh still needs PATH, HOME, its auth env.
+    expect(env['PATH']).toBe(process.env['PATH']);
+    expect(env['GH_HOST']).toBeUndefined();
+  });
+
+  it('turns off forced colour and TTY emulation before spawning gh', () => {
+    // Neither default is safe to leave alone: gh reads ANY non-empty
+    // GH_FORCE_TTY as "yes" (`GH_FORCE_TTY=0` still colourises), so the key is
+    // deleted rather than zeroed, and NO_COLOR does NOT override an exported
+    // CLICOLOR_FORCE=1, so that one is pinned to '0'.
+    //
+    // Forced colour is not cosmetic on this path. Measured on gh 2.97.0 with a
+    // piped stdout, `CLICOLOR_FORCE=1 gh api … --jq '.[] | {sha}'` interleaves
+    // SGR escapes BETWEEN tokens AND switches the output from one JSON value
+    // per line to pretty-printed multi-line, so `parseNdjson`'s per-line
+    // JSON.parse sees `{` on a line of its own — a failure no strip-ANSI pass
+    // can undo, and `ghRaw`'s diff bytes carry the escapes into the file that
+    // is written back.
+    const savedForce = process.env['CLICOLOR_FORCE'];
+    const savedTty = process.env['GH_FORCE_TTY'];
+    process.env['CLICOLOR_FORCE'] = '1';
+    process.env['GH_FORCE_TTY'] = '1';
+    try {
+      const env = ghEnv();
+      expect(env['CLICOLOR_FORCE']).toBe('0');
+      expect('GH_FORCE_TTY' in env).toBe(false);
+    } finally {
+      if (savedForce === undefined) delete process.env['CLICOLOR_FORCE'];
+      else process.env['CLICOLOR_FORCE'] = savedForce;
+      if (savedTty === undefined) delete process.env['GH_FORCE_TTY'];
+      else process.env['GH_FORCE_TTY'] = savedTty;
+    }
   });
 
   it('with a host set, extends the inherited env with GH_HOST', () => {
@@ -49,12 +81,14 @@ describe('setGhHost / ghEnv', () => {
 
   it('accepts a host:port and resets on undefined or empty string', () => {
     setGhHost('ghe.internal:8443');
-    expect(ghEnv()!['GH_HOST']).toBe('ghe.internal:8443');
+    expect(ghEnv()['GH_HOST']).toBe('ghe.internal:8443');
+    // Reset means "no GH_HOST key", not "no env object": the colour/TTY
+    // neutralising below is unconditional, so ghEnv() always returns one.
     setGhHost('');
-    expect(ghEnv()).toBeUndefined();
+    expect(ghEnv()['GH_HOST']).toBeUndefined();
     setGhHost('ghe.internal');
     setGhHost(undefined);
-    expect(ghEnv()).toBeUndefined();
+    expect(ghEnv()['GH_HOST']).toBeUndefined();
   });
 
   it('rejects non-hostname input (an env value must never smuggle shell or spaces)', () => {
