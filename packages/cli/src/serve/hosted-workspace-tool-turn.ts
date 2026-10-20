@@ -191,7 +191,9 @@ import {
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import {
   HOSTED_TOOL_INPUT_ORDER,
+  HostedHookInputConflictError,
   hostedHookOccurrenceId,
+  recordedToolHookFields,
   semanticInputDigest,
 } from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -208,6 +210,7 @@ import {
   HOSTED_TOOL_APPROVAL_POLICY,
   hostedActionAllowed,
   hostedApprovalAsks,
+  hostedLiveApprovalPoll,
   type HostedActionOptions,
   type HostedApprovalSettings,
   type HostedApprovalWaiters,
@@ -518,6 +521,8 @@ export function workflowDefinitionPin(script: string): DefinitionPin {
 export interface HostedApprovalTurnOptions {
   settings: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
+  readSettings?: () => Promise<HostedApprovalSettings>;
+  isBlocked?: () => boolean;
 }
 
 const APPROVAL_REFUSALS = {
@@ -2587,10 +2592,14 @@ export class HostedWorkspaceToolTurn {
     // may only match an after event that release already saved.
     const effective = await Promise.all(
       calls.map(async (call) => {
-        const pre = await this.recordedHook(HookEventName.PreToolUse, call);
+        const occurrence = `${this.promptId}:${call.callId}`;
+        const pre = await this.recordedHook(
+          HookEventName.PreToolUse,
+          occurrence,
+        );
         const permission = await this.recordedHook(
           HookEventName.PermissionRequest,
-          call,
+          occurrence,
         );
         const order = pre ? pre.toolInputOrder : permission?.toolInputOrder;
         if (
@@ -2608,7 +2617,7 @@ export class HostedWorkspaceToolTurn {
         }
         if (!pre) return { call, earlier: call };
         const input = pre.refusedInputDigest
-          ? await this.preToolUseInput(call, pre.refusedInputDigest)
+          ? await this.preToolUseInput(call, pre)
           : (pre.input['tool_input'] as Record<string, unknown>);
         return {
           call: {
@@ -2704,13 +2713,26 @@ export class HostedWorkspaceToolTurn {
         permission_mode: this.approval?.settings.mode ?? 'yolo',
         prompt_id: this.promptId,
       });
-      const result = await this.hooks.fire(
-        failed ? HookEventName.PostToolUseFailure : HookEventName.PostToolUse,
-        `${this.promptId}:${call.callId}`,
+      const event = failed
+        ? HookEventName.PostToolUseFailure
+        : HookEventName.PostToolUse;
+      const occurrence = `${this.promptId}:${call.callId}`;
+      const current = await this.toolHookFields(
+        event,
+        occurrence,
         fields(call.args),
+        fields(earlier.args),
+      );
+      const result = await this.hooks.fire(
+        event,
+        occurrence,
+        current,
         signal,
         this.promptHookRunner,
-        fields(earlier.args),
+        {
+          ...fields(earlier.args),
+          permission_mode: current['permission_mode'],
+        },
       );
       const output =
         result &&
@@ -2740,13 +2762,23 @@ export class HostedWorkspaceToolTurn {
       permission_mode: this.approval?.settings.mode ?? 'yolo',
       prompt_id: this.promptId,
     });
+    const batchOccurrence = `${this.promptId}:${calls.map((call) => call.callId).join(':')}`;
+    const currentBatch = await this.toolHookFields(
+      HookEventName.PostToolBatch,
+      batchOccurrence,
+      batchFields(effective.map(({ call }) => call)),
+      batchFields(effective.map(({ earlier }) => earlier)),
+    );
     const batch = await this.hooks.fire(
       HookEventName.PostToolBatch,
-      `${this.promptId}:${calls.map((call) => call.callId).join(':')}`,
-      batchFields(effective.map(({ call }) => call)),
+      batchOccurrence,
+      currentBatch,
       signal,
       this.promptHookRunner,
-      batchFields(effective.map(({ earlier }) => earlier)),
+      {
+        ...batchFields(effective.map(({ earlier }) => earlier)),
+        permission_mode: currentBatch['permission_mode'],
+      },
     );
     const output =
       batch && createHookOutput(HookEventName.PostToolBatch, batch);
@@ -2803,7 +2835,7 @@ export class HostedWorkspaceToolTurn {
     pre: RecordedToolHook | undefined,
     permission: RecordedToolHook | undefined,
   ): ToolCallRequestInfo {
-    if (!pre || !recordedFor(pre, this.preToolUseFields(call)))
+    if (!pre || !recordedToolHookFields(pre, this.preToolUseFields(call)))
       throw new HostedToolRecoveryRequiredError(
         'PreToolUse record does not match its tool call.',
       );
@@ -2833,11 +2865,11 @@ export class HostedWorkspaceToolTurn {
    */
   private async recordedHook(
     event: HookEventName,
-    call: ToolCallRequestInfo,
+    occurrence: string,
   ): Promise<RecordedToolHook | undefined> {
     const marker = this.session.authority.extensionRecord(
       'hook_execution',
-      hostedHookOccurrenceId(event, `${this.promptId}:${call.callId}`),
+      hostedHookOccurrenceId(event, occurrence),
     );
     if (!marker) return undefined;
     const record = parseHookExecution(marker.record);
@@ -2861,6 +2893,27 @@ export class HostedWorkspaceToolTurn {
     };
   }
 
+  private async toolHookFields(
+    event: HookEventName,
+    occurrence: string,
+    fields: Record<string, unknown>,
+    earlier?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const saved = await this.recordedHook(event, occurrence);
+    if (!saved) {
+      if (this.approval) await this.readApprovalSettings();
+      return {
+        ...fields,
+        permission_mode: this.approval?.settings.mode ?? 'yolo',
+      };
+    }
+    const matched =
+      recordedToolHookFields(saved, fields) ??
+      (earlier && recordedToolHookFields(saved, earlier));
+    if (!matched) throw new HostedHookInputConflictError();
+    return { ...fields, permission_mode: matched['permission_mode'] };
+  }
+
   /**
    * The input an oversized PreToolUse plan kept only as a digest. PreToolUse
    * ran on the input the PermissionRequest Hook left, so that record (or the
@@ -2868,19 +2921,17 @@ export class HostedWorkspaceToolTurn {
    */
   private async preToolUseInput(
     call: ToolCallRequestInfo,
-    digest: string,
+    pre: RecordedToolHook,
   ): Promise<Record<string, unknown>> {
     const permission = await this.recordedHook(
       HookEventName.PermissionRequest,
-      call,
+      `${this.promptId}:${call.callId}`,
     );
     const decision = permission?.output?.hookSpecificOutput?.['decision'] as
       | { updatedInput?: Record<string, unknown> }
       | undefined;
     const args = decision?.updatedInput || call.args;
-    if (
-      semanticInputDigest(this.preToolUseFields({ ...call, args })) !== digest
-    )
+    if (!recordedToolHookFields(pre, this.preToolUseFields({ ...call, args })))
       throw new HostedToolRecoveryRequiredError(
         'PreToolUse record does not match its tool call.',
       );
@@ -7485,10 +7536,15 @@ export class HostedWorkspaceToolTurn {
   ): Promise<HostedPreparedRequest[]> {
     const inputs = requests.map((request) => request.call);
     for (const [index, request] of requests.entries()) {
+      const occurrence = `${this.promptId}:${request.call.callId}`;
       const output = await this.hooks!.fire(
         HookEventName.PreToolUse,
-        `${this.promptId}:${request.call.callId}`,
-        this.preToolUseFields(request.call),
+        occurrence,
+        await this.toolHookFields(
+          HookEventName.PreToolUse,
+          occurrence,
+          this.preToolUseFields(request.call),
+        ),
         signal,
         this.promptHookRunner,
         undefined,
@@ -7514,7 +7570,7 @@ export class HostedWorkspaceToolTurn {
         !this.approval ||
         request.skill ||
         !hostedApprovalAsks(
-          this.approval.settings,
+          await this.readApprovalSettings(),
           request.call.name,
           this.globProfile,
         )
@@ -7568,6 +7624,7 @@ export class HostedWorkspaceToolTurn {
     let asked = false;
     for (const [index, request] of requests.entries()) {
       if (index < nextOrdinal) continue;
+      const settings = await this.readApprovalSettings();
       if (
         refusals[index] ||
         (request.call.name === 'skill' && this.skills !== undefined) ||
@@ -7578,11 +7635,7 @@ export class HostedWorkspaceToolTurn {
             request.call.name === 'exit_plan_mode'
           ) &&
           (this.hookAllowed.has(request.call.callId) ||
-            !hostedApprovalAsks(
-              approval.settings,
-              request.call.name,
-              globProfile,
-            )))
+            !hostedApprovalAsks(settings, request.call.name, globProfile)))
       )
         continue;
       asked = true;
@@ -7602,6 +7655,7 @@ export class HostedWorkspaceToolTurn {
         inputRef,
         messageId,
         signal,
+        !asks.has(index) && request.call.name !== 'exit_plan_mode',
       );
     }
     return asked && signal.aborted
@@ -7615,6 +7669,7 @@ export class HostedWorkspaceToolTurn {
     inputRef: ManagedSessionDurableRef,
     messageId: string,
     signal: AbortSignal,
+    liveApproval: boolean,
   ): Promise<string | undefined> {
     const authority = this.session.authority;
     const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
@@ -7676,6 +7731,17 @@ export class HostedWorkspaceToolTurn {
       () =>
         authority.action(requestId)?.state !== 'requested' ||
         authority.writesStopped,
+      liveApproval && approval.readSettings
+        ? hostedLiveApprovalPoll(
+            this.session,
+            approval.waiters,
+            options,
+            () => this.readApprovalSettings(),
+            signal,
+            this.globProfile,
+            approval.isBlocked,
+          )
+        : undefined,
     );
     if (authority.action(requestId)?.state === 'requested')
       await endHostedAction(
@@ -7692,6 +7758,24 @@ export class HostedWorkspaceToolTurn {
     if (action.state !== 'expired') return APPROVAL_REFUSALS.cancelled;
     this.unanswered = true;
     return APPROVAL_REFUSALS.expired;
+  }
+
+  private async readApprovalSettings(): Promise<HostedApprovalSettings> {
+    if (!this.approval)
+      throw new Error('Hosted approval policy is unavailable.');
+    try {
+      if (this.approval.isBlocked?.())
+        throw new Error('Hosted approval policy is recovery blocked.');
+      const settings = this.approval.readSettings
+        ? await this.approval.readSettings()
+        : this.approval.settings;
+      if (this.approval.isBlocked?.())
+        throw new Error('Hosted approval policy is recovery blocked.');
+      this.approval.settings = settings;
+      return settings;
+    } catch (cause) {
+      throw new HostedToolRecoveryRequiredError(cause);
+    }
   }
 
   async consumeResults(): Promise<void> {
