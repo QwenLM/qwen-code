@@ -685,7 +685,7 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (162 + 20 + 50 + 20 = 252 — the FG8 letters
+    # The step ceilings today (164 + 20 + 50 + 20 = 254 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
     # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
@@ -718,7 +718,7 @@ jobs:
     # gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 252 + 13. The failover arms run in hosted-failover-e2e.
+    # checks): 254 + 13. The failover arms run in hosted-failover-e2e.
     timeout-minutes: 267
     services:
       mysql:
