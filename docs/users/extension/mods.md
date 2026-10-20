@@ -4,13 +4,22 @@ Qwen Code can run a small subset of the Claude Code Mod API in headless and inte
 This feature is opt-in and requires a trusted workspace and an enabled Claude or
 native Qwen extension. Agent Plugins v1 packages continue to ignore hooks.
 
-Add this setting to your Qwen settings:
+In the Ink or OpenTUI terminal, open `/settings`, search for **Mods**, and turn on
+**Mods (Experimental)**. The setting is disabled by default. Changes take effect
+after restarting Qwen Code; the current session keeps its startup state.
+
+You can also configure the same setting directly, including for headless use:
 
 ```json
 {
   "experimental": { "mods": true }
 }
 ```
+
+Set `experimental.mods` to `false` and restart to disable Mod loading. The switch
+does not install or enable extensions. With no Mod extensions installed, enabling
+it leaves the session running normally. Existing workspace trust and host
+restrictions still apply.
 
 Create a plugin directory with these files:
 

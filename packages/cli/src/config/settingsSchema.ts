@@ -4308,13 +4308,13 @@ const SETTINGS_SCHEMA = {
     properties: {
       mods: {
         type: 'boolean',
-        label: 'Claude-compatible Mod commands',
+        label: 'Mods (Experimental)',
         category: 'Experimental',
         requiresRestart: true,
         default: false,
         description:
-          'Run the experimental JavaScript and TypeScript Mod command subset from enabled extensions in trusted headless sessions.',
-        showInDialog: false,
+          'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+        showInDialog: true,
       },
       liveVoice: {
         type: 'object',
