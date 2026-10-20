@@ -284,7 +284,7 @@ jobs:
           path: |
             packages/sdk-java/qwencode/target/surefire-reports/*.txt
             packages/managed-agent-server/target/surefire-reports/*.txt
-          if-no-files-found: ignore
+          if-no-files-found: 'ignore'
           retention-days: 7
 
       - name: 'Run Java SDK Checkstyle'
