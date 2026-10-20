@@ -296,10 +296,13 @@ ${parts.preview}`;
       sessionBytesWritten + byteSize > MAX_SESSION_BYTES)
   )
     return {
-      content: envelope(`[Note: Full output could not be saved: ${skipReason}]`, {
-        description: truncationDescription,
-        preview: truncatedContent,
-      }),
+      content: envelope(
+        `[Note: Full output could not be saved: ${skipReason}]`,
+        {
+          description: truncationDescription,
+          preview: truncatedContent,
+        },
+      ),
     };
   persistenceConfig?.trackToolResultBytes?.(byteSize);
 
