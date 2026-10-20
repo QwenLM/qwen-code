@@ -131,7 +131,8 @@ interface CalculatedEdit {
    * Payload to write. For a new file it is `newContent`; for an existing file
    * containing CRLF, the replacement is spliced into the original bytes so
    * untouched line endings are preserved. Uniformly CRLF files still match the
-   * previous write path.
+   * previous write path, with the helper's documented exception for a
+   * `newString` ending in a bare `\r`.
    */
   contentForWrite: string;
   occurrences: number;
@@ -406,10 +407,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     // Scan the full resulting content, not just new_string, so a secret split
     // across multiple edits (each fragment alone undetectable) is still caught.
     // Only the bytes that reach disk need scanning: for an existing file that is
-    // `contentForWrite`, and `newContent` is the LF-normalized view of those same
-    // bytes, so a scan of both would run the same content through the detector
-    // twice. A brand-new file writes `newContent` directly, which is why it is
-    // the one named in the first position below.
+    // `contentForWrite`, so a scan of both would run the same content through the
+    // detector twice. `newContent` is its LF-normalized view except where the
+    // splice absorbs a trailing bare `\r`, which is another reason to scan the
+    // written bytes rather than the preview. A brand-new file writes `newContent`
+    // directly, which is why it is the one named in the first position below.
     if (!error) {
       const projectRoot = this.config.getProjectRoot();
       const bytesToWrite = isNewFile ? newContent : contentForWrite;
