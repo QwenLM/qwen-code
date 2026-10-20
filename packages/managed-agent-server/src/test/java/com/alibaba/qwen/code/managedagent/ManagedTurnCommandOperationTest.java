@@ -389,6 +389,86 @@ class ManagedTurnCommandOperationTest {
     }
 
     @Test
+    void aCancelOfAnUnknownExecutionParksInsteadOfFailingAlreadySettled() {
+        Admission admitted = admit("submit-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(cancel.commandEffect()).isTrue();
+        assertThat(operation(cancel.operationId()).state()).isEqualTo("PENDING");
+
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "managed_runtime_recovery_blocked",
+                "prior tool execution unknown");
+
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(operation.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(operation.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("cancel_unconfirmed");
+        assertThat(operation.receiptId()).isNull();
+    }
+
+    @Test
+    void aCancelSubmittedAfterAnUnknownFailureFailsAlreadySettled() {
+        Admission admitted = admit("submit-1");
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "managed_runtime_recovery_blocked",
+                "prior tool execution unknown");
+        Admission late = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(late.commandEffect()).isFalse();
+        OperationRecord operation = operation(late.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
+    }
+
+    @Test
+    void aCancelOfAnAttemptedTurnWithoutAnEpochParks() {
+        Admission attempted = submit("submit-1", "digest-1");
+        claim(attempted);
+        store.markSubmissionAttempted(TENANT, sessionId,
+                attempted.turnId(), OWNER);
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", attempted);
+        store.failTurn(TENANT, sessionId, attempted.turnId(), OWNER,
+                "managed_runtime_recovery_blocked",
+                "prior tool execution unknown");
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("cancel_unconfirmed");
+    }
+
+    @Test
+    void aCancelParksWhenItsHarnessReportsAnUnknownExecutionFailure() {
+        Admission admitted = admit("submit-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        assertThat(cancel.commandEffect()).isTrue();
+        assertThat(store.findTurn(TENANT, sessionId, admitted.turnId())
+                .orElseThrow().status()).isEqualTo("CANCELLING");
+
+        finish(admitted, "turn.failed", "FAILED",
+                "managed_runtime_recovery_blocked");
+
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(operation.admissionStage()).isEqualTo("JAVA_DURABLE");
+        assertThat(operation.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(operation.failureCode()).isEqualTo("cancel_unconfirmed");
+        assertThat(operation.receiptId()).isNull();
+    }
+
+    @Test
+    void aCancelOfAnAdmittedTurnFailedOtherwiseFailsAlreadySettled() {
+        Admission admitted = admit("submit-1");
+        Admission cancel = cancel("cancel-1", "cancel-digest-1", admitted);
+        claim(admitted);
+        store.failTurn(TENANT, sessionId, admitted.turnId(), OWNER,
+                "hosted_harness_unavailable", "gone");
+        OperationRecord operation = operation(cancel.operationId());
+        assertThat(operation.state()).isEqualTo("FAILED");
+        assertThat(operation.failureCode()).isEqualTo("turn_already_settled");
+    }
+
+    @Test
     void aCancelOfAnEndedTurnSettlesAtAdmission() {
         Admission completed = admit("submit-1");
         finish(completed, "turn.completed", "COMPLETED");
@@ -724,13 +804,18 @@ class ManagedTurnCommandOperationTest {
     }
 
     private void finish(Admission turn, String type, String status) {
+        finish(turn, type, status, null);
+    }
+
+    private void finish(Admission turn, String type, String status,
+            String errorCode) {
         claim(turn);
         String epoch = store.findTurn(TENANT, sessionId, turn.turnId())
                 .orElseThrow().harnessEventEpoch();
         store.recordHarnessEvents(TENANT, sessionId, turn.turnId(), OWNER,
                 epoch, List.of(new HarnessEvent(1, "boot:" + epoch + ":1",
                         new ProjectedEvent(type, Map.of(), true, status,
-                                null, null))));
+                                errorCode, null))));
     }
 
     OperationRecord operation(String operationId) {
