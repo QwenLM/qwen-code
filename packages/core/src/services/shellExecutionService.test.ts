@@ -777,6 +777,7 @@ describe('ShellExecutionService', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -794,6 +795,7 @@ describe('ShellExecutionService', () => {
         { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
       );
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.toString()).toBe('12345678ab');
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -806,6 +808,7 @@ describe('ShellExecutionService', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(false);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toBe('1234567890');
       expect(result.output).not.toContain(CAP_NOTICE);
@@ -968,12 +971,17 @@ describe('ShellExecutionService', () => {
       const { result } = await simulateExecution(
         'yes | head -c 100000000',
         () => {
+          ptyData('1234567890discarded');
           // The qwen-bun-pty backend has already killed the tree and closed
           // the fd when it emits this; no onExit follows.
           expect(() => mockPtyProcess.emit('error', limitError)).not.toThrow();
         },
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
       );
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
+      expect(result.rawOutput.toString()).toBe('1234567890');
+      expect(result.output).toContain(CAP_NOTICE);
       expect(result.error).toBe(limitError);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
@@ -2382,6 +2390,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
       const result = await handle.result;
 
+      expect(result.outputCaptureLimitExceeded).toBe(true);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toContain('12345678ab');
       expect(result.output).toContain(CAP_NOTICE);
@@ -2397,6 +2406,7 @@ describe('ShellExecutionService child_process fallback', () => {
         maxBufferedOutputBytes: 10,
       });
 
+      expect(result.outputCaptureLimitExceeded).toBe(false);
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toBe('1234567890');
       expect(result.output).not.toContain(CAP_NOTICE);
