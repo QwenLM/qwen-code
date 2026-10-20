@@ -653,11 +653,9 @@ class HostedHookReplyLossFaultGatesIT {
         // Without this the cell also passes when the child's own commit was
         // the one refused: both leave the marker unsettled and the receipt
         // replayable, so only a settled child proves which commit was hit.
-        JsonNode child = HostedGateTestSupport.extensionRecords(jdbc, tenant, session, "hook_execution").stream()
-                .filter(record -> !"__plan__".equals(record.path("hookId").asText()))
-                .findFirst()
-                .orElseThrow();
-        assertThat(child.path("resultRef").isNull()).as("child settled before the marker").isFalse();
+        // hookExecution() pins hasSize(1) and the PreToolUse event, so a
+        // second child cannot satisfy this on the wrong record.
+        assertThat(hookExecution(session).path("resultRef").isNull()).as("child settled before the marker").isFalse();
         String occurrenceId = marker.path("hookExecutionId").asText();
         StoreFaultGate.INSTANCE.clear();
         waitFor(() -> {
