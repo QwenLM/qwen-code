@@ -7889,7 +7889,12 @@ export class CoreToolScheduler {
     if (GATE_EXEMPT_TOOLS.has(canonicalToolName(toolName))) return { content };
 
     const text = extractTextFromPartListUnion(content);
-    if (!text || isAlreadyTruncated(text)) return { content };
+    if (
+      !text ||
+      (canonicalToolName(toolName) !== ToolNames.WEB_FETCH &&
+        isAlreadyTruncated(text))
+    )
+      return { content };
 
     const gateThreshold =
       this.config.getTruncateToolOutputThreshold() + GATE_HEADROOM;

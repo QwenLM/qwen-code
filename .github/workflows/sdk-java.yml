@@ -718,7 +718,7 @@ jobs:
     # 150 s, moving the fork to 9261 s and Verify to 165 minutes; the FG13b
     # Hook dispatch store-rejection cell adds 150 s, moving the fork to
     # 9411 s and Verify to 167 minutes; the FG11f publication cell adds 82 s, so
-    # the fork moves to 9493 s and Verify to 169 minutes, wrapping fork + 600 s
+    # the fork moves to 9765 s and Verify to 173 minutes, wrapping fork + 600 s
     # plus margin;
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
@@ -813,7 +813,7 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 9735 s, so the step wraps to fork + 600 s plus margin (173 min).
+        # 9765 s, so the step wraps to fork + 600 s plus margin (173 min).
         timeout-minutes: 173
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
