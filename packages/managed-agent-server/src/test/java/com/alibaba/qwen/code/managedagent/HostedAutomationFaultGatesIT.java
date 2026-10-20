@@ -1264,9 +1264,13 @@ class HostedAutomationFaultGatesIT {
                 .path("id").asText();
         waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
                 .anyMatch(prompt -> prompt.contains("manual:fg11d-cancel-run")));
-        // The public task id is the projection's, not the run record id.
+        // The public task id is the projection's, not the run record id. The
+        // listing is newest-first; pin the kind so a later task cannot silently
+        // take the cancel.
         JsonNode tasks = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200);
-        String taskId = tasks.path("data").path(0).path("id").asText();
+        JsonNode task = tasks.path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        String taskId = task.path("id").asText();
         assertThat(taskId).as("the run projects a public task").isNotEmpty();
         request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel", null,
                 "fg11d-cancel-task", 202);
@@ -1274,6 +1278,14 @@ class HostedAutomationFaultGatesIT {
         // wins and the run settles cancelled before the model is released.
         waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(run))
                 .as("the target run is cancelled").isEqualTo("cancelled"));
+        assertThat(request("GET", "/v1/agents/sessions/" + session + "/tasks/" + taskId, null, null, 200)
+                .path("state").asText()).as("the task settles cancelled").isEqualTo("cancelled");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", Integer.class, tenant, id,
+                "manual:fg11d-cancel-run")).as("the occurrence settles once").isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", String.class, tenant, id,
+                "manual:fg11d-cancel-run")).as("the occurrence fired once").isEqualTo("fired");
         assertThat(request("GET", "/v1/agent-automations/" + id, null, null, 200).path("state").asText())
                 .as("the schedule survives its run's cancel").isEqualTo("live");
         heldModel.countDown();
