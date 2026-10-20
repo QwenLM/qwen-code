@@ -19,6 +19,20 @@ const skill = {
   base_directory: '.qwen/skills/code-review',
 };
 
+it.each([
+  ['/code-review inspect this', ['code-review']],
+  ['  /code-review\n/code-review inspect this', ['code-review']],
+  ['/code-reviewer inspect this', []],
+  ['Explain /code-review', []],
+  ['/unknown /code-review', []],
+  ['/code-review/path', []],
+])(
+  'recognizes only exact leading published invocations in %s',
+  (prompt, names) => {
+    expect(new HostedSkillCatalog([skill]).invocations(prompt)).toEqual(names);
+  },
+);
+
 it('advertises only published descriptions and loads a fixed Workspace-relative body', () => {
   const source = [{ ...skill }];
   const catalog = new HostedSkillCatalog(source);

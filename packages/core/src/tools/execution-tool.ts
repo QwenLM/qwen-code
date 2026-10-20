@@ -249,6 +249,12 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
           ? { outputBudgetApplied: true }
           : {}),
         ...(result.error ? { error: result.error } : {}),
+        // The environment hands back what the producer declared, including an
+        // explicit `null` for "unknown"; dropping it makes the scheduler infer
+        // a raw size from the already-bounded body (#13652 R4-4).
+        ...(result.rawOutputSize === undefined
+          ? {}
+          : { rawOutputSize: result.rawOutputSize }),
         persistedOutputFiles: [],
         resultFilePaths: [],
       };
