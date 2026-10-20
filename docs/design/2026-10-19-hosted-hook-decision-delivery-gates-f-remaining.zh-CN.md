@@ -2,8 +2,8 @@
 
 [English](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.md) | [简体中文](2026-10-19-hosted-hook-decision-delivery-gates-f-remaining.zh-CN.md)
 
-> 承接已合入 main 的 #14701。deny 臂已在其中落地；`failclosed-reply-lost`
-> 在本层落地，其余用例仍是计划，在各自测试落地前不宣称已实现。
+> 承接 #14701。两条决策格都已落地：deny 臂在那里，`failclosed-reply-lost` 在
+> #14803；其余各行见下方评估。
 
 ## 问题与范围
 
@@ -14,7 +14,7 @@ FG13f 覆盖决策与输出投递。#14701 钉住“已结算 deny 回复丢失�
 ## 用例
 
 `failclosed-reply-lost` 已在 `fg13fFailClosedReplyLossReplaysTheBlockedFailureOnMySql`
-中实现；其余各行仍是计划。
+中实现；其余各行见「剩余臂」。
 
 | 用例                     | 注入                                                                                                                                                    | 期望                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
@@ -34,19 +34,31 @@ FG13f 覆盖决策与输出投递。#14701 钉住“已结算 deny 回复丢失�
 main 上已有：`failClosed` 包装（`hosted-hook-session.test.ts`）、超大的 worker 侧上限
 （`managed-hook-runtime.test.ts`：70 KiB 的 handler 返回对 60 KiB 的 `MAX_BYTES`，
 回执小于 1 KiB）、以及回执上限与运行名额（4096 次操作的 worker 单测）。Hosted 各格补的是
-进程内测试看不见的部分：harness 聚合/结算上限、传输路径、owner 重启与生命周期。
+传输路径、owner 重启与生命周期；聚合/结算上限同样已有进程内测试（见「剩余臂」）。
 `failclosed-reply-lost` 补的是包装的 Hosted 路径：已结算的失败回复被丢弃，记录显示
 `recovery_blocked` / `outcome_unknown`，随后一次 status 读取在工具运行前持久化包装
 后的 block。对
 `receipt-cap` 而言，这部分边际价值是投递——上限拒绝要跨过 broker 成为一次 deny——而不是
 上限算术；4096 次 `hook-execute` 请求正是它单独预算的原因。
 
+## 剩余臂
+
+三行已有进程内覆盖，不再计划 Hosted 格：
+
+- `oversized-output`：60 KiB 聚合/结算上限由 `hosted-hook-session.test.ts` 的
+  “bounds combined ... decisions without losing denial” 钉住；它在 PreToolUse 与
+  PermissionRequest 上各跑两个 36 KiB Hook，并覆盖丢失最终 marker 的恢复路径。
+- `receipt-cap` 与 `running-quota`：4096 次操作的 worker 单测同时钉住两种拒绝及其结果。
+
+再为它们补 Hosted 格只多出传输路径，却各占 150 秒共享 fork；因此暂缓，等出现
+传输相关缺陷再补。这些臂仍由 #14449 跟踪。
+
+`message-display-reload` 仍是计划：抑制是 Harness 模型里的展示状态，目前没有 Hosted
+格钉住它经重载后仍被抑制。
+
 ## 变异见证
 
 - `failclosed-reply-lost`：不再丢弃已结算的失败回复；记录会立即结算，永远读不到 `recovery_blocked`。去掉 `failClosed` 包装后结果只有 `success:false` 而没有 `decision:'block'`，工具会运行。丢失回复后重跑命令，`hook.call` 会计为两次。
-- `oversized-output`：变异要打在见证点名的那一层。worker 侧上限已由 `managed-hook-runtime.test.ts` 钉住，撤回它会让那个单测变红，而不是本格。本格的见证是 harness 聚合/结算上限与传输路径。
-- `receipt-cap`：再放一条回执进来，或直接服务该请求。拒绝断言失败。
-- `running-quota`：把拒绝归类为 blocking。它在 allow 策略下也会阻断。
 - `message-display-reload`：保留被抑制文本。重载重放会包含它。
 
 ## 非目标
