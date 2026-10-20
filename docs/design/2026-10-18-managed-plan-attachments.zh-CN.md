@@ -36,7 +36,9 @@ Java 投影有效且已批准的公开 Plan Action 时，验证其输入与 Turn
 
 ## 附件契约与模型输入
 
-扩展封闭的公开输入联合类型：`input_file` 包含 `name`、`mime_type`、UTF-8 `text`，`input_image` 包含 `mime_type` 和 base64 `data`。保留 `input_text` 与旧 `text` 行为。拒绝混用或未知字段、空附件、任意 URL、宿主机路径、二进制文件、非法 base64 和不匹配的图片签名。文本附件使用保守的文本 MIME/扩展名白名单，并拒绝 NUL。图片支持 PNG、JPEG、WebP。PDF、Office、音频和视频不在范围内。
+扩展封闭的公开输入联合类型：`input_file` 包含 `name`、`mime_type`、UTF-8 `text`，`input_image` 包含 `mime_type` 和 base64 `data`。保留 `input_text` 与旧 `text` 行为。拒绝混用或未知字段、空附件、任意 URL、宿主机路径、二进制文件、非法 base64 和不匹配的图片签名。文本附件使用保守的文本 MIME/扩展名白名单，并拒绝 NUL。图片支持 PNG、JPEG（含 `image/jpg` 别名）、GIF 和 WebP，与普通 Qwen Code 的 `PIPELINE_IMAGE_MIME_TYPES` 保持一致。PDF、Office、音频和视频不在范围内。
+
+在 Managed 输入框及草稿恢复、公开 OpenAPI 契约、Java 准入与 Hosted 解析中使用相同的图片格式。接受 `GIF87a` 和 `GIF89a` 两种签名，使用 JPEG 签名校验 `image/jpg`。构建持久化输入、模型 parts 以及恢复输入框缩略图时，将 JPEG 别名规范为 `image/jpeg`，与普通图片接入及下游模型、展示要求一致。摘要、重放和投影保留原始图片字节及规范 MIME。对齐普通模型输入链路，而非其更宽的文件识别列表；BMP、TIFF、HEIC 和 SVG 图片块仍不支持。无需转码或新增存储。依赖 GIF 或 `image/jpg` 前，同步部署 UI、Java 服务与 Harness；旧校验器会拒绝这些格式。
 
 文件归一为带生成的非宿主 URI 的内联 ACP 文本资源，图片归一为 ACP image。语义摘要和 payload 摘要覆盖每个附件字节及名称、MIME。带附件请求的整份 canonical JSON 含文字最多 8 MiB，Java 与 Hosted 使用同一上限。Hosted 精确检查带附件的真实用户消息是否满足 9 MiB 预算，并使用既有消息分片保存。[附件容量设计](2026-10-18-managed-attachment-budget.zh-CN.md)定义专用输入、模型资源和浏览器持久化预算。普通资源保留既有上限，不增加上传服务或存储表，不自动截断或省略内容。
 
@@ -70,7 +72,7 @@ Java Harness 客户端构造时会固定能力快照。如果已经协商到不�
 
 覆盖新建/已有内置及自定义会话、三种执行权限、Plan 读取与零副作用拒绝、批准/拒绝/取消/过期、过期 CAS 与回执重放、owner/grant 隔离、Plan Action 刷新，以及决策/结果前后的崩溃恢复。确认批准后仍遵循冻结权限，旧 Action 不会解除新 Plan；回归团队成员规划与原生审批。
 
-覆盖文本/图片/纯文件输入、非法形状、MIME/编码/签名与大小边界、完整输入摘要冲突、旧能力拒绝、最终模型图片能力、Hook 文字更新、投递未知后的刷新、记录/snapshot/resync 及后续历史。验证一个可恢复的小型预备请求，并单独记录原有快照上限。
+覆盖文本/图片/纯文件输入、非法形状、MIME/编码/签名与大小边界、完整输入摘要冲突、旧能力拒绝、最终模型图片能力、Hook 文字更新、投递未知后的刷新、记录/snapshot/resync 及后续历史。验证 GIF87a/GIF89a 与 `image/jpg` 准入，重放、投影及模型输入中的字节与规范 MIME 精确保留，草稿恢复时规范化别名，并与普通链路的格式列表保持一致。拒绝签名不匹配或头部截断的 GIF、非法 base64 和不支持的图片格式。验证一个可恢复的小型预备请求，并单独记录原有快照上限。
 
 运行受影响的 Java 单测、API/SurfaceRegistry 检查、SDK 测试、完整 Java 验证、真实 MySQL 和对应 Hosted 恢复 profile；运行根 build/typecheck/bundle、重点 CLI/Web Shell 单测、生成契约一致性、格式检查与两轮干净自审。更新本地部署前独立评审完整变更，明确报告不可用的验证通道。
 

@@ -10,6 +10,10 @@ import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
+import {
+  ToolDetailsContext,
+  type ToolDetailsLoader,
+} from '../messages/tools/ToolDetailsContext';
 import { ChatEditor } from '../ChatEditor';
 import { WelcomeHeader } from '../WelcomeHeader';
 import { ChatContextHeader } from '../ChatContextHeader';
@@ -24,7 +28,7 @@ import {
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
-import { managedEventsToMessages } from './managed-session-messages';
+import { createManagedMessageProjector } from './managed-session-messages';
 import {
   getManagedClientId,
   managedRequestId,
@@ -235,6 +239,23 @@ function ManagedSessionsContent({
     if (detail.summary && !detail.summary.capabilities.artifacts)
       setOutputTarget(undefined);
   }, [detail.summary]);
+  const loadToolDetails = useMemo<ToolDetailsLoader | undefined>(() => {
+    const reader = provider.toolDetails;
+    if (!sessionId || !reader) return undefined;
+    return async (callId, signal) => {
+      const itemId = callId.slice(callId.lastIndexOf(':') + 1);
+      const detail = await reader.get(sessionId, itemId, { clientId, signal });
+      return {
+        args: detail.input ?? undefined,
+        rawOutput:
+          detail.shellResult ??
+          (detail.output === null
+            ? undefined
+            : detail.output +
+              (detail.truncated ? `\n${t('managed.truncated')}` : '')),
+      };
+    };
+  }, [provider, sessionId, clientId, t]);
   const openResult = useCallback(
     (itemId: string) => {
       if (sessionId) setOutputTarget({ sessionId, itemId });
@@ -259,9 +280,15 @@ function ManagedSessionsContent({
   const listBusy = useRef(false);
   const selection = useRef(sessionId);
   selection.current = sessionId;
+  const messageProjector = useMemo(
+    () => createManagedMessageProjector(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- provider and sessionId are projector cache reset keys
+    [provider, sessionId],
+  );
+  const truncatedLabel = t('managed.truncated');
   const messages = useMemo(
-    () => managedEventsToMessages(detail.events, t('managed.truncated')),
-    [detail.events, t],
+    () => messageProjector(detail.events, truncatedLabel),
+    [messageProjector, detail.events, truncatedLabel],
   );
   // The caveat sits beside the card rather than inside the panel, so the panel
   // is told about it: without this the dialog describes only the tool name and
@@ -1028,34 +1055,36 @@ function ManagedSessionsContent({
             />
           ) : (
             <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
-              <MessageList
-                messages={messages}
-                onToolResultOpen={
-                  summary?.capabilities.artifacts && provider.toolResults
-                    ? openResult
-                    : undefined
-                }
-                pendingApproval={pendingApproval}
-                sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
-                loadingTranscript={detail.loading}
-                isResponding={Boolean(active)}
-                activeTurnStartedAt={active ? summary?.admittedAt : undefined}
-                hasOlderHistory={Boolean(detail.olderCursor)}
-                loadingOlderHistory={detail.loadingOlder}
-                onLoadOlderHistory={detail.loadOlder}
-                workspaceCwd={summary?.workspaceCwd}
-                hideSessionTimeline
-                welcomeHeader={
-                  messages.length === 0 && !detail.loading ? (
-                    <WelcomeHeader
-                      version=""
-                      cwd={summary?.workspaceCwd ?? ''}
-                      currentModel={displayedModel}
-                      currentMode=""
-                    />
-                  ) : undefined
-                }
-              />
+              <ToolDetailsContext.Provider value={loadToolDetails}>
+                <MessageList
+                  messages={messages}
+                  onToolResultOpen={
+                    summary?.capabilities.artifacts && provider.toolResults
+                      ? openResult
+                      : undefined
+                  }
+                  pendingApproval={pendingApproval}
+                  sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
+                  loadingTranscript={detail.loading}
+                  isResponding={Boolean(active)}
+                  activeTurnStartedAt={active ? summary?.admittedAt : undefined}
+                  hasOlderHistory={Boolean(detail.olderCursor)}
+                  loadingOlderHistory={detail.loadingOlder}
+                  onLoadOlderHistory={detail.loadOlder}
+                  workspaceCwd={summary?.workspaceCwd}
+                  hideSessionTimeline
+                  welcomeHeader={
+                    messages.length === 0 && !detail.loading ? (
+                      <WelcomeHeader
+                        version=""
+                        cwd={summary?.workspaceCwd ?? ''}
+                        currentModel={displayedModel}
+                        currentMode=""
+                      />
+                    ) : undefined
+                  }
+                />
+              </ToolDetailsContext.Provider>
             </div>
           )}
           {pending && !busy && (

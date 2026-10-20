@@ -1,23 +1,25 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static com.alibaba.qwen.code.runtimebroker.FaultGateRig.HARNESS;
-import static com.alibaba.qwen.code.runtimebroker.FaultGateRig.SESSION;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import com.alibaba.fastjson2.JSONObject;
-import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+import static com.alibaba.qwen.code.runtimebroker.FaultGateRig.HARNESS;
+import static com.alibaba.qwen.code.runtimebroker.FaultGateRig.SESSION;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * FG3: a worker or a Broker JVM dies with a tool call in flight. A killed

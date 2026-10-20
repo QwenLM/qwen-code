@@ -3296,6 +3296,32 @@ describe('loadCliConfig', () => {
     },
   );
 
+  it('leaves a Managed transcript to a Managed host on resume', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    mockSessionServiceInstance.loadSession.mockResolvedValue({
+      conversation: { sessionId, messages: [] },
+    });
+    mockSessionServiceInstance.assertLegacySessionExecution.mockClear();
+
+    await loadCliConfig(
+      {},
+      { resume: sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { executionEngine: 'managed' },
+    );
+
+    expect(
+      mockSessionServiceInstance.assertLegacySessionExecution,
+    ).not.toHaveBeenCalled();
+    expect(mockConfigConstructorParams).toHaveBeenCalled();
+  });
+
   it('rebinds a selective restore projection to the forked session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const projectionSource = vi.fn(async (sessionId: string) => ({

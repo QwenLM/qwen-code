@@ -53,6 +53,7 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionScheduleSessionModeEnabled,
   assertManagedSessionEventActor,
+  ManagedSessionAppendUnsettledError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   assertManagedSessionTransaction,
@@ -453,9 +454,43 @@ export class LocalManagedSessionAuthority {
   ) {}
 
   private writeFailure: Error | undefined;
+  /**
+   * The transaction whose append outcome the journal has not settled yet.
+   * While it is held the log is not dead: the next append asks the journal
+   * whether these records landed and applies them here if they did, so a
+   * writer lease that lapsed under an outage can re-attest instead of
+   * fencing the Session for good.
+   */
+  private unsettledAppend:
+    | {
+        readonly key: string;
+        readonly marker: ManagedSessionCommitMarker;
+        readonly events: readonly ManagedSessionEvent[];
+        readonly branches: ReadonlySet<string>;
+        readonly lastRecordUuid: string;
+        readonly extension?: {
+          readonly eventId: string;
+          readonly apply: () => void;
+        };
+      }
+    | undefined;
   private recoveryBlocked = false;
   private queue: Promise<unknown> = Promise.resolve();
+  private retirementPreparation?: Promise<readonly unknown[]>;
   private readonly eventIds = new Set<string>();
+  private readonly latestByKind = new Map<
+    ManagedSessionEventKind,
+    ManagedSessionEvent
+  >();
+  /**
+   * The first committed `tool.receipt` per execution call. Shell capture
+   * resolves a call's receipt on every accept; scanning the whole log for it
+   * made each call O(history).
+   */
+  private readonly receiptsByExecutionCall = new Map<
+    string,
+    ManagedSessionEvent
+  >();
   private readonly checkpointSequences = new Map<string, number>();
   private checkpoint: ManagedSessionCheckpoint | undefined;
   private hasContinuation = false;
@@ -717,6 +752,7 @@ export class LocalManagedSessionAuthority {
         authority.recordDomainEvent(event);
       }
       authority.recordRecoveryFacts(event, branches.has(event.eventId));
+      authority.indexCommittedEvent(event);
     }
     await authority.rebuildExtensionRecords();
     if (options.retainVerifiedResources !== true)
@@ -768,6 +804,11 @@ export class LocalManagedSessionAuthority {
    * stays closed to writers that do not know how to take it over.
    */
   async close(): Promise<void> {
+    if (this.retirementPreparation) {
+      throw new ManagedSessionConflictError(
+        'original CSI retirement owns the final boundary.',
+      );
+    }
     await this.journal.seal(this.commitProof);
   }
 
@@ -805,10 +846,28 @@ export class LocalManagedSessionAuthority {
   lastEventOfKind(
     kind: ManagedSessionEventKind,
   ): ManagedSessionEvent | undefined {
-    for (let index = this.events.length - 1; index >= 0; index--) {
-      if (this.events[index].kind === kind) return this.events[index];
+    return this.latestByKind.get(kind);
+  }
+
+  /**
+   * The first committed `tool.receipt` for an execution call, in the same
+   * order a scan from sequence 1 would return.
+   */
+  committedReceipt(executionCallId: string): ManagedSessionEvent | undefined {
+    return this.receiptsByExecutionCall.get(executionCallId);
+  }
+
+  private indexCommittedEvent(event: ManagedSessionEvent): void {
+    this.latestByKind.set(event.kind, event);
+    if (event.kind !== 'tool.receipt') return;
+    const executionCallId = event.payload['executionCallId'];
+    if (
+      typeof executionCallId !== 'string' ||
+      this.receiptsByExecutionCall.has(executionCallId)
+    ) {
+      return;
     }
-    return undefined;
+    this.receiptsByExecutionCall.set(executionCallId, event);
   }
 
   /**
@@ -822,8 +881,11 @@ export class LocalManagedSessionAuthority {
     fromSequence: number,
     toSequence: number,
   ): readonly ManagedSessionEvent[] {
-    return this.events.filter(
-      (event) => event.sequence >= fromSequence && event.sequence <= toSequence,
+    if (!(fromSequence <= toSequence)) return [];
+    // Journal validation keeps every sequence from 1; no prefix is evicted.
+    return this.events.slice(
+      Math.max(0, Math.ceil(fromSequence) - 1),
+      Math.max(0, Math.floor(toSequence)),
     );
   }
 
@@ -842,9 +904,9 @@ export class LocalManagedSessionAuthority {
       throw new ManagedSessionRecordError('readEvents limit must be positive.');
     }
     const out: ManagedSessionEvent[] = [];
-    for (const event of this.events) {
-      if (event.sequence <= after) continue;
-      out.push(event);
+    const start = Math.max(0, Math.floor(after) || 0);
+    for (let index = start; index < this.events.length; index++) {
+      out.push(this.events[index]);
       if (out.length === limit) break;
     }
     return out;
@@ -3021,8 +3083,33 @@ export class LocalManagedSessionAuthority {
    * which is not enough: concurrent transactions would interleave their event
    * records around each other's commit markers.
    */
+  /**
+   * Settles a pending append for a caller that reads replay state or
+   * publishes a body before it commits. The work rides the serial queue, so
+   * a landed transaction is applied before the caller's read.
+   */
+  settlePendingAppend(): Promise<void> {
+    return this.runSerial(async () => undefined);
+  }
+
   private runSerial<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.queue.then(operation, operation);
+    if (this.retirementPreparation) {
+      return Promise.reject(
+        new ManagedSessionConflictError(
+          'original CSI retirement admission is closed.',
+        ),
+      );
+    }
+    const run = async () => {
+      // Settle before the operation reads replay state or publishes the body
+      // it would rebuild: a landed-but-unacknowledged attempt must be applied
+      // first, or the retry answers with the wrong record reference (or no
+      // extension record) while the commit itself replays.
+      if (this.unsettledAppend !== undefined)
+        await this.settleUnsettledAppend();
+      return operation();
+    };
+    const pending = this.queue.then(run, run);
     this.queue = pending.then(
       () => undefined,
       () => undefined,
@@ -3162,26 +3249,10 @@ export class LocalManagedSessionAuthority {
       encoded.reduce((sum, line) => sum + Buffer.byteLength(line, 'utf8'), 0),
     );
 
-    const marker = parseManagedSessionCommitMarker({
-      transactionId: randomUUID(),
-      commandId: command.commandId,
-      operation: command.operation,
-      contentDigest: command.contentDigest,
-      firstSequence: events[0].sequence,
-      lastSequence: events[events.length - 1].sequence,
-      eventCount: events.length,
-      eventsDigest: managedSessionEventsDigest(events),
-      previousCommitDigest: this.lastMarkerDigest,
-    });
-    const markerLine = JSON.stringify(marker);
-    if (
-      Buffer.byteLength(markerLine, 'utf8') >
-      MANAGED_SESSION_LIMITS.maxCommitMarkerBytes
-    ) {
-      throw new ManagedSessionRecordError(
-        `commit marker exceeds ${MANAGED_SESSION_LIMITS.maxCommitMarkerBytes} bytes.`,
-      );
-    }
+    const { marker, records, lastRecordUuid } = this.encodeTransaction(
+      command,
+      events,
+    );
 
     for (const event of events) {
       await this.assertReaderFacingBody(event);
@@ -3191,28 +3262,28 @@ export class LocalManagedSessionAuthority {
 
     // Events first, marker last: a crash before the marker leaves the
     // transaction invisible rather than half applied.
-    const records: unknown[] = [];
-    let lastRecordUuid = this.lastRecordUuid;
-    for (const event of events) {
-      const next = this.createRecord(
-        MANAGED_SESSION_EVENT_SUBTYPE,
-        event,
-        lastRecordUuid,
-      );
-      records.push(next.record);
-      lastRecordUuid = next.uuid;
-    }
-    const final = this.createRecord(
-      MANAGED_SESSION_COMMIT_SUBTYPE,
-      marker,
-      lastRecordUuid,
-    );
-    records.push(final.record);
     try {
       await this.journal.appendTransaction(records);
-      this.lastRecordUuid = final.uuid;
+      this.lastRecordUuid = lastRecordUuid;
     } catch (cause) {
       if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
+      if (
+        cause instanceof ManagedSessionAppendUnsettledError &&
+        this.journal.settleAppend !== undefined
+      ) {
+        // The store can prove the outcome later from its durable head, so keep
+        // the exact attempt instead of fencing a journal whose writer lease a
+        // recoverable outage lapsed.
+        this.unsettledAppend = {
+          key,
+          marker,
+          events,
+          branches,
+          lastRecordUuid,
+          ...(extension === undefined ? {} : { extension }),
+        };
+        throw cause;
+      }
       // Records may already be on disk, so the sequences this transaction
       // claimed are spent whether or not the marker landed.
       this.writeFailure =
@@ -3220,9 +3291,34 @@ export class LocalManagedSessionAuthority {
       throw cause;
     }
 
+    return this.applyCommitted(
+      key,
+      marker,
+      events,
+      branches,
+      lastRecordUuid,
+      extension,
+    );
+  }
+
+  /**
+   * Applies one committed transaction to the in-memory authority. The normal
+   * append and the settlement of an append whose acknowledgement was lost both
+   * come through here, so the two advance the log identically.
+   */
+  private applyCommitted(
+    key: string,
+    marker: ManagedSessionCommitMarker,
+    events: readonly ManagedSessionEvent[],
+    branches: ReadonlySet<string>,
+    lastRecordUuid: string,
+    extension?: { readonly eventId: string; readonly apply: () => void },
+  ): ManagedSessionCommitReceipt {
+    this.lastRecordUuid = lastRecordUuid;
     for (const event of events) {
       this.events.push(event);
       this.eventIds.add(event.eventId);
+      this.indexCommittedEvent(event);
       if (event.kind === 'activation.changed') {
         this.activation = managedSessionActivationStateFrom(event);
       }
@@ -3247,10 +3343,41 @@ export class LocalManagedSessionAuthority {
     };
     this.transactions.set(key, {
       receipt,
-      contentDigest: command.contentDigest,
+      contentDigest: marker.contentDigest,
     });
     extension?.apply();
     return receipt;
+  }
+
+  /**
+   * Resolves the append the journal could not acknowledge. `landed` applies
+   * those records here, `absent` drops them, and an unsettled answer keeps the
+   * attempt so the next append asks again. Any other failure proves the log
+   * cannot be trusted and fences it for good.
+   */
+  private async settleUnsettledAppend(): Promise<void> {
+    const pending = this.unsettledAppend!;
+    let outcome: 'landed' | 'absent';
+    try {
+      outcome = await this.journal.settleAppend!();
+    } catch (cause) {
+      if (cause instanceof ManagedSessionAppendUnsettledError) throw cause;
+      this.unsettledAppend = undefined;
+      this.writeFailure =
+        cause instanceof Error ? cause : new Error(String(cause));
+      throw cause;
+    }
+    this.unsettledAppend = undefined;
+    if (outcome === 'landed') {
+      this.applyCommitted(
+        pending.key,
+        pending.marker,
+        pending.events,
+        pending.branches,
+        pending.lastRecordUuid,
+        pending.extension,
+      );
+    }
   }
 
   /**
@@ -3415,6 +3542,70 @@ export class LocalManagedSessionAuthority {
         live.activationId === current.activationId &&
         live.epoch === current.epoch,
     });
+  }
+
+  /** Stages one original release without appending or applying it locally. */
+  prepareOriginalCsiRelease(): Promise<readonly unknown[]> {
+    if (this.retirementPreparation) return this.retirementPreparation;
+    const prepared = this.queue.then(async () => {
+      if (this.unsettledAppend !== undefined)
+        await this.settleUnsettledAppend();
+      const current = this.activation;
+      if (
+        this.writeFailure ||
+        this.recoveryBlocked ||
+        this.compactedThrough !== 0 ||
+        this.header.createdBy !== 'hosted-harness' ||
+        !this.resources ||
+        !current ||
+        current.phase !== 'active' ||
+        current.epoch !== 1 ||
+        current.expiresAt === null ||
+        current.expiresAt <= this.now()
+      ) {
+        throw new ManagedSessionConflictError(
+          'original CSI activation cannot prepare retirement.',
+        );
+      }
+      const boundaryRef = await this.publishActivationBody(
+        'managed-activation-boundary',
+        {
+          version: 1,
+          activationId: current.activationId,
+          epoch: current.epoch,
+          committedSequence: this.committed,
+          lastRecordUuid: this.lastRecordUuid,
+        },
+      );
+      const command = {
+        operation: 'releaseActivation',
+        commandId: `${current.activationId}:released`,
+        sessionKey: this.sessionKey,
+        contentDigest: this.header.definitionRef.digest,
+      };
+      const event = parseManagedSessionEvent({
+        v: MANAGED_SESSION_FORMAT_VERSION,
+        sequence: this.committed + 1,
+        eventId: `activation:${current.activationId}:released`,
+        sessionKey: this.sessionKey,
+        kind: 'activation.changed',
+        occurredAt: this.now(),
+        payload: {
+          activationId: current.activationId,
+          epoch: current.epoch,
+          workerId: current.workerId,
+          subject: this.currentActivationSubject,
+          phase: 'released',
+          leaseDurationMs: null,
+          expiresAt: current.expiresAt,
+          installRef: null,
+          boundaryRef,
+        },
+      });
+      return this.encodeTransaction(command, [event]).records;
+    });
+    this.retirementPreparation = prepared;
+    return prepared;
   }
 
   private async publishActivationBody(
@@ -3760,6 +3951,51 @@ export class LocalManagedSessionAuthority {
         'event subject does not match the activation the harness holds.',
       );
     }
+  }
+
+  private encodeTransaction(
+    command: ManagedSessionCommand,
+    events: readonly ManagedSessionEvent[],
+  ) {
+    const marker = parseManagedSessionCommitMarker({
+      transactionId: randomUUID(),
+      commandId: command.commandId,
+      operation: command.operation,
+      contentDigest: command.contentDigest,
+      firstSequence: events[0].sequence,
+      lastSequence: events[events.length - 1].sequence,
+      eventCount: events.length,
+      eventsDigest: managedSessionEventsDigest(events),
+      previousCommitDigest: this.lastMarkerDigest,
+    });
+    const markerLine = JSON.stringify(marker);
+    if (
+      Buffer.byteLength(markerLine, 'utf8') >
+      MANAGED_SESSION_LIMITS.maxCommitMarkerBytes
+    ) {
+      throw new ManagedSessionRecordError(
+        `commit marker exceeds ${MANAGED_SESSION_LIMITS.maxCommitMarkerBytes} bytes.`,
+      );
+    }
+
+    const records: unknown[] = [];
+    let lastRecordUuid = this.lastRecordUuid;
+    for (const event of events) {
+      const next = this.createRecord(
+        MANAGED_SESSION_EVENT_SUBTYPE,
+        event,
+        lastRecordUuid,
+      );
+      records.push(next.record);
+      lastRecordUuid = next.uuid;
+    }
+    const final = this.createRecord(
+      MANAGED_SESSION_COMMIT_SUBTYPE,
+      marker,
+      lastRecordUuid,
+    );
+    records.push(final.record);
+    return { marker, records, lastRecordUuid: final.uuid };
   }
 
   private createRecord(

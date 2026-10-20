@@ -37,13 +37,17 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import { MANAGED_SESSION_COMMAND_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-record.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   isChildSessionRun,
   parseChildRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseSessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { sessionMessageInputId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
-import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  HostedChildAgentSession,
+  type HostedChildAgentStore,
+} from './hosted-child-agent-session.js';
 import {
   HostedSessionCommandSession,
   SessionCommandBlockedError,
@@ -138,6 +142,84 @@ async function memberSide(): Promise<Side> {
     parentSessionId: PARENT,
     parentChildRunId: LEAF_RUN,
   });
+}
+
+/**
+ * A member side whose next extension commit lands durably but reports an
+ * unknown outcome: the record is withheld from the authority's view until
+ * `settlePendingAppend()` applies it, exactly the landed-with-lost-ack shape
+ * a retry must settle before reading replay state.
+ */
+async function lostAckMemberSide(): Promise<{
+  readonly member: Side;
+  armNextCommit(): void;
+  publications(kind: string): number;
+}> {
+  const session = await open(CHILD);
+  let pending:
+    | Parameters<typeof session.authority.commitExtensionRecord>
+    | undefined;
+  let armed = false;
+  const published: string[] = [];
+  const publish = async (kind: string, bytes: Buffer) => {
+    const ref = await session.resources.publish(kind, bytes);
+    published.push(kind);
+    return ref;
+  };
+  const resources = new Proxy(session.resources, {
+    get(target, prop) {
+      if (prop === 'publish') return publish;
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const authority = new Proxy(session.authority, {
+    get(target, prop) {
+      if (prop === 'settlePendingAppend') {
+        return async () => {
+          const next = pending;
+          pending = undefined;
+          if (next !== undefined) await target.commitExtensionRecord(...next);
+        };
+      }
+      if (prop === 'commitExtensionRecord') {
+        return async (
+          ...args: Parameters<typeof target.commitExtensionRecord>
+        ) => {
+          if (armed) {
+            armed = false;
+            pending = args;
+            throw new ManagedSessionAppendUnsettledError(
+              new Error('acknowledgement lost after the append landed'),
+            );
+          }
+          return target.commitExtensionRecord(...args);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const store = {
+    authority: authority as unknown as HostedChildAgentStore['authority'],
+    resources: resources as unknown as HostedChildAgentStore['resources'],
+  };
+  const key = session.authority.sessionHeader.sessionKey;
+  const children = new HostedChildAgentSession(store, key);
+  return {
+    member: {
+      session,
+      children,
+      commands: new HostedSessionCommandSession(store, key, children, {
+        parentSessionId: PARENT,
+        parentChildRunId: LEAF_RUN,
+      }),
+    },
+    armNextCommit: () => {
+      armed = true;
+    },
+    publications: (kind) => published.filter((entry) => entry === kind).length,
+  };
 }
 
 const DEFINITION = {
@@ -680,6 +762,58 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
       'consumed',
     );
+  });
+
+  it('settles a landed answered append before replay, so a lost-acknowledgement retry publishes once', async () => {
+    const { member, armNextCommit, publications } = await lostAckMemberSide();
+    const commandId = commandIdOf('call-lost-ack-answered');
+    await member.commands.runCommand({
+      commandId,
+      kind: 'board_write',
+      args: TASK_CREATE_ARGS,
+      executionCallId: 'prompt-1:call-lost-ack-answered',
+      closing: false,
+    });
+    await member.commands.handover(commandId, PARENT);
+    const reply = {
+      outcome: 'answered' as const,
+      text: 'Task #1 created: "ship the fix"',
+    };
+    armNextCommit();
+    await expect(member.commands.answered(commandId, reply)).rejects.toThrow(
+      ManagedSessionAppendUnsettledError,
+    );
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'accepting',
+    );
+    await member.commands.answered(commandId, reply);
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'accepted',
+    );
+    expect(publications('managed-command-reply')).toBe(1);
+    expect(await member.commands.readReply(commandId)).toEqual(reply);
+  });
+
+  it('settles a landed outbound append before replay, so a lost-acknowledgement retry publishes once', async () => {
+    const { member, armNextCommit, publications } = await lostAckMemberSide();
+    const commandId = commandIdOf('call-lost-ack-sent');
+    const params = {
+      commandId,
+      kind: 'board_write' as const,
+      args: TASK_CREATE_ARGS,
+      executionCallId: 'prompt-1:call-lost-ack-sent',
+      closing: false,
+    };
+    armNextCommit();
+    await expect(member.commands.runCommand(params)).rejects.toThrow(
+      ManagedSessionAppendUnsettledError,
+    );
+    expect(member.commands.command(commandId)).toBeUndefined();
+    await member.commands.runCommand(params);
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'planned',
+    );
+    expect(publications('managed-command-args')).toBe(1);
   });
 
   it('settles only along the map: cancelled from planned, unknown and rejected from accepting', async () => {
