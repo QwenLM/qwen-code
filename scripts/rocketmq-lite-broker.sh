@@ -308,10 +308,12 @@ start() {
   launch namesrv "${RMQ_NAMESRV_PORT}" "boot success" \
     "${ROCKETMQ_HOME}/bin/mqnamesrv" -c "${RMQ_WORK_DIR}/conf/namesrv.conf" ||
     die "the NameServer did not start"
-  # The broker also binds listenPort - 2 (fast channel) and + 1 (HA).
+  # The broker also binds listenPort - 2 (fast channel) and + 1 (HA). These
+  # operands must stay unquoted: macOS's system Bash 3.2 rejects a quoted
+  # number in arithmetic.
   unhold_port "${RMQ_BROKER_PORT}"
-  unhold_port "$(("${RMQ_BROKER_PORT}" - 2))"
-  unhold_port "$(("${RMQ_BROKER_PORT}" + 1))"
+  unhold_port "$((RMQ_BROKER_PORT - 2))"
+  unhold_port "$((RMQ_BROKER_PORT + 1))"
   launch broker "${RMQ_BROKER_PORT}" "boot success" \
     "${ROCKETMQ_HOME}/bin/mqbroker" -c "${RMQ_WORK_DIR}/conf/broker.conf" ||
     die "the broker did not start"
