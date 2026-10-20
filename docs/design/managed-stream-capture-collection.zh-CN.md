@@ -2,6 +2,16 @@
 
 [English](managed-stream-capture-collection.md) | [简体中文](managed-stream-capture-collection.zh-CN.md)
 
+## Schema 整合后的当前状态
+
+下文 P1 实现记录的是最初 `4a3b8f3c08` 基线。在 `06efd789b1` 上，共享 schema
+使用 `ma_resource`、`ma_resource_ref` 和 `SESSION_RESOURCE_GC` 操作。
+回收器现已在回收前释放退役 Session 的记录与 journal owner，再收集没有引用的
+`MYSQL_INLINE` 资源体；覆盖 `PUBLISHED` 与 `REFERENCED` 两种状态，不再限制
+kind。下文关于 MCP 记录与 journal 引用的 manifest 永久钉住的历史说明已不再代表
+当前 SQL 回收行为。参见 [MCP 生命周期契约与见证](managed-mcp-retention-lifecycle.zh-CN.md)。
+私有 CSI Session 仍不参与此通道，物理 GC 默认值与部署门禁保持不变。
+
 ## 问题与基线
 
 O4（`managed-tool-output-retention.md`）让工具输出的物理回收变得安全，但只覆盖
