@@ -364,6 +364,9 @@ export class WebTerminalRegistry {
       }
       if (session.failure) return;
       session.failure = { message };
+      // Failure remains exclusive even if a real exit was observed first.
+      session.exited = false;
+      delete session.exitCode;
       // The backend already killed the child and closed the master fd; free
       // the session's pty-side listeners the same way the exit path does.
       setImmediate(() => this.releasePtyResources(session));

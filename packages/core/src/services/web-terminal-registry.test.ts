@@ -576,49 +576,55 @@ describe('WebTerminalRegistry', () => {
     },
   );
 
-  it('keeps a failed session out of the exited state when a native exit races it', async () => {
-    const errorListeners: Array<(err: Error) => void> = [];
-    spawn.mockReturnValueOnce({
-      pid: 42,
-      write,
-      resize,
-      kill,
-      onData: vi.fn((listener: (data: string) => void) => {
-        onData = listener;
-        return { dispose: disposeData };
-      }),
-      onExit: vi.fn(
-        (listener: (e: { exitCode: number; signal?: number }) => void) => {
-          onExit = listener;
-          return { dispose: disposeExit };
-        },
-      ),
-      on: vi.fn((event: string, listener: (err: Error) => void) => {
-        if (event === 'error') errorListeners.push(listener);
-        return { dispose: vi.fn() };
-      }),
-    });
-    const registry = await start('terminal:failed-exit-race');
-    const exitEvents: Array<{ exitCode: number; signal?: number }> = [];
-    registry.addExitListener('terminal:failed-exit-race', (e) =>
-      exitEvents.push(e),
-    );
+  it.each(['failure-first', 'exit-first'])(
+    'keeps failure and exit mutually exclusive (%s)',
+    async (order) => {
+      const errorListeners: Array<(err: Error) => void> = [];
+      spawn.mockReturnValueOnce({
+        pid: 42,
+        write,
+        resize,
+        kill,
+        onData: vi.fn((listener: (data: string) => void) => {
+          onData = listener;
+          return { dispose: disposeData };
+        }),
+        onExit: vi.fn(
+          (listener: (e: { exitCode: number; signal?: number }) => void) => {
+            onExit = listener;
+            return { dispose: disposeExit };
+          },
+        ),
+        on: vi.fn((event: string, listener: (err: Error) => void) => {
+          if (event === 'error') errorListeners.push(listener);
+          return { dispose: vi.fn() };
+        }),
+      });
+      const registry = await start('terminal:failed-exit-race');
+      const exitEvents: Array<{ exitCode: number; signal?: number }> = [];
+      registry.addExitListener('terminal:failed-exit-race', (e) =>
+        exitEvents.push(e),
+      );
 
-    errorListeners[0]!(
-      Object.assign(new Error('qwen-bun-pty resource limit reached'), {
-        code: 'QWEN_PTY_WRITE_LIMIT',
-      }),
-    );
-    // The backend's parked-exit path delivers the reaped native exit after
-    // the structured failure.
-    onExit({ exitCode: 3 });
+      if (order === 'exit-first') onExit({ exitCode: 3 });
+      errorListeners[0]!(
+        Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+          code: 'QWEN_PTY_WRITE_LIMIT',
+        }),
+      );
+      if (order === 'failure-first') onExit({ exitCode: 3 });
 
-    const snapshot = registry.readSnapshot('terminal:failed-exit-race');
-    expect(snapshot?.failed).toBe(true);
-    expect(snapshot?.exited).toBe(false);
-    expect(snapshot?.exitCode).toBeUndefined();
-    expect(exitEvents).toHaveLength(0);
-  });
+      const snapshot = registry.readSnapshot('terminal:failed-exit-race');
+      expect(snapshot?.failed).toBe(true);
+      expect(snapshot?.exited).toBe(false);
+      expect(snapshot?.exitCode).toBeUndefined();
+      expect(exitEvents).toHaveLength(order === 'failure-first' ? 0 : 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      registry.release('terminal:failed-exit-race');
+      expect(kill).not.toHaveBeenCalled();
+      expect(process.kill).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not re-throw unexpected backend errors from the error event', async () => {
     // A throw here leaves the backend's fs callback as an uncaught exception

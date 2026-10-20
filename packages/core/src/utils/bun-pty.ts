@@ -878,8 +878,11 @@ export class BunPtyProcess extends EventEmitter {
       this.finishOutput();
       // Failure first: consumers settle once per session, and the exit
       // listener detaches the failure listener before it can run.
-      this.reportError(error);
-      this.fireExit(exitCode, signal);
+      try {
+        this.reportError(error);
+      } finally {
+        this.fireExit(exitCode, signal);
+      }
       return;
     }
     this.discardPausedHold();
