@@ -168,6 +168,7 @@ jobs:
           sparse-checkout: |-
             /.github/scripts
             /scripts/assert-release-version.mjs
+            /scripts/check-release-tarball-exec-bits.mjs
             /scripts/release-packages.mjs
             /scripts/workspaces.js
             /package.json
