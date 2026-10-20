@@ -1723,6 +1723,37 @@ Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; 
 
 ### `GET /workspace/skills`
 
+The primary and workspace-qualified inventory routes return a retained snapshot
+immediately while revalidating in the background. Starts are throttled to once
+per second and concurrent readers share a task. Cold reads wait for that task.
+Revalidation has a five-second deadline; a timeout allows retry but does not
+cancel work already executing in ACP. Timed-out or invalidated tasks cannot
+publish late results. Explicit invalidation drops known-invalid inventory.
+
+Initialized inventory responses additionally include optional observation
+metadata (older daemons and direct config/runtime status reads omit it):
+
+```json
+{
+  "snapshot": {
+    "observedAt": 1792486800000,
+    "ageMs": 1500,
+    "stale": true,
+    "refreshing": true
+  }
+}
+```
+
+`observedAt` is the Unix-millisecond start time of the successful observation;
+`ageMs` is recalculated per response, conservatively including collection time.
+`stale` means that observation is at least one second old. `refreshing` reports
+whether a revalidation is currently pending. Failed reads, timeouts, and replay
+after the runtime stops do not renew the timestamp. Clients may display this
+age, but it is not a filesystem revision or proof that every session is current.
+If no initialized snapshot exists and the cold read times out, the response has
+`initialized: false` and no `snapshot` metadata. Status reads do not invoke
+session-affecting Skill refresh commands.
+
 ```json
 {
   "v": 1,
