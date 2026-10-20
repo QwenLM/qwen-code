@@ -107,6 +107,15 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(names.indexOf('Bundle Qwen Code')).toBeGreaterThan(
       names.indexOf('Build Qwen Code'),
     );
+    expect(names.indexOf('Run Java daemon E2E')).toBeGreaterThan(
+      names.indexOf('Bundle Qwen Code'),
+    );
+    for (const name of ['Build Qwen Code', 'Bundle Qwen Code']) {
+      const explicit = steps.find((s) => s.name === name);
+      expect(explicit['continue-on-error'], name).toBeUndefined();
+      expect(explicit.if, name).toBeUndefined();
+      expect(explicit.run, name).not.toContain('|| true');
+    }
   });
 
   it('serializes latency-sensitive tests on each physical ECS host', () => {
