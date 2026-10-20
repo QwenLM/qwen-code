@@ -5315,6 +5315,21 @@ export interface PermissionResponse {
   [key: string]: unknown;
 }
 
+export interface DaemonMessageGroupsSnapshot {
+  snapshot: string;
+  groups: Array<{
+    id: string;
+    promptId?: string;
+    promptIds?: string[];
+    recordIds: string[];
+  }>;
+}
+
+export interface DaemonDeleteMessageGroupsResult {
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
+}
+
 export interface DaemonRewindSnapshotInfo {
   promptId: string;
   turnIndex: number;

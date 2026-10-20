@@ -1,3 +1,8 @@
+import { plural } from './utils/plural.js';
+import {
+  MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_ZH,
+} from './components/message-deletion-messages.js';
 import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
@@ -62,13 +67,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/** English count plus its noun, pluralised the regular way. */
-function plural(count: string | number | undefined, noun: string): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
-}
 
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
@@ -1195,9 +1193,10 @@ const EN: Messages = {
   'markdownTable.selection.average': 'Average',
   'markdownTable.selection.min': 'Min',
   'markdownTable.selection.max': 'Max',
-  'markdownTable.copyTsv': 'Copy TSV',
-  'markdownTable.copyTsvHint': 'Copy as TSV for pasting into spreadsheet apps',
-  'markdownTable.copyVisible': 'Copy table',
+  'markdownTable.copyTsv': 'Copy text',
+  'markdownTable.copyTsvHint': 'Copy text for pasting into spreadsheet apps',
+  'markdownTable.copyVisible': 'Copy',
+  'markdownTable.copyMarkdown': 'Copy Markdown',
   'markdownTable.customColumns': 'Custom columns',
   'markdownTable.customColumns.tableSection': 'Columns shown in the table',
   'markdownTable.customColumns.detailSection': 'Fields shown in expanded rows',
@@ -3769,6 +3768,8 @@ const EN: Messages = {
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
+  'message.moreActions': 'More message actions',
+  ...MESSAGE_DELETION_MESSAGES_EN,
   'userMessage.editSubmit': 'Send',
   'userMessage.editSending': 'Sending…',
   'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
@@ -5570,9 +5571,10 @@ const ZH: Messages = {
   'markdownTable.selection.average': '平均',
   'markdownTable.selection.min': '最小',
   'markdownTable.selection.max': '最大',
-  'markdownTable.copyTsv': '复制 TSV',
-  'markdownTable.copyTsvHint': '复制为 TSV，可粘贴到 Excel 等表格应用',
-  'markdownTable.copyVisible': '复制表格',
+  'markdownTable.copyTsv': '复制文本',
+  'markdownTable.copyTsvHint': '复制文本，可粘贴到 Excel 等表格应用',
+  'markdownTable.copyVisible': '复制',
+  'markdownTable.copyMarkdown': '复制 Markdown',
   'markdownTable.customColumns': '自定义列',
   'markdownTable.customColumns.tableSection': '显示在表格列的信息',
   'markdownTable.customColumns.detailSection': '显示在折叠面板的信息',
@@ -7942,6 +7944,8 @@ const ZH: Messages = {
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
+  'message.moreActions': '更多操作',
+  ...MESSAGE_DELETION_MESSAGES_ZH,
   'userMessage.editSubmit': '发送',
   'userMessage.editSending': '发送中…',
   'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
