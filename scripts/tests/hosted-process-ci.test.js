@@ -475,9 +475,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (169 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (173 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 259, 272],
+    ['hosted-harness-mysql', 263, 276],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -699,7 +699,7 @@ describe('Hosted real-process gates', () => {
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(9493);
+        expect(forkSeconds).toBe(9765);
       }
     },
   );
@@ -773,7 +773,7 @@ describe('Hosted real-process gates', () => {
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 8893;
+  const hostedForkHealthySeconds = 9165;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -847,6 +847,7 @@ describe('Hosted real-process gates', () => {
       'HostedHookReplyLossFaultGatesIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
+      'HostedMcpResultDeliveryIT',
       'HostedMcpStoreFaultGatesIT',
       'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',
@@ -909,6 +910,27 @@ describe('Hosted real-process gates', () => {
       // so pin the guard itself, not the exact `await().failFast` prefix.
       expect(read(hostedTestPath(className))).toContain(
         '.failFast("The case\'s @Timeout interrupted it"',
+      );
+    },
+  );
+
+  // Awaitility replaces, rather than composes, the exception predicate each
+  // ignore* call installs. A helper that polls a child JVM's readiness must
+  // therefore keep ConnectException in the same predicate as the deadlock it
+  // newly ignores, or the first refused connection aborts the case.
+  it.each(['HostedExtensionsIT', 'HostedHookFaultGatesIT'])(
+    'keeps %s waiting through a refused connection and a deadlock',
+    (className) => {
+      const chain = hostedTestSource(className).match(
+        /await\(\)[\s\S]*?\.untilAsserted\(/,
+      );
+      expect(chain, className).not.toBeNull();
+      expect(chain[0], className).toContain('.ignoreExceptionsMatching(');
+      expect(chain[0], className).toContain(
+        'e instanceof java.net.ConnectException',
+      );
+      expect(chain[0], className).toContain(
+        'e instanceof CannotAcquireLockException',
       );
     },
   );

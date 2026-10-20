@@ -863,6 +863,12 @@ export interface DaemonTurnErrorData {
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
   loopType?: string;
+  /** Which cause stopped the turn when `loopType` covers several. */
+  loopReason?: string;
+  /** For `turn_tool_call_cap`: calls counted when the cap fired. */
+  toolCallCount?: number;
+  /** For `turn_tool_call_cap`: the limit that applied. */
+  toolCallLimit?: number;
   promptId?: string;
   [key: string]: unknown;
 }

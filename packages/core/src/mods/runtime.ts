@@ -215,10 +215,6 @@ export class ModRuntime {
     next: ModToolNext,
     signal: AbortSignal,
   ): Promise<ModToolResult> {
-    if (this.surface === 'terminal')
-      throw new Error(
-        'Mod tool middleware is not supported in terminal sessions.',
-      );
     if (this.tool || this.pending)
       throw new Error('A Mod dispatch is already running.');
     const owner: NonNullable<ModRuntime['tool']> = {
