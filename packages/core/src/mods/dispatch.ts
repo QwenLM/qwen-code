@@ -141,6 +141,7 @@ export interface ModInvocation {
   plugin: number;
   event: ModEvent;
   input: ModInput;
+  toNativeInput: (input: ModInput) => ModInput;
   origin: ModOrigin;
   frames: ModFrame[];
   budget: ModBudget;

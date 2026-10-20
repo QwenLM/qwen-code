@@ -30,19 +30,30 @@ import {
   isChildSessionRun,
   parseChildRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { MANAGED_CHILD_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import { MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
+  assertManagedSessionDomainEnabled,
   ManagedSessionRecordError,
   type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { sanitizeName } from '@qwen-code/qwen-code-core/agents/team/teamHelpers.js';
 import {
   type HostedChildAgentSession,
   type HostedChildAgentStore,
 } from './hosted-child-agent-session.js';
-import type { HostedSessionLineage } from './hosted-session-message-session.js';
 import {
+  memberMessageContent,
+  type HostedSessionLineage,
+} from './hosted-session-message-session.js';
+import {
+  HOSTED_BROADCAST_POSITIONS,
+  HOSTED_MEMBER_MESSAGE_IN_FLIGHT,
+  HOSTED_MEMBER_MESSAGE_PER_RUN,
   HostedChildChains,
   hostedMemberView,
   hostedOpenTeamChainMember,
+  memberMessageId,
 } from './hosted-member-chain.js';
 import {
   HostedTeamRefusal,
@@ -78,17 +89,22 @@ export const SESSION_COMMAND_LEADER_UNANSWERING_TEXT =
  */
 export function sessionCommandEvidenceText(
   state: 'planned' | 'accepting' | 'rejected' | 'cancelled' | 'unknown',
+  kind: SessionCommandKind = 'board_write',
 ): string {
   switch (state) {
     case 'planned':
       return 'The leader did not take the command before the wait ended; it was not sent and nothing happened. Send it again in a fresh turn.';
     case 'accepting':
+      if (kind === 'member_message')
+        return 'The message reached the leader, but its reply did not arrive in time; some recipients may already have it or get it later. Do not send it again; end your turn and say so in your result.';
       return 'The command reached the leader, but its reply did not arrive in time; a write may have taken effect. End your turn and say so in your result; read the board again before repeating the write.';
     case 'rejected':
       return 'The leader rejected the command; it was not run.';
     case 'cancelled':
       return 'The command was cancelled before it ran; it never left.';
     default:
+      if (kind === 'member_message')
+        return "The message's outcome is unknown; some recipients may already have it or get it later. Do not send it again.";
       return "The command's outcome is unknown; the leader may have run it and a write may have taken effect. Read the board again before repeating the write.";
   }
 }
@@ -113,19 +129,42 @@ function digest(record: unknown): string {
 }
 
 /**
- * A reply is at most 64 KiB as stored JSON; a longer task list or board
- * answer is shortened with a marker rather than refused. Leaves enough
- * headroom for the reply's own `outcome`/`text` envelope.
+ * A reply is at most 64 KiB AS STORED — the receipt commits the
+ * JSON.stringify of its outcome-and-text envelope, so the cut is
+ * measured on the escape-hungry serialized form, never on the raw text:
+ * a lone `\` costs one byte raw and two in JSON, and control characters
+ * gain even more. The marker itself joins the budget, and the loop
+ * floor (an empty head) always fits.
  */
 function cutCommandReplyText(text: string): string {
-  const cap = MANAGED_SESSION_COMMAND_LIMITS.maxReplyBytes - 512;
-  if (Buffer.byteLength(text, 'utf8') <= cap) return text;
+  const max = MANAGED_SESSION_COMMAND_LIMITS.maxReplyBytes;
+  const envelopeOf = (candidate: string): number =>
+    Buffer.byteLength(
+      JSON.stringify({ outcome: 'answered', text: candidate }),
+      'utf8',
+    );
+  if (envelopeOf(text) <= max) return text;
   const marker = '\n… (the reply grew past its size limit and was cut)';
-  const budget = cap - Buffer.byteLength(marker, 'utf8');
-  const cut = new TextDecoder()
-    .decode(Buffer.from(text, 'utf8').subarray(0, budget))
-    .replace(/\uFFFD+$/, '');
-  return cut + marker;
+  // The escape ratio of the untried text estimates the raw budget; an
+  // escaping tail can overshoot it, so each pass re-measures the
+  // serialized envelope and shrinks until it fits. The estimate lands
+  // inside on the first pass for anything but an all-escape tail.
+  let budget = Math.max(
+    0,
+    Math.floor((Buffer.byteLength(text, 'utf8') * max) / envelopeOf(text)),
+  );
+  for (;;) {
+    const head =
+      budget > 0
+        ? new TextDecoder()
+            .decode(Buffer.from(text, 'utf8').subarray(0, budget))
+            .replace(/\uFFFD+$/, '')
+        : '';
+    const candidate = head + marker;
+    if (envelopeOf(candidate) <= max) return candidate;
+    const overshoot = envelopeOf(candidate) - max;
+    budget = Math.max(0, budget - Math.ceil(overshoot / 2) - 1);
+  }
 }
 
 export class HostedSessionCommandSession {
@@ -214,6 +253,7 @@ export class HostedSessionCommandSession {
       );
     }
     await this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const sent = this.command(params.commandId);
       if (sent !== undefined) {
         if (
@@ -231,6 +271,25 @@ export class HostedSessionCommandSession {
         throw new ManagedSessionRecordError(
           'This Session is closing and takes no more commands.',
         );
+      }
+      if (params.kind === 'plan_submit') {
+        for (const prior of this.commands()) {
+          if (
+            prior.direction !== 'outbound' ||
+            prior.kind !== 'plan_submit' ||
+            prior.childRunId !== lineage.parentChildRunId
+          )
+            continue;
+          const state = prior.run.delivery?.state;
+          if (state === 'cancelled' || state === 'rejected') continue;
+          if (state === 'accepted' || state === 'consumed') {
+            const reply = await this.readReply(prior.commandId);
+            if (reply?.outcome === 'refused') continue;
+          }
+          throw new ManagedSessionRecordError(
+            'This run already submitted a plan whose acceptance is confirmed or unresolved; end your turn and wait for the leader.',
+          );
+        }
       }
       const volume = this.commands().filter(
         (command) =>
@@ -302,6 +361,7 @@ export class HostedSessionCommandSession {
     }
     const replyDigest = createHash('sha256').update(replyBytes).digest('hex');
     await this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const existing = this.store.authority.extensionRecord(
         'session_command',
         commandId,
@@ -415,6 +475,7 @@ export class HostedSessionCommandSession {
     readonly reply: SessionCommandReply;
   }): Promise<void> {
     await this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const existing = this.command(params.commandId);
       if (existing !== undefined) {
         if (
@@ -486,8 +547,10 @@ export class HostedSessionCommandSession {
    *
    * A board read commits no receipt: it changes nothing and a re-run may
    * answer a newer board. A board write commits its receipt under the
-   * same commandId, refused replies included. `member_message` and
-   * `plan_submit` belong to later batches and are refused deterministically.
+   * same commandId, refused replies included. A `member_message` rides
+   * decision 8's sends through the same three steps, its receipt
+   * committed like a write; `plan_submit` (b3d) is refused
+   * deterministically.
    */
   async execute(
     teams: HostedTeamSession,
@@ -542,12 +605,48 @@ export class HostedSessionCommandSession {
       }
       return reply;
     };
-    if (params.kind === 'member_message' || params.kind === 'plan_submit') {
-      return receipt(
-        refusedCommandReply(
-          'This team command is not accepted yet: members cannot send it to their leader.',
-        ),
-      );
+    if (params.kind === 'plan_submit') {
+      try {
+        if (teams.plan(params.commandId) === undefined)
+          assertManagedSessionDomainEnabled('team_plan');
+      } catch (cause) {
+        if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+        if (teams.supersededPlan(params.commandId) !== undefined)
+          throw new SessionCommandBlockedError(
+            'Plan submission partially committed; recovery awaits team_plan enablement.',
+          );
+        return receipt(
+          refusedCommandReply(
+            'This team command is not accepted yet: members cannot send it to their leader.',
+          ),
+        );
+      }
+      if (
+        Object.keys(params.args).some((key) => key !== 'plan') ||
+        typeof params.args['plan'] !== 'string' ||
+        !params.args['plan'].trim()
+      )
+        return receipt(
+          refusedCommandReply('Plan submission requires only a nonempty plan.'),
+        );
+      try {
+        const text = await teams.submitPlan(
+          params.commandId,
+          params.childRunId,
+          params.args['plan'],
+        );
+        return receipt(answeredCommandReply(cutCommandReplyText(text)));
+      } catch (cause) {
+        if (cause instanceof HostedTeamRefusal) {
+          return receipt(
+            refusedCommandReply(cutCommandReplyText(cause.message)),
+          );
+        }
+        throw cause;
+      }
+    }
+    if (params.kind === 'member_message') {
+      return this.executeMemberMessage(params, receipt);
     }
     const chains = new HostedChildChains(
       this.store.authority.extensionRecordsInDomain('child_run'),
@@ -633,11 +732,204 @@ export class HostedSessionCommandSession {
     }
   }
 
+  /**
+   * Decision 8 (b3c): the lead's execution of a member's message. A
+   * re-run answers the committed receipt first (the `execute` caller's
+   * `existingReply` arm); without one, the messages the earlier runs of
+   * this command already committed — the `msgc_` entry of each roster
+   * position — are probed, so a recipient reached before the cut is
+   * reported as reached and is never sent twice. A first run gates the
+   * sender exactly like the board commands do; with sends already
+   * committed the remaining ones go out as decision 8 says, whatever the
+   * sender's own chain did since.
+   */
+  private async executeMemberMessage(
+    params: {
+      readonly commandId: string;
+      readonly childRunId: string;
+      readonly senderSessionId: string;
+      readonly args: Record<string, unknown>;
+    },
+    receipt: (reply: SessionCommandReply) => Promise<SessionCommandReply>,
+  ): Promise<SessionCommandReply> {
+    const leadSessionId = this.key.sessionId;
+    // Every early refusal is cut as a body would be: `maxArgsBytes` and
+    // `maxReplyBytes` are both 64 KiB, so an interpolating refusal must
+    // never outgrow what a receipt can hold (R1-1).
+    const refused = (text: string): Promise<SessionCommandReply> =>
+      receipt(refusedCommandReply(cutCommandReplyText(text)));
+    const messageIdOf = (position: number): string =>
+      memberMessageId({ leadSessionId, commandId: params.commandId, position });
+    const committed = new Set<number>();
+    for (
+      let position = 1;
+      position <= HOSTED_BROADCAST_POSITIONS;
+      position += 1
+    ) {
+      if (
+        this.store.authority.extensionRecord(
+          'session_message',
+          messageIdOf(position),
+        ) !== undefined
+      ) {
+        committed.add(position);
+      }
+    }
+    const chains = new HostedChildChains(
+      this.store.authority.extensionRecordsInDomain('child_run'),
+    );
+    const membership = hostedOpenTeamChainMember(
+      this.store.authority.extensionRecordsInDomain('team_state'),
+      chains,
+      params.childRunId,
+    );
+    if (membership === undefined) {
+      if (committed.size === 0) {
+        return refused('This Session is not a member of an open team.');
+      }
+      return receipt(
+        answeredCommandReply(
+          `The message was sent to ${committed.size} member${committed.size === 1 ? '' : 's'} before its team changed; nothing more was sent.`,
+        ),
+      );
+    }
+    const view = hostedMemberView(chains, membership.rootChildRunId);
+    const runsNow =
+      view.head?.childRunId === params.childRunId &&
+      view.state === 'running' &&
+      !view.stopping;
+    if (committed.size === 0 && !runsNow) {
+      return refused(
+        'Your run has ended or is being stopped; it takes no more team commands.',
+      );
+    }
+    const senderName = membership.name;
+    const team = membership.team;
+    const to = params.args['to'];
+    const text = params.args['message'];
+    if (
+      typeof to !== 'string' ||
+      to.trim() === '' ||
+      typeof text !== 'string' ||
+      text.trim() === ''
+    ) {
+      return refused('A member message takes a nonempty "to" and "message".');
+    }
+    const content = Buffer.from(memberMessageContent(senderName, text), 'utf8');
+    if (content.byteLength > MANAGED_CHILD_LIMITS.maxEnvelopeBytes) {
+      return refused(
+        `Message exceeds what a member message can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes with its member-message header.`,
+      );
+    }
+    const address = to.trim();
+    const recipients: Array<{
+      readonly name: string;
+      readonly rootChildRunId: string;
+      readonly position: number;
+    }> = [];
+    if (address === '*') {
+      for (const [index, member] of team.members.entries()) {
+        if (member.name !== senderName) {
+          recipients.push({
+            name: member.name,
+            rootChildRunId: member.childRunId,
+            position: index + 1,
+          });
+        }
+      }
+      if (recipients.length === 0) {
+        return refused(`Team "${team.name}" has no other members to message.`);
+      }
+    } else {
+      const named = sanitizeName(address);
+      if (named === '') {
+        return refused(
+          `Address "${address}" sanitizes to an empty string; name a member of the team, or "*".`,
+        );
+      }
+      if (named === senderName) {
+        return refused('A member cannot send a message to itself.');
+      }
+      const index = team.members.findIndex((member) => member.name === named);
+      if (index < 0) {
+        return refused(
+          `"${address}" is not a member of team "${team.name}". Members: ${team.members.map((each) => each.name).join(', ')}.`,
+        );
+      }
+      const member = team.members[index]!;
+      recipients.push({
+        name: member.name,
+        rootChildRunId: member.childRunId,
+        position: index + 1,
+      });
+    }
+    const notReachedText: Record<
+      | 'finished'
+      | 'ended'
+      | 'stopping'
+      | 'budget_exhausted'
+      | 'count_limit'
+      | 'member_budget'
+      | 'member_count_limit'
+      | 'completed_after_stop',
+      string
+    > = {
+      finished:
+        'it has finished; the leader may give it more work, a peer cannot.',
+      ended: 'it has ended.',
+      stopping: 'it is being stopped.',
+      budget_exhausted: `it has received its ${MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS.maxPerRun} messages (budget_exhausted).`,
+      count_limit: `it has ${MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS.maxInFlightPerRun} messages still on their way to it (count_limit); wait for them to arrive.`,
+      member_budget: `it has received the ${HOSTED_MEMBER_MESSAGE_PER_RUN} member messages one run may hold (budget_exhausted).`,
+      member_count_limit: `it has ${HOSTED_MEMBER_MESSAGE_IN_FLIGHT} member messages still on their way (count_limit); wait for them to arrive.`,
+      completed_after_stop:
+        'it completed after a stop was requested; for more work, the leader can launch a new member under a new name — a peer cannot reach it.',
+    };
+    const lines: string[] = [];
+    let sent = 0;
+    for (const recipient of recipients) {
+      if (committed.has(recipient.position)) {
+        sent += 1;
+        lines.push(`- ${recipient.name}: sent.`);
+        continue;
+      }
+      const route = await this.children.sendToRunningMember({
+        rootChildRunId: recipient.rootChildRunId,
+        content,
+        messageId: messageIdOf(recipient.position),
+        executionCallId: params.commandId,
+      });
+      if (route.kind === 'sent') {
+        sent += 1;
+        lines.push(`- ${recipient.name}: sent.`);
+      } else {
+        lines.push(
+          `- ${recipient.name}: not reached: ${notReachedText[route.reason]}`,
+        );
+      }
+    }
+    const heading =
+      recipients.length === 1
+        ? sent === 1
+          ? `Message sent to ${recipients[0]!.name}.`
+          : 'The message was not sent:'
+        : sent === recipients.length
+          ? `Message sent to every other member of team "${team.name}".`
+          : sent === 0
+            ? `The message reached no member of team "${team.name}":`
+            : `Message sent to ${sent} of ${recipients.length} other members of team "${team.name}":`;
+    const body = cutCommandReplyText(`${heading}\n${lines.join('\n')}`);
+    return receipt(
+      sent === 0 ? refusedCommandReply(body) : answeredCommandReply(body),
+    );
+  }
+
   private revise(
     commandId: string,
     step: (previous: SessionCommand) => SessionCommand,
   ): Promise<void> {
     return this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const existing = this.store.authority.extensionRecord(
         'session_command',
         commandId,

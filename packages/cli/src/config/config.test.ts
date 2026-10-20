@@ -1459,6 +1459,83 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
+  it('H03 forwards only an explicitly supplied workflow ancestor provider', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    await loadCliConfig({}, argv);
+    expect(
+      mockConfigConstructorParams.mock.lastCall?.[0]
+        .workflowAncestorTrustProvider,
+    ).toBeUndefined();
+    const provider = vi.fn(async (dirs: readonly string[]) =>
+      dirs.map(() => true),
+    );
+    await loadCliConfig(
+      {},
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { workflowAncestorTrustProvider: provider },
+    );
+    expect(mockConfigConstructorParams.mock.lastCall?.[0]).toHaveProperty(
+      'workflowAncestorTrustProvider',
+      provider,
+    );
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
+    'H03 strips a supplied ancestor provider from %s sessions',
+    async (kind) => {
+      process.argv = [
+        'node',
+        'script.js',
+        ...(kind === 'bare' ? ['--bare'] : []),
+        ...(kind === 'safe' ? ['--safe-mode'] : []),
+      ];
+      if (kind === 'ssh') {
+        sshWorkspaceProbe.mockReturnValueOnce({
+          host: 'host',
+          port: 2222,
+          directory: '/srv/project',
+        });
+      }
+      const provider = vi.fn(async (dirs: readonly string[]) =>
+        dirs.map(() => true),
+      );
+      await loadCliConfig(
+        {},
+        await parseArguments(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          workflowAncestorTrustProvider: provider,
+          ...(kind === 'agent-host'
+            ? { agentHostReadOnly: true as const }
+            : {}),
+          ...(kind === 'provisional'
+            ? { provisionalWorkspace: true as const }
+            : {}),
+        },
+      );
+      expect(
+        mockConfigConstructorParams.mock.lastCall?.[0]
+          .workflowAncestorTrustProvider,
+      ).toBeUndefined();
+      expect(provider).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([undefined, 'workspace', 'project'] as const)(
     'registers bundled Mem0 read-only over repository MCP configuration: %s',
     async (scope) => {
@@ -3219,6 +3296,32 @@ describe('loadCliConfig', () => {
     },
   );
 
+  it('leaves a Managed transcript to a Managed host on resume', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    mockSessionServiceInstance.loadSession.mockResolvedValue({
+      conversation: { sessionId, messages: [] },
+    });
+    mockSessionServiceInstance.assertLegacySessionExecution.mockClear();
+
+    await loadCliConfig(
+      {},
+      { resume: sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { executionEngine: 'managed' },
+    );
+
+    expect(
+      mockSessionServiceInstance.assertLegacySessionExecution,
+    ).not.toHaveBeenCalled();
+    expect(mockConfigConstructorParams).toHaveBeenCalled();
+  });
+
   it('rebinds a selective restore projection to the forked session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const projectionSource = vi.fn(async (sessionId: string) => ({
@@ -4914,6 +5017,108 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
     expect(config.isMcpServerDisabled('server1')).toBe(true);
     expect(config.isMcpServerDisabled('server2')).toBe(true);
     expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should exclude exactly the named server via --disable-mcp-server', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server1'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    // Exclusion is a disabled-status flag, not removal from the server map —
+    // the same contract as settings.mcp.excluded above.
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+      server3: { url: 'http://localhost:8082' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should exclude multiple servers with repeated --disable-mcp-server flags', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--disable-mcp-server',
+      'server1',
+      '--disable-mcp-server',
+      'server2',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should union --disable-mcp-server with settings mcp.excluded', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server2'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      ...baseSettings,
+      mcp: { excluded: ['server1'] },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should disable nothing when --disable-mcp-server is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(false);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('should apply --disable-mcp-server alongside an allow-list (allow-then-deny)', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--allowed-mcp-server-names',
+      'server1,server2',
+      '--disable-mcp-server',
+      'server1',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    // The allow-list narrows the returned map; the disable flag still applies
+    // on top of it, so a server named by both ends up disabled.
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+  });
+
+  it('should still apply --disable-mcp-server under --safe-mode', async () => {
+    // Safe mode drops settings.mcpServers entirely (only top-tier session and
+    // `--mcp-config` servers survive), so these servers come from --mcp-config.
+    process.argv = [
+      'node',
+      'script.js',
+      '--safe-mode',
+      '--disable-mcp-server',
+      'cli-server-1',
+      '--mcp-config',
+      JSON.stringify({
+        mcpServers: {
+          'cli-server-1': { command: 'cmd-1' },
+          'cli-server-2': { command: 'cmd-2' },
+        },
+      }),
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getMcpServers()).toEqual({
+      'cli-server-1': { command: 'cmd-1' },
+      'cli-server-2': { command: 'cmd-2' },
+    });
+    expect(config.isMcpServerDisabled('cli-server-1')).toBe(true);
+    expect(config.isMcpServerDisabled('cli-server-2')).toBe(false);
   });
 
   it('should apply allowedMcpServers filter but excluded servers are still returned', async () => {

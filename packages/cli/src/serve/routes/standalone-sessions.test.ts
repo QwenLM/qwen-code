@@ -544,6 +544,7 @@ describe('standalone session routes', () => {
         sessionId,
         compactedReplay: [commandsEvent],
         liveJournal: [commandsEvent],
+        lifecycleReplay: [commandsEvent],
       } as never);
 
       const response = await request(app)
@@ -551,7 +552,11 @@ describe('standalone session routes', () => {
         .send({});
 
       expect(response.status).toBe(200);
-      for (const replayKey of ['compactedReplay', 'liveJournal'] as const) {
+      for (const replayKey of [
+        'compactedReplay',
+        'liveJournal',
+        'lifecycleReplay',
+      ] as const) {
         expect(
           response.body[replayKey][0].data.update.availableCommands.map(
             (command: { name: string }) => command.name,

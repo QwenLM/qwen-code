@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import { EventBus } from './eventBus.js';
+import { createTranscriptExecutionLifecycleUpdate } from './transcript-replay.js';
 import type { BridgeEvent } from './eventBus.js';
 
 function makeTextChunk(id: number, text: string): BridgeEvent {
@@ -281,6 +282,51 @@ describe('TurnBoundaryCompactionEngine', () => {
         ),
     ).toEqual(['tool_call_update', 'tool_call_update']);
   });
+
+  it.each([undefined, 'parent-tool'])(
+    'preserves request lifecycle frames after a turn completes (parent=%s)',
+    (parentToolCallId) => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const frames: BridgeEvent[] = [];
+      for (const executionId of ['attempt-1', 'attempt-2']) {
+        for (const phase of ['started', 'ended'] as const) {
+          frames.push({
+            v: 1,
+            id: frames.length + 1,
+            type: 'session_update',
+            data: {
+              update: createTranscriptExecutionLifecycleUpdate(
+                {
+                  v: 1,
+                  kind: 'request',
+                  sessionId: 'session',
+                  promptId: 'prompt',
+                  executionId,
+                  model: 'model',
+                  startedAt: 100,
+                  ...(phase === 'started'
+                    ? { phase }
+                    : {
+                        phase,
+                        endedAt: 110,
+                        durationMs: 10,
+                        outcome: 'success',
+                      }),
+                },
+                { extra: { parentToolCallId } },
+              ),
+            },
+          });
+        }
+      }
+      frames.forEach((frame) => engine.ingest(frame));
+      engine.ingest(makeTextChunk(5, 'answer'));
+      engine.ingest(makeTurnComplete(6));
+      const snapshot = engine.snapshot();
+      expect(snapshot.compactedTurns.slice(0, 4)).toEqual(frames);
+      expect(snapshot.liveJournal).toEqual([]);
+    },
+  );
 
   describe('basic compaction', () => {
     it('merges consecutive text chunks into a single event on turn_complete', () => {

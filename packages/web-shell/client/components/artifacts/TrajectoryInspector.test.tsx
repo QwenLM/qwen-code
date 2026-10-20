@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
@@ -395,3 +395,220 @@ it('displays and copies a request execution ID', async () => {
   await click(container, 'Copy displayed content');
   expect(writeText.mock.lastCall?.[0]).toContain('Execution ID: execution-1');
 });
+
+it('shows execution status and outcome separately and copies metadata without output tabs', async () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounts.push(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <TrajectoryInspector
+          execution={{
+            key: 'execution',
+            name: 'shell',
+            status: 'success',
+            startedAt: 100,
+            endedAt: 500,
+            durationMs: 123,
+            entry: {
+              status: 'success',
+              conflicted: false,
+              event: {
+                v: 1,
+                kind: 'tool',
+                phase: 'ended',
+                executionId: 'execution',
+                sessionId: 's',
+                callId: 'call',
+                toolName: 'shell',
+                executionStatus: 'success',
+                outcome: 'cancelled',
+                startedAt: 100,
+                endedAt: 500,
+                executionDurationMs: 123,
+              },
+            },
+          }}
+          title="shell"
+          hiddenByRange={false}
+          hiddenByCollapse={false}
+          onReveal={() => {}}
+          onClearRange={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>,
+    ),
+  );
+  expect(container.textContent).toContain('Execution status');
+  expect(container.textContent).toContain('Final outcome');
+  expect(container.textContent).toContain('cancelled');
+  const buttons = Array.from(container.querySelectorAll('button')).map(
+    (button) => button.textContent,
+  );
+  expect(buttons).not.toContain('Input');
+  expect(buttons).not.toContain('Output');
+  await click(container, 'Copy displayed content');
+  expect(writeText).toHaveBeenCalledWith(
+    expect.stringContaining('Execution status: success'),
+  );
+  expect(writeText).toHaveBeenCalledWith(
+    expect.stringContaining('Final outcome: cancelled'),
+  );
+  await click(container, 'Metrics');
+  expect(container.textContent).toContain('123ms');
+});
+
+it.each(['en', 'zh-CN'] as const)(
+  'keeps execution status tones across success and error updates in %s',
+  async (language) => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounts.push(() => {
+      act(() => root.unmount());
+      container.remove();
+    });
+    for (const status of ['success', 'error'] as const) {
+      await act(async () =>
+        root.render(
+          <I18nProvider language={language}>
+            <TrajectoryInspector
+              execution={{
+                key: 'same-execution',
+                name: 'model',
+                status,
+                entry: {
+                  status,
+                  conflicted: false,
+                  event: {
+                    v: 1,
+                    kind: 'request',
+                    phase: 'ended',
+                    executionId: 'same-execution',
+                    sessionId: 's',
+                    promptId: 'p',
+                    model: 'model',
+                    startedAt: 10,
+                    endedAt: 20,
+                    durationMs: 10,
+                    outcome: status,
+                  },
+                },
+              }}
+              hiddenByRange={false}
+              hiddenByCollapse={false}
+              onReveal={() => {}}
+              onClearRange={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      const value = container.querySelector(`[data-tone="${status}"] pre`);
+      const labels =
+        language === 'en'
+          ? { success: 'Succeeded', error: 'Failed' }
+          : { success: '成功', error: '失败' };
+      expect(value?.textContent).toBe(labels[status]);
+    }
+  },
+);
+
+it.each([false, true])(
+  'restores only after actual removal, using the latest callback (shadow=%s)',
+  async (shadow) => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const container = document.createElement('div');
+    (shadow ? host.attachShadow({ mode: 'open' }) : host).append(container);
+    const root = createRoot(container);
+    const first = vi.fn();
+    const latest = vi.fn();
+    mounts.push(() => {
+      act(() => root.unmount());
+      host.remove();
+    });
+    const render = async (callback: () => void) => {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <TrajectoryInspector
+                row={tool({}, 'output')}
+                hiddenByCollapse={false}
+                hiddenByRange={false}
+                onReveal={() => {}}
+                onClearRange={() => {}}
+                onClose={() => {}}
+                onFocusedUnmount={callback}
+              />
+            </I18nProvider>
+          </StrictMode>,
+        );
+      });
+    };
+    await render(first);
+    expect(first).not.toHaveBeenCalled();
+    const button = container.querySelector<HTMLButtonElement>('button')!;
+    button.focus();
+    await render(latest);
+    expect(first).not.toHaveBeenCalled();
+    expect(latest).not.toHaveBeenCalled();
+    expect(
+      (container.getRootNode() as Document | ShadowRoot).activeElement,
+    ).toBe(button);
+    await act(async () => root.render(null));
+    expect(first).not.toHaveBeenCalled();
+    expect(latest).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each([false, true])(
+  'does not restore if another control gains focus before recovery (shadow=%s)',
+  async (shadow) => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const container = document.createElement('div');
+    (shadow ? host.attachShadow({ mode: 'open' }) : host).append(container);
+    const root = createRoot(container);
+    const fallback = vi.fn();
+    mounts.push(() => {
+      act(() => root.unmount());
+      host.remove();
+    });
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <TrajectoryInspector
+            row={tool({}, 'output')}
+            hiddenByCollapse={false}
+            hiddenByRange={false}
+            onReveal={() => {}}
+            onClearRange={() => {}}
+            onClose={() => {}}
+            onFocusedUnmount={fallback}
+          />
+        </I18nProvider>,
+      ),
+    );
+    const other = document.createElement('button');
+    container.after(other);
+    act(() => root.render(null));
+    other.focus();
+    await act(async () => {});
+    expect(fallback).not.toHaveBeenCalled();
+    expect(
+      (container.getRootNode() as Document | ShadowRoot).activeElement,
+    ).toBe(other);
+  },
+);

@@ -10,6 +10,8 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
+import { ToolNames } from '../tools/tool-names.js';
+import type { AnyDeclarativeTool } from '../tools/tools.js';
 import { record, validateResult } from './dispatch.js';
 import type {
   ModToolCallInput,
@@ -21,6 +23,7 @@ import {
   MOD_END_TIMEOUT_MS,
   MOD_MAX_BYTES,
   type ModCommand,
+  type ModCommandPresentation,
   type ModLog,
   type ModReply,
   type ModRequest,
@@ -28,6 +31,10 @@ import {
   type ModOptions,
   type ModPlugin,
 } from './types.js';
+
+type ModToolResolver = (
+  name: string,
+) => Promise<AnyDeclarativeTool | undefined>;
 
 function workerEntry(): URL | string {
   if (import.meta.url.endsWith('.ts')) {
@@ -67,14 +74,16 @@ export class ModRuntime {
 
   private constructor(
     private readonly log: (entry: ModLog, plugin: string) => void,
+    private readonly resolveTool?: ModToolResolver,
+    private readonly surface: 'terminal' | null = null,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
       stderr: true,
       workerData: this.cancelled.buffer,
     });
-    this.worker.stdout.resume();
-    this.worker.stderr.resume();
+    this.worker.stdout?.resume();
+    this.worker.stderr?.resume();
     this.worker.on('message', (reply: ModReply) => {
       if (reply.type === 'host-call') this.executeHost(reply);
       else if (reply.type === 'host-cancel') {
@@ -118,16 +127,24 @@ export class ModRuntime {
     cwd: string,
     log: (entry: ModLog, plugin: string) => void,
     signal: AbortSignal,
+    resolveTool?: ModToolResolver,
+    surface: 'terminal' | null = null,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
       new Set(plugins.map((p) => p.id)).size !== plugins.length
     )
       throw new Error('Invalid Mod plugin group.');
-    const runtime = new ModRuntime(log);
+    const runtime = new ModRuntime(
+      log,
+      plugins.some((plugin) => plugin.toolDialect === 'claude')
+        ? resolveTool
+        : undefined,
+      surface,
+    );
     try {
       const result = await runtime.request(
-        { type: 'load', plugins, cwd },
+        { type: 'load', plugins, cwd, surface },
         signal,
         60_000,
       );
@@ -168,6 +185,31 @@ export class ModRuntime {
     return this.tools;
   }
 
+  private async builtinTool(name: string): Promise<string | undefined> {
+    if (!this.resolveTool) return undefined;
+    let builtin = false;
+    switch (name) {
+      case ToolNames.SHELL:
+        builtin =
+          (await this.resolveTool(name)) instanceof
+          (await import('../tools/shell.js')).ShellTool;
+        break;
+      case ToolNames.EDIT:
+        builtin =
+          (await this.resolveTool(name)) instanceof
+          (await import('../tools/edit.js')).EditTool;
+        break;
+      case ToolNames.WRITE_FILE:
+        builtin =
+          (await this.resolveTool(name)) instanceof
+          (await import('../tools/write-file.js')).WriteFileTool;
+        break;
+      default:
+        return undefined;
+    }
+    return builtin ? name : undefined;
+  }
+
   async runTool(
     input: ModToolCallInput,
     next: ModToolNext,
@@ -184,8 +226,9 @@ export class ModRuntime {
     };
     this.tool = owner;
     try {
+      const builtinTool = await this.builtinTool(input.tool);
       const result = await this.request(
-        { type: 'tool', input },
+        { type: 'tool', input, builtinTool },
         AbortSignal.any([signal, owner.controller.signal]),
       );
       validateResult('tool.call', result);
@@ -289,11 +332,19 @@ export class ModRuntime {
     command: string,
     args: string,
     signal: AbortSignal,
+    presentation?: ModCommandPresentation,
   ): Promise<string> {
     if (!this.commands.some((item) => item.name === command))
       throw new Error('Unknown Mod command.');
     const result = await this.request(
-      { type: 'command', command, args },
+      {
+        type: 'command',
+        command,
+        args,
+        ...(this.surface === 'terminal' && presentation
+          ? { presentation }
+          : {}),
+      },
       signal,
     );
     if (

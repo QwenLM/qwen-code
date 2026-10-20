@@ -185,24 +185,42 @@ export function assertManagedSessionScheduleSessionModeEnabled(
 }
 
 /**
- * The `child_run` body kinds a caller may actually submit today (H4b).
- * `child_run` carries its capabilities with independent enablement gates —
- * H3's background Shell, H4's child agent, and the workflow kind (#13803)
- * — so it never joins the plain enabled list as a whole. H4b admitted
- * `child_agent`; the shell kind joined once H3's hold semantics and
- * physical acceptance landed (#13856). The Java store validates every
- * kind ahead of any writer, keeping the server-first order H1/H2 used.
+ * The `child_run` body kinds a caller may actually submit today.
+ * `child_run` carries three capabilities with independent enablement gates
+ * — H3's background Shell, H4's child agent and H4's workflow — so it never
+ * joins the plain enabled list as a whole. H4b admitted `child_agent`; the
+ * shell kind joined once H3's hold semantics and physical acceptance landed
+ * (#13856); the workflow kind joined with its runtime slice (#13803). The
+ * kind gate fires on every `child_run` revision commitment, so a kind joins
+ * this list only together with the runtime whose verbs commit its later
+ * revisions (relay, cascade, funnel). The Java store validates every kind
+ * ahead of any writer, keeping the server-first order H1/H2 used.
  */
 export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
   'child_agent',
   'shell',
+  'workflow',
 ] as const);
 
 /**
- * The `child_run` gate. This stands beside {@link
- * assertManagedSessionDomainEnabled} for that one domain: enablement is
- * decided per capability, and the body kind is the capability.
+ * The input sources a child run's completion notification carries — the
+ * child Session kinds of the gate above. A background `shell` run is not a
+ * child Session and never posts an acceptance notification, so it stays
+ * off this list. Consumers spread this constant instead of re-listing
+ * `'child_agent', 'workflow'` by hand.
  */
+export const CHILD_NOTIFICATION_SOURCES = Object.freeze([
+  'child_agent',
+  'workflow',
+] as const);
+
+/** True when an input's source names one of the child Session kinds. */
+export function isChildNotificationSource(source: unknown): boolean {
+  return (
+    typeof source === 'string' &&
+    (CHILD_NOTIFICATION_SOURCES as readonly string[]).includes(source)
+  );
+}
 export function assertManagedSessionChildRunKindEnabled(kind: string): void {
   if (
     !(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]).includes(
@@ -413,6 +431,36 @@ export class ManagedSessionWritesStoppedError extends ManagedSessionRecordError 
       `session log writes stopped after an earlier failure: ${cause.message}`,
     );
     this.name = 'ManagedSessionWritesStoppedError';
+  }
+}
+
+/**
+ * An append the journal could not observe: the transaction may or may not have
+ * committed. A journal that can prove the answer from its durable head keeps
+ * the attempt and answers `settleAppend`; until then the authority must not
+ * latch the log dead, because a lapsed writer lease is re-acquirable.
+ */
+export class ManagedSessionAppendUnsettledError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_append_unsettled';
+
+  constructor(readonly failure: Error) {
+    super(`session log append outcome is unknown: ${failure.message}`);
+    this.name = 'ManagedSessionAppendUnsettledError';
+  }
+}
+
+/**
+ * Settlement proved another writer owns this append position. Unlike an
+ * unknown outcome, this fence is permanent: the Session needs a takeover.
+ * It is typed so the Hosted routes classify it as a store-side fence rather
+ * than as a request-shape refusal.
+ */
+export class ManagedSessionJournalFencedError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_journal_fenced';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagedSessionJournalFencedError';
   }
 }
 
@@ -1879,6 +1927,19 @@ export function managedSessionEventsDigest(
     return fail('transaction identity exceeds the maximum encoded size.');
   }
   return createHash('sha256').update(encoded).digest('hex');
+}
+
+/**
+ * SHA-256 over the canonical JSON of one JSON value: the canonical form
+ * `managedSessionEventsDigest` applies to an event list, for a committed
+ * body that is not a journal event (the public event row a `public_event`
+ * envelope binds).
+ */
+export function managedSessionJsonDigest(value: unknown): string {
+  assertJsonValue(value, 'value', new Set<object>(), 0);
+  return createHash('sha256')
+    .update(canonicalManagedSessionJson(value))
+    .digest('hex');
 }
 
 function canonicalManagedSessionJson(value: ManagedSessionJsonValue): string {

@@ -38,7 +38,13 @@ import {
   type CliRenderer,
   type KeyEvent,
 } from '@opentui/core';
-import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
+import {
+  createRoot,
+  useKeyboard,
+  useTerminalDimensions,
+  useRenderer,
+} from '@opentui/react';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -123,6 +129,13 @@ function OpenTuiEntryApp({
   initialDialog,
 }: OpenTuiEntryAppProps) {
   const { width, height } = useTerminalDimensions();
+  const renderer = useRenderer();
+  useEffect(() => {
+    getInteractiveModSession(config)?.setPresentation({
+      isFullscreen: renderer.screenMode === 'alternate-screen',
+      columns: width,
+    });
+  }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
   const live = useOpenTuiLiveTurn({ config });
@@ -199,6 +212,9 @@ function OpenTuiEntryApp({
     for (const warning of startupWarnings) {
       applyEvent({ type: 'warning', text: warning });
     }
+    return getInteractiveModSession(config)?.subscribe((text) => {
+      applyEvent({ type: 'info', text });
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

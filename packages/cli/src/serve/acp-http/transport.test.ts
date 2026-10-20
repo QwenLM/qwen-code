@@ -582,6 +582,14 @@ class FakeBridge {
     this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
   }
+  async getSessionTaskRuntime(sessionId: string, taskId: string) {
+    return {
+      v: 1 as const,
+      sessionId,
+      taskId,
+      runtime: { outputTail: 'ready' },
+    };
+  }
   async getSessionAgentsStatus(sessionId: string) {
     return { sessionId, tasks: [] };
   }
@@ -1025,11 +1033,14 @@ async function* readSseRaw(
   }
 }
 
+// The frame budget starts at 15 s: a contended CI runner (many vitest
+// workers per CPU) stalls the event loop for seconds, and a 2 s budget
+// aborts healthy streams. Call sites that assert silence pass their own.
 /** Read the next N RAW data frames (with `id:` lines) from an SSE response. */
 async function takeRawFrames(
   res: Response,
   n: number,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<string[]> {
   const out: string[] = [];
   const ac = new AbortController();
@@ -1050,7 +1061,7 @@ async function takeRawFrames(
 async function takeFrames(
   res: Response,
   n: number,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<unknown[]> {
   const out: unknown[] = [];
   const ac = new AbortController();
@@ -1071,7 +1082,7 @@ function frameReader(res: Response) {
   const ac = new AbortController();
   const iterator = readSse(res, ac.signal)[Symbol.asyncIterator]();
   return {
-    async next(timeoutMs = 2000): Promise<unknown> {
+    async next(timeoutMs = 15_000): Promise<unknown> {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -1095,7 +1106,7 @@ function frameReader(res: Response) {
 
 async function waitUntil(
   predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 2000,
+  timeoutMs = 15_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -3971,6 +3982,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.id).toBe(141);
     expect(frame.error.code).toBe(-32602);
     expect(frame.error.message).toContain('resolveConflicts');
+  });
+
+  it('_qwen/sessions/archive rejects a non-boolean idle guard', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 144,
+      method: '_qwen/sessions/archive',
+      params: { sessionIds: ['session-1'], requireIdle: 'yes' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.id).toBe(144);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('requireIdle');
   });
 
   it('_qwen/sessions/unarchive returns per-id result buckets', async () => {
@@ -8562,7 +8594,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 2); // session/new reply + load reject
+    const reader = frameReader(connStream);
     await new Promise((r) => setTimeout(r, 50));
     // close is now in flight (awaiting closeGate) → sess-1 is "closing".
     void post(connId, {
@@ -8578,11 +8610,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/load',
       params: { sessionId: 'sess-1' },
     });
-    const frames = (await got) as Array<{
-      id: number;
-      error?: { code: number; message: string };
-    }>;
-    const loadReply = frames.find((f) => f.id === 301);
+    // The load reject is the only frame this stream is owed — the
+    // session/new reply rode the delivery stream newSession opened, and a
+    // replayed duplicate of it may or may not precede the reject. Read
+    // until the reject lands instead of counting frames.
+    let loadReply:
+      | { id: number; error?: { code: number; message: string } }
+      | undefined;
+    for (;;) {
+      const frame = (await reader.next()) as {
+        id: number;
+        error?: { code: number; message: string };
+      };
+      if (frame.id === 301) {
+        loadReply = frame;
+        break;
+      }
+    }
     // Transient server-side race → INTERNAL_ERROR (-32603), not INVALID_PARAMS.
     expect(loadReply?.error?.code).toBe(-32603); // "being closed; retry"
     expect(loadReply?.error?.message).toContain('being closed');
@@ -9245,6 +9289,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it.each([
+      { sessionId: 'sess-1', taskId: 'bg_1', owned: true, valid: true },
+      { sessionId: 'sess-1', taskId: '', owned: true, valid: false },
+      { sessionId: 'sess-1', taskId: 123, owned: true, valid: false },
+      {
+        sessionId: 'other-session',
+        taskId: 'bg_1',
+        owned: false,
+        valid: false,
+      },
+    ])(
+      '_qwen/session/task_runtime validates ownership and task id: $sessionId / $taskId',
+      async ({ sessionId, taskId, owned, valid }) => {
+        const read = vi.spyOn(bridge, 'getSessionTaskRuntime');
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/new',
+          params: {},
+        });
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 58,
+          method: '_qwen/session/task_runtime',
+          params: { sessionId, taskId },
+        });
+        const frames = await takeFrames(await streamRes, 2);
+        if (valid) {
+          expect(frames[1]).toMatchObject({
+            result: { sessionId, taskId, runtime: { outputTail: 'ready' } },
+          });
+          expect(read).toHaveBeenCalledWith(sessionId, taskId);
+        } else {
+          expect(frames[1]).toMatchObject({
+            error: {
+              code: -32602,
+              message: expect.stringContaining(owned ? 'taskId' : 'not owned'),
+            },
+          });
+          expect(read).not.toHaveBeenCalled();
+        }
+        read.mockRestore();
+      },
+    );
+
     it('_qwen/session/tasks/cancel forwards the task and trusted client context', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -9424,7 +9517,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         method: '_qwen/session/tasks',
         params: { sessionId: 'sess-1', includeWorkflows: true },
       });
-      const frames = await takeFrames(await streamRes, 7);
+      // Exactly the five replies this stream carries: session/new plus the
+      // four extension calls above — the session_update push rides the
+      // session stream, not this one.
+      const frames = await takeFrames(await streamRes, 5);
       const byId = new Map(
         frames
           .filter(

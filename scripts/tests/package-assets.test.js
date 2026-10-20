@@ -25,6 +25,7 @@ import {
 } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
 import { preparePackage } from '../prepare-package.js';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const realReadFileSync = fs.readFileSync;
 const realReaddirSync = fs.readdirSync;
@@ -569,12 +570,12 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than running into the other branch — a
-  // readable tree, stamped as usual — and failing red against the no-stamp
-  // assertion.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under
+  // test is unreachable there. The case skips rather than running into the
+  // other branch — a readable tree, stamped as usual — and failing red
+  // against the no-stamp assertion.
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses when a digest root exists but cannot be listed',
     () => {
       // The root-level arm of the unlistable-directory refusal: with the
@@ -1227,12 +1228,12 @@ describe('package asset scripts', () => {
     ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 50000 bytes/);
   });
 
-  it('enforces a 128 MiB default unpacked size budget', () => {
+  it('enforces a 160 MiB default unpacked size budget', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
     writeFile(rootDir, 'dist/chunks/large.bin', '');
     const largeFile = path.join(rootDir, 'dist', 'chunks', 'large.bin');
-    truncateSync(largeFile, 127 * 1024 * 1024);
+    truncateSync(largeFile, 159 * 1024 * 1024);
     stubConsole();
 
     expect(() =>
@@ -1242,7 +1243,7 @@ describe('package asset scripts', () => {
       }),
     ).not.toThrow();
 
-    truncateSync(largeFile, 128 * 1024 * 1024);
+    truncateSync(largeFile, 160 * 1024 * 1024);
 
     expect(() =>
       preparePackage({
@@ -1250,7 +1251,7 @@ describe('package asset scripts', () => {
         requireNativeAudioCapture: false,
       }),
     ).toThrow(
-      /Prepared package unpacked size \d+ bytes exceeds 134217728 bytes/,
+      /Prepared package unpacked size \d+ bytes exceeds 167772160 bytes/,
     );
   });
 

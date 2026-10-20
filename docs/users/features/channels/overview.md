@@ -462,13 +462,13 @@ Files work with any model — no multimodal support required.
 
 ### Platform differences
 
-| Feature  | Telegram                                     | WeChat                           | DingTalk                                      | Feishu                                                      | QQ Bot                                             |
-| -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- | ----------------------------------------------------------- | -------------------------------------------------- |
-| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (authenticated GET, 50MB limit) | Vision input, also saved to a local path (8MB cap) |
-| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (50MB limit)                    | Not supported — images and videos only             |
-| Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): text extracted; embedded images ignored | Message text is kept as the caption                |
+| Feature  | Telegram                                     | WeChat                           | DingTalk                                      | Feishu                                                      | QQ Bot                                              |
+| -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------------- |
+| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (authenticated GET, 50MB limit) | Vision input, also saved to a local path (8MB cap)  |
+| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (50MB limit)                    | Direct download, saved to a local path (20MB limit) |
+| Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): text extracted; embedded images ignored | Message text is kept as the caption                 |
 
-> QQ Bot accepts images and videos. An image is passed to the agent as vision input and is also saved to a temporary local path; a video is saved to a temporary local path and the agent is told that path. Image input requires a model that accepts images — with a text-only model the agent still gets the path. See [QQ Bot](./qqbot#images-and-videos) for details.
+> QQ Bot accepts images, videos, files, and voice messages. An image is passed to the agent as vision input and is also saved to a temporary local path; a video or a file is saved to a temporary local path and the agent is told that path, with a file keeping the sender's extension so the read tool can classify it. A voice message is saved as audio — the platform's SILK-to-WAV conversion is preferred when available — and needs no text to start a turn. Image input requires a model that accepts images — with a text-only model the agent still gets the path. See [QQ Bot](./qqbot#images-videos-and-files) for details.
 >
 > WeCom accepts text, images, mixed text plus images, files, videos, and voice messages (transcribed). Images are passed to the agent as attachments; files and videos are downloaded to temporary local paths. See [WeCom](./wecom#images-and-files) for details.
 

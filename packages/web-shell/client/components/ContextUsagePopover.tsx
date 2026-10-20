@@ -17,6 +17,7 @@ import styles from './ChatEditor.module.css';
 export function ContextUsagePopover({
   tokenCount,
   contextWindow,
+  known: observedKnown,
   controls,
   onOpenDetails,
   showSnapshotHint,
@@ -24,6 +25,7 @@ export function ContextUsagePopover({
 }: {
   tokenCount: number;
   contextWindow: number;
+  known?: boolean;
   controls?: Pick<
     ContextUsageControls,
     'canCompress' | 'compressing' | 'result' | 'compress'
@@ -48,7 +50,7 @@ export function ContextUsagePopover({
   const restoreFocus = useRef(false);
   const suppressFocusOpen = useRef(false);
   const pointerDown = useRef(false);
-  const known = tokenCount > 0 && contextWindow > 0;
+  const known = observedKnown ?? (tokenCount > 0 && contextWindow > 0);
   const percentage = known ? (tokenCount / contextWindow) * 100 : 0;
 
   useEffect(
@@ -146,7 +148,17 @@ export function ContextUsagePopover({
         }}
         onClick={() => {
           pointerDown.current = false;
-          close();
+          if (
+            observedKnown !== undefined &&
+            !controls &&
+            !onOpenDetails &&
+            !showSnapshotHint &&
+            !open
+          ) {
+            cancelOpen();
+            cancelClose();
+            setOpen(true);
+          } else close();
         }}
         onKeyDown={(event) => {
           if (
@@ -267,6 +279,9 @@ export function ContextUsagePopover({
               </dd>
             </dl>
           </>
+        )}
+        {observedKnown === false && (
+          <p className="text-muted-foreground">{t('contextUsage.unknown')}</p>
         )}
         {(controls?.compressing || controls?.result !== dismissedResult) && (
           <ContextCompressionFeedback

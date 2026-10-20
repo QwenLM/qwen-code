@@ -17,6 +17,7 @@ import { normalizeLanguage, type WebShellLanguage } from './i18n';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
+export type { WebShellApprovalMode } from './utils/planMode';
 export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
 export {
   JavaManagedAgentClient,
@@ -58,6 +59,10 @@ export {
   type ManagedAgentSessionSummary,
   type ManagedAgentSessionTranscript,
   type ManagedAgentTurnAdmission,
+  type ManagedRuntimeNode,
+  type ManagedWorkspaceDirectory,
+  type ManagedWorkspaceCreateOperation,
+  type ManagedWorkspaceRegistration,
 } from './components/managed/managed-agent-provider';
 
 export interface WebShellWithProvidersProps extends WebShellProps {

@@ -1048,6 +1048,51 @@ describe('package scripts', () => {
     expect(readPackageJson().workspaces).toContain('packages/*');
   });
 
+  it('detects an unapplied ink patch by a file the patch creates', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+    const sentinel = buildScript.match(
+      /'node_modules\/ink\/build\/([^']+)'/,
+    )?.[1];
+    expect(sentinel).toBeDefined();
+    expect(buildScript).toContain('npm run postinstall');
+
+    const inkPatch = readdirSync(path.join(root, 'patches')).find((name) =>
+      name.startsWith('ink+'),
+    );
+    expect(inkPatch).toBeDefined();
+    const created = readFileSync(path.join(root, 'patches', inkPatch), 'utf8')
+      .split(/^diff --git /m)
+      .find((file) =>
+        file.startsWith(`a/node_modules/ink/build/${sentinel} b/node_modules/`),
+      );
+    // The sentinel only proves the patch is missing if no published ink ships
+    // it, i.e. the patch must create the file rather than edit an existing one.
+    expect(created).toContain('new file mode');
+  });
+
+  it('keeps the root build above the heap ceiling that broke the CLI compile', () => {
+    const { build } = readPackageJson().scripts;
+    const cap = build.match(/--max-old-space-size=(\d+)/)?.[1];
+    expect(cap).toBeDefined();
+    // The CLI's TypeScript compile crossed the previous 4 GiB ceiling on the
+    // shared pool and failed the Java daemon E2E leg before any test ran
+    // (#14835). Keep the build-time cap at or above the 6144 MB that fixed it.
+    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+  });
+
+  it('keeps the pnpm prepare build above the same heap ceiling', () => {
+    const { nodeOptions } = parse(readWorkflow('pnpm-workspace.yaml'));
+    const cap = nodeOptions?.match(/--max-old-space-size=(\d+)/)?.[1];
+    expect(cap).toBeDefined();
+    // The pnpm prepare path compiles the same CLI project that crossed the
+    // 4 GiB ceiling in #14823; #14827 raised this cap, so pin it beside the
+    // root build script instead of leaving one half of the fix unguarded.
+    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+  });
+
   it('selects the CLI dependency closure without selecting the same-named root', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
@@ -1130,6 +1175,81 @@ describe('package scripts', () => {
     expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
     expect(step).toContain('npm run test:ci:workspaces -- "${retry_arg[@]}"');
     expect(step).toContain('npm run test:scripts -- "${retry_arg[@]}"');
+  });
+
+  it('drops DAC capabilities for root unit tests on both CI commands', () => {
+    // The permission-bit probes in the workspaces and scripts/tests ask the
+    // kernel, so on a root lane that keeps these capabilities every case
+    // they gate skips, without failing.
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    // The step's code, one command per entry: indentation, blank lines and
+    // comments do not change what runs, a commented-out line does.
+    const code = step
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    const setpriv =
+      "test_runner=(setpriv '--bounding-set=-dac_override,-dac_read_search' '--inh-caps=-dac_override,-dac_read_search')";
+    const branch = code.indexOf('if [ "$(id -u)" -eq 0 ]; then');
+    expect(branch).toBeGreaterThan(0);
+    expect(code.slice(branch - 1, branch + 5)).toEqual([
+      'test_runner=()',
+      'if [ "$(id -u)" -eq 0 ]; then',
+      'chown -R 0 "$GITHUB_WORKSPACE" "$HOME"',
+      "echo 'Dropping DAC override capabilities for root unit tests'",
+      setpriv,
+      'fi',
+    ]);
+    // Nothing else touches it (no unset, read or reset), and both test
+    // commands run under it, with no unwrapped copy beside them.
+    expect(code.filter((line) => /\btest_runner\b/.test(line))).toEqual([
+      'test_runner=()',
+      setpriv,
+      '"${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"',
+      '"${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"',
+    ]);
+    expect(
+      code.filter((line) =>
+        /\bnpm run test:(?:ci:workspaces|scripts)\b/.test(line),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('keeps every copy of the permission-bit probe identical', () => {
+    // The probe is copied, not shared: each package that uses it keeps its
+    // own copy, and cli, core and browser-use also keep its tests (wecom
+    // inlines a smaller probe for its one case). A fix to one copy has to
+    // reach the others, or the packages measure differently.
+    const copies = {
+      'permission-bits.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+        'packages/sdk-typescript/test/test-utils',
+        'integrations/test-failure-explorer/src/test-utils',
+      ],
+      'permission-bits.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+      'permission-bits.mocked-fs.test.ts': [
+        'packages/cli/src/test-utils',
+        'packages/core/src/test-utils',
+        'packages/browser-use/src/test-utils',
+      ],
+    };
+    for (const [file, dirs] of Object.entries(copies)) {
+      const [reference, ...others] = dirs.map((dir) =>
+        readFileSync(path.join(root, dir, file), 'utf8'),
+      );
+      others.forEach((text, i) => {
+        expect(text, `${file}: ${dirs[i + 1]} vs ${dirs[0]}`).toBe(reference);
+      });
+    }
   });
 
   it('bounds the CI unit step so a hang fails instead of stalling', () => {

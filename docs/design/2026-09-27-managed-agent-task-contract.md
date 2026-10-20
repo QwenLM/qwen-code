@@ -91,6 +91,7 @@ resources:
 | `taskId`             | `id`                  | `taskId`             | As `PublicSession` and `PublicAction`. |
 | (none)               | `object`              | (none)               | Added, `agent.task`.                   |
 | `sessionId`          | `session_id`          | `sessionId`          |                                        |
+| (none)               | `child_session_id`    | `childSessionId`     | Child kinds only (F2 of #13746).       |
 | `kind`               | `kind`                | `kind`               | `TaskKind`, same five values.          |
 | `state`              | `state`               | `state`              | `TaskState`, same eight values.        |
 | `definitionRevision` | `definition_revision` | `definitionRevision` | `int64`, at least 1.                   |
@@ -135,9 +136,9 @@ forbids: Runtime binding ID, generation, Runtime endpoint, Pod, absolute path,
 raw PID, SecretHandle and local sidecar.
 
 The list is ordered newest first by `created_at`, then by `id`, both
-descending. That is the order of the Session list in the API contract, with
-creation time instead of update time, so a task that changes state does not
-move between pages.
+descending. That is the order of the Session list in the API contract —
+both order by immutable creation time, so an item whose state changes does
+not move between pages.
 
 These invariants are schema conditionals:
 

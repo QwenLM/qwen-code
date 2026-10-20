@@ -15,11 +15,11 @@ import { LocalManagedSessionResourceStore } from './managed-session-resources.js
 import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
 // The H4b/H3 enablement gates are real in this suite: `child_acceptance`
-// sits in the plain enabled list and the kind gate admits `child_agent`
-// and `shell` (#13856), so no mock is needed to run those commits. The H4c
-// cases commit `workflow` chains ahead of that kind's enablement; the flag
-// below lifts the kind gate for exactly those plantings.
-const enablement = vi.hoisted(() => ({ workflowKind: false }));
+// sits in the plain enabled list and the kind gate admits `child_agent`,
+// `shell` (#13856) and, with the workflow runtime slice (#13803),
+// `workflow`, so no mock is needed to run commits. The flag below narrows
+// the `workflow` kind for exactly the R1-14 window.
+const enablement = vi.hoisted(() => ({ workflowNarrowed: false }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
   const actual =
@@ -27,9 +27,14 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
   return {
     ...actual,
     assertManagedSessionChildRunKindEnabled: (kind: string) => {
-      if (!(kind === 'workflow' && enablement.workflowKind)) {
-        actual.assertManagedSessionChildRunKindEnabled(kind);
+      if (kind === 'workflow' && enablement.workflowNarrowed) {
+        // R1-14: refuse just this kind for the narrowing window — the whole
+        // point of the blocker's witness is that a persisted workflow
+        // record outlives its own later submission refusal.
+        actual.assertManagedSessionChildRunKindEnabled('unsettled-kind');
+        return;
       }
+      actual.assertManagedSessionChildRunKindEnabled(kind);
     },
   };
 });
@@ -37,7 +42,7 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.workflowKind = false;
+  enablement.workflowNarrowed = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -1130,28 +1135,25 @@ describe('managed session authority child_agent records', () => {
   });
 });
 
-describe('managed session authority workflow records (H4c)', () => {
-  it('refuses a workflow launch through the kind gate, committing nothing', async () => {
+describe('managed session authority workflow records (H4c, enabled by the workflow runtime slice)', () => {
+  it('admits a workflow launch through the real kind gate', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     await withAuthority(harness, async (authority) => {
-      await expect(
-        authority.commitExtensionRecord(
-          command('run-1:1'),
-          { domain: 'child_run', record: workflowLife(refs)[0] },
-          TRUSTED,
-        ),
-      ).rejects.toThrow(
-        'domain child_run kind workflow is registered but not enabled for submission.',
+      await authority.commitExtensionRecord(
+        command('run-1:1'),
+        { domain: 'child_run', record: workflowLife(refs)[0] },
+        TRUSTED,
       );
-      expect(await publishedBodies(harness, 'child_run')).toBe(0);
-      expect(authority.extensionRecord('child_run', 'run-1')).toBeUndefined();
-      expect(authority.taskViews()).toEqual([]);
+      expect(await publishedBodies(harness, 'child_run')).toBe(1);
+      expect(authority.extensionRecord('child_run', 'run-1')).toMatchObject({
+        revision: 1,
+      });
+      expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
     });
   });
 
   it('chains a workflow child through acceptance and consumption, rebuilt on reopen', async () => {
-    enablement.workflowKind = true;
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     const chain = workflowLife(refs);
@@ -1192,8 +1194,6 @@ describe('managed session authority workflow records (H4c)', () => {
         TRUSTED,
       );
     });
-    // Rebuild needs no gate: the gate refuses submission, never a reader.
-    enablement.workflowKind = false;
     await withAuthority(
       harness,
       async (authority) => {
@@ -1210,8 +1210,59 @@ describe('managed session authority workflow records (H4c)', () => {
     );
   });
 
+  // The H4c kind gate is submission-only by construction: reopening and
+  // rebuilding a persisted journal never re-runs it — if the gate ever
+  // widened, an already-committed workflow record would read as an
+  // admission failure on replay.
+  it('keeps a committed workflow child readable after the workflow kind gate narrows', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = workflowLife(refs);
+    await withAuthority(harness, async (authority) => {
+      await authority.commitExtensionRecord(
+        command('run-1:1'),
+        { domain: 'child_run', record: chain[0] },
+        TRUSTED,
+      );
+      expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+      // The gate narrows while the Session stays open: a new workflow
+      // submission is refused on sight, and the persisted record still
+      // projects its task. The refusal is this test's control that the
+      // flag narrows anything at all — without the flag the same commit is
+      // answered by the revision chain instead — so it must stay asserted;
+      // the narrowed reopen below is what fails if replay re-ran the gate.
+      enablement.workflowNarrowed = true;
+      try {
+        await expect(
+          authority.commitExtensionRecord(
+            command('run-2:1'),
+            { domain: 'child_run', record: chain[0] },
+            TRUSTED,
+          ),
+        ).rejects.toThrow('not enabled for submission');
+        expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+      } finally {
+        enablement.workflowNarrowed = false;
+      }
+    });
+    // The gate holds onto nobody's durable record: a fresh authority
+    // rebuilding this journal from committed bytes walks through replay
+    // untouched, no matter how it updates its gate.
+    enablement.workflowNarrowed = true;
+    try {
+      await withAuthority(
+        harness,
+        async (authority) => {
+          expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+        },
+        { create: false },
+      );
+    } finally {
+      enablement.workflowNarrowed = false;
+    }
+  });
+
   it('binds a workflow child to the child Session commit rules', async () => {
-    enablement.workflowKind = true;
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     const chain = workflowLife(refs);

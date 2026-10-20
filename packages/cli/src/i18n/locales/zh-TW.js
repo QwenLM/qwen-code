@@ -1951,6 +1951,10 @@ export default {
   'API key cannot be empty.': 'API Key 不能為空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無效的 API Key，Coding Plan API Key 均以 "sk-sp-" 開頭，請檢查',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '無效的 API Key。按量付費 Key 以 "sk-" 或 "sk-ws-" 開頭。Token Plan Key（"sk-sp-"）請使用 Token Plan 入口。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '無效的 API Key。Token Plan API Key 以 "sk-sp-" 開頭。請從 Token Plan 控制台產生，或使用 Standard API Key 入口綁定按量付費 Key。',
   'You can get your Coding Plan API key here':
     '您可以在這裏獲取 Coding Plan API Key',
   'You can get your Token Plan API key here':
@@ -1969,6 +1973,17 @@ export default {
     '您可以在 settings.json 中配置 API Key 和模型',
   'Refer to the documentation for setup instructions': '請參考文檔瞭解配置說明',
   'Coding Plan': 'Coding Plan',
+  QwenCloud: '千問AI平台',
+  'QwenCloud · Access Method': '千問AI平台 · 接入方式',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推薦配置：Token Plan 或 Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    '按量付費 · 使用既有的平台 API Key 連線',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    '按月 Credit 額度訂閱 · 專用 endpoint（個人版與團隊版）',
+  'China — 千问AI平台': '中國 — 千問AI平台',
+  'International — QwenCloud': '國際 — QwenCloud',
+  Platform: '平台',
   Custom: '自定義',
   'Select Region for Coding Plan': '選擇 Coding Plan 區域',
   'Choose based on where your account is registered':

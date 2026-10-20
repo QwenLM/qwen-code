@@ -677,6 +677,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_status',
   'session_close',
   'session_archive',
+  'session_archive_idle_guard',
   'session_storage_conflict_repair',
   'session_metadata',
   'session_organization',
@@ -707,12 +708,16 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_file_write',
   // Binary file upload (never overwrites; auto-numbers occupied names).
   'workspace_file_upload',
+  'workspace_file_delete',
+  'workspace_directory_create',
+  'workspace_directory_delete',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
   'workspace_skill_settings_toggle',
   'workspace_skill_settings_batch_toggle',
+  'workspace_session_refresh',
   'extension_batch_activation_v2',
   'extension_activation_explicit_refresh',
   'workspace_skill_manage',
@@ -742,6 +747,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'permission_mediation',
   'non_blocking_prompt',
   'session_language',
+  'session_message_deletion',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -836,6 +842,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
       f !== 'session_language' &&
+      f !== 'session_message_deletion' &&
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
@@ -890,6 +897,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'non_blocking_prompt',
   'session_language',
   'user_language_sync',
+  'session_message_deletion',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -2691,6 +2699,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTasksOptions.push(opts);
       return sessionTasksImpl(sessionId, opts);
     },
+    async getSessionTaskRuntime(sessionId, taskId) {
+      return { v: 1, sessionId, taskId, runtime: { outputTail: 'ready' } };
+    },
     async getSessionAgentsStatus(sessionId) {
       sessionAgentsCalls.push(sessionId);
       return sessionAgentsImpl(sessionId);
@@ -3518,6 +3529,15 @@ describe('createServeApp', () => {
       // predicate must be false, otherwise the tag would fail the
       // "default-off" property baseline tags get for free.
       for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
+        if (feature === 'session_message_deletion') {
+          expect(predicate({ hostedHarness: true })).toBe(false);
+          expect(predicate({})).toBe(true);
+          expect(
+            getAdvertisedServeFeatures(undefined, { hostedHarness: true }),
+          ).not.toContain(feature);
+          expect(getAdvertisedServeFeatures()).toContain(feature);
+          continue;
+        }
         if (
           feature === 'hosted_harness_private_v1' ||
           feature === 'managed_session_journal_delta_v1'
@@ -11435,13 +11455,17 @@ describe('createServeApp', () => {
     it('dispatches read-only session snapshots through the live owner runtime', async () => {
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge({
-        summaryImpl: (sessionId) => ({
-          sessionId,
-          workspaceCwd: WS_DIFFERENT,
-          createdAt: '2026-05-17T12:00:00.000Z',
-          clientCount: 1,
-          hasActivePrompt: false,
-        }),
+        summaryImpl: (sessionId) => {
+          if (sessionId !== 's-secondary')
+            throw new SessionNotFoundError(sessionId);
+          return {
+            sessionId,
+            workspaceCwd: WS_DIFFERENT,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          };
+        },
         sessionContextImpl: async (sessionId) => ({
           v: 1,
           sessionId,
@@ -11480,6 +11504,14 @@ describe('createServeApp', () => {
           bridge: secondaryBridge,
         }),
       ]);
+      const primaryRuntimeRead = vi.spyOn(
+        primaryBridge,
+        'getSessionTaskRuntime',
+      );
+      const secondaryRuntimeRead = vi.spyOn(
+        secondaryBridge,
+        'getSessionTaskRuntime',
+      );
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
@@ -11493,6 +11525,24 @@ describe('createServeApp', () => {
         .get('/session/s-secondary/resources')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
+      const runtimeRes = await request(app)
+        .get('/session/s-secondary/tasks/bg_1/runtime')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(runtimeRes.status).toBe(200);
+      expect(runtimeRes.body).toEqual({
+        v: 1,
+        sessionId: 's-secondary',
+        taskId: 'bg_1',
+        runtime: { outputTail: 'ready' },
+      });
+      expect(secondaryRuntimeRead).toHaveBeenCalledWith('s-secondary', 'bg_1');
+      expect(primaryRuntimeRead).not.toHaveBeenCalled();
+      const missingRes = await request(app)
+        .get('/session/missing/tasks/bg_1/runtime')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingRes.status).toBe(404);
+      expect(secondaryRuntimeRead).toHaveBeenCalledTimes(1);
+      expect(primaryRuntimeRead).not.toHaveBeenCalled();
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
         sessionId: 's-secondary',
@@ -12020,6 +12070,13 @@ describe('createServeApp', () => {
       async (encodedSubagentRef, subagentRef) => {
         const taskId = `general-purpose-${subagentRef}`;
         const bridge = fakeBridge({
+          summaryImpl: (sessionId) => ({
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          }),
           cancelSessionTaskImpl: async () => ({ cancelled: true }),
         });
         const resolveSpy = vi
@@ -12120,7 +12177,15 @@ describe('createServeApp', () => {
     });
 
     it('serves virtual session stubs without calling the parent bridge', async () => {
-      const bridge = fakeBridge();
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
@@ -12388,7 +12453,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-xyz')
-        .send({ prompt: 'must not appear in logs' });
+        .send({
+          prompt: 'must not appear in logs',
+          confirmCancellation: 'legacy-daemon',
+        });
 
       expect(res.status).toBe(200);
       // The originator + a generated promptId must reach the bridge so the
@@ -12396,6 +12464,7 @@ describe('createServeApp', () => {
       expect(bridge.continueSessionContexts).toHaveLength(1);
       expect(bridge.continueSessionContexts[0]).toMatchObject({
         clientId: 'client-xyz',
+        confirmCancellation: 'legacy-daemon',
       });
       const promptId = bridge.continueSessionContexts[0]?.promptId;
       expect(typeof promptId).toBe('string');
@@ -16847,7 +16916,15 @@ describe('createServeApp', () => {
     });
 
     it('redacts skill bodies from virtual subagent load replay (#9234)', async () => {
-      const bridge = fakeBridge();
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
@@ -17721,6 +17798,7 @@ describe('createServeApp', () => {
           clientId: 'client-load',
           state: {},
           compactedReplay: [commandsEvent],
+          lifecycleReplay: [commandsEvent],
         }),
       });
       const app = createServeApp(
@@ -17747,6 +17825,9 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.compactedReplay[0].data.update.availableCommands).toEqual(
+        [{ name: 'help', description: 'Help' }],
+      );
+      expect(res.body.lifecycleReplay[0].data.update.availableCommands).toEqual(
         [{ name: 'help', description: 'Help' }],
       );
       expect(commandsEvent.data.update.availableCommands).toHaveLength(2);
@@ -31630,6 +31711,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(204);
       expect(bridge.closeCalls).toHaveLength(1);
       expect(bridge.closeCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.closeCalls[0]?.closeOpts).toEqual({ cancelReason: 'user' });
     });
 
     it('passes client identity context', async () => {
@@ -33026,6 +33108,169 @@ describe('createServeApp', () => {
       expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
     });
 
+    it.each([
+      ['trusted', 'active'],
+      ['untrusted', 'active'],
+      ['ambiguous', 'active'],
+      ['missing', 'active'],
+      ['missing', 'transitioning'],
+      ['missing', 'blocked'],
+      ['trusted', 'transitioning'],
+      ['trusted', 'blocked'],
+    ] as const)(
+      'routes historical workflow detail only to its persisted %s owner with primary %s',
+      async (ownership, primaryState) => {
+        const parentId = '55555555-bbbb-cccc-dddd-123456789abc';
+        const agentId = 'workflow-agent-history';
+        const virtualId = createVirtualSubagentSessionId(parentId, agentId);
+        const secondaryDir = path.join(
+          runtimeDir,
+          'workflow-history-secondary',
+        );
+        await fsp.mkdir(secondaryDir, { recursive: true });
+        const secondaryWs = realpathSync(secondaryDir);
+        if (ownership !== 'missing')
+          await writeTranscriptSession(parentId, 'active', secondaryWs);
+        if (ownership === 'ambiguous') await writeTranscriptSession(parentId);
+        const primaryBridge = fakeBridge();
+        const secondaryBridge = fakeBridge({
+          sessionTasksImpl: async () => {
+            throw new SessionNotFoundError(parentId);
+          },
+        });
+        const registry = createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary',
+            workspaceCwd: wsDir,
+            primary: true,
+            bridge: primaryBridge,
+          }),
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'secondary',
+            workspaceCwd: secondaryWs,
+            primary: false,
+            trusted: ownership !== 'untrusted',
+            bridge: secondaryBridge,
+          }),
+        ]);
+        const subagentDir = path.join(
+          new Storage(secondaryWs).getProjectDir(),
+          'subagents',
+          parentId,
+        );
+        await fsp.mkdir(subagentDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(subagentDir, `agent-${agentId}.meta.json`),
+          JSON.stringify({
+            agentId,
+            agentType: 'reviewer',
+            description: 'Historical workflow',
+            parentSessionId: parentId,
+            parentAgentId: null,
+            createdAt: '2026-05-28T12:00:00.000Z',
+            status: 'completed',
+            isBackgrounded: false,
+          }),
+        );
+        await fsp.writeFile(
+          path.join(subagentDir, `agent-${agentId}.jsonl`),
+          JSON.stringify({
+            uuid: 'history-1',
+            parentUuid: null,
+            sessionId: parentId,
+            agentId,
+            timestamp: '2026-05-28T12:00:00.000Z',
+            type: 'user',
+            message: {
+              role: 'user',
+              parts: [{ text: 'Original chat workflow activity' }],
+            },
+          }) + '\n',
+        );
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { workspaceRegistry: registry },
+        );
+        if (primaryState !== 'active') {
+          registry.beginReplacement(registry.primaryEntry, 'next');
+          if (primaryState === 'blocked')
+            registry.blockReplacement(registry.primaryEntry, 'build failed');
+        }
+        const expected =
+          ownership === 'trusted'
+            ? 200
+            : ownership === 'missing'
+              ? primaryState === 'active'
+                ? 404
+                : 503
+              : ownership === 'untrusted'
+                ? 403
+                : 500;
+        const resolved = await request(app)
+          .get(`/session/${parentId}/subagents/${agentId}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(resolved.status).toBe(expected);
+        if (expected === 503) {
+          expect(resolved.body.code).toBe('workspace_runtime_unavailable');
+          expect(resolved.headers['retry-after']).toBe('1');
+        }
+        const loaded = await request(app)
+          .post(`/session/${virtualId}/load`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+        expect(loaded.status).toBe(expected);
+        const subscribe = vi
+          .spyOn(VirtualSubagentSessions.prototype, 'subscribe')
+          .mockImplementation(async (runtime) =>
+            (async function* () {
+              yield {
+                id: 1,
+                v: 1,
+                type: 'session_update',
+                data: { owner: runtime.workspaceId },
+              } as BridgeEvent;
+            })(),
+          );
+        try {
+          const events = await request(app)
+            .get(`/session/${virtualId}/events`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`);
+          expect(events.status).toBe(expected);
+          if (expected === 503) {
+            expect(events.body.code).toBe('workspace_runtime_unavailable');
+            expect(events.headers['retry-after']).toBe('1');
+          }
+          if (ownership === 'trusted') {
+            expect(events.text).toContain('secondary');
+            expect(subscribe.mock.calls[0]?.[0].workspaceCwd).toBe(secondaryWs);
+          } else expect(subscribe).not.toHaveBeenCalled();
+        } finally {
+          subscribe.mockRestore();
+        }
+        if (ownership === 'trusted') {
+          expect(resolved.body.sessionId).toBe(virtualId);
+          expect(JSON.stringify(loaded.body)).toContain(
+            'Original chat workflow activity',
+          );
+          expect(loaded.body.workspaceCwd).toBe(secondaryWs);
+          for (const suffix of ['context', 'supported-commands']) {
+            const stub = await request(app)
+              .get(`/session/${virtualId}/${suffix}`)
+              .set('Host', `127.0.0.1:${baseOpts.port}`);
+            expect(stub.status).toBe(200);
+          }
+          const heartbeat = await request(app)
+            .post(`/session/${virtualId}/heartbeat`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+          expect(heartbeat.status).toBe(200);
+        }
+        expect(primaryBridge.loadCalls).toEqual([]);
+        expect(secondaryBridge.loadCalls).toEqual([]);
+      },
+    );
+
     it('rejects transcript pages owned by an untrusted secondary workspace', async () => {
       const sid = '55555555-bbbb-cccc-dddd-acacacacacac';
       const secondaryDir = path.join(runtimeDir, 'untrusted-secondary');
@@ -34161,6 +34406,34 @@ describe('createServeApp', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('validates and forwards the idle-only archive guard', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeed';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createArchiveApp(bridge);
+
+      const invalid = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], requireIdle: 'yes' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_request');
+
+      const archived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], requireIdle: true });
+      expect(archived.status).toBe(200);
+      expect(bridge.closeCalls[0]?.closeOpts).toMatchObject({
+        requireAgentClose: true,
+        requireIdle: true,
+      });
+    });
+
     it('requires an explicit boolean to repair active/archive conflicts', async () => {
       const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeea';
       await writeSession(sid);
@@ -34455,7 +34728,7 @@ describe('createServeApp', () => {
         {
           sessionId: sid,
           clientId: undefined,
-          closeOpts: { requireAgentClose: true },
+          closeOpts: { requireAgentClose: true, requireIdle: false },
         },
       ]);
     });
@@ -39670,6 +39943,13 @@ describe('GET /session/:id/events (SSE)', () => {
 
   it('streams virtual subagent events without subscribing to the parent session', async () => {
     const bridge = fakeBridge({
+      summaryImpl: (sessionId) => ({
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      }),
       subscribeImpl: () => {
         throw new Error('parent bridge must not be subscribed');
       },
@@ -39727,6 +40007,13 @@ describe('GET /session/:id/events (SSE)', () => {
     // throw aborts the subscription and breaks the subagent event stream.
     const epochLookups: string[] = [];
     const bridge = fakeBridge({
+      summaryImpl: (sessionId) => ({
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      }),
       getSessionEventEpochImpl: (sessionId) => {
         epochLookups.push(sessionId);
         throw new Error(`Session not found: ${sessionId}`);
@@ -42231,6 +42518,65 @@ describe('auth device-flow routes', () => {
         'This install would replace a model configured for another purpose.',
     });
     expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider reports invalid API key as a client error', async () => {
+    const installAuthProvider = vi.fn();
+    const bridge = fakeBridge();
+    const invokeWorkspaceCommand = vi.spyOn(bridge, 'invokeWorkspaceCommand');
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'qwencloud-standard',
+        apiKey: 'sk-sp-not-a-real-key',
+        baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      });
+
+    expect(installAuthProvider).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: 'invalid_api_key',
+    });
+    expect(res.body.error).toContain('Token Plan');
+    expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider passes padded valid keys through to installAuthProvider', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'qwencloud-standard',
+      providerLabel: 'Standard API Key',
+      authType: 'openai',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'qwencloud-standard',
+        apiKey: '  sk-valid-pay-as-you-go-key  ',
+        baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      });
+
+    expect(res.status).toBe(200);
+    expect(installAuthProvider).toHaveBeenCalledOnce();
+    expect(installAuthProvider.mock.calls[0][0]).toMatchObject({
+      apiKey: 'sk-valid-pay-as-you-go-key',
+    });
   });
 
   it('POST /workspace/auth/provider returns a warning state when runtime sync fails after persistence', async () => {

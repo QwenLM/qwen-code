@@ -145,7 +145,10 @@ export interface HostedFileHistorySettlement {
  */
 export async function canSettleHostedFileHistory(
   session: ManagedSession,
-  record: HostedFileHistoryRecord,
+  record: Pick<
+    HostedFileHistoryRecord,
+    'pendingTurn' | 'pendingUndo' | 'pendingMessageId'
+  >,
 ): Promise<HostedFileHistorySettlement | null> {
   if (record.pendingUndo) return { blocker: 'undo_pending' };
   if (!record.pendingTurn) return { blocker: 'no_pending_turn' };
@@ -234,4 +237,22 @@ export async function commitHostedFileHistory(
     },
     { class: 'trusted_entry' },
   );
+}
+
+/** A Turn that can no longer resume never reconciles its pending file
+ * history, so the obligation dies with it — the cancel and continue routes
+ * both own this retirement, and any later route that finds the marker owed
+ * after a settled Turn runs it again. */
+export async function dropPendingHostedFileHistoryTurn(
+  session: ManagedSession,
+  promptId: string,
+): Promise<void> {
+  const saved = await readHostedFileHistory(session);
+  if (saved?.pendingTurn !== promptId) return;
+  await commitHostedFileHistory(session, {
+    schemaVersion: 1,
+    state: saved.state,
+    pendingTurn: null,
+    pendingUndo: null,
+  });
 }

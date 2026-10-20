@@ -18,13 +18,15 @@ import type {
 } from '../core/turn.js';
 import { LlmEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
-import { LoopType } from '../telemetry/types.js';
+import { LoopReason, LoopType } from '../telemetry/types.js';
+import type { LoopStopDetail } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
 import { FULL_OUTPUT_DIGEST_LABEL } from '../tools/truncation.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
+  getTurnToolCallCapHalt,
 } from './loopDetectionService.js';
 import { fnResponse } from '../test-utils/model-fixtures.js';
 
@@ -1051,6 +1053,127 @@ describe('LoopDetectionService', () => {
     });
   });
 
+  describe('ModelFallback must not clear committed guard evidence', () => {
+    it('keeps the consecutive-identical streak across per-round-trip ModelFallback', () => {
+      service.reset('');
+      // Production can only emit ModelFallback before its own attempt's
+      // calls (the fallback chain is gated on !streamYieldedAnyChunk, and a
+      // streamed functionCall counts as candidate output), and the chain is
+      // per-request, so a capacity-limited primary can prefix every round-trip
+      // of one turn with ModelFallback. The streak evidence accumulated by
+      // earlier committed round-trips must survive the switch, or this guard
+      // never fires again.
+      const finished = {
+        type: LlmEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerLlmStreamEvent;
+      const fallback = {
+        type: LlmEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
+      } satisfies ServerLlmModelFallbackEvent as ServerLlmStreamEvent;
+      // TOOL_CALL_LOOP_THRESHOLD - 1 identical calls, each in its own
+      // round-trip separated by Finished + ModelFallback.
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(guardTool('read_file', { absolute_path: '/repo/a.ts' })).toBe(
+          false,
+        );
+        guard(finished);
+        guard(fallback);
+      }
+      // The threshold call must still fire: the streak reached 5 across the
+      // committed round-trips instead of being zeroed by each fallback.
+      expect(guardTool('read_file', { absolute_path: '/repo/a.ts' })).toBe(
+        true,
+      );
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
+    it('keeps the shell-inspection stagnation streak across per-round-trip ModelFallback', () => {
+      service.reset('');
+      // Same reachable shape as above but with varied git-inspection
+      // wording, which only the stagnation guard (keyed on command family)
+      // can see — the consecutive-identical guard never fires on it.
+      const finished = {
+        type: LlmEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerLlmStreamEvent;
+      const fallback = {
+        type: LlmEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
+      } satisfies ServerLlmModelFallbackEvent as ServerLlmStreamEvent;
+      const VARIANTS = [
+        'git status --short',
+        'git diff --stat',
+        'git ls-files --modified',
+        'git status --porcelain=v1',
+        'git diff --name-only HEAD',
+        'git -C . status --short',
+        'git --no-pager diff --stat',
+      ];
+      for (let i = 0; i < SHELL_COMMAND_STAGNATION_THRESHOLD - 1; i++) {
+        expect(
+          guardTool('run_shell_command', {
+            command: VARIANTS[i % VARIANTS.length],
+            description: 'Inspect repository changes',
+          }),
+        ).toBe(false);
+        guard(finished);
+        guard(fallback);
+      }
+      expect(
+        guardTool('run_shell_command', {
+          command: 'git status --short',
+          description: 'Inspect repository changes',
+        }),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.SHELL_COMMAND_STAGNATION);
+    });
+
+    it('keeps capMaxKeyRepeat accumulating across per-round-trip ModelFallback', () => {
+      service.reset('');
+      // The adaptive cap's stuck signal (capMaxKeyRepeat >=
+      // GLOBAL_DUPLICATE_THRESHOLD) is what halts a productive-looking but
+      // stuck diverse turn past the soft cap; per-round-trip fallbacks must
+      // not zero it either. Diverse calls keep every other guard quiet.
+      const finished = {
+        type: LlmEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerLlmStreamEvent;
+      const fallback = {
+        type: LlmEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
+      } satisfies ServerLlmModelFallbackEvent as ServerLlmStreamEvent;
+      // Diverse calls past DEFAULT_MAX_TOOL_CALLS_PER_TURN (the soft cap,
+      // where the adaptive cap starts halting on the stuck signal), then
+      // round-trips of alternating stuck keys, each separated by Finished +
+      // ModelFallback: the repeat evidence must accumulate ACROSS the
+      // fallback boundaries, or the adaptive cap's stuck signal never
+      // reaches its threshold and the turn runs to the 1000-call backstop.
+      const SOFT_CAP = DEFAULT_MAX_TOOL_CALLS_PER_TURN;
+      for (let i = 0; i < SOFT_CAP; i++) {
+        expect(guardTool('any_tool', { i })).toBe(false);
+        guard(finished);
+        guard(fallback);
+      }
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        expect(guardTool('any_tool', { stuck: 'a' })).toBe(false);
+        expect(guardTool('any_tool', { stuck: 'b' })).toBe(false);
+        guard(finished);
+        guard(fallback);
+      }
+      expect(guardTool('any_tool', { stuck: 'a' })).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+  });
+
   describe('Truncation hysteresis', () => {
     // The physical trim walks the whole contentStats map (one entry per
     // window position at saturation): Θ(window) synchronous CPU per event.
@@ -1567,6 +1690,115 @@ describe('LoopDetectionService', () => {
       const svc = capOfTwo(false);
       expect(guardTool('t', { a: 3 }, svc)).toBe(false);
     });
+
+    // The reason and numbers ride the bubbled event (getLastLoopDetail) and
+    // the loop_detected telemetry, so both are asserted.
+    const expectCapDetail = (detail: LoopStopDetail, svc = service) => {
+      expect(svc.getLastLoopDetail()).toEqual(detail);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          loop_type: 'turn_tool_call_cap',
+          loop_reason: detail.loopReason,
+          tool_call_count: detail.toolCallCount,
+          tool_call_limit: detail.toolCallLimit,
+        }),
+      );
+    };
+
+    it('names an explicit cap with the call count and the cap', () => {
+      const svc = capOfTwo(true);
+      expectFired(guardTool('t', { a: 3 }, svc), CAP, svc);
+      expectCapDetail(
+        {
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 3,
+          toolCallLimit: 2,
+        },
+        svc,
+      );
+    });
+
+    it('names the adaptive backstop with the backstop as its limit', () => {
+      service.reset('');
+      diverse(HARD_CAP);
+      expectFired(guardTool('t', { last: true }), CAP);
+      expectCapDetail({
+        loopReason: LoopReason.BACKSTOP,
+        toolCallCount: HARD_CAP + 1,
+        toolCallLimit: HARD_CAP,
+      });
+    });
+
+    it('names a stuck halt with the soft cap as its limit', () => {
+      service.reset('');
+      // As in 'fires at the soft cap when a stuck-repetition signal is
+      // present': the first call past the soft cap halts.
+      const fired = fires(SOFT_CAP + GLOBAL_DUPLICATE_THRESHOLD, (i) =>
+        guardTool('any_tool', i % 2 === 0 ? { stuck: true } : { distinct: i }),
+      );
+      expectFired(fired, CAP);
+      expectCapDetail({
+        loopReason: LoopReason.STUCK_REPETITION,
+        toolCallCount: SOFT_CAP + 1,
+        toolCallLimit: SOFT_CAP,
+      });
+    });
+
+    it('clears the stop detail on reset', () => {
+      const svc = capOfTwo(true);
+      expect(guardTool('t', { a: 3 }, svc)).toBe(true);
+      svc.reset('next-prompt');
+      expect(svc.getLastLoopType()).toBeNull();
+      expect(svc.getLastLoopDetail()).toEqual({});
+    });
+  });
+
+  describe('getTurnToolCallCapHalt', () => {
+    const SOFT = DEFAULT_MAX_TOOL_CALLS_PER_TURN;
+    const HARD = SOFT * 10;
+    const STUCK = GLOBAL_DUPLICATE_THRESHOLD;
+
+    it('lets the turn continue at or below the cap', () => {
+      expect(getTurnToolCallCapHalt(SOFT, STUCK, SOFT, true)).toBeNull();
+      expect(getTurnToolCallCapHalt(SOFT, STUCK, SOFT, false)).toBeNull();
+    });
+
+    it('stops past an explicit cap whatever the repetition', () => {
+      const explicit = { reason: LoopReason.EXPLICIT_CAP, limit: SOFT };
+      expect(getTurnToolCallCapHalt(SOFT + 1, 1, SOFT, true)).toEqual(explicit);
+      expect(getTurnToolCallCapHalt(HARD + 1, STUCK, SOFT, true)).toEqual(
+        explicit,
+      );
+    });
+
+    it('lets a diverse adaptive turn run to the backstop', () => {
+      expect(getTurnToolCallCapHalt(HARD, STUCK - 1, SOFT, false)).toBeNull();
+      expect(getTurnToolCallCapHalt(HARD + 1, 1, SOFT, false)).toEqual({
+        reason: LoopReason.BACKSTOP,
+        limit: HARD,
+      });
+    });
+
+    it('reports the backstop, not the repetition, past the backstop', () => {
+      expect(getTurnToolCallCapHalt(HARD + 1, STUCK, SOFT, false)).toEqual({
+        reason: LoopReason.BACKSTOP,
+        limit: HARD,
+      });
+    });
+
+    it('stops a stuck adaptive turn with the soft cap as its limit', () => {
+      expect(getTurnToolCallCapHalt(SOFT + 1, STUCK, SOFT, false)).toEqual({
+        reason: LoopReason.STUCK_REPETITION,
+        limit: SOFT,
+      });
+    });
+
+    it('never stops when the cap is disabled', () => {
+      expect(
+        getTurnToolCallCapHalt(HARD * 10, STUCK * 10, Infinity, false),
+      ).toBeNull();
+    });
   });
 
   describe('Global Tool Call Duplicate Detection', () => {
@@ -1596,6 +1828,31 @@ describe('LoopDetectionService', () => {
       // getLastLoopType() is the getter the client uses to populate the
       // bubbled LoopDetected event, so assert it too — not just the logged one.
       expectType(LoopType.GLOBAL_TOOL_CALL_DUPLICATE);
+      expect(service.getLastLoopDetail()).toEqual({
+        loopReason: LoopReason.REPEATED_CALL,
+      });
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'global_tool_call_duplicate',
+          loop_reason: 'repeated_call',
+        }),
+      );
+    });
+
+    it('drops the reason when a later detector in the same pass sets the type', () => {
+      // One heuristic pass runs every detector: on the 8th call the 6th
+      // repeat trips global-duplicate and the 8-call same-name streak trips
+      // action stagnation, which sets the last loop type. The repeated-call
+      // reason belongs to global-duplicate only, so it must not leak.
+      service.reset('');
+      heur(toolCall('t', { a: 1 }));
+      heur(toolCall('t', { a: 2 }));
+      run(GLOBAL_DUPLICATE_THRESHOLD - 1, () => heur(toolCall('t', { x: 1 })));
+      expect(heur(toolCall('t', { x: 1 }))).toBe(true);
+      expectLogged('global_tool_call_duplicate');
+      expectType(LoopType.ACTION_STAGNATION);
+      expect(service.getLastLoopDetail()).toEqual({});
     });
 
     it('should not fire for different (tool, args) pairs', () => {
@@ -1855,6 +2112,24 @@ describe('LoopDetectionService', () => {
       });
       expect(fired).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('names a frozen board halted by its recorded results a repeated call', () => {
+      // With heuristics on, the result-aware global-duplicate count halts an
+      // interleaved frozen board from recordToolResult.
+      const svc = newService(heuristicsOn(), 'frozen-global');
+      const fired = fires(
+        GLOBAL_DUPLICATE_THRESHOLD,
+        (i) =>
+          guardTool('filler', { i }, svc) ||
+          guard(taskListEvent(`call-${i}`), svc) ||
+          record(taskListResult('frozen board'), svc),
+      );
+      expect(fired).toBe(true);
+      expect(svc.getLastLoopType()).toBe(LoopType.GLOBAL_TOOL_CALL_DUPLICATE);
+      expect(svc.getLastLoopDetail()).toEqual({
+        loopReason: LoopReason.REPEATED_CALL,
+      });
     });
 
     it('still halts an interleaved frozen board via the adaptive cap', () => {

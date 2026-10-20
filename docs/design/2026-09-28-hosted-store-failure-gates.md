@@ -73,7 +73,7 @@ description of the attempted operation, not the source of truth for success.
 
 The driver is `integration-tests/helpers/hosted-store-failure-driver.ts`;
 the Spring/SQL fixture is extended in
-`packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java`.
+`packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java`.
 
 ## Validation and acceptance
 

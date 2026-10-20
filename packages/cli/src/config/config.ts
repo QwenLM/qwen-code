@@ -111,6 +111,7 @@ import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
+import { daemonCommand } from '../commands/daemon.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { agentsCommand } from '../commands/agents.js';
 import { batchCommand } from '../commands/batch.js';
@@ -189,6 +190,7 @@ export interface CliArgs {
   telemetryLogPrompts: boolean | undefined;
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
+  disableMcpServer: string[] | undefined;
   mcpConfig: string | undefined;
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
@@ -679,6 +681,15 @@ export async function parseArguments(): Promise<CliArgs> {
               mcpServerName.split(',').map((m) => m.trim()),
             ),
         })
+        .option('disable-mcp-server', {
+          ...DEFAULT_COMMAND_OPTIONS['disable-mcp-server'],
+          string: true,
+          coerce: (disabledServerNames: string[]) =>
+            // Handle comma-separated values
+            disabledServerNames.flatMap((disabledServerName) =>
+              disabledServerName.split(',').map((m) => m.trim()),
+            ),
+        })
         .option('mcp-config', DEFAULT_COMMAND_OPTIONS['mcp-config'])
         .option('allowed-tools', {
           ...DEFAULT_COMMAND_OPTIONS['allowed-tools'],
@@ -883,6 +894,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(boardCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
+    // Register `qwen daemon` (local daemon inspection and control)
+    .command(daemonCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
     // Register `qwen agents` (join a coordinator; session_send MCP server)
@@ -936,6 +949,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
+      result._[0] === 'daemon' ||
       result._[0] === 'agents' ||
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
@@ -945,13 +959,14 @@ export async function parseArguments(): Promise<CliArgs> {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
-    // execution and exit. Returning here would let the main interactive flow
-    // run, which would prompt for stdin input despite the user having already
-    // invoked a subcommand. `batch` must be here for a second reason: the main
-    // flow below relaunches the process for a larger heap, and a second parse
-    // would run the subcommand handler again — submitting (and billing) a
-    // duplicate batch job whose id the user never sees.
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Daemon/Batch commands handle
+    // their own execution and exit. Returning here would let the main
+    // interactive flow run, which would prompt for stdin input despite the
+    // user having already invoked a subcommand. `batch` must be here for a
+    // second reason: the main flow below relaunches the process for a larger
+    // heap, and a second parse would run the subcommand handler again —
+    // submitting (and billing) a duplicate batch job whose id the user never
+    // sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -1701,6 +1716,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
@@ -2191,6 +2207,22 @@ export async function loadCliConfig(
       ? new Set(settings.mcp.excluded.filter(Boolean))
       : undefined;
   }
+  // `--disable-mcp-server` is an explicit per-invocation argument, not local
+  // state, so it unions into the exclude set in its OWN block after the
+  // if/else-if chain above. Folding it into the `else if (!bareMode &&
+  // !safeMode)` branch would silently drop it twice over: under `--safe-mode`
+  // that branch does not run at all, and next to `--allowed-mcp-server-names`
+  // the first branch wins and leaves the set undefined. Precedence is
+  // allow-then-deny — a server named by both flags ends up disabled.
+  // Boot-time only: the settings-watcher and ACP reload paths rebuild the
+  // exclude set from settings alone, so a later settings.json edit drops these
+  // entries. Durable fix tracked in #14009.
+  if (argv.disableMcpServer) {
+    excludedMcpServers = new Set([
+      ...(excludedMcpServers ?? []),
+      ...argv.disableMcpServer.filter(Boolean),
+    ]);
+  }
 
   const selectedAuthType =
     (argv.authType as AuthType | undefined) ||
@@ -2320,7 +2352,12 @@ export async function loadCliConfig(
     }
 
     if (sessionId) {
-      sessionService.assertLegacySessionExecution(sessionId);
+      // A Managed host restores its own sessions; a Legacy host must not
+      // execute a Managed transcript. The reverse direction is refused when
+      // the Managed session writer lease sees a Legacy transcript.
+      if (hostPolicy?.executionEngine !== 'managed') {
+        sessionService.assertLegacySessionExecution(sessionId);
+      }
     }
 
     if (argv.forkSession && sessionId) {
@@ -2501,6 +2538,14 @@ export async function loadCliConfig(
     sandbox: sandboxConfig,
     targetDir: cwd,
     provisionalWorkspace,
+    workflowAncestorTrustProvider:
+      bareMode ||
+      safeMode ||
+      sshWorkspace ||
+      agentHostReadOnly ||
+      provisionalWorkspace
+        ? undefined
+        : hostPolicy?.workflowAncestorTrustProvider,
     includeDirectories,
     loadMemoryFromIncludeDirectories: provisionalWorkspace
       ? false

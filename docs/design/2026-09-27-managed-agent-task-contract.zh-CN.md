@@ -66,6 +66,7 @@ operation 模型；本变更选择接受它可见。此后 D4 已把共用命令
 | `taskId`             | `id`                  | `taskId`             | 与 `PublicSession`、`PublicAction` 一致。 |
 | （无）               | `object`              | （无）               | 新增，`agent.task`。                      |
 | `sessionId`          | `session_id`          | `sessionId`          |                                           |
+| （无）               | `child_session_id`    | `childSessionId`     | 仅 child 类型（#13746 F2）。              |
 | `kind`               | `kind`                | `kind`               | `TaskKind`，同样五个值。                  |
 | `state`              | `state`               | `state`              | `TaskState`，同样八个值。                 |
 | `definitionRevision` | `definition_revision` | `definitionRevision` | `int64`，至少为 1。                       |
@@ -100,8 +101,8 @@ operation 模型；本变更选择接受它可见。此后 D4 已把共用命令
 拒绝设计禁止的所有字段：Runtime binding ID、generation、Runtime endpoint、Pod、绝对路径、
 原始 PID、SecretHandle 和本地 sidecar。
 
-列表按 `created_at`、再按 `id` 降序排列，即最新的在前。这与 API 契约中 Session 列表的顺序相同，
-只是用创建时间代替更新时间，因此任务状态变化时不会在分页之间移动。
+列表按 `created_at`、再按 `id` 降序排列，即最新的在前。这与 API 契约中 Session 列表的顺序相同——
+两者都按不可变的创建时间排序，因此条目状态变化时不会在分页之间移动。
 
 以下不变式写成 schema 条件：
 
