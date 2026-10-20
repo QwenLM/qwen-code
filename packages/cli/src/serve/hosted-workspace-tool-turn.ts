@@ -2639,7 +2639,7 @@ export class HostedWorkspaceToolTurn {
             part.functionResponse?.name === calls[index].name &&
             typeof part.functionResponse?.response?.['error'] === 'string',
         ) ||
-        !isDeepStrictEqual(persisted, responses)
+        !isDeepStrictEqual(persisted, JSON.parse(JSON.stringify(responses)))
       ) {
         this.uncertain = true;
         throw new HostedToolRecoveryRequiredError(

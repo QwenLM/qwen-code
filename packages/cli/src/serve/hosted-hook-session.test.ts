@@ -45,6 +45,7 @@ import * as stdio from '../utils/stdioHelpers.js';
 import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // The absent-owner release refusal is reported on the module's debug
 // logger only, and that channel is silent unless a debug session is active:

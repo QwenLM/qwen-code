@@ -4660,7 +4660,9 @@ it.each(
       'tool_result',
     ]);
     expect(history[0].message?.parts).toEqual(input);
-    expect(history[1].message?.parts).toEqual(responses);
+    expect(history[1].message?.parts).toEqual(
+      JSON.parse(JSON.stringify(responses)),
+    );
     const restored = makeTurn();
     expect(
       await restored.resumeHookResults(
@@ -4714,7 +4716,9 @@ it.each([
     expect(responses[1].functionResponse?.response?.['error']).toContain(
       'unpaired UTF-16 surrogate',
     );
-    expect((await session.sink.project())[1].message?.parts).toEqual(responses);
+    expect((await session.sink.project())[1].message?.parts).toEqual(
+      JSON.parse(JSON.stringify(responses)),
+    );
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
   },
