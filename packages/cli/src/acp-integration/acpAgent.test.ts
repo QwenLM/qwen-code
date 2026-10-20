@@ -29142,7 +29142,9 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
       skipFileCheckpointing: true,
     });
 
-    const { agent, agentPromise } = await bootAgent();
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(makeRecordingService()),
+    );
     const cleanup = agent as unknown as {
       cleanupUnstoredConfig(config: Config): Promise<void>;
     };
