@@ -43,6 +43,50 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     private Path mediaDirectory;
 
     @Test
+    void cleanupDebtSurvivesUntilItsNativeJournalIsPermanentlyCollected() {
+        initSession();
+        head(session);
+        jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 0");
+        byte[] bytes = "cleanup descriptor".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        publish("cleanup", "hosted-turn-cleanup", bytes);
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
+                + " journal_revision, resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?,"
+                + " 'workspace-1', ?, 1, 'cleanup', 0)", resScope, resScope,
+                ManagedSchemaKeys.key(resScope, "cleanup"), tenant, session);
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id,"
+                + " journal_revision, command_key_hash, transaction_id, operation, command_id,"
+                + " content_digest, first_sequence, last_sequence, event_count, writer_generation,"
+                + " writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes,"
+                + " byte_length, record_digest, gmt_create) VALUES (?, 'workspace-1', ?, 1, ?,"
+                + " 'tx', 'hostedCleanup', 'cleanup', ?, 1, 1, 1, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, 0)",
+                tenant, session, "c".repeat(64), "d".repeat(64), "e".repeat(64), bytes,
+                bytes.length, ToolPublicationContract.sha256(bytes));
+        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                + " owner_revision, resource_key, runtime_binding_key, tenant_id, workspace_id,"
+                + " session_id, journal_revision, resource_id, gmt_create) VALUES (?,"
+                + " 'HOSTED_CLEANUP', ?, 7, ?, ?, ?, 'workspace-1', ?, 1, 'cleanup', 0)",
+                resScope, ManagedSchemaKeys.key("cleanup"), ManagedSchemaKeys.key(resScope, "cleanup"),
+                HostedCleanupReferences.bindingKey(tenant, "workspace-1", "binding"), tenant, session);
+        retire();
+        var collector = collector(true, Duration.ZERO);
+        assertThat(collector.runOnce()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref"
+                + " WHERE owner_kind = 'HOSTED_CLEANUP'", Long.class)).isEqualTo(1);
+        assertThat(rows()).singleElement().satisfies(row -> assertThat(row.get("inline_bytes")).isNotNull());
+        assertThat(collector.runOnce()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref"
+                + " WHERE owner_kind = 'HOSTED_CLEANUP'", Long.class)).isZero();
+        assertThat(rows()).singleElement().satisfies(row -> assertThat(row.get("inline_bytes")).isNotNull());
+        assertThat(collector.runOnce()).isTrue();
+        assertThat(rows()).singleElement().satisfies(row -> assertThat(row.get("inline_bytes")).isNull());
+        assertThat(((Number) ledger().get("collected_bytes")).longValue()).isEqualTo(bytes.length);
+        assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE"
+                + " tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
+    }
+
+    @Test
     void retirementInventoryCompletionIsAtomicWithVerifiedGcSettlement() {
         initSession();
         head(session);
