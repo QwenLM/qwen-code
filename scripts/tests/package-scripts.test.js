@@ -1083,6 +1083,16 @@ describe('package scripts', () => {
     expect(Number(cap)).toBeGreaterThanOrEqual(6144);
   });
 
+  it('keeps the pnpm prepare build above the same heap ceiling', () => {
+    const { nodeOptions } = parse(readWorkflow('pnpm-workspace.yaml'));
+    const cap = nodeOptions?.match(/--max-old-space-size=(\d+)/)?.[1];
+    expect(cap).toBeDefined();
+    // The pnpm prepare path compiles the same CLI project that crossed the
+    // 4 GiB ceiling in #14823; #14827 raised this cap, so pin it beside the
+    // root build script instead of leaving one half of the fix unguarded.
+    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+  });
+
   it('selects the CLI dependency closure without selecting the same-named root', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
