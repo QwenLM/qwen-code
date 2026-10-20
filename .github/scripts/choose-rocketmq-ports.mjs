@@ -28,6 +28,12 @@ import os from 'node:os';
 
 const holderDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmq-port-holders-'));
 
+// Handed over before any port is parked, not after the pick loop: stdout is
+// the job's env file, so a chooser that dies mid-loop must still leave the
+// workflow the directory to release. Otherwise the holders below outlive the
+// job with no record and permanently burn their ports on the pool host.
+console.log(`RMQ_HOLDER_DIR=${holderDir}`);
+
 // Kept dependency-free so it runs on any runner Node as `node -e`.
 const HOLDER = `
 // node -e leaves no script path in process.argv: argv is [node, port, file].
@@ -74,6 +80,12 @@ const hold = (port) =>
         resolve(false);
       }
     }, 50);
+    // A spawn failure (EMFILE/EAGAIN on a busy pool host) emits 'error' on the
+    // child; with no listener that throws and kills the chooser mid-loop.
+    child.on('error', () => {
+      clearInterval(timer);
+      resolve(false);
+    });
   });
 
 // Kills the holder of a port the chooser decided not to use after all.
@@ -143,7 +155,6 @@ for (const name of [
   }
 }
 
-console.log(`RMQ_HOLDER_DIR=${holderDir}`);
 for (const [name, port] of Object.entries(ports)) {
   console.log(`${name}=${port}`);
 }

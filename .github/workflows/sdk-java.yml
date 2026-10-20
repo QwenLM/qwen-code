@@ -1347,8 +1347,12 @@ jobs:
             ${{ runner.temp }}/rocketmq/logs/
             ${{ runner.temp }}/rocketmq/home/logs/
           retention-days: 7
+      # Ungated on purpose: a port chooser that dies mid-loop leaves the
+      # broker step skipped while the detached holders it already parked
+      # stay bound on this shared pool host. `stop` releases them and is a
+      # no-op for a cluster that never started.
       - name: 'Stop the RocketMQ cluster'
-        if: "${{ always() && steps.broker.outcome != 'skipped' }}"
+        if: '${{ always() }}'
         env:
           RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
         run: 'scripts/rocketmq-lite-broker.sh stop'
@@ -1629,8 +1633,12 @@ jobs:
             ${{ runner.temp }}/rocketmq/logs/
             ${{ runner.temp }}/rocketmq/home/logs/
           retention-days: 7
+      # Ungated on purpose: a port chooser that dies mid-loop leaves the
+      # broker step skipped while the detached holders it already parked
+      # stay bound on this shared pool host. `stop` releases them and is a
+      # no-op for a cluster that never started.
       - name: 'Stop the RocketMQ cluster'
-        if: "${{ always() && steps.broker.outcome != 'skipped' }}"
+        if: '${{ always() }}'
         env:
           RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
         run: 'scripts/rocketmq-lite-broker.sh stop'

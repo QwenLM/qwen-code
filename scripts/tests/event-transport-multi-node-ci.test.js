@@ -104,13 +104,14 @@ describe('EventTransport multi-node gates CI', () => {
   });
 
   it('always stops the broker it started and keeps its evidence', () => {
-    for (const name of [
-      'Upload multi-node gate reports',
-      'Stop the RocketMQ cluster',
-    ]) {
-      expect(step(name).if).toContain('always()');
-      expect(step(name).if).toContain("steps.broker.outcome != 'skipped'");
-    }
+    expect(step('Upload multi-node gate reports').if).toContain('always()');
+    expect(step('Upload multi-node gate reports').if).toContain(
+      "steps.broker.outcome != 'skipped'",
+    );
+    // Ungated on purpose: a chooser that dies mid-loop leaves the broker
+    // step skipped while its detached holders stay bound, and only `stop`
+    // releases them.
+    expect(step('Stop the RocketMQ cluster').if).toBe('${{ always() }}');
     expect(step('Stop the RocketMQ cluster').run).toBe(
       'scripts/rocketmq-lite-broker.sh stop',
     );

@@ -32,6 +32,10 @@ const step = (name) => {
   return found;
 };
 const script = readFileSync('scripts/rocketmq-lite-broker.sh', 'utf8');
+const chooser = readFileSync(
+  '.github/scripts/choose-rocketmq-ports.mjs',
+  'utf8',
+);
 const pom = readFileSync('packages/managed-agent-server/pom.xml', 'utf8');
 const profile = pom
   .split('<id>event-transport-broker-gates</id>')[1]
@@ -89,13 +93,14 @@ describe('EventTransport broker gates CI', () => {
   });
 
   it('always stops the broker it started and keeps its evidence', () => {
-    for (const name of [
-      'Upload broker gate reports',
-      'Stop the RocketMQ cluster',
-    ]) {
-      expect(step(name).if).toContain('always()');
-      expect(step(name).if).toContain("steps.broker.outcome != 'skipped'");
-    }
+    expect(step('Upload broker gate reports').if).toContain('always()');
+    expect(step('Upload broker gate reports').if).toContain(
+      "steps.broker.outcome != 'skipped'",
+    );
+    // Ungated on purpose: a chooser that dies mid-loop leaves the broker
+    // step skipped while its detached holders stay bound, and only `stop`
+    // releases them.
+    expect(step('Stop the RocketMQ cluster').if).toBe('${{ always() }}');
     expect(step('Stop the RocketMQ cluster').run).toBe(
       'scripts/rocketmq-lite-broker.sh stop',
     );
@@ -125,6 +130,13 @@ describe('EventTransport broker gates CI', () => {
     const order = job.steps.map((candidate) => candidate.name);
     expect(order.indexOf('Choose RocketMQ ports')).toBeLessThan(
       order.indexOf('Start the RocketMQ LiteTopic cluster'),
+    );
+    // stdout is the env file, so the holder dir has to be handed over before
+    // any port is parked: a chooser that dies mid-loop must still leave the
+    // directory that the ungated stop step releases. Otherwise release_holders
+    // sees no RMQ_HOLDER_DIR and returns without touching the holders.
+    expect(chooser.indexOf('console.log(`RMQ_HOLDER_DIR=')).toBeLessThan(
+      chooser.indexOf('for (const name of ['),
     );
     const dir = mkdtempSync(join(tmpdir(), 'rmq-ports-'));
     let holderDir;
