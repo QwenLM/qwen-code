@@ -1405,7 +1405,11 @@ function truncateTurnText(text: string): {
   if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
     return { text, truncated: false };
   }
-  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+  const end =
+    (text.codePointAt(TURN_RESULT_TEXT_MAX_CHARS - 1) ?? 0) > 0xffff
+      ? TURN_RESULT_TEXT_MAX_CHARS - 1
+      : TURN_RESULT_TEXT_MAX_CHARS;
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function stripReferencedAttachmentDataParts(
@@ -16916,11 +16920,14 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
+                  this.config,
                 )
               : convertToFunctionResponse(
                   modelFacingToolName,
                   callId,
                   toolResult.llmContent,
+                  toolResult,
+                  this.config,
                 );
 
           // A tool can fail "softly" by returning toolResult.error without

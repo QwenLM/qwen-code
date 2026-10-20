@@ -593,7 +593,7 @@ class HostedMcpResultDeliveryIT {
                 }
             }
             boolean call = toolValue != null && !toolResult && mcpName != null;
-            var chunk = json.createObjectNode().put("id", "fg12a")
+            var chunk = json.createObjectNode().put("id", "fg12f")
                     .put("object", "chat.completion.chunk").put("created", 0)
                     .put("model", "loss-fixture");
             var choice = chunk.putArray("choices").addObject()
@@ -865,7 +865,7 @@ class HostedMcpResultDeliveryIT {
     private void saveEvidence() {
         try {
             Path destination = Files.createDirectories(Path.of(
-                    "target/fg12-cases/fg12a", tenant));
+                    "target/fg12-cases/fg12f", tenant));
             System.out
                     .println("FG12A_EVIDENCE " + destination.toAbsolutePath());
             json.writeValue(destination.resolve("proxy.json").toFile(),
