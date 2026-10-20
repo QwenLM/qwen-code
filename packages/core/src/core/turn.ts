@@ -42,7 +42,7 @@ import {
   getThoughtSummary,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
-import type { LoopType } from '../telemetry/types.js';
+import type { LoopStopDetail, LoopType } from '../telemetry/types.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,
@@ -561,7 +561,7 @@ export type ServerLlmLoopDetectedEvent = {
   // it so downstream consumers can surface a concrete reason to the user.
   value?: {
     loopType: LoopType;
-  };
+  } & LoopStopDetail;
 };
 
 export type ServerLlmCitationEvent = {
