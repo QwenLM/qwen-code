@@ -91,11 +91,13 @@ around it.
   lifecycle throw.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
-  `GET /v1/agents/sessions/{id}/tasks` is accepted. Sent while the wake turn
-  was parked on the model, that cancel did not stop the run: once the model
-  was released the run settled `completed`, and a 120 s wait for `cancelled`
-  expired. The cell needs a hold point where the cancel wins that race, which
-  this fixture does not expose.
+  `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn kept
+  parked on the model, the cancel wins: the task and the run both settle
+  `cancelled` in under a second, and releasing the model afterwards does not
+  revive them. Releasing the model immediately after the `202` instead lets the
+  turn finish first, and the run settles `completed`. The parked model is
+  therefore the hold point this cell needs; the release ordering, not the
+  fixture, decides the outcome.
 - Lease takeover during a cancel is out of scope, as in FG11c.
 - The stream-gap gate (`FG11e`) is untouched.
 

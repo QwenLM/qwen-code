@@ -73,9 +73,10 @@ available.`。公开 close 路由经 `SessionLifecycleService.admit` 的 workspa
   `Workspace execution authority is unavailable.`——两者都不是本条生命周期抛错。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
-  接受。把 wake turn 扣在模型上时发出该取消，并没有停住 run：模型释放后
-  run 结算为 `completed`，等待 `cancelled` 的 120 s 窗口到期。要构造这一格
-  需要一个让取消赢下这场竞速的扣留点，本夹具尚未暴露。
+  接受。把 wake turn 一直扣在模型上时，取消会赢：task 与 run 都在一秒内结算为
+  `cancelled`，之后再释放模型也不会复活。反之，在收到 `202` 后立刻释放模型，
+  turn 会先跑完，run 结算为 `completed`。因此扣住的模型本身就是这一格所需的
+  扣留点；决定结果的是释放顺序，而不是夹具。
 - 取消期间的租约接管不在范围内，与 FG11c 一致。
 - stream gap 门禁（FG11e）不在此处。
 
