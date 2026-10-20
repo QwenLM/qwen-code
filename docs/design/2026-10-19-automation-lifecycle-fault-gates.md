@@ -2,8 +2,9 @@
 
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
-Status: slice 1 is partially delivered. `disable-span` is implemented and
-green; the other two cells and slice 2 are scoped but not implemented.
+Status: `disable-span` and the per-run cancel cell are implemented and green;
+`retire-at-intent`, `close-queued-input` and the rest of the cancellation matrix
+are scoped but not implemented.
 
 Issue: #14446, the FG11 tracker. The `d` row records per-run task
 cancellation as implemented by #14526, and states that retire, disable,
@@ -63,6 +64,12 @@ asserts:
   a run that completes naturally keeps its outcome;
 - a retry under the same key reuses the original operation and run, and a
   parked cancel is never redelivered.
+
+- `cancel-stops-only-the-target` is delivered. With the wake turn parked on the
+  model, the public task cancel settles the task and the run `cancelled` in
+  under a second and the schedule stays `live`; releasing the model immediately
+  after the `202` instead lets the turn finish first, which is the ordering the
+  cell avoids.
 
 #14526 implemented the per-run cancel; slice 2 pins the round-level matrix
 around it.
