@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -69,16 +70,24 @@ function events(transaction: Transaction): Event[] {
 
 function selected(transaction: Transaction, fault: string) {
   const committed = events(transaction);
-  if (fault === 'arguments' || fault === 'intent') {
+  if (fault === 'arguments') {
+    return transaction.resources.some(
+      (resource) =>
+        resource.kind === 'managed-tool-input' && resource.bytesBase64,
+    );
+  }
+  if (fault === 'intent') {
     const intent = committed.find((event) => event.kind === 'tool.intent');
     if (!intent) return false;
-    const argument = transaction.resources.find(
-      (resource) => resource.kind === 'managed-tool-input',
-    );
-    assert(argument?.bytesBase64);
-    assert.equal(
-      (intent.payload['argsRef'] as { resourceId: string }).resourceId,
-      argument.resourceId,
+    const argument = intent.payload['argsRef'] as {
+      kind: string;
+      resourceId: string;
+    };
+    assert.equal(argument.kind, 'managed-tool-input');
+    assert(
+      transaction.resources.some(
+        (resource) => resource.resourceId === argument.resourceId,
+      ),
     );
     return true;
   }
@@ -137,7 +146,10 @@ const proxy = createServer(async (req, res) => {
       ...(body.length ? { body } : {}),
       signal: AbortSignal.timeout(30_000),
     };
-    const commit = store && url.pathname.endsWith('/transactions:commit');
+    const commit =
+      store &&
+      (url.pathname.endsWith('/transactions:commit') ||
+        url.pathname.endsWith('/transactions:commit-v2'));
     const target = commit && !restoring && selected(fields, report.fault);
     if (target) {
       assert(report.faults < 3, 'Harness exceeded the commit retry budget');
@@ -173,14 +185,29 @@ const proxy = createServer(async (req, res) => {
         return;
       }
       assert.equal(upstream.status, 500, bytes.toString());
+    } else if (url.pathname.endsWith(':release-mount')) {
+      assert(
+        isLegitimateMountRelease(upstream.status, json?.code),
+        `${upstream.status} ${url}: ${bytes}`,
+      );
     } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     if (restoring && store && url.pathname.endsWith('/transactions'))
       report.restoreTransactions.push(...json.transactions);
     if (!store) {
-      assert.equal(fields.runtimeSessionId, report.promptId);
       const operation =
         req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
-      report.operations.push(operation);
+      const harnessScoped =
+        req.method === 'POST' &&
+        [
+          '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/tool-sessions:active-holds',
+        ].includes(url.pathname);
+      assert.equal(
+        fields.runtimeSessionId,
+        harnessScoped ? undefined : report.promptId,
+      );
+      if (!(harnessScoped && operation === 'active-holds'))
+        report.operations.push(operation);
       if (operation === 'prepare') {
         assert.equal(report.executionCallId, '');
         report.executionCallId = json.executionCallId;
@@ -313,25 +340,45 @@ try {
       async () => !(await json(`${route}/status`)).hasActivePrompt,
     );
     assert.equal(current.faults, 3, `${current.fault}: retries not exhausted`);
-    assert.equal((await json(`${route}/status`)).recoveryBlocked, true);
-    assert.equal(current.modelCalls, current.fault === 'turn-reply' ? 2 : 1);
+    // A reply-lost commit landed durably before its answer was dropped. The
+    // settle (#14570) applies it once: a result reply becomes the one
+    // committed tool_result while the Turn stays blocked, and a turn reply
+    // settles the Turn itself, so it completes without a cold load.
+    const settled = current.fault === 'turn-reply';
+    if (settled)
+      await waitUntil(async () => {
+        const status = await json(`${route}/status`);
+        const applied = await transcript();
+        return (
+          !status.hasActivePrompt &&
+          !status.recoveryBlocked &&
+          applied.some((event) => event.type.startsWith('turn_'))
+        );
+      });
+    assert.equal((await json(`${route}/status`)).recoveryBlocked, !settled);
+    assert.equal(current.modelCalls, settled ? 2 : 1);
     const records = await transcript();
-    assert.equal(
-      records.filter((event) => event.type.startsWith('turn_')).length,
-      0,
-    );
+    const terminals = records.filter((event) => event.type.startsWith('turn_'));
+    assert.equal(terminals.length, settled ? 1 : 0);
+    if (settled) {
+      assert.equal(terminals[0].type, 'turn_complete');
+      assert.equal(terminals[0].promptId, current.promptId);
+    }
     assert.equal(
       records.filter((event) => event.data.record?.type === 'tool_result')
         .length,
-      ['result-checkpoint', 'turn-reply'].includes(current.fault) ? 1 : 0,
+      ['result-checkpoint', 'result-reply', 'turn-reply'].includes(
+        current.fault,
+      )
+        ? 1
+        : 0,
     );
-    const started =
-      current.fault.startsWith('result-') || current.fault === 'turn-reply';
+    const started = current.fault.startsWith('result-') || settled;
     for (const [operation, count] of [
       ['acquire', 1],
-      ['prepare', 1],
+      ['prepare', current.fault === 'arguments' ? 0 : 1],
       ['start', started ? 1 : 0],
-      ['release', current.fault === 'turn-reply' ? 1 : 0],
+      ['release', 0],
     ] as const)
       assert.equal(
         current.operations.filter((item) => item === operation).length,
@@ -345,10 +392,12 @@ try {
       await readFile(path.join(cli.root, 'proof.txt'), 'utf8'),
       'decoy',
     );
-    assert.equal(
-      (await json(`${route}/prompt`, input('must remain blocked'), 409)).error,
-      'hosted_turn_recovery_required',
-    );
+    if (!settled)
+      assert.equal(
+        (await json(`${route}/prompt`, input('must remain blocked'), 409))
+          .error,
+        'hosted_turn_recovery_required',
+      );
   }
   await cli.close();
   const leaseDeadline = Date.now() + 5_100;
@@ -392,10 +441,10 @@ try {
         restored[0].recordBytesBase64,
         current.target!.recordBytesBase64,
       );
-    assert.equal(
-      current.operations.length,
-      operations,
-      'Cold load must not contact Broker',
+    assert.deepEqual(
+      current.operations.slice(operations),
+      completed ? ['release'] : [],
+      'Cold load may only release a durably settled Turn',
     );
     assert.equal(
       current.modelCalls,

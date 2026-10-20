@@ -42,7 +42,8 @@ owner 证据与 owner 读取器一致。M3 是配置快照与兼容评估，已�
 后续修改。M2 是子进程宿主，已在 #13131 实现。下文的 M5 一节按宿主决定的要求，在实现
 之前更新了 M5 的 worker 归属、共享、清理与会话隔离要求，并把 M5 拆成三部分；第一部分
 M5a 已在 #13167 实现，第二部分 M5b 已在 #13291 实现，第三部分 M5c 已在 #13352 借下文“物理停止”
-一节落地。M6 仍是后置提议，重新排期后落地时更新设计。
+一节落地。下文的 M6 一节是最后一个切片的规格；其注册与工作区变更回执已在 #14483
+实现，评审修复在 #14488。
 M2 的更新基于 `afb911a3c8`，M5 的更新基于 `f3bf699476`，M5b 的更新基于 `1a5aae80d9`，
 M5c 的更新基于 `2c591ecc08`。
 
@@ -180,7 +181,7 @@ B2d 的不变量仍然成立。此外：
 ### 切片计划
 
 M1 到 M4 已实现并保留；M2、M4、M5a、M5b 与 M5c 先于状态一节所述的优先级评估落地，
-但不注册引擎。只有 M6 后置，等待该评估；下方依赖顺序与验收检查不代表已安排实施。
+但不注册引擎。M6 已在 #14483 实现；评审修复在 #14488，工作区变更测试在 #14525 与 #14554，端到端验收发现并在 #14688 修复了 Managed 恢复被拒的问题。
 参考提交描述原始移植方案；所链接的宿主决定取代了旧的进程内 M2 方案。
 
 | 切片                                                                 | 交付内容                                                                                                                                                                                                                                                                                                                                                               | 验收检查                                                                                                                                                                                                                                                                                                                                                            | 参考                                                                                                                                                                               |
@@ -190,7 +191,7 @@ M1 到 M4 已实现并保留；M2、M4、M5a、M5b 与 M5c 先于状态一节所
 | **M3 — 严格配置快照**（#12883）                                      | 按 M3 一节细化后的兼容契约，对其配置输入的只读快照：读取各层 settings 时不做迁移写入、备份或重置（迁移只在内存中进行；缺失、不可读、损坏和版本未知的层彼此区分），带错误的 `.mcp.json`，所有 settings 层的 Hooks，不加锁地证明 extension store 为空，转发的 argv，信任状态与 cwd，以及请求的审批模式；外加返回 `compatible`、`deferred` 或 `unknown`（附原因）的评估。 | 读取不改变任何字节或元数据文件；每个输入来源单独都能使配置成为 `deferred` 或 `unknown`；对空的受信工作区评估为 `compatible`。                                                                                                                                                                                                                                       | `a836081466`、`306cf17546`、`d48161bc4a`                                                                                                                                           |
 | **M4 — Managed Session log 记录**（#12935）                          | 宿主的 recorder 在 certified writer lease 下通过 authority 的 record sink 写入；恢复读取 log 的 projection；关闭时封存 log。                                                                                                                                                                                                                                           | 以这种方式记录的会话恢复后历史相同；Legacy 入口凭 header 拒绝它；在第一次提交之前崩溃，不会留下 Legacy 能运行的 Managed 会话。                                                                                                                                                                                                                                      | `e98cda5c95`、`1ed806ca85`、`f501d9694d`                                                                                                                                           |
 | **M5 — Runtime 承载的工具**（M5a：#13167；M5b：#13291；M5c：#13352） | 会话独占的本地 Runtime worker，由 Managed 子进程在第一次工具调用时惰性启动并绑定到会话目录；Read、Write、Edit 和前台 Shell 无需等待 worker 即可声明，在宿主中准备并做权限检查，在 worker 中执行；取消能到达 worker 的进程，并等到其进程组退出；模型继续之前结果已持久写入 log；结果未知时阻塞而不是重放。                                                              | 工具文件写入与 Shell 进程只在 worker 中执行；宿主仍可启动 worker 和记录会话。取消有物理停止证据；子进程或 worker 崩溃不留下 ledger 无法指认的 Shell 进程组（M5c 一节接受的缺口除外：spawn 到 pid 回调的窗口、setsid/daemonize 残留、以及拥有 worker 自身权限的 Shell 对 ledger 的篡改）；无法证明的停止让引擎保持隔离，并由 reaper 持续重试；结果丢失时会话被阻塞。 | `7786edd123`、`5dde5c8dd7`、`174e072ac4`                                                                                                                                           |
-| **M6 — 引擎**（后置）                                                | Managed 通道 factory（M2 宿主、M5 工具、M3 复核），宿主尚缺的工作区变更确认，以及对 Bridge 在 Managed 通道上调用的其他扩展方法（会话关闭、用户语言、资源快照）的核验（宿主已能应答它们），工作区控制的决定，在 `--experimental-paired-engines` 之后注册到三个 daemon 构造点和嵌入式默认 Bridge，以及生命周期（关闭、排空、撤销、代际与环境重载）。                     | 在双引擎 daemon 上，受信工作区中配置为空的普通新会话经真实路由在 Managed 上运行：创建、prompt、工具调用、取消、关闭，以及 daemon 重启后的冷恢复。延期配置留在 Legacy，新的 deny 规则送达存活的 Managed 会话，关闭开关后 Legacy 拒绝该 Managed 会话。                                                                                                                | `824e92d84f`、`306cf17546`                                                                                                                                                         |
+| **M6 — 引擎**（已在 #14483 实现）                                    | Managed 通道 factory（M2 宿主、M5 工具、M3 复核），宿主尚缺的工作区变更确认，以及对 Bridge 在 Managed 通道上调用的其他扩展方法（会话关闭、用户语言、资源快照）的核验（宿主已能应答它们），工作区控制的决定，在 `--experimental-paired-engines` 之后注册到三个 daemon 构造点和嵌入式默认 Bridge，以及生命周期（关闭、排空、撤销、代际与环境重载）。                     | 在双引擎 daemon 上，受信工作区中配置为空的普通新会话经真实路由在 Managed 上运行：创建、prompt、工具调用、取消、关闭，以及 daemon 重启后的冷恢复。延期配置留在 Legacy，新的 deny 规则送达存活的 Managed 会话，关闭开关后 Legacy 拒绝该 Managed 会话。                                                                                                                | `824e92d84f`、`306cf17546`                                                                                                                                                         |
 
 M2 与 M3 互不依赖。M4 和 M5 依赖 M2 作为驱动它们的宿主；M4 的记录本身先行落地
 （见 M4 一节）。M6 依赖以上全部，也是唯一能让会话选中 Managed 的切片。
@@ -906,6 +907,101 @@ Shell；以及任何不在 PTY 上运行的 Shell。两者都覆盖不了的：�
   被 `tools.eager` 降级的工具也没有 `tool_search` 可以到达。M6 之前，M3 需要为二者
   加入规则。
 - 第一次调用（启动 worker）的开销与 worker 的内存，在 M6 之前随整个进程树一并测量。
+
+### M6：引擎
+
+M6 是唯一能让会话选中 Managed 的切片。它把 M2 的宿主与 M3 的兼容评估注册到
+daemon 的双引擎站点上，并补上 Managed 通道唯一没有应答的扩展方法：Bridge 下发给
+另一种引擎每个存活通道的工作区变更。
+
+它拆成两个代码切片同时落地，因为单独任一个都不安全：只注册、不应答回执，会让每次
+工作区控制变更都变成通道隔离；没有注册，回执也没有生产调用方。
+
+**状态：已在 #14483 实现。** 引擎已注册到每个双引擎运行时，Managed 宿主也已应答
+`qwen/control/workspace/change`；评审修复在 #14488，工作区变更测试在 #14525 与 #14554，端到端验收发现并在 #14688 修复了 Managed 恢复被拒的问题。
+
+#### M6a：注册与兼容性
+
+`serve/managed-execution-engine.ts` 用两项输入构造选择器已经接受的
+`ManagedExecutionEngine`：
+
+- 运行时自己的 Legacy `SpawnChannelFactoryOptions`，使两个子进程共享同一进程登记
+  表、堆策略、空闲回收、管道上限与诊断，且 daemon 的进程预算把 Managed 子进程也
+  计入；
+- M3 评估读取的运行时事实：规范化工作区、其信任判定、会话宿主实际收到的有效环境、
+  转发的 argv，以及运行中的工作区是否持有配置文件之外的 MCP 服务器。
+
+工厂是带这些选项的 `createManagedEngineChannelFactory`；评估用选择器给出的规范化
+工作区与请求的审批模式调用 `evaluateManagedCompatibility`。这就是全部选择器输入：
+它已经携带规范化工作区与受信 standalone 用途；冷加载与恢复所需的持久 owner 记录由
+选择器自行读取。
+
+注册只发生在四个双引擎站点：
+
+| 站点                                 | 运行时           | 说明                       |
+| ------------------------------------ | ---------------- | -------------------------- |
+| `run-qwen-serve.ts` 主运行时         | 绑定工作区       | 完整事实                   |
+| `run-qwen-serve.ts` 次运行时         | 每个附加工作区   | 完整事实                   |
+| `run-qwen-serve.ts` 工作区限定运行时 | 每个已注册工作区 | live-conversation 来源跳过 |
+| `server.ts` 默认 Bridge              | 内嵌宿主         | 仅当调用方注入事实或引擎   |
+
+Conversations 运行时保持单工厂：它的会话是 daemon 拥有的 standalone 对话，选择器
+本来就把它们留在 Legacy；#12737 Q4 也把工作区控制限定在 Legacy。此处不会在会话选中
+Managed 之前启动 Managed 宿主、worker 或兼容扫描。
+
+#### M6b：工作区变更回执
+
+Bridge 的 `propagateWorkspaceChange` 把 `qwen/control/workspace/change` 下发给每个
+存活的非 Legacy 通道；任何不是该精确版本确认的应答都记为漏确认，并隔离该通道。M2
+宿主已应答 Bridge 调用它的其他方法（会话关闭、用户语言、资源快照），唯独没有这个。
+M6b 在 `acpAgent.extMethodInternal` 中补上：
+
+- 只接受 `v: 1`、安全整数 `revision` 与已知 `kind`；其余一律判为非法请求，不构成
+  确认。
+- 通过与对应控制方法相同的内部处理器应用变更——`settings` 走 `workspaceReload`，
+  `sessionWorkflow` 走 `workspaceSessionWorkflow`，`modelProviders` 走
+  `workspaceModelProvidersReload`，`skills` 走 `workspaceSkillsRefresh`——子进程不会
+  因此多出第二条通往同一状态的、口径不同的入口。
+- `permissions` 是例外：settings 重载不会触及存活的权限管理器，因此宿主按变更指明的
+  作用域重读规则集，并按权限规则控制方法的同一方式同步。请求本身不携带规则；宿主读取
+  控制引擎已经持久化的内容。
+- 对收紧型变更，先请求每个运行中的回合取消，否则只处理空闲会话的重载路径会跳过它们。
+  这就是 #12737 Q2 的「无法重新校验的在飞回合请求取消」；已准入的操作仍由原 owner
+  负责查询、取消与结算。
+- 变更应用期间宿主不接收新 prompt；应用完成即解除围栏，不因活动延长。
+- 只有变更确实应用后才应答 `{ v: 1, revision, acknowledged: true }`。处理器失败则
+  不应答，Bridge 记为漏确认并隔离通道，即设计要求的失败关闭方向。
+
+只由 Legacy 工作区控制通道持久化的变更（新增 deny 规则）以权限规则重读的形式到达
+子进程，因为控制引擎已经写入。引擎不从请求里取规则，而是重读它实际要用的配置。
+
+#### 生命周期与隔离
+
+- 选择仍按工作区运行时进行：每个运行时一个 Managed 子进程，由其会话共享；代际或
+  环境重载替换运行时的方式与 Legacy 相同。退役运行时的 Managed 通道由关闭 Legacy
+  的同一 Bridge 关闭流程释放。
+- 隔离原因沿用 M5c 的错误码 `managed_engine_quarantined`：新 Managed 会话以带原因的
+  可重试 503 被拒绝，daemon 不把它改判成已经是恢复冲突 409 的
+  `session_execution_engine_unavailable`。M6 按该错误码编写 daemon 侧传播。
+- 无法被选中的 Managed 引擎（配置为 deferred 或 unknown）让会话留在 Legacy；无法在
+  此处运行的 Managed owner 被拒绝，绝不回退到 Legacy 重放。
+
+#### 验收标准
+
+1. 在双引擎 daemon 上，受信工作区中配置为空的普通新会话通过真实路由跑在 Managed
+   上：创建、prompt、工具调用、取消、关闭，以及 daemon 重启后的冷恢复。
+2. M3 评估判为 deferred 的配置留在 Legacy。
+3. 新增 deny 规则到达存活的 Managed 会话，并以精确版本被确认，通道不被隔离。
+4. 关闭 `--experimental-paired-engines` 时不启动任何 Managed 宿主或 worker，Legacy
+   以既有分类拒绝 Managed transcript。
+5. 子进程无法应用的变更使通道保持隔离，daemon 报告
+   `managed_engine_quarantined`，而不是泛化的内部错误。
+
+#### 残留项
+
+- `session/cd` 仍需要新 worker；M6 继续拒绝它，处理器的 cwd 规则不变。
+- M5 记录的 worker 设置下发、Shell `sed` 预览、文件写入模式/原子性/审计保持开放；
+  它们门禁的是默认启用，而不是本次 opt-in 切片。
 
 ## 文件与消费者
 

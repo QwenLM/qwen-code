@@ -287,6 +287,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'goals', key: 'modelProposed' },
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
+  { section: 'ui', key: 'allowedApprovalModes' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
@@ -301,6 +302,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
 export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
   'advisorModel',
   'advisorMaxUses',
+  'pluginConfigs',
 ] as const;
 
 /**

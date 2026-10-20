@@ -57,8 +57,10 @@ host, is implemented in #13131. The M5 section below updates M5's worker
 ownership, sharing, cleanup and session-isolation requirements, as the host
 decision asked before implementation, and splits M5 into three parts; the
 first, M5a, is implemented in #13167, the second, M5b, in #13291, and the
-third, M5c, in #13352, below under "physical stop". M6 remains a deferred
-proposal; it lands with its own design update after rescheduling. The M2
+third, M5c, in #13352, below under "physical stop". The M6 section below is
+the design of the last slice; its registration and workspace-change
+acknowledgement are implemented in #14483, with the review fixes in #14488.
+The M2
 update is based on `afb911a3c8`, the M5 update on `f3bf699476`, the M5b
 update on `1a5aae80d9`, and the M5c update on `2c591ecc08`.
 
@@ -241,8 +243,10 @@ The B2d invariants hold. In addition:
 
 M1 to M4 are implemented and retained; M2, M4, M5a, M5b and M5c landed
 ahead of the priority review described in Status without registering the
-engine. Only M6 is deferred until that review; the dependency order and
-exit checks below do not schedule its implementation. Reference commits
+engine. M6 is implemented in #14483; the review fixes are in #14488, the
+workspace-change tests in #14525 and #14554, and the end-to-end pass found
+and fixed the Managed restore refusal in #14688. Reference
+commits
 describe the original port; the linked host decision supersedes the old
 in-process M2 approach.
 
@@ -253,7 +257,7 @@ in-process M2 approach.
 | **M3 — strict configuration snapshot** (#12883)                       | A read-only snapshot of the configuration inputs of the compatibility contract, as the M3 section refines them: settings layers read without migration writes, backups or resets (in-memory migration only; missing, unreadable, corrupt and unknown-version layers kept distinct), `.mcp.json` with its errors, Hooks from every settings layer, a lock-free proof that the extension store is empty, forwarded argv, trust and cwd, and the requested approval mode; plus the evaluation that returns `compatible`, `deferred` or `unknown` with a reason. | Reading leaves every byte and every metadata file unchanged; each input source alone makes a configuration `deferred` or `unknown`; an evaluation of an empty trusted workspace is `compatible`.                                                                                                                                                                                                                                                                                                                                                                       | `a836081466`, `306cf17546`, `d48161bc4a`                                                                                                                                                        |
 | **M4 — Managed Session log recording** (#12935)                       | The host's recorder writes through the authority's record sink under the certified writer lease; restore reads the log's projection; the log is sealed on close.                                                                                                                                                                                                                                                                                                                                                                                             | A session recorded this way restores with the same history; Legacy entries refuse it by its header; a crash before the first commit leaves no Managed session that Legacy can run.                                                                                                                                                                                                                                                                                                                                                                                     | `e98cda5c95`, `1ed806ca85`, `f501d9694d`                                                                                                                                                        |
 | **M5 — Runtime-backed tools** (M5a: #13167; M5b: #13291; M5c: #13352) | A session-exclusive local Runtime worker launched by the Managed child lazily at the first tool call and bound to the session's directory; Read, Write, Edit and foreground Shell declared without waiting for the worker, prepared and permission-checked in the host, executed in the worker; cancellation that reaches the worker's processes and waits for their process groups to exit; results durable in the log before the model continues; an unknown outcome blocks instead of replaying.                                                          | Tool file writes and Shell processes run only in the worker; host-side worker provisioning and session recording remain allowed. Cancellation has physical-stop evidence; a crash of the child or the worker leaves no Shell process group the ledger cannot name (except the holes the M5c section accepts: the spawn-to-pid-callback window, the setsid/daemonize residual, and ledger tampering by a Shell running with the worker's own permissions); an unprovable stop keeps the engine quarantined while a reaper retries it; a lost result blocks the session. | `7786edd123`, `5dde5c8dd7`, `174e072ac4`                                                                                                                                                        |
-| **M6 — the engine** (deferred)                                        | The Managed channel factory (the M2 host, M5 tools, M3 revalidation), the workspace-change acknowledgement the host lacks and a check of the other extension methods the Bridge calls on a Managed channel (session close, user language, resource snapshot), which the host already answers, the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                            | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session.                                                                                                                                                                                   | `824e92d84f`, `306cf17546`                                                                                                                                                                      |
+| **M6 — the engine** (implemented in #14483)                           | The Managed channel factory (the M2 host, M5 tools, M3 revalidation), the workspace-change acknowledgement the host lacks and a check of the other extension methods the Bridge calls on a Managed channel (session close, user language, resource snapshot), which the host already answers, the workspace-control decision, registration at the three daemon sites and the embedded default behind `--experimental-paired-engines`, and lifecycle (shutdown, drain, revoke, generation and environment reload).                                            | On a paired daemon, an ordinary new session in a trusted workspace with an empty configuration runs on Managed through the real routes: create, prompt, tool call, cancel, close, and a cold restore after a daemon restart. A deferred configuration stays on Legacy, a new deny rule reaches the live Managed session, and with the opt-in off Legacy refuses the Managed session.                                                                                                                                                                                   | `824e92d84f`, `306cf17546`                                                                                                                                                                      |
 
 M2 and M3 are independent of each other. M4 and M5 need M2 for the host that
 drives them; the M4 recording itself landed first (see the M4 section). M6
@@ -1267,6 +1271,134 @@ is unchanged from M5a and recorded here rather than claimed away.
   no `tool_search` to reach it. M3 needs rules for both before M6.
 - The cost of the first call, which starts the worker, and the worker's
   memory are measured with the whole process tree before M6.
+
+### M6: the engine
+
+M6 is the only slice that makes a session select Managed. It registers the M2
+host with the M3 compatibility evaluation at the daemon's paired sites, and it
+closes the one extension method a Managed channel does not answer: the
+workspace change the Bridge sends to every live engine of another type.
+
+It is split into two code slices that land together, because either alone is
+unsafe: registration without the acknowledgement turns every workspace control
+change into a quarantine, and the acknowledgement has no production caller
+without registration.
+
+**Status: implemented in #14483.** The engine is registered at every paired
+runtime and the Managed host answers `qwen/control/workspace/change`. The
+review fixes are in #14488; the workspace-change tests are in #14525 and
+#14554, and the end-to-end pass found and fixed the Managed restore refusal
+in #14688.
+
+#### M6a: registration and compatibility
+
+`serve/managed-execution-engine.ts` builds the `ManagedExecutionEngine` the
+selector already accepts, from two things:
+
+- the runtime's own Legacy `SpawnChannelFactoryOptions`, so both children share
+  its process registry, heap policy, idle reclamation, pipe limits and
+  diagnostics, and the daemon's process budget counts the Managed child;
+- the runtime facts the M3 evaluation reads: the canonical workspace, its trust
+  decision, the effective environment its session hosts receive, the forwarded
+  argv, and whether the running workspace holds MCP servers outside its files.
+
+The factory is `createManagedEngineChannelFactory` with those options; the
+evaluation calls `evaluateManagedCompatibility` with the selection's canonical
+workspace and requested approval mode. That is the whole selector input: it
+carries the canonical workspace and the trusted standalone purpose, and the
+cold load or resume adds the durable owner record, which the selector already
+reads.
+
+Registration happens at the four paired sites and nowhere else:
+
+| Site                                     | Runtime                   | Notes                                                |
+| ---------------------------------------- | ------------------------- | ---------------------------------------------------- |
+| `run-qwen-serve.ts`, primary             | bound workspace           | full facts                                           |
+| `run-qwen-serve.ts`, secondary           | each additional workspace | full facts                                           |
+| `run-qwen-serve.ts`, workspace-qualified | each registered workspace | skipped for live-conversation provenance             |
+| `server.ts`, default Bridge              | embedded host             | only when the caller injects the facts, or an engine |
+
+The Conversations runtime stays single-factory: its sessions are daemon-owned
+standalone conversations, which the selector defers to Legacy anyway, and
+`#12737` Q4 keeps workspace control Legacy-scoped. Nothing here starts a
+Managed host, a worker or a compatibility scan before a session selects
+Managed.
+
+#### M6b: workspace-change acknowledgement
+
+The Bridge's `propagateWorkspaceChange` sends `qwen/control/workspace/change`
+to every live non-Legacy channel and treats any answer other than the exact
+revision acknowledgement as a missed change, which quarantines the channel.
+The M2 host answers every other method the Bridge calls — session close, user
+language, resource snapshot — but not this one. M6b adds it to
+`acpAgent.extMethodInternal`:
+
+- It accepts only `v: 1`, a safe-integer `revision` and a known `kind`;
+  anything else is an invalid request, which is not an acknowledgement.
+- It applies the change through the same internal handler the corresponding
+  control method uses — `workspaceReload` for `settings`,
+  `workspaceSessionWorkflow` for `sessionWorkflow`,
+  `workspaceModelProvidersReload` for `modelProviders`, and
+  `workspaceSkillsRefresh` for `skills` — so the child gains no second,
+  divergent door to the same state.
+- `permissions` is the exception: a settings reload does not touch the live
+  permission managers, so the host re-reads the rule sets from the scopes the
+  change names and syncs them exactly as the permission-rule control method
+  does. The request carries no rules; the host reads what the control engine
+  persisted.
+- For a tightening change it first asks every running turn to cancel, so the
+  reload reaches sessions the idle-only reload path would otherwise skip. This
+  is #12737 Q2's "in-flight turn that cannot be revalidated is asked to
+  cancel"; operations already admitted keep their original owner for status,
+  cancellation and settlement.
+- While the change is being applied the host admits no new prompt; the fence
+  lifts when the change is applied and is not extended by activity.
+- It answers `{ v: 1, revision, acknowledged: true }` only after the change
+  was applied. A handler failure leaves the request unanswered, which the
+  Bridge records as a missed change and quarantines — the fail-closed
+  direction the design requires.
+
+A change that only the Legacy workspace-control channel persists (a new deny
+rule) reaches the child as a settings reload, because the control engine has
+already written it. The engine does not re-derive permission rules from the
+request; it re-reads the settings it will actually use.
+
+#### Lifecycle and quarantine
+
+- Selection stays per workspace runtime: one Managed child per runtime, shared
+  by its sessions, and a generation or environment reload replaces the runtime
+  exactly as it does for Legacy. A retired runtime's Managed channel is disposed
+  through the same Bridge shutdown that closes Legacy.
+- A quarantine reason keeps the M5c error kind, `managed_engine_quarantined`:
+  new Managed sessions are refused with a retryable 503 that carries the
+  reasons, and the daemon does not reclassify it as
+  `session_execution_engine_unavailable`, which already means the resume
+  conflict 409. M6 writes the daemon-side propagation against that kind.
+- A Managed engine that cannot be selected (deferred or unknown
+  configuration) leaves the session on Legacy; a Managed owner that cannot run
+  is refused, never replayed through Legacy.
+
+#### Acceptance criteria
+
+1. On a paired daemon, an ordinary new session in a trusted workspace with an
+   empty configuration runs on Managed through the real routes: create, prompt,
+   a tool call, cancel, close, and a cold restore after a daemon restart.
+2. A configuration the M3 evaluation defers stays on Legacy.
+3. A new deny rule reaches the live Managed session and is acknowledged with
+   its exact revision, so the channel is not quarantined.
+4. With `--experimental-paired-engines` off, no Managed host or worker starts
+   and a Managed transcript is refused by Legacy with the existing
+   classification.
+5. A change the child cannot apply leaves the channel quarantined and the
+   daemon reports `managed_engine_quarantined`, not a generic internal error.
+
+#### Residuals
+
+- A `session/cd` still needs a new worker; M6 keeps refusing it and leaves the
+  handler's cwd rule unchanged.
+- The worker settings carry-over, the Shell `sed` preview and the file-write
+  mode/atomicity/audit items recorded under M5 stay open; they gate a default
+  enablement, not this opt-in slice.
 
 ## Files and consumers
 

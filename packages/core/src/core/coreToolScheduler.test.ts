@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getToolOutputProvenance,
+  measureToolOutput,
+} from '../tools/tool-output-size.js';
+import * as outputTruncation from '../tools/truncation.js';
+import * as sizeLoggers from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
@@ -254,6 +260,31 @@ vi.mock('../tools/modifiable-tool.js', async (importOriginal) => {
       modifyWithEditorOverride.value?.() ?? actual.modifyWithEditor(...args),
   };
 });
+
+// The vision bridge runs after a producer already settled, so it is the
+// reachable post-settlement step that can still throw.
+const bridgeRejection = vi.hoisted(() => ({
+  value: undefined as Error | undefined,
+}));
+
+vi.mock(
+  '../services/visionBridge/tool-result-vision-bridge.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../services/visionBridge/tool-result-vision-bridge.js')
+      >();
+    return {
+      ...actual,
+      bridgeToolResultImages: (
+        params: Parameters<typeof actual.bridgeToolResultImages>[0],
+      ) => {
+        if (bridgeRejection.value) return Promise.reject(bridgeRejection.value);
+        return actual.bridgeToolResultImages(params);
+      },
+    };
+  },
+);
 
 vi.mock('../telemetry/sdk.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../telemetry/sdk.js')>();
@@ -878,6 +909,139 @@ function autoApprovePendingTools(
 }
 
 describe('CoreToolScheduler', () => {
+  it.each(['success', 'sync_error', 'async_error'])(
+    'observes actual execution boundary and settled status (%s)',
+    async (mode) => {
+      const order: string[] = [];
+      const execute = vi.fn(() => {
+        order.push('execute');
+        if (mode === 'sync_error') throw new Error('sync failure');
+        return mode === 'async_error'
+          ? Promise.reject(new Error('async failure'))
+          : Promise.resolve(textResult('done'));
+      });
+      const tool = new MockTool({
+        name: 'boundary_tool',
+        execute,
+        getDefaultPermission: async () => 'allow',
+      });
+      const onSettled = vi.fn(
+        (_id: string, status: ToolExecutionStatus, duration: number) => {
+          order.push('settled');
+          expect(status).toBe(mode === 'success' ? 'success' : 'error');
+          expect(duration).toBeGreaterThanOrEqual(0);
+        },
+      );
+      const { scheduler, onAllToolCallsComplete } = schedulerWithCallbacks(
+        makeSchedulerConfig(makeToolRegistry(tool), {
+          getApprovalMode: () => ApprovalMode.YOLO,
+        }),
+        {
+          onToolExecutionStarted: (id, epoch) => {
+            expect(id).toBe('boundary');
+            expect(epoch).toBeGreaterThan(0);
+            order.push('started');
+          },
+          onToolExecutionSettled: onSettled,
+        },
+      );
+      await scheduleBatch(
+        scheduler,
+        toolRequest('boundary', tool.name, {}, 'prompt'),
+      );
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(order).toEqual(['started', 'execute', 'settled']);
+      expect(onSettled).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps observed execution success when PostToolUse changes the final result', async () => {
+    const settled = vi.fn();
+    const tool = new MockTool({
+      name: 'post_boundary_tool',
+      execute: async () => textResult('done'),
+      getDefaultPermission: async () => 'allow',
+    });
+    const messageBus = hookBus(async (request) => {
+      if (request.eventName === 'PostToolUse') {
+        expect(settled).toHaveBeenCalledWith(
+          'post-boundary',
+          'success',
+          expect.any(Number),
+        );
+        return hookResponse('post-stop', {
+          continue: false,
+          stopReason: 'post hook stopped',
+        });
+      }
+      return hookResponse('allow', { decision: 'allow' });
+    });
+    const { scheduler, onAllToolCallsComplete } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+        getDisableAllHooks: () => false,
+        getMessageBus: () => messageBus,
+      }),
+      { onToolExecutionSettled: settled },
+    );
+    await scheduleBatch(
+      scheduler,
+      toolRequest('post-boundary', tool.name, {}, 'prompt'),
+    );
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+    expect(
+      firstBatch<CompletedToolCall>(onAllToolCallsComplete)[0],
+    ).toMatchObject({
+      status: 'error',
+      response: { executionStatus: 'success' },
+    });
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
+  it('keeps execution observer unsettled until an abort-ignoring tool actually returns', async () => {
+    let resolveExecution!: (result: ToolResult) => void;
+    const execute = vi.fn(
+      () =>
+        new Promise<ToolResult>((resolve) => {
+          resolveExecution = resolve;
+        }),
+    );
+    const tool = new MockTool({
+      name: 'late_boundary_tool',
+      execute,
+      getDefaultPermission: async () => 'allow',
+    });
+    const started = vi.fn();
+    const settled = vi.fn();
+    const { scheduler } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+      }),
+      { onToolExecutionStarted: started, onToolExecutionSettled: settled },
+    );
+    const controller = new AbortController();
+    const scheduled = scheduler.schedule(
+      [toolRequest('late-boundary', tool.name, {}, 'prompt')],
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    controller.abort();
+    expect(started).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    resolveExecution(textResult('late completion'));
+    await scheduled;
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce());
+    expect(settled).toHaveBeenCalledWith(
+      'late-boundary',
+      'cancelled',
+      expect.any(Number),
+    );
+  });
+
   beforeEach(() => {
     debugLoggerInfoSpy.mockClear();
     boundaryObserveMock.mockClear();
@@ -1197,6 +1361,8 @@ describe('CoreToolScheduler', () => {
     deferredHiddenNames?: ReadonlySet<string>;
     includeToolSearch?: boolean;
     isToolExecutionAllowed?: (name: string) => boolean;
+    isInteractive?: boolean;
+    inputFormat?: InputFormat;
   }) {
     let autoModeDenialState = options.autoModeDenialState ?? {
       ...ZERO_DENIAL_STATE,
@@ -1284,8 +1450,8 @@ describe('CoreToolScheduler', () => {
           getWorkspaceContext: () => ({
             isPathWithinWorkspace: () => false,
           }),
-          isInteractive: () => true,
-          getInputFormat: () => undefined,
+          isInteractive: () => options.isInteractive ?? true,
+          getInputFormat: () => options.inputFormat,
           getExperimentalZedIntegration: () => false,
           getActiveTodoWorkChainOwner: options.getActiveTodoWorkChainOwner,
           // Threaded into resolveDeferredToolCall so the bridge's exclusion
@@ -3492,7 +3658,9 @@ describe('CoreToolScheduler', () => {
     );
 
     expectStatus(completedCall, 'success');
-    expect(completedCall.response.responseParts).toEqual([
+    expect(
+      JSON.parse(JSON.stringify(completedCall.response.responseParts)),
+    ).toEqual([
       fnResponse(
         'malformedTool',
         { output: '(malformedTool completed with no output)' },
@@ -3736,6 +3904,75 @@ describe('CoreToolScheduler', () => {
     expect(outputOfTool(calls, 'defaultTool')).toBe('a'.repeat(8000));
   });
 
+  it('does not measure a self-bounded producer body as its own raw size', async () => {
+    // grep/ripGrep shorten their own render and then declare the raw size
+    // unknown: the pre-reduction size is no longer recoverable, and the
+    // scheduler must not certify the already-bounded body as the raw size
+    // (#13652 R2-5).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-unknown',
+      'prompt-grep-unknown',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+    expect(new ToolCallEvent(call).raw_content_length).toBeUndefined();
+
+    // Control: an ordinary producer that declares nothing is still measured
+    // from its own body, so the assertions above are not "never measured".
+    const { calls: plainCalls } = await runLoneTool(
+      toolReturning('plainTool', modelResult('plain body', 'plain body')),
+      'call-plain-raw',
+      'prompt-plain-raw',
+      { waitForCompletion: true },
+    );
+    expect(new ToolCallEvent(plainCalls[0]).raw_content_length).toBe(
+      'plain body'.length,
+    );
+  });
+
+  it('carries a producer-declared truncation bit when its raw size is unknown', async () => {
+    // A self-bounded producer cannot recover the pre-reduction size, but it
+    // knows it cut the body. Keep the bit instead of collapsing it into the
+    // unknown raw size (#14742).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+          truncatedByProducer: true,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-truncated',
+      'prompt-grep-truncated',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBe(true);
+    expect(new ToolCallEvent(call).truncated).toBe(true);
+  });
+
   /** Asserts lone tool `name` (Infinity budget) delivers `content` whole. */
   async function expectDeliveredWhole(name: string, content: string) {
     const { calls } = await runLoneTool(
@@ -3825,7 +4062,7 @@ describe('CoreToolScheduler', () => {
         toolReturning('budgetedTool', result, { maxOutputChars: 30_000 }),
         'c',
         'p',
-        { waitForCompletion: true },
+        { waitForCompletion: true, truncateToolOutputThreshold: 25000 },
       );
       return calls[0];
     }
@@ -5495,6 +5732,101 @@ describe('CoreToolScheduler', () => {
     expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState());
     expect(execute).toHaveBeenCalledOnce();
   });
+
+  it('does not let a PermissionRequest hook allow waive a destructive-command escalation', async () => {
+    // Counterpart to the test above. The escalation shares its reason code with
+    // the classifier arm, so without `requiresHumanDecision` this hook allow
+    // would schedule a command the deterministic guard classified as
+    // work-destroying, with no human in the loop.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', 'git reset --hard', 'git', onConfirmSpy),
+          ),
+        execute,
+      }),
+      {
+        messageBus: permissionRequestHookBus({ behavior: 'allow' }),
+        disableHooks: false,
+        // One below maxTotalDenials, so this denial reaches the session cap and
+        // the destructive arm escalates instead of hard-blocking.
+        autoModeDenialState: denialState({ totalBlock: 19 }),
+        setAutoModeDenialState: vi.fn(),
+      },
+    );
+
+    await harness.scheduler.schedule(
+      shellRequest('destructive-hook-waiver', 'git reset --hard'),
+      new AbortController().signal,
+    );
+
+    // The hook fired and answered `allow`, but the call must still be waiting
+    // on a human rather than scheduled. `reportedCalls` flattens every snapshot
+    // ever emitted, and this test schedules exactly one call, so the last
+    // snapshot is that call's current state.
+    await vi.waitFor(() =>
+      expect(reportedCalls(harness.onToolCallsUpdate).at(-1)?.status).toBe(
+        'awaiting_approval',
+      ),
+    );
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('denies a destructive-command escalation in non-interactive STREAM_JSON instead of offering it to the host', async () => {
+    // Counterpart to the test above for the other programmatic approver.
+    // STREAM_JSON is exempt from the non-interactive deny because a host can
+    // answer `can_use_tool`, but that host is not a human — so handing it this
+    // dialog lets `{behavior:'allow'}` resolve to ProceedOnce and run the
+    // work-destroying command. Without a human channel the escalation must
+    // deny, as it did before the escalation existed.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', 'git reset --hard', 'git', onConfirmSpy),
+          ),
+        execute,
+      }),
+      {
+        isInteractive: false,
+        inputFormat: InputFormat.STREAM_JSON,
+        // One below maxTotalDenials, so this denial reaches the session cap and
+        // the destructive arm escalates instead of hard-blocking.
+        autoModeDenialState: denialState({ totalBlock: 19 }),
+        setAutoModeDenialState: vi.fn(),
+      },
+    );
+
+    await scheduleAndSettle(
+      harness,
+      shellRequest('destructive-stream-json', 'git reset --hard'),
+    );
+
+    const [denied] = firstBatch<CompletedToolCall>(
+      harness.onAllToolCallsComplete,
+    );
+    expect(denied.status).toBe('error');
+    expect(denied.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+    // `awaiting_approval` is the only status PermissionController's
+    // update callback picks up to emit `can_use_tool`, so never reaching it
+    // is what keeps the escalation off the wire.
+    expect(
+      reportedCalls(harness.onToolCallsUpdate).map((c) => c.status),
+    ).not.toContain('awaiting_approval');
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   /** Read-kind MockTools by name; each runs a mock or resolves a result. */
   function readToolMap(
     executes: Record<string, Mock | ToolResult>,
@@ -6311,6 +6643,32 @@ describe('CoreToolScheduler', () => {
     expect(latestSpan('tool.alpha', 'call-alpha')?.ended).toBe(true);
   });
 
+  it('drops the producer raw size when a post-settlement step throws', async () => {
+    // A throw after `execute()` settled (here the vision bridge) replaces the
+    // producer's outcome with an error body, so that body must not inherit
+    // the producer's raw size or truncation status.
+    bridgeRejection.value = new Error('bridge failed');
+    try {
+      const { onAllToolCallsComplete } = await runReadBatch(
+        { alpha: textResult('p'.repeat(2000)) },
+        [valueRequest('alpha', 'a', 'prompt-post-settlement-throw')],
+      );
+
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'error');
+      expect(completed.response.error?.message).toContain('bridge failed');
+      const provenance = getToolOutputProvenance(
+        completed.response.responseParts[0],
+      );
+      expect(provenance).toBeDefined();
+      expect(provenance?.rawSize).toBeUndefined();
+      expect(provenance?.truncated).toBeUndefined();
+      expect(new ToolCallEvent(completed).raw_content_length).toBeUndefined();
+    } finally {
+      bridgeRejection.value = undefined;
+    }
+  });
+
   it('applies PostToolBatch stop decisions and preserves additional context', async () => {
     const alpha = deferred<ToolResult>();
     const executeB = vi.fn().mockResolvedValue(textResult('beta output'));
@@ -6368,6 +6726,13 @@ describe('CoreToolScheduler', () => {
       'halt'.length + 'batch context'.length + 2,
     );
     expect(lastCompletedCall.outcome).toBeUndefined();
+    const provenance = getToolOutputProvenance(
+      lastCompletedCall.response.responseParts[0],
+    );
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+    expect(provenance?.budget).toBeUndefined();
     expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
       'PostToolBatch hook stopped batch (2 calls): halt',
     );
@@ -7144,6 +7509,59 @@ describe('CoreToolScheduler with payload', () => {
 });
 
 describe('convertToFunctionResponse', () => {
+  it('carries pre-reduction producer sizes without inventing restored raw data', () => {
+    const [produced] = convertToFunctionResponse('shell', 'call', 'preview', {
+      rawOutputSize: { chars: 40000, estimatedTokens: 10000 },
+    });
+    expect(getToolOutputProvenance(produced)).toMatchObject({
+      rawSize: { chars: 40000, estimatedTokens: 10000 },
+      truncated: true,
+    });
+    const [restored] = convertToFunctionResponse('shell', 'call', 'preview');
+    expect(getToolOutputProvenance(restored)?.rawSize).toBeUndefined();
+  });
+
+  it('measures an undeclared body but keeps a declared null unknown', () => {
+    const cfg = {
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+    const [measured] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'complete body',
+      {},
+      cfg,
+    );
+    // Undeclared means an ordinary producer whose body is complete, so the
+    // ACP and speculation paths report the same raw size as the scheduler.
+    expect(getToolOutputProvenance(measured)?.rawSize?.chars).toBe(
+      'complete body'.length,
+    );
+    expect(getToolOutputProvenance(measured)?.truncated).toBe(false);
+
+    const [declared] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null },
+      cfg,
+    );
+    // A producer that bounds its own render still declares raw size unknown.
+    expect(getToolOutputProvenance(declared)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(declared)?.truncated).toBeUndefined();
+
+    // ...but when it also declares the cut itself, the bit survives.
+    const [cut] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null, truncatedByProducer: true },
+      cfg,
+    );
+    expect(getToolOutputProvenance(cut)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(cut)?.truncated).toBe(true);
+  });
+
   const toolName = 'testTool';
   const callId = 'call1';
 
@@ -7210,7 +7628,11 @@ describe('convertToFunctionResponse', () => {
       'Tool execution succeeded.',
     ],
   ])('%s', (_title, llmContent, output, parts) => {
-    expect(convertToFunctionResponse(toolName, callId, llmContent)).toEqual([
+    expect(
+      JSON.parse(
+        JSON.stringify(convertToFunctionResponse(toolName, callId, llmContent)),
+      ),
+    ).toEqual([
       {
         functionResponse: {
           name: toolName,
@@ -7261,6 +7683,33 @@ describe('convertToFunctionErrorResponse', () => {
       });
     },
   );
+
+  it('reports no raw size for the body the error path replaces', () => {
+    const content = [
+      { inlineData: { mimeType: 'image/png', data: 'base64...' } },
+    ] satisfies PartListUnion;
+    const cfg = {
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      content,
+      'image read failed',
+      cfg,
+    );
+
+    expect(part.functionResponse?.response).toEqual({
+      error: 'image read failed',
+    });
+    // The measured body was replaced by `error`, so its size must not travel
+    // as this response's pre-reduction raw size (#13652 R4-1).
+    const provenance = getToolOutputProvenance(part);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+  });
 
   it('prefers an existing error and preserves media and response fields', () => {
     const content = {
@@ -14939,5 +15388,67 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     ).resolves.not.toThrow();
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+  });
+});
+
+describe('persistence size attribution', () => {
+  it('counts retained media with the configured estimate', async () => {
+    const cfg = {
+      getTruncateToolOutputThreshold: () => 25000,
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+    const owner = Object.assign(Object.create(CoreToolScheduler.prototype), {
+      config: cfg,
+    }) as {
+      maybePersistLargeToolResult(
+        callId: string,
+        toolName: string,
+        content: PartListUnion,
+        budgetApplied: boolean,
+        promptId: string,
+      ): Promise<{ content: PartListUnion }>;
+    };
+    const persist = vi
+      .spyOn(outputTruncation, 'persistAndTruncateToolResult')
+      .mockResolvedValue({
+        content: 'preview',
+        outputFile: '/tmp/original.txt',
+        bytesWritten: 60000,
+      });
+    const log = vi
+      .spyOn(sizeLoggers, 'logToolResultSize')
+      .mockImplementation(() => {});
+    try {
+      const image = { inlineData: { mimeType: 'image/png', data: 'BASE64' } };
+      const input = [{ text: 'x'.repeat(60000) }, image];
+      const result = await owner.maybePersistLargeToolResult(
+        'media',
+        'mcp__image',
+        input,
+        false,
+        'p',
+      );
+      expect(result.content).toEqual([{ text: 'preview' }, image]);
+      const event = log.mock.calls[0][1];
+      expect(event.raw_estimated_tokens).toBe(
+        measureToolOutput(input, cfg).estimatedTokens,
+      );
+      expect(event.injected_estimated_tokens).toBe(
+        measureToolOutput(result.content, cfg).estimatedTokens,
+      );
+      expect(event.injected_estimated_tokens).toBeGreaterThanOrEqual(800);
+      expect(event.prompt_id).toBe('p');
+      await owner.maybePersistLargeToolResult(
+        'already',
+        'shell',
+        '<persisted-output>' + 'x'.repeat(60000),
+        false,
+        'p',
+      );
+      expect(persist).toHaveBeenCalledTimes(1);
+    } finally {
+      persist.mockRestore();
+      log.mockRestore();
+    }
   });
 });

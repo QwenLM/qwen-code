@@ -246,7 +246,7 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
-} from './tools/write-file.js';
+} from './tools/artifact/workspace-auto-record.js';
 export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
@@ -979,3 +979,15 @@ export {
   runWithHookExecutionOwner,
 } from './hooks/hook-execution-context.js';
 export type { HookExecutionOwner } from './hooks/hook-execution-context.js';
+
+export type { RequestLifecycleEvent } from './telemetry/request-lifecycle.js';
+
+export {
+  createToolLifecycle,
+  TOOL_LIFECYCLE_DRAIN_MS,
+} from './telemetry/tool-lifecycle.js';
+export type {
+  ToolLifecycleEvent,
+  ToolLifecycleRecord,
+  ToolLifecycleOutcome,
+} from './telemetry/tool-lifecycle.js';

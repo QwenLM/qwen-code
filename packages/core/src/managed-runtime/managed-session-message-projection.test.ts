@@ -25,6 +25,7 @@ import { managedSessionResourceRoot } from '../utils/sessionStorageUtils.js';
 import {
   MANAGED_SESSION_LIMITS,
   managedSessionEventsDigest,
+  ManagedSessionRecordError,
   parseManagedSessionEvent,
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
@@ -305,13 +306,19 @@ describe('managed session message projection', () => {
     const checkpointPublishing = new Promise<void>((resolve) => {
       checkpointPublishStarted = resolve;
     });
+    let boundaryPublished!: () => void;
+    const boundaryPublishing = new Promise<void>((resolve) => {
+      boundaryPublished = resolve;
+    });
     vi.spyOn(harness.store, 'publish').mockImplementation(
       async (kind, body) => {
         if (kind === 'managed-checkpoint') {
           checkpointPublishStarted();
           await checkpointReleased;
         }
-        return publish(kind, body);
+        const result = await publish(kind, body);
+        if (kind === 'managed-activation-boundary') boundaryPublished();
+        return result;
       },
     );
     const appendEvent = vi.spyOn(harness.authority, 'appendExecutionEvent');
@@ -330,7 +337,12 @@ describe('managed session message projection', () => {
       );
       await vi.waitFor(() => expect(appendEvent).toHaveBeenCalledOnce());
       const release = harness.authority.releaseActivation();
-      await vi.waitFor(() => expect(appendEvent).toHaveBeenCalledTimes(2));
+      // The release queues its commit synchronously once its boundary body is
+      // published; a macrotask turn drains that microtask chain.
+      await boundaryPublishing;
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
 
       releaseCheckpoint();
       await expect(
@@ -389,8 +401,11 @@ describe('managed session message projection', () => {
 
   it('rejects an invalid timestamp in a durable reader-facing record', async () => {
     const harness = await createHarness();
-    try {
-      await harness.projection.commit(
+    // The writer fence and the cold reader share one acceptance predicate, so
+    // the commit is refused before the log can carry the record.
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.projection.commit(
         command('commitMessage', 'invalid-timestamp'),
         {
           record: {
@@ -399,10 +414,139 @@ describe('managed session message projection', () => {
           },
         },
         HOLDS,
-      );
-    } finally {
-      await harness.close();
-    }
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+
+    // A log a writer from before that fence could have left is still refused
+    // at read time: the event is spliced into the committed log directly.
+    const contentRef = await harness.store.publish(
+      'managed-message',
+      Buffer.from(
+        JSON.stringify({ ...records[0], timestamp: 'not-a-timestamp' }),
+        'utf8',
+      ),
+    );
+    const scan = await readManagedSessionLog(
+      harness.transcriptPath,
+      sessionKey,
+    );
+    const event = parseManagedSessionEvent({
+      v: 1,
+      sequence: scan.committed + 1,
+      eventId: 'message:invalid-timestamp',
+      sessionKey,
+      kind: 'message.committed',
+      occurredAt: 1,
+      subject: {
+        type: 'activation',
+        scopeId: 'act-1',
+        activationId: 'act-1',
+        epoch: 1,
+      },
+      payload: {
+        messageId: 'rec-user-1',
+        role: 'user',
+        contentRef,
+        parentMessageId: null,
+      },
+    });
+    const marker = {
+      transactionId: 'invalid-timestamp',
+      commandId: 'invalid-timestamp',
+      operation: 'commitMessage',
+      contentDigest: DIGEST,
+      firstSequence: event.sequence,
+      lastSequence: event.sequence,
+      eventCount: 1,
+      eventsDigest: managedSessionEventsDigest([event]),
+      previousCommitDigest: scan.lastMarkerDigest,
+    };
+    await fs.appendFile(
+      harness.transcriptPath,
+      [
+        JSON.stringify({
+          subtype: 'managed_session_event_v1',
+          managedSession: event,
+        }),
+        JSON.stringify({
+          subtype: 'managed_session_commit_v1',
+          managedSession: marker,
+        }),
+      ].join('\n') + '\n',
+    );
+
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).rejects.toThrow(
+      /invalid reader-facing record: Ignored an invalid transcript record timestamp\. \(message\.committed event message:invalid-timestamp ref\)/,
+    );
+  });
+
+  it('refuses a stored domain envelope whose record body is null', async () => {
+    const harness = await createHarness();
+    await harness.close();
+
+    // A hand-composed envelope spliced into the committed log: the cold
+    // reader must refuse it with the typed record error, not an untyped
+    // TypeError from reading `record` off null.
+    const recordRef = await harness.store.publish(
+      'managed-file_history',
+      Buffer.from('null', 'utf8'),
+    );
+    const scan = await readManagedSessionLog(
+      harness.transcriptPath,
+      sessionKey,
+    );
+    const event = parseManagedSessionEvent({
+      v: 1,
+      sequence: scan.committed + 1,
+      eventId: 'domain:file_history:null-record',
+      sessionKey,
+      kind: 'domain.committed',
+      occurredAt: 1,
+      subject: {
+        type: 'activation',
+        scopeId: 'act-1',
+        activationId: 'act-1',
+        epoch: 1,
+      },
+      payload: {
+        domain: 'file_history',
+        version: 1,
+        operationId: 'cmd-domain-null-record',
+        recordRef,
+      },
+    });
+    const marker = {
+      transactionId: 'null-record',
+      commandId: 'null-record',
+      operation: 'commitDomainRecord',
+      contentDigest: DIGEST,
+      firstSequence: event.sequence,
+      lastSequence: event.sequence,
+      eventCount: 1,
+      eventsDigest: managedSessionEventsDigest([event]),
+      previousCommitDigest: scan.lastMarkerDigest,
+    };
+    await fs.appendFile(
+      harness.transcriptPath,
+      [
+        JSON.stringify({
+          subtype: 'managed_session_event_v1',
+          managedSession: event,
+        }),
+        JSON.stringify({
+          subtype: 'managed_session_commit_v1',
+          managedSession: marker,
+        }),
+      ].join('\n') + '\n',
+    );
 
     await expect(
       readManagedSessionRecords({
@@ -411,6 +555,138 @@ describe('managed session message projection', () => {
         sessionKey,
       }),
     ).rejects.toThrow(/invalid reader-facing record/);
+  });
+
+  it('projects a committed compaction summary back to the reader', async () => {
+    const harness = await createHarness();
+    try {
+      await harness.projection.commit(
+        command('commitMessage', 'cmd-msg-pre-compaction'),
+        { record: records[0] },
+        HOLDS,
+      );
+      // The summary body is the whole record, the way the record sink
+      // publishes it; the reader-facing list projects it back verbatim.
+      const summary = {
+        uuid: 'rec-compaction-1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-09-01T10:01:00.000Z',
+        type: 'system',
+        subtype: 'chat_compression',
+        cwd: '/workspace',
+        version: '1.2.3',
+        systemPayload: {
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'summarise the design docs' }] },
+          ],
+        },
+      } as ChatRecord;
+      const summaryRef = await harness.store.publish(
+        'managed-compaction-summary',
+        Buffer.from(JSON.stringify(summary), 'utf8'),
+      );
+      await harness.authority.appendExecutionEvent(
+        command('compactContext', 'cmd-compact-1'),
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'compaction:rec-compaction-1',
+          sessionKey,
+          kind: 'context.compacted',
+          occurredAt: 1,
+          subject: {
+            type: 'activation',
+            scopeId: 'act-1',
+            activationId: 'act-1',
+            epoch: 1,
+          },
+          payload: {
+            compactionId: 'rec-compaction-1',
+            fromSequence: 1,
+            toSequence: sequence - 1,
+            summaryRef,
+            replacedMessageIds: ['rec-user-1'],
+            tokenCountsRef: null,
+          },
+        }),
+        HOLDS,
+      );
+      await expect(
+        readManagedSessionRecords({
+          transcriptPath: harness.transcriptPath,
+          runtimeBaseDir: harness.runtimeBaseDir,
+          sessionKey,
+        }),
+      ).resolves.toEqual([records[0], summary]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('rejects a turn.settled with a null resultRef as a typed record error', async () => {
+    const harness = await createHarness();
+    await harness.close();
+    // The writer refuses this event, so it is spliced into the committed log
+    // the way a writer from before that fence could have left it.
+    const scan = await readManagedSessionLog(
+      harness.transcriptPath,
+      sessionKey,
+    );
+    const event = parseManagedSessionEvent({
+      v: 1,
+      sequence: scan.committed + 1,
+      eventId: 'turn:null-result',
+      sessionKey,
+      kind: 'turn.settled',
+      occurredAt: 1,
+      subject: {
+        type: 'activation',
+        scopeId: 'act-1',
+        activationId: 'act-1',
+        epoch: 1,
+      },
+      payload: {
+        turnId: 'turn-1',
+        outcome: 'completed',
+        stopReason: null,
+        resultRef: null,
+        usageRef: null,
+        pendingOwnersRef: null,
+      },
+    });
+    const marker = {
+      transactionId: 'null-result',
+      commandId: 'null-result',
+      operation: 'settleTurn',
+      contentDigest: DIGEST,
+      firstSequence: event.sequence,
+      lastSequence: event.sequence,
+      eventCount: 1,
+      eventsDigest: managedSessionEventsDigest([event]),
+      previousCommitDigest: scan.lastMarkerDigest,
+    };
+    await fs.appendFile(
+      harness.transcriptPath,
+      [
+        JSON.stringify({
+          subtype: 'managed_session_event_v1',
+          managedSession: event,
+        }),
+        JSON.stringify({
+          subtype: 'managed_session_commit_v1',
+          managedSession: marker,
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const read = readManagedSessionRecords({
+      transcriptPath: harness.transcriptPath,
+      runtimeBaseDir: harness.runtimeBaseDir,
+      sessionKey,
+    });
+    await expect(read).rejects.toBeInstanceOf(ManagedSessionRecordError);
+    await expect(read).rejects.toThrow(/turn\.settled event turn:null-result/);
   });
 
   it('projects the latest durable session title for cold restore', async () => {

@@ -14,6 +14,8 @@ import {
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
   isOfficeDocumentPath,
+  isExcelFile,
+  isPdfArtifact,
   normalizePath,
   readWorkspaceFileAsBlob,
 } from './artifactUtils';
@@ -76,13 +78,13 @@ describe('artifactUtils', () => {
         kind: 'file',
         workspacePath: 'a.xlsx',
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isDownloadOnlyWorkspaceArtifact({
         kind: 'pdf',
         workspacePath: 'paper.pdf',
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isDownloadOnlyWorkspaceArtifact({
         kind: 'image',
@@ -95,6 +97,84 @@ describe('artifactUtils', () => {
         workspacePath: 'notes.md',
       }),
     ).toBe(false);
+  });
+
+  it('recognizes xlsx paths and extensionless Excel attachments', () => {
+    const mime =
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    expect(isExcelFile('reports/Q3.XLSX', 'application/octet-stream')).toBe(
+      true,
+    );
+    expect(isExcelFile('attachment-id', mime)).toBe(true);
+    expect(isExcelFile(undefined, `${mime}; charset=utf-8`)).toBe(true);
+    expect(isExcelFile('legacy.xls', mime)).toBe(false);
+    expect(isExcelFile('notes.txt', mime)).toBe(false);
+    expect(isExcelFile('attachment-id', 'application/octet-stream')).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    [{ workspacePath: 'reports/Q3.PDF', mimeType: 'text/markdown' }, true],
+    [{ workspacePath: 'report.pdf?download=1#page=2' }, false],
+    [
+      {
+        workspacePath: 'attachment-id',
+        mimeType: 'APPLICATION/PDF; charset=binary',
+      },
+      true,
+    ],
+    [{ workspacePath: 'report', kind: 'pdf' }, true],
+    [
+      { workspacePath: 'notes.txt', mimeType: 'application/pdf', kind: 'pdf' },
+      true,
+    ],
+    [{ workspacePath: 'report.docx', mimeType: 'application/pdf' }, true],
+    [{ workspacePath: 'graphic.svg', mimeType: 'application/pdf' }, true],
+    [{ workspacePath: 'report', mimeType: 'application/octet-stream' }, false],
+  ] as const)(
+    'recognizes PDF extensions, MIME types and artifact kinds: %j',
+    (artifact, expected) => {
+      expect(isPdfArtifact(artifact)).toBe(expected);
+    },
+  );
+
+  it.each([
+    'reports/Q3#final.pdf',
+    'reports/Q3?final.PDF',
+    'reports#approved/report.pdf',
+    'reports?approved/report.pdf',
+    'reports.xlsx#approved/report.pdf',
+    'reports.xlsx?approved/report.pdf',
+    'reports/report.svg#final.pdf',
+    'reports/report.docx?final.pdf',
+    'reports\\Q3#final.PDF',
+  ])('previews the literal PDF workspace path %s', (workspacePath) => {
+    expect(isPdfArtifact({ workspacePath })).toBe(true);
+    expect(isExcelFile(workspacePath)).toBe(false);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind: 'document', workspacePath }),
+    ).toBe(false);
+  });
+
+  it.each(['reports/report.pdf#final.svg', 'reports/report.pdf?final.docx'])(
+    'keeps the actual non-PDF suffix download-only: %s',
+    (workspacePath) => {
+      expect(isPdfArtifact({ workspacePath })).toBe(false);
+      expect(
+        isDownloadOnlyWorkspaceArtifact({
+          workspacePath,
+          mimeType: 'application/pdf',
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it('keeps Excel classification on the actual filename', () => {
+    const workspacePath = 'reports.pdf#approved/report.xlsx';
+    expect(isPdfArtifact({ workspacePath })).toBe(false);
+    expect(isExcelFile(workspacePath)).toBe(true);
+    expect(isDownloadOnlyWorkspaceArtifact({ workspacePath })).toBe(false);
   });
 
   it('prefers recognized file types before the artifact kind', () => {
@@ -144,8 +224,9 @@ describe('artifactUtils', () => {
 
   it.each([
     ['report.docx', 'text/html'],
-    ['report.xlsx', 'image/png'],
-    ['report.pdf', 'text/markdown'],
+    ['report.docx', 'application/pdf'],
+    ['graphic.svg', 'application/pdf'],
+    ['report.xls', 'image/png'],
     ['clip.mp4', 'image/png'],
   ])(
     'does not let previewable MIME types override download-only paths',

@@ -522,6 +522,8 @@ Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor
 
 Note: Spaces in paths need to be escaped with backslash (e.g., `@My\ Documents/file.txt`)
 
+In the interactive prompt, `@` completion supports Unicode filenames, including emoji. Emoji elsewhere in the prompt do not change the file path used for completion.
+
 ## 3. Exclamation Commands (`!`) - Shell Command Execution
 
 Exclamation commands allow you to execute system commands directly within Qwen Code.

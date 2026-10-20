@@ -5,6 +5,7 @@
  */
 
 import { readReportedArtifacts } from './reported-artifacts.js';
+import { isAskUserQuestionToolName } from '../constants/toolNames.js';
 import {
   isTaskExecutionMode,
   parseDaemonBackgroundTurn,
@@ -985,7 +986,7 @@ export function transcriptBlocksToDaemonMessages(
           };
           needsNewContentMessage = false;
           currentThinkingIdx = null;
-        } else if (!isTextBlockEmpty(textBlock)) {
+        } else if (textBlock.text.trim().length > 0) {
           messages.push({
             id: block.id,
             role: 'assistant',
@@ -1420,6 +1421,7 @@ export function transcriptBlocksToDaemonMessages(
 
   synchronizeToolGroupSourceIdentity(messages);
   attachTurnPromptIds(messages, blocks);
+  attachDeletionIdentity(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
 }
@@ -1448,6 +1450,34 @@ function attachTurnPromptIds(
       const promptId = promptIdByBlockId.get(id);
       if (promptId) {
         message.promptId = promptId;
+        break;
+      }
+    }
+  }
+}
+
+function attachDeletionIdentity(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const byId = new Map(blocks.map((block) => [block.id, block]));
+  for (const message of messages) {
+    const sources = [message.id, ...(message.sourceBlockIds ?? [])].flatMap(
+      (id) => (byId.get(id) ? [byId.get(id)!] : []),
+    );
+    const records = [
+      ...new Set(sources.flatMap((block) => block.sourceRecordIds ?? [])),
+    ];
+    if (records.length) message.sourceRecordIds = records;
+    for (const block of sources) {
+      const meta = 'meta' in block ? getRecord(block.meta) : undefined;
+      const local =
+        getString(meta, 'localCommandId') ??
+        (block.promptId?.startsWith('local-command:')
+          ? block.promptId
+          : undefined);
+      if (local) {
+        message.localCommandId = local;
         break;
       }
     }
@@ -2066,9 +2096,7 @@ function normalizeToolContent(
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {
-  if (!block.toolName) return false;
-  const normalized = block.toolName.toLowerCase();
-  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+  return !!block.toolName && isAskUserQuestionToolName(block.toolName);
 }
 
 function getToolContentText(

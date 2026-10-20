@@ -7,12 +7,14 @@
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
 import { randomUUID } from 'node:crypto';
+import { isChildNotificationSource } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
 import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 /**
  * The Session's one wake-recovery classification, shared by its wiring
@@ -20,11 +22,18 @@ import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
  * would silently consume every recovery exception while the wiring stays
  * green, which is exactly how the round-9 regression shipped.
  */
-export function monitorWakeNeedsRecovery(cause: unknown): boolean {
+export function monitorWakeNeedsRecovery(
+  cause: unknown,
+): cause is
+  | HostedToolRecoveryRequiredError
+  | HostedMcpRecoveryRequiredError
+  | HostedHookRecoveryRequiredError
+  | LlmRequestPreparationError {
   return (
     cause instanceof HostedToolRecoveryRequiredError ||
     cause instanceof HostedMcpRecoveryRequiredError ||
-    cause instanceof HostedHookRecoveryRequiredError
+    cause instanceof HostedHookRecoveryRequiredError ||
+    cause instanceof LlmRequestPreparationError
   );
 }
 
@@ -59,9 +68,13 @@ export function createMonitorWakeRunTurn(params: {
     abort: AbortController,
   ) => Promise<unknown>;
   readonly busy: () => boolean;
+  /** A turn its source no longer runs (H4d-b: a stopped run's message),
+   * re-read with the busy verdict right before the turn starts. */
+  readonly held?: (turn: HostedMonitorWakeTurn) => boolean;
+  readonly cancelled?: (turn: HostedMonitorWakeTurn) => boolean;
   /**
-   * The recovery-required classification. It is injected because the three
-   * RecoveryRequiredError classes must be matched by type — their
+   * The recovery-required classification. It is injected because these
+   * error classes must be matched by type — their
    * constructors never assign `name`, so every instance reads `name ===
    * 'Error'` and a name comparison silently reclassifies a recovery
    * exception as an ordinary failure, settling its unconsumed input.
@@ -85,7 +98,7 @@ export function createMonitorWakeRunTurn(params: {
   readonly writeStderr: (line: string) => void;
 }): (
   turn: HostedMonitorWakeTurn,
-) => Promise<'settled' | 'settled_incomplete' | 'busy' | 'held'> {
+) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   const { session } = params;
   return async (turn) => {
     if (params.busy() || session.blocked) return 'busy';
@@ -132,21 +145,53 @@ export function createMonitorWakeRunTurn(params: {
       // The notification ran and died inside the turn it started.
       // Re-driving it text-only would mint a second user record and an
       // unanswered first call in the model's history, so it is for the
-      // recovery fleet, never for the pump.
+      // recovery fleet, never for the pump. Distinct from 'settled', so a
+      // caller tracking the turn settles its stop the honest way.
       session.blocked = true;
       params.writeStderr(
         'qwen serve: Monitor wake turn ' +
           turn.turnId +
           ' needs recovery, not a re-drive.',
       );
-      return 'settled';
+      return 'recovery';
     }
     // The busy verdict must be re-read after every journal read: a prompt
     // route's own claim in this window would otherwise be cleared here,
     // losing its turn instead of queuing this one.
-    if (params.busy() || session.blocked) return 'busy';
+    if (params.busy() || session.blocked || params.held?.(turn)) return 'busy';
     const abort = new AbortController();
     session.active = { promptId: turn.turnId, digest: '', abort };
+    if (params.cancelled?.(turn)) {
+      try {
+        await session.managed.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId: params.sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          cwd: params.cwd,
+          version: 'hosted-harness/1',
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId: turn.turnId,
+            state: 'cancelled',
+            stopReason: 'cancelled',
+            endedAt: Date.now(),
+          },
+        } as ChatRecord);
+        return 'settled_incomplete';
+      } catch (cause) {
+        params.writeStderr(
+          'qwen serve: Queued wake cancellation ' +
+            turn.turnId +
+            ' could not settle this pass; the next wake attempt drives it again: ' +
+            String(cause),
+        );
+        return 'busy';
+      } finally {
+        session.active = undefined;
+      }
+    }
     let turnResult: { systemPayload?: Record<string, unknown> } | null;
     try {
       turnResult = (await params.executeHostedTurn(
@@ -165,7 +210,7 @@ export function createMonitorWakeRunTurn(params: {
             ' is recovery blocked: ' +
             String(cause),
         );
-        return 'settled';
+        return 'recovery';
       }
       try {
         await session.managed.sink.write({
@@ -218,7 +263,7 @@ export function createMonitorWakeRunTurn(params: {
 export function withChildAgentConsumption(
   runWakeTurn: (
     turn: HostedMonitorWakeTurn,
-  ) => Promise<'settled' | 'settled_incomplete' | 'busy' | 'held'>,
+  ) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'>,
   session: {
     blocked: boolean;
     childAgents?: HostedChildAgentSession;
@@ -226,19 +271,21 @@ export function withChildAgentConsumption(
   writeStderr: (line: string) => void = () => {},
 ): (
   turn: HostedMonitorWakeTurn,
-) => Promise<'settled' | 'settled_incomplete' | 'busy' | 'held'> {
+) => Promise<'settled' | 'busy' | 'recovery' | 'held' | 'settled_incomplete'> {
   return async (turn) => {
     const outcome = await runWakeTurn(turn);
+    const notificationTurnId = turn.notificationTurnId ?? turn.turnId;
     if (
       outcome === 'settled' &&
       !session.blocked &&
-      turn.source === 'child_agent' &&
-      turn.turnId.endsWith(':accept:notify') &&
+      // #13803: either child Session kind's acceptance notification.
+      isChildNotificationSource(turn.source) &&
+      notificationTurnId.endsWith(':accept:notify') &&
       session.childAgents
     ) {
       try {
         await session.childAgents.markConsumed(
-          turn.turnId.slice(0, -':accept:notify'.length),
+          notificationTurnId.slice(0, -':accept:notify'.length),
         );
       } catch (cause) {
         // The wake settled the input durably already: a rejected consume

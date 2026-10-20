@@ -28,6 +28,7 @@ import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { ShellToolOutput } from './tools/ShellToolOutput';
+import { ToolDetails } from './tools/ToolDetailsContext';
 import {
   extractTodosFromToolCall,
   isTodoWriteToolName,
@@ -50,6 +51,7 @@ import {
 } from './tools/toolDisplay';
 import {
   extractText,
+  hasRecordedOutput,
   formatTokenCount,
   getAgentCancellationReason,
   getAgentCurrentToolHint,
@@ -242,7 +244,23 @@ const READ_LANGUAGE_ALIASES: Record<string, string> = {
 };
 
 function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
+  const { t } = useI18n();
   const content = useMemo(() => extractText(tool) || '', [tool]);
+  if (!content) {
+    return (
+      <div className={styles.expandedRead}>
+        <pre className={styles.expandedOutput}>
+          {t(
+            isActiveToolStatus(tool.status)
+              ? 'shell.result.waiting'
+              : hasRecordedOutput(tool)
+                ? 'shell.result.empty'
+                : 'shell.result.unavailable',
+          )}
+        </pre>
+      </div>
+    );
+  }
   const language = languageForPath(getReadFilePath(tool));
   const plainText =
     language === 'text' ||
@@ -1007,6 +1025,7 @@ function areToolLinePropsEqual(
     a.subContent === b.subContent &&
     a.rawOutput === b.rawOutput &&
     a.toolResult === b.toolResult &&
+    a.toolDetailsRevision === b.toolDetailsRevision &&
     a.wasCancelled === b.wasCancelled &&
     a.args === b.args &&
     a.content === b.content &&
@@ -1034,6 +1053,7 @@ function areSubToolsEqual(
       a.endTime !== b.endTime ||
       a.rawOutput !== b.rawOutput ||
       a.toolResult !== b.toolResult ||
+      a.toolDetailsRevision !== b.toolDetailsRevision ||
       a.wasCancelled !== b.wasCancelled ||
       a.args !== b.args ||
       a.subContent !== b.subContent ||
@@ -1577,53 +1597,77 @@ export const ToolLine = memo(function ToolLine({
                   : styles.lineDetail
             }
           >
-            {isWorkflow ? (
-              <WorkflowToolDetail
-                tool={tool}
-                displayName={displayName}
-                detail={expandedCardDetail}
-                result={result}
-              />
-            ) : isShell ? (
-              <ShellToolOutput tool={tool} />
-            ) : isRead ? (
-              <ToolExpandedCard
-                title={displayName}
-                status={tool.status}
-                action={filePreviewAction}
-              >
-                <ExpandedReadContent tool={tool} />
-              </ToolExpandedCard>
-            ) : (
-              <ToolExpandedCard
-                title={displayName}
-                detail={expandedCardDetail}
-                status={tool.status}
-                action={filePreviewAction}
-              >
-                {(name === 'write_file' || name === 'writefile') && (
-                  <ExpandedEditContent tool={tool} />
-                )}
-                {(name === 'edit' ||
-                  name === 'write' ||
-                  name === 'editfile') && <ExpandedEditContent tool={tool} />}
-                {isAskUserQuestionToolName(tool.toolName) && (
-                  <ExpandedAskUserQuestionOutput tool={tool} />
-                )}
-                {isSkillToolName(name) && <ExpandedSkillOutput tool={tool} />}
-                {isAdvisor && (
-                  <Markdown content={getAdvisorDisplayText(tool) ?? ''} />
-                )}
-              </ToolExpandedCard>
-            )}
+            <ToolDetails
+              tool={tool}
+              enabled={detailsVisible && (isShell || isRead)}
+            >
+              {(tool) =>
+                isWorkflow ? (
+                  <WorkflowToolDetail
+                    tool={tool}
+                    displayName={displayName}
+                    detail={expandedCardDetail}
+                    result={result}
+                  />
+                ) : isShell ? (
+                  <ShellToolOutput tool={tool} />
+                ) : isRead ? (
+                  <ToolExpandedCard
+                    title={displayName}
+                    status={tool.status}
+                    action={
+                      detailsVisible ? (
+                        <ToolFilePreviewButton
+                          tool={tool}
+                          workspaceCwd={workspaceCwd}
+                          onOpen={onTurnOutputOpen}
+                        />
+                      ) : undefined
+                    }
+                  >
+                    <ExpandedReadContent tool={tool} />
+                  </ToolExpandedCard>
+                ) : (
+                  <ToolExpandedCard
+                    title={displayName}
+                    detail={expandedCardDetail}
+                    status={tool.status}
+                    action={filePreviewAction}
+                  >
+                    {(name === 'write_file' || name === 'writefile') && (
+                      <ExpandedEditContent tool={tool} />
+                    )}
+                    {(name === 'edit' ||
+                      name === 'write' ||
+                      name === 'editfile') && (
+                      <ExpandedEditContent tool={tool} />
+                    )}
+                    {isAskUserQuestionToolName(tool.toolName) && (
+                      <ExpandedAskUserQuestionOutput tool={tool} />
+                    )}
+                    {isSkillToolName(name) && (
+                      <ExpandedSkillOutput tool={tool} />
+                    )}
+                    {isAdvisor && (
+                      <Markdown content={getAdvisorDisplayText(tool) ?? ''} />
+                    )}
+                  </ToolExpandedCard>
+                )
+              }
+            </ToolDetails>
           </div>
         )}
-      {tool.toolResult && (
-        <ManagedToolResultSummary
-          result={tool.toolResult}
-          onOpen={onToolResultOpen}
-        />
-      )}
+      {tool.toolResult &&
+        (expanded ||
+          tool.toolResult.execution_status !== 'success' ||
+          tool.toolResult.capture_status === 'partial' ||
+          tool.toolResult.capture_status === 'unavailable' ||
+          tool.toolResult.delivery_status !== 'committed') && (
+          <ManagedToolResultSummary
+            result={tool.toolResult}
+            onOpen={onToolResultOpen}
+          />
+        )}
     </div>
   );
 }, areToolLinePropsEqual);

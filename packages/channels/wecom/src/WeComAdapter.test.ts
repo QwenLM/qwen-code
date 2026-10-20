@@ -3432,7 +3432,65 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(existsSync(dirname(filePath!))).toBe(false));
   });
 
-  it.skipIf(process.platform === 'win32')(
+  // The read-only parent only blocks removal where permission bits bind:
+  // Windows ignores them and root with its DAC capabilities bypasses them.
+  // Ask the kernel, as the permission-bits helpers in other packages do, so a
+  // root lane that drops those capabilities still runs this case. A probe
+  // that cannot measure answers false too, and says so on stderr, as a
+  // warning under GitHub Actions.
+  const permissionBitsEnforced = ((): boolean => {
+    if (process.platform === 'win32') return false;
+    let dir: string | undefined;
+    const codeOf = (error: unknown): unknown =>
+      (error as { code?: unknown } | null | undefined)?.code;
+    const inconclusive = (error: unknown): false => {
+      try {
+        process.stderr.write(
+          `${process.env['GITHUB_ACTIONS'] === 'true' ? '::warning::' : ''}` +
+            `[permission-bits] probe inconclusive (${String(codeOf(error) ?? 'no errno')}) ` +
+            'for WeComAdapter.test.ts; treating permission bits as unenforced, so ' +
+            'the attachment cleanup case skips\n',
+        );
+      } catch {
+        // A diagnostic must never fail the file it is meant to explain.
+      }
+      return false;
+    };
+    const refused = (attempt: () => unknown): boolean => {
+      try {
+        attempt();
+        return false;
+      } catch (error) {
+        return codeOf(error) === 'EACCES' || inconclusive(error);
+      }
+    };
+    try {
+      dir = mkdtempSync(join(tmpdir(), 'wecom-permission-probe-'));
+      chmodSync(dir, 0o000);
+      const probe = dir;
+      return (
+        refused(() => readdirSync(probe)) &&
+        refused(() => writeFileSync(join(probe, 'probe'), ''))
+      );
+    } catch (error) {
+      return inconclusive(error);
+    } finally {
+      if (dir !== undefined) {
+        try {
+          chmodSync(dir, 0o700);
+        } catch {
+          // Best effort, like the removal below.
+        }
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          // Best effort: a leftover probe must not fail the file.
+        }
+      }
+    }
+  })();
+
+  it.skipIf(!permissionBitsEnforced)(
     'continues attachment cleanup when one dir removal fails',
     async () => {
       const parent = join(tmpdir(), 'channel-files');

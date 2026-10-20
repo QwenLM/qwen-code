@@ -267,6 +267,9 @@ export function normalizeDaemonEvent(
     case 'history_truncated':
       return normalizeHistoryTruncated(event, base);
 
+    case 'session_messages_deleted':
+      return [];
+
     case 'session_rewound':
       return normalizeSessionRewound(event, base);
 
@@ -1050,6 +1053,15 @@ function normalizeSessionUpdate(
       // block's human-readable title with the bare tool name from _meta;
       // the web UI has its own activity indicator, so drop the frame.
       const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+      if (
+        meta &&
+        Object.hasOwn(meta, 'toolLifecycle') &&
+        update['status'] === undefined &&
+        update['content'] === undefined &&
+        update['title'] === undefined &&
+        update['kind'] === undefined
+      )
+        return [];
       if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
