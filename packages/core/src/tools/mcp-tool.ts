@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type {
   ToolCallConfirmationDetails,
@@ -778,6 +779,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
+        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
         returnDisplay: appDisplay ?? fallbackText,
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
@@ -1021,6 +1023,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
+        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
         returnDisplay: getDisplayFromPartsWithPersistedOutput(
           transformedParts,
           truncated.persistedOutputFiles,
@@ -1044,6 +1047,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     rawResponseParts: Part[],
     functionCall: FunctionCall,
   ): Promise<ToolResult> {
+    // The body is replaced by `error` below and observeProducerOutput
+    // short-circuits on error results, so no raw size is declared here
+    // (#13652 R4-1).
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
@@ -1135,6 +1141,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           // tables) would otherwise truncate while chars remain. Consistent
           // with the shell tool's in-tool truncation.
           {
+            layer: 'producer',
+            source: 'per_tool',
             threshold: 500_000,
             previewChars: 2000,
             lines: Number.POSITIVE_INFINITY,

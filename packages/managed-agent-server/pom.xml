@@ -508,7 +508,8 @@
                                  granularity: the healthy sum becomes 8451 s,
                                  so the fork moves to 9051 s and the Verify
                                  step stays 161 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9133</forkedProcessTimeoutInSeconds>
+                            <!-- Cleanup retention budgets 60 s for its measured 22.2 s MySQL runtime. -->
+                            <forkedProcessTimeoutInSeconds>9193</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

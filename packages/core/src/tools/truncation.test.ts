@@ -16,13 +16,17 @@ import {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
-import { logToolOutputTruncated } from '../telemetry/loggers.js';
+import {
+  logToolOutputTruncated,
+  logToolResultSize,
+} from '../telemetry/loggers.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 vi.mock('node:fs/promises');
 vi.mock('../utils/atomicFileWrite.js');
 vi.mock('../telemetry/loggers.js', () => ({
   logToolOutputTruncated: vi.fn(),
+  logToolResultSize: vi.fn(),
 }));
 
 const mockWriteFile = vi.mocked(fs.writeFile);
@@ -434,6 +438,19 @@ describe('truncateToolOutput', () => {
     expect(logToolOutputTruncated).toHaveBeenCalled();
     const event = vi.mocked(logToolOutputTruncated).mock.calls[0][1];
     expect(event.prompt_id).toBe('prompt-123');
+  });
+
+  it('carries the call id on a per-layer size event', async () => {
+    await truncateToolOutput(
+      tmpConfig,
+      'shell',
+      'a'.repeat(200_000),
+      { threshold: 100 },
+      'prompt-123',
+      'call-456',
+    );
+    const event = vi.mocked(logToolResultSize).mock.calls[0][1];
+    expect(event.call_id).toBe('call-456');
   });
 });
 

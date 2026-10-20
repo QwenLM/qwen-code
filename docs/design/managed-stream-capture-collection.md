@@ -2,6 +2,19 @@
 
 [English](managed-stream-capture-collection.md) | [简体中文](managed-stream-capture-collection.zh-CN.md)
 
+## Current status after schema consolidation
+
+The P1 implementation below records the original `4a3b8f3c08` baseline. On
+`06efd789b1`, the shared schema uses `ma_resource`, `ma_resource_ref`, and a
+`SESSION_RESOURCE_GC` operation. The collector now releases retired Session
+record/journal owners before collecting unreferenced `MYSQL_INLINE` bodies in
+either `PUBLISHED` or `REFERENCED` state, without a kind whitelist. The older
+claims below that MCP records and journal-referenced manifests remain pinned
+permanently no longer describe current SQL collection. See the
+[MCP lifecycle contract and witness](managed-mcp-retention-lifecycle.md).
+Private CSI Sessions remain excluded, and the physical GC default and
+deployment gates remain unchanged.
+
 ## Problem and baseline
 
 O4 (`managed-tool-output-retention.md`) made the physical collection of tool
