@@ -506,9 +506,13 @@
                                  forwarded-refusal case added by this PR
                                  measures 5.8 s and adds 6 s at this ledger's
                                  granularity: the healthy sum becomes 8451 s,
-                                 so the fork moves to 9051 s and the Verify
-                                 step stays 161 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9051</forkedProcessTimeoutInSeconds>
+                                 so the fork moves to 9051 s; the FG12f
+                                 delivery class (HostedMcpResultDeliveryIT,
+                                 three cases, 14.08 s measured) adds 30 s at
+                                 2x: the healthy sum becomes 8481 s, so the
+                                 fork moves to 9081 s and the Verify step to
+                                 162 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9081</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
