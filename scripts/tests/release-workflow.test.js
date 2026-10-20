@@ -454,8 +454,10 @@ describe('release workflow', () => {
         ref: '${{ github.workflow_sha }}',
         'fetch-depth': 1,
         'persist-credentials': false,
+        // The tarball gate rides this checkout too: run from the selected
+        // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });

@@ -1830,13 +1830,15 @@ describe('package scripts', () => {
     );
 
     // The gate runs in the arm that produces `dist`, before the publish step
-    // consumes it, so no release can publish a tarball it never checked.
+    // consumes it, so no release can publish a tarball it never checked. It
+    // runs from the workflow-pinned scripts: a release ref that predates it
+    // would have no `scripts/check-release-tarball-exec-bits.mjs` of its own.
     const buildPackageArm = releaseStepScript.slice(
       releaseStepScript.indexOf('build-package)'),
       releaseStepScript.indexOf('build-archives)'),
     );
     expect(buildPackageArm).toContain(
-      'node scripts/check-release-tarball-exec-bits.mjs dist',
+      'node .release-workflow/scripts/check-release-tarball-exec-bits.mjs dist',
     );
   });
 
