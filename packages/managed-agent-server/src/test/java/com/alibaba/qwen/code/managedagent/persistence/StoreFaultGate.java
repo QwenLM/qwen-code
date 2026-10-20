@@ -10,10 +10,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /**
- * FG12b (issue #14447): the test-only seam that rejects one step of the MCP
- * record state machine. The wrapper calls it from inside the Session store's
- * commit transaction, before the record is applied, so the whole commit rolls
- * back exactly as a store failure would.
+ * FG12b/FG13b (issues #14447/#14449): the test-only seam that rejects one step
+ * of the MCP or Hook record state machine. The wrapper calls it from inside
+ * the Session store's commit transaction, before the record is applied, so the
+ * whole commit rolls back exactly as a store failure would.
  */
 public final class StoreFaultGate {
     public enum Phase {
@@ -79,7 +79,7 @@ public final class StoreFaultGate {
             }
             attempts.incrementAndGet();
             throw new IllegalStateException(
-                    "FG12b store fault injected: " + expected);
+                    "Store fault injected: " + expected);
         }
     }
 
