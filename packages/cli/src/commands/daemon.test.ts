@@ -10,9 +10,11 @@ import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { Argv } from 'yargs';
 
-vi.mock('../ui/utils/textUtils.js', () => ({
-  sanitizeTerminalText: (value: string) => value,
-}));
+const sanitizeTerminalText = vi.hoisted(() =>
+  vi.fn((value: string) => value.replace(/\p{Cc}/gu, '')),
+);
+
+vi.mock('../ui/utils/textUtils.js', () => ({ sanitizeTerminalText }));
 
 // A record only names a process inside the namespace it was written in, so
 // the decision table is pinned against a fixed local namespace here.
@@ -36,6 +38,7 @@ import {
   formatDaemonStartSummary,
   fetchDaemonDetail,
   followFile,
+  listenerIdentityVerified,
   pidResolvableHere,
   probeHealth,
   processStartMatchesRecord,
@@ -191,7 +194,7 @@ describe('qwen daemon command', () => {
     );
     try {
       await expect(
-        fetchDaemonDetail(entry(4170).record),
+        fetchDaemonDetail(entry(4170).record, true),
       ).resolves.toMatchObject({ status: 'ok', version: '0.25.3' });
     } finally {
       vi.unstubAllGlobals();
@@ -208,15 +211,125 @@ describe('qwen daemon command', () => {
       vi.fn(async () => responses.shift()!),
     );
     try {
-      await expect(fetchDaemonDetail(entry(4170).record)).resolves.toBe(
+      await expect(fetchDaemonDetail(entry(4170).record, true)).resolves.toBe(
         'auth required; set QWEN_SERVER_TOKEN',
       );
-      await expect(fetchDaemonDetail(entry(4170).record)).resolves.toBe(
+      await expect(fetchDaemonDetail(entry(4170).record, true)).resolves.toBe(
         'status endpoint returned HTTP 500',
       );
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('verifies the recorded listener before trusting a bearer', () => {
+    const record = entry(4170).record;
+    const started = Date.parse(record.startedAt);
+    expect(
+      listenerIdentityVerified(
+        record,
+        'pid:[1]',
+        () => true,
+        () => started,
+      ),
+    ).toBe(true);
+    expect(
+      listenerIdentityVerified(
+        { ...record, pidNamespace: 'pid:[2]' },
+        'pid:[1]',
+        () => true,
+        () => started,
+      ),
+    ).toBe(false);
+    expect(
+      listenerIdentityVerified(
+        record,
+        'pid:[1]',
+        () => false,
+        () => started,
+      ),
+    ).toBe(false);
+    expect(
+      listenerIdentityVerified(
+        record,
+        'pid:[1]',
+        () => true,
+        () => started - 3_600_000,
+      ),
+    ).toBe(false);
+    expect(
+      listenerIdentityVerified(
+        record,
+        'pid:[1]',
+        () => true,
+        () => undefined,
+      ),
+    ).toBe(false);
+    expect(
+      listenerIdentityVerified(
+        { ...record, startedAt: 'not-a-date' },
+        'pid:[1]',
+        () => true,
+        () => started,
+      ),
+    ).toBe(false);
+  });
+
+  it('withholds the bearer from an unverified listener', async () => {
+    const previous = process.env['QWEN_SERVER_TOKEN'];
+    process.env['QWEN_SERVER_TOKEN'] = 'secret';
+    const fetchMock = vi.fn(
+      async (_input: URL | string, _init?: RequestInit) =>
+        new Response('{}', { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const bearer = { ...entry(4170).record, auth: 'bearer' as const };
+    try {
+      await expect(
+        fetchDaemonDetail({ ...bearer, pidNamespace: 'pid:[2]' }, false),
+      ).resolves.toBe(
+        'listener identity unverified; not sending QWEN_SERVER_TOKEN',
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await expect(fetchDaemonDetail(bearer, true)).resolves.toBe(
+        'invalid status response',
+      );
+      const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+      expect(init?.headers).toEqual({ Authorization: 'Bearer secret' });
+
+      await expect(fetchDaemonDetail(entry(4170).record, true)).resolves.toBe(
+        'invalid status response',
+      );
+      const unauth = fetchMock.mock.calls[1]?.[1] as RequestInit | undefined;
+      expect(unauth?.headers).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+      if (previous === undefined) {
+        delete process.env['QWEN_SERVER_TOKEN'];
+      } else {
+        process.env['QWEN_SERVER_TOKEN'] = previous;
+      }
+    }
+  });
+
+  it('sanitizes daemon-derived detail text', () => {
+    const esc = String.fromCharCode(27);
+    const newline = String.fromCharCode(10);
+    const line = formatDaemonDetail(entry(4170).record, {
+      status: `ok${esc}[31mred`,
+      version: `1.0${newline}FAKE`,
+      issues: [],
+    });
+    expect(line).not.toContain(esc);
+    expect(line).not.toContain(`${newline}FAKE`);
+
+    const unavailable = formatDaemonDetail(
+      entry(4170).record,
+      `boom${esc}[2J${newline}second`,
+    );
+    expect(unavailable).not.toContain(esc);
+    expect(unavailable).not.toContain(`${newline}second`);
   });
 
   it('drops parent session bindings from the child environment', () => {

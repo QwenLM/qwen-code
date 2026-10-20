@@ -213,6 +213,27 @@ export function pidResolvableHere(
   return record.pidNamespace === currentNamespace;
 }
 
+/**
+ * A discovery record and an answering /health prove that a listener exists,
+ * not that it is the daemon that wrote the record: a foreign namespace cannot
+ * address the pid, and a recycled pid can answer for an unrelated listener.
+ * Only call this when the recorded process is addressable here, alive, and
+ * started when the record says it did.
+ */
+export function listenerIdentityVerified(
+  record: DaemonDiscoveryRecord,
+  currentNamespace: string | undefined = currentPidNamespace(),
+  alive: (pid: number) => boolean = isProcessAlive,
+  startedAt: (pid: number) => number | undefined = processStartTime,
+): boolean {
+  if (!pidResolvableHere(record, currentNamespace)) return false;
+  if (!alive(record.pid)) return false;
+  if (!Number.isFinite(Date.parse(record.startedAt))) return false;
+  const started = startedAt(record.pid);
+  if (started === undefined) return false;
+  return processStartMatchesRecord(record.startedAt, started);
+}
+
 export async function probeHealth(
   record: DaemonDiscoveryRecord,
 ): Promise<DaemonHealth> {
@@ -290,8 +311,15 @@ export function summarizeDaemonStatus(
 
 export async function fetchDaemonDetail(
   record: DaemonDiscoveryRecord,
+  allowToken: boolean,
 ): Promise<DaemonDetailSummary | string> {
-  const token = process.env['QWEN_SERVER_TOKEN']?.trim();
+  const token =
+    record.auth === 'bearer'
+      ? process.env['QWEN_SERVER_TOKEN']?.trim()
+      : undefined;
+  if (token && !allowToken) {
+    return 'listener identity unverified; not sending QWEN_SERVER_TOKEN';
+  }
   try {
     const response = await fetch(
       new URL('/daemon/status?detail=summary', record.url),
@@ -319,7 +347,7 @@ export function formatDaemonDetail(
   detail: DaemonDetailSummary | string,
 ): string {
   if (typeof detail === 'string') {
-    return `qwen daemon: port ${record.port}: detail unavailable: ${detail}`;
+    return `qwen daemon: port ${record.port}: detail unavailable: ${sanitize(detail)}`;
   }
   const uptime =
     detail.uptimeMs === undefined
@@ -333,8 +361,8 @@ export function formatDaemonDetail(
           ? ''
           : `(+${detail.sessions.admissionInFlight} admitting)`);
   return (
-    `qwen daemon: port ${record.port}: status=${detail.status}` +
-    ` version=${detail.version ?? 'unknown'} uptime=${uptime}` +
+    `qwen daemon: port ${record.port}: status=${sanitize(detail.status)}` +
+    ` version=${sanitize(detail.version ?? 'unknown')} uptime=${uptime}` +
     `${sessions} issues=${detail.issues.length}`
   );
 }
@@ -776,10 +804,10 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
       rows
         .filter((row) => row.health === 'running')
         .map(async (row) => {
-          details.set(
-            row.entry.record.port,
-            await fetchDaemonDetail(row.entry.record),
-          );
+          const record = row.entry.record;
+          const allowToken =
+            record.auth === 'bearer' && listenerIdentityVerified(record);
+          details.set(record.port, await fetchDaemonDetail(record, allowToken));
         }),
     );
   }
