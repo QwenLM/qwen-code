@@ -181,6 +181,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/artifacts/files-messages.transcript-stub.ts',
     ],
     [
+      './client/components/artifacts/token-usage-messages.ts',
+      './client/components/artifacts/token-usage-messages.transcript-stub.ts',
+    ],
+    [
       './client/voice/messages.ts',
       './client/voice/messages.transcript-stub.ts',
     ],
