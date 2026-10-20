@@ -37,9 +37,16 @@ continues to protect its bytes independently of the additional owner.
 
 Schema V13 adds the reference owner, binding index and a nullable
 `cleanup_head_revision` stamp to the native journal head. Fresh heads start at
-zero. Every commit advances a current stamp atomically with the journal and
+zero. Ordinary commits advance a current stamp atomically with the journal and
 cleanup owners. A missing or stale stamp never becomes current merely because
 a later transaction contains no cleanup event.
+
+The frozen CSI terminal path accepts exactly one `activation.changed` release
+event and its boundary resource; it cannot carry a `hosted.cleanup` event.
+It does not advance the cleanup stamp, so even a fresh head that takes this
+path becomes unverified. Its binding family remains protected until permanent
+journal collection. Extending stamp coverage to this path is deferred; the
+current behavior conservatively over-retains rather than losing cleanup debt.
 
 Existing heads are deliberately unverified. Retention preserves their binding
 families while their journals remain recoverable; this avoids an unsafe partial

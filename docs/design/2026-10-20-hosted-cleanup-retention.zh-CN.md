@@ -30,9 +30,15 @@ descriptor 原有的 journal 引用独立于新增 owner，继续保护其字节
 ## 兼容性
 
 Schema V13 为引用增加 owner 和 binding 索引，并在原生 journal head 增加可空的
-`cleanup_head_revision` 水位。新 head 从零开始。每次提交将当前水位与 journal、
+`cleanup_head_revision` 水位。新 head 从零开始。普通提交将当前水位与 journal、
 cleanup owner 原子推进。缺失或过时的水位，不会因为后续事务没有 cleanup 事件
 就被重新认证为当前。
+
+冻结的 CSI 终局路径只接受一条 `activation.changed` 释放事件及其 boundary
+resource，不能携带 `hosted.cleanup` 事件。该路径不推进 cleanup 水位，因此即使是
+新 head 经过此路径后也会变为未验证，其 binding 家族继续受到保护，直到 journal
+永久回收。将水位覆盖扩展到该路径留待后续处理；当前行为是保守地过度保留，而不会
+丢失 cleanup 欠账。
 
 既有 head 有意保持未验证。在 journal 仍可恢复期间，retention 保留其 binding
 家族，避免不安全的部分回填，也不把缺失历史当作释放证明。只有永久删除的 Session
