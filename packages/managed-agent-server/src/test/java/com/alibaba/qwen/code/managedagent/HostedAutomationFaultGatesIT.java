@@ -19,6 +19,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
@@ -46,6 +47,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
@@ -100,6 +102,13 @@ class HostedAutomationFaultGatesIT {
     private int brokerPort;
     // Spring arguments a test adds before it boots.
     private final List<String> springExtras = new ArrayList<>();
+    // FG11f: the publication case faults the physical object write and keeps
+    // whatever the store accepted, so the assertions read the same bytes.
+    private HostedGateTestSupport.PublicationFaults publicationFaults;
+    private final Map<String, byte[]> publicationObjects = new ConcurrentHashMap<>();
+    private final Map<String, Integer> physicalPuts = new ConcurrentHashMap<>();
+    private final AtomicInteger publicationFaultsSeen = new AtomicInteger();
+    private final AtomicInteger shellSteps = new AtomicInteger();
     // Fronts the Session Store for the Harness when a test asks for it before booting, and
     // drops the answer to the one commit whose command id is armed.
     private boolean storeRelayed;
@@ -1077,6 +1086,171 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-retire", 202);
     }
 
+    // FG11f: the wake turn's Shell output is captured and published, and the
+    // arm faults the physical object write. The store never rewrites the
+    // object and never re-runs the Shell, so these assertions read what it
+    // kept rather than assuming a retry the store does not drive.
+    // One method per arm keeps a stall in one arm inside its own ceiling. The
+    // selector keeps the meaning it has for fg11b and fg11c: unset runs every
+    // arm, and naming one runs only that one.
+    @Test
+    @Timeout(600)
+    void fg11fPublicationFailsBeforeWriteOnMySql() throws Exception {
+        assumeTrue(selected("fg11f", "fail-before-write"));
+        runPublicationArm("fail-before-write");
+    }
+
+    @Test
+    @Timeout(600)
+    void fg11fPublicationTimesOutOnMySql() throws Exception {
+        assumeTrue(selected("fg11f", "timeout"));
+        runPublicationArm("timeout");
+    }
+
+    @Test
+    @Timeout(600)
+    void fg11fPublicationFaultsSettleOnceOnMySql() throws Exception {
+        assumeTrue(selected("fg11f", "drop-ack-after-write"));
+        runPublicationArm("drop-ack-after-write");
+    }
+
+    private void runPublicationArm(String arm) throws Exception {
+        publicationFaults = publicationFaults(arm);
+        boot("fg11f");
+        String definition = request("POST", "/v1/agents", Map.of(
+                "model", Map.of(),
+                "instructions", "Run the Shell command the prompt names.",
+                "tools", List.of(Map.of("type", "hosted_profile", "profile", "hosted-workspace-shell/1")),
+                // A Shell definition must start with an asking policy (#13271);
+                // the case answers the wake turn's permission request below.
+                "permission_policy", Map.of("approval_mode", "default")), "fg11f-definition", 202)
+                .path("id").asText();
+        String session = request("POST", "/api/agent/web-shell/v1/sessions/create", Map.of(
+                "agentId", definition, "idempotencyKey", "fg11f-session", "input", List.of(),
+                "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child")),
+                "fg11f-session", 202).path("sessionId").asText();
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?", String.class, tenant,
+                session)).isEqualTo("ACTIVE"));
+        request("POST", "/v1/agents/sessions/" + session + "/events", Map.of(
+                "type", "agent.session.input.message",
+                "input", List.of(Map.of("type", "input_text", "text", "FG11_WARM fg11f"))), "fg11f-warm", 202);
+        waiting().atMost(Duration.ofSeconds(90)).untilAsserted(() -> assertThat(jdbc.queryForList(
+                "SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session))
+                .containsExactly("COMPLETED"));
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11F_SHELL", "* * * * *"), "fg11f-base", 202).path("id").asText();
+        // The wake turn asks for permission before it runs the Shell; answer it
+        // the way an operator would for as long as this case needs.
+        java.util.Set<String> answeredActions = ConcurrentHashMap.newKeySet();
+        Thread approver = Thread.ofVirtual().start(() -> {
+            for (int attempt = 0; attempt < 240 && !Thread.currentThread().isInterrupted(); attempt++) {
+                try {
+                    JsonNode page = request("POST", "/api/agent/web-shell/v1/actions/query",
+                            Map.of("sessionId", session), "fg11f-actions-" + attempt, 200);
+                    for (JsonNode action : page.path("data")) {
+                        String actionId = action.path("actionId").asText();
+                        if (!answeredActions.add(actionId)) {
+                            continue;
+                        }
+                        request("POST", "/api/agent/web-shell/v1/actions/respond", Map.of(
+                                "sessionId", session,
+                                "actionId", actionId,
+                                "idempotencyKey", "fg11f-respond-" + actionId,
+                                "requestId", "fg11f-shell",
+                                "response", Map.of("kind", "permission", "optionId", "allow",
+                                        "inputRevision", action.path("inputRevision").asLong(),
+                                        "policyRevision", action.path("policyRevision").asText())),
+                                "fg11f-respond-" + actionId, 202);
+                    }
+                    Thread.sleep(500);
+                } catch (InterruptedException stopped) {
+                    return;
+                } catch (Exception transientFailure) {
+                    // The action may not exist yet; keep polling.
+                }
+            }
+        });
+        Map<String, Object> occurrence = awaitOccurrence(id, "fired");
+        String runId = (String) occurrence.get("run_id");
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(runId))
+                .isIn("completed", "failed", "cancelled"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE tenant_id = ?"
+                + " AND session_id = ? AND domain = 'automation_run'", Integer.class, tenant, session))
+                .as("one automation_run").isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
+                + " WHERE harness_session_id = ?", Integer.class, session)).as("one Shell execution").isEqualTo(1);
+        List<String> puts = jdbc.queryForList("SELECT state FROM ma_operation"
+                + " WHERE tenant_id = ? AND operation_kind = 'OBJECT_PUT'", String.class, tenant);
+        // The injected fault must have fired. Without this a dropped injection
+        // leaves an ordinary publication that passes every other assertion.
+        assertThat(publicationFaultsSeen.get()).as("the injected fault fired").isGreaterThanOrEqualTo(1);
+        if ("drop-ack-after-write".equals(arm)) {
+            // The lost ack is transient: the store reconciles by reading the
+            // object back and settles the put exactly once.
+            assertThat(puts).as("the lost ack reconciles to settled puts").isNotEmpty()
+                    .allMatch("RETURNED"::equals);
+            assertThat(physicalPuts).as("each object was written exactly once").isNotEmpty()
+                    .allSatisfy((key, count) -> assertThat(count).as(key).isEqualTo(1));
+            assertThat(publicationObjects).as("the committed object is kept").isNotEmpty();
+            // The Shell writes 2 MiB of "a" against a 4 MiB publication limit,
+            // so the retained chunks must add up to exactly that and hold the
+            // run's own bytes rather than any same-sized placeholder.
+            // The store also writes its envelope beside the payload, so count
+            // only the chunks that carry this run's own bytes: a same-sized
+            // placeholder would leave nothing to count.
+            java.util.List<byte[]> captured = publicationObjects.values().stream()
+                    .filter(bytes -> bytes.length >= 64 * 1024)
+                    .filter(bytes -> {
+                        for (byte value : bytes) {
+                            if (value != 'a') {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }).toList();
+            assertThat(captured).as("the capture landed as chunks of this run's output").isNotEmpty();
+            assertThat(captured.stream().mapToLong(bytes -> bytes.length).sum())
+                    .as("the retained payload is the Shell's 2 MiB").isEqualTo(2 * 1024 * 1024);
+        } else {
+            assertThat(puts).as("a refused write stays unresolved").isNotEmpty()
+                    .allMatch("UNKNOWN"::equals);
+            assertThat(publicationObjects).as("nothing was stored").isEmpty();
+        }
+        approver.interrupt();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11f-retire", 202);
+    }
+
+    private HostedGateTestSupport.PublicationFaults publicationFaults(String arm) {
+        return new HostedGateTestSupport.PublicationFaults() {
+            @Override
+            public void beforePut(String key, byte[] bytes) {
+                if ("fail-before-write".equals(arm)) {
+                    publicationFaultsSeen.incrementAndGet();
+                    throw new com.aliyun.oss.OSSException("Injected write failure", "InternalError",
+                            "request", "host", "fg11f-bucket", key, "resource");
+                }
+                if ("timeout".equals(arm)) {
+                    publicationFaultsSeen.incrementAndGet();
+                    try {
+                        Thread.sleep(11_000);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                    throw new com.aliyun.oss.ClientException("SocketTimeout");
+                }
+            }
+
+            @Override
+            public void afterPut(String key, byte[] bytes) {
+                if ("drop-ack-after-write".equals(arm)) {
+                    publicationFaultsSeen.incrementAndGet();
+                    throw new com.aliyun.oss.ClientException("Connection reset after commit");
+                }
+            }
+        };
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
@@ -1088,6 +1262,12 @@ class HostedAutomationFaultGatesIT {
         temporary = temporary.toRealPath();
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
         Files.createDirectory(temporary.resolve("broker"));
+        if (publicationFaults != null) {
+            // Durable local-process mode refuses a Runtime state directory
+            // any other account can read; a public Shell Session needs it.
+            Files.setPosixFilePermissions(temporary.resolve("broker"),
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        }
         Path root = Files.createDirectory(temporary.resolve("workspace-0"));
         Files.createDirectory(root.resolve("child"));
         // Keep the initialized root's mtime distinct from its birth time without sleeping.
@@ -1243,9 +1423,11 @@ class HostedAutomationFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
-                "--qwen.managed-agent.runtime-broker.durable-local-process=false",
+                "--qwen.managed-agent.runtime-broker.durable-local-process="
+                        + (publicationFaults != null),
                 "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
-                        + "Linux".equals(System.getProperty("os.name")),
+                        + (publicationFaults != null
+                                || "Linux".equals(System.getProperty("os.name"))),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=fg11-fixture",
@@ -1256,9 +1438,23 @@ class HostedAutomationFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + root));
         arguments.addAll(springExtras);
+        if (publicationFaults != null) {
+            arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port, "fg11f-bucket", 4L * 1024 * 1024));
+            arguments.add("--qwen.managed-agent.definition-tool-profiles=hosted-workspace-shell/1");
+            arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
+            // Workspace Shell refuses the server default of yolo; the session
+            // still runs yolo from its definition, so the wake turn needs no
+            // approval round-trip.
+            arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        }
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
-                .initializers(context -> context.getBeanFactory().registerSingleton("fg11Authentication",
-                        authentication()))
+                .initializers(context -> {
+                    context.getBeanFactory().registerSingleton("fg11Authentication", authentication());
+                    if (publicationFaults != null) {
+                        HostedGateTestSupport.stubPublicationOss(context, publicationObjects, "fg11f-oss",
+                                publicationFaults, physicalPuts);
+                    }
+                })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
     }
@@ -1270,7 +1466,10 @@ class HostedAutomationFaultGatesIT {
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, ?, ?, 'OPERATOR')", tenant, "workspace-0", "actor".getBytes(StandardCharsets.UTF_8));
-        if ("Linux".equals(System.getProperty("os.name"))) {
+        // Registration must follow the same condition as the guard itself: the
+        // guard allows Linux and macOS, and a public Shell wake turn verifies
+        // the registered root before any execution.
+        if (publicationFaults != null || "Linux".equals(System.getProperty("os.name"))) {
             spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }
@@ -1307,7 +1506,8 @@ class HostedAutomationFaultGatesIT {
                 }, response));
         filter.setOrder(Ordered.HIGHEST_PRECEDENCE);
         filter.setAsyncSupported(true);
-        filter.addUrlPatterns("/v1/agents/*", "/v1/agent-automations", "/v1/agent-automations/*");
+        filter.addUrlPatterns("/v1/agents", "/v1/agents/*", "/v1/agent-automations",
+                "/v1/agent-automations/*", "/api/agent/web-shell/*");
         return filter;
     }
 
@@ -1374,6 +1574,27 @@ class HostedAutomationFaultGatesIT {
                 // Outlive the whole method: a crash case releases this in teardown, and a
                 // timeout here would surface as a broken pipe during the NEXT case.
                 heldModel.await(900, TimeUnit.SECONDS);
+            }
+            if (prompt.contains("FG11F_SHELL") && shellSteps.getAndIncrement() == 0) {
+                var call = json.createObjectNode().put("id", "fg11").put("object", "chat.completion.chunk")
+                        .put("created", 1).put("model", "fg11-fixture");
+                var callChoice = call.putArray("choices").addObject().put("index", 0);
+                callChoice.putObject("delta").put("role", "assistant").putArray("tool_calls").addObject()
+                        .put("index", 0).put("id", "fg11f-tool").put("type", "function")
+                        .putObject("function").put("name", "run_shell_command")
+                        .put("arguments", json.writeValueAsString(Map.of(
+                                "command", "head -c 2097152 /dev/zero | tr '\\0' a",
+                                "description", "Write the publication proof")));
+                callChoice.putNull("finish_reason");
+                String first = "data: " + json.writeValueAsString(call) + "\n\n";
+                callChoice.putObject("delta");
+                callChoice.put("finish_reason", "tool_calls");
+                byte[] toolCall = (first + "data: " + json.writeValueAsString(call)
+                        + "\n\ndata: [DONE]\n\n").getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+                exchange.sendResponseHeaders(200, toolCall.length);
+                exchange.getResponseBody().write(toolCall);
+                return;
             }
             var chunk = json.createObjectNode().put("id", "fg11").put("object", "chat.completion.chunk")
                     .put("created", 1).put("model", "fg11-fixture");
@@ -1454,7 +1675,8 @@ class HostedAutomationFaultGatesIT {
 
     // Awaitility ignores the interrupt a @Timeout sends, so every wait fails on it.
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted())
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted())
                 .pollInterval(Duration.ofMillis(200));
     }
 
