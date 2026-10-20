@@ -77,7 +77,7 @@ import {
   Turn,
   type ServerLlmStreamEvent,
 } from './turn.js';
-import { LoopType } from '../telemetry/types.js';
+import { LoopReason, LoopType } from '../telemetry/types.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
 import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
 import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
@@ -8154,6 +8154,12 @@ Other open files:
     it('halts the interactive turn when paired ToolResults show a frozen stateful board (#9450)', async () => {
       const events = await runTaskListPollTurns(() => 'frozen board');
       expectLoopType(events, 'global_tool_call_duplicate');
+      expect(
+        events.find((e) => e.type === LlmEventType.LoopDetected)?.value,
+      ).toEqual({
+        loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+        loopReason: LoopReason.REPEATED_CALL,
+      });
     });
 
     it('keeps the interactive turn alive while paired ToolResults keep changing (#9450)', async () => {
@@ -8358,6 +8364,33 @@ Other open files:
         'loop_detected',
         LoopType.TURN_TOOL_CALL_CAP,
       );
+    });
+
+    it('bubbles the cap reason and numbers on the LoopDetected event', async () => {
+      // A real detector run (no getLastLoopType spy): an explicit cap of 2
+      // halts the third distinct call, and the event carries why.
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(true);
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('cap-1', 'read_file', { path: 'a' }),
+          toolCallRequest('cap-2', 'read_file', { path: 'b' }),
+          toolCallRequest('cap-3', 'read_file', { path: 'c' }),
+        ),
+      );
+      installChat();
+
+      const events = await run([{ text: 'read three files' }], 'prompt-cap');
+
+      expect(events.at(-1)).toEqual({
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 3,
+          toolCallLimit: 2,
+        },
+      });
     });
 
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {

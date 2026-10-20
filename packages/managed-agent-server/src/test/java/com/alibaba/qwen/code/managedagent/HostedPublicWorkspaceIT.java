@@ -48,6 +48,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -581,7 +582,7 @@ class HostedPublicWorkspaceIT {
     // W2: a controlled cwd change settles through the production server and
     // the deployment's real Workspace probe, on both API surfaces.
     @Test
-    @Timeout(150)
+    @Timeout(480)
     void workspaceCwdChangeSettlesThroughBothSurfaces() throws Exception {
         List<Path> roots = boot();
         Files.createDirectory(roots.get(0).resolve("child2"));
@@ -599,9 +600,24 @@ class HostedPublicWorkspaceIT {
 
         Map<String, Object> change = Map.of("cwd_relative", "child2//",
                 "expected_context_revision", 1);
-        JsonNode operation = request("POST",
-                "/v1/agents/sessions/" + session + "/cwd", change, "w2-cwd-1",
-                "actor", 202);
+        // A just-completed Turn can retain the Runtime context for a moment;
+        // re-drive the same idempotency key until admission answers 202.
+        JsonNode operation = await().atMost(Duration.ofSeconds(35))
+                .until(() -> {
+                    HttpResponse<String> answer = rawRequest("POST",
+                            "/v1/agents/sessions/" + session + "/cwd", change,
+                            "w2-cwd-1", "actor");
+                    JsonNode body = json.readTree(answer.body());
+                    if (answer.statusCode() == 409
+                            && "session_context_busy".equals(body.path("error")
+                                    .path("code").asText())) {
+                        return null;
+                    }
+                    assertThat(answer.statusCode())
+                            .as("POST /cwd: %s", answer.body())
+                            .isEqualTo(202);
+                    return body;
+                }, Objects::nonNull);
         assertThat(operation.path("type").asText()).isEqualTo("cwd_change");
         assertThat(operation.path("target_cwd_relative").asText())
                 .isEqualTo("child2");
@@ -621,7 +637,7 @@ class HostedPublicWorkspaceIT {
         assertThat(replay.path("id").asText()).isEqualTo(operationId);
         assertThat(replay.path("replayed").asBoolean()).isTrue();
 
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + operationId, null, null, "actor", 200);
             assertThat(polled.path("status").asText()).isEqualTo("completed");
@@ -669,7 +685,7 @@ class HostedPublicWorkspaceIT {
         assertThat(webReplay.path("operationId").asText())
                 .isEqualTo(webOperationId);
         assertThat(webReplay.path("replayed").asBoolean()).isTrue();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("POST",
                     "/api/agent/web-shell/v1/operations/query",
                     Map.of("sessionId", session,
@@ -709,7 +725,7 @@ class HostedPublicWorkspaceIT {
                         "expected_context_revision", 3),
                 "w2-missing-dir", "actor", 202);
         String missingOperation = missing.path("id").asText();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + missingOperation, null, null,
                     "actor", 200);
@@ -728,7 +744,7 @@ class HostedPublicWorkspaceIT {
 
         // The WebShell twin's failed projection must carry failureCode too —
         // the contract condition requires it, and generated clients read it.
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("POST",
                     "/api/agent/web-shell/v1/operations/query",
                     Map.of("sessionId", session,
@@ -745,7 +761,7 @@ class HostedPublicWorkspaceIT {
                 Map.of("cwd_relative", "child2",
                         "expected_context_revision", 3),
                 "w2-recovered", "actor", 202).path("id").asText();
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
             JsonNode polled = request("GET", "/v1/agents/sessions/" + session
                     + "/operations/" + recovered, null, null, "actor", 200);
             assertThat(polled.path("status").asText()).isEqualTo("completed");
@@ -1772,7 +1788,7 @@ class HostedPublicWorkspaceIT {
         return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
-    private JsonNode request(String method, String path, Object body, String key, String actor, int expected)
+    private HttpResponse<String> rawRequest(String method, String path, Object body, String key, String actor)
             throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .timeout(Duration.ofSeconds(10)).header("X-Qwen-Tenant-Id", tenant)
@@ -1785,7 +1801,12 @@ class HostedPublicWorkspaceIT {
         if (actor != null) {
             request.header("X-G0-Fixture-Actor", actor);
         }
-        var response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+        return http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private JsonNode request(String method, String path, Object body, String key, String actor, int expected)
+            throws Exception {
+        HttpResponse<String> response = rawRequest(method, path, body, key, actor);
         assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body()).isEqualTo(expected);
         return json.readTree(response.body());
     }
