@@ -10,7 +10,7 @@ This document proposes where that recovery belongs. It is a design only: no prod
 
 ## Current state
 
-- `managed-mcp-runtime.ts` keys an in-flight operation by `control.operationId` inside `connection.pending`. `settled()` removes the entry; `unknown()` does not.
+- `control()` in `managed-mcp-runtime.ts` deduplicates at Runtime scope: it looks the operation up by Session scope plus `operationId` in the Runtime-level `operations` map, returns the existing view for an identical retry and rejects a changed request as a conflict. `client.onclose` marks the connection closed and calls `unknown()` on its pending operations; it does not delete the connection object or its `pending` map. So the record and the dedup survive — what is lost is the transport that could deliver a reply.
 - `client.onclose` iterates `connection.pending` and calls `unknown(pending, 'managed_mcp_connection_lost')` for each, then the connection is closed. Nothing retains the ids afterwards.
 - The Harness records the unknown view through `commitOperation` and resolves later reads with `lookup()`, which asks the Broker for `mcp-status`.
 - `ManagedMcpProtocol.RECOVERY_KINDS` already carries `mcp-status`/`mcp-cancel`/`mcp-release`, and validates their expected id against `targetOperationId`. There is no equivalent for a late result.
@@ -20,17 +20,16 @@ This document proposes where that recovery belongs. It is a design only: no prod
 
 1. **Keep the original operation, do not re-issue it.** The late reply must be written back to the record the client already knows, so `mcp-status` can answer `settled` without a second invoke.
 2. **No producer-side hold can receive the reply.** MCP request ids are scoped to one connection: `connection.pending` is the only place the Runtime keys an operation, and `client.onclose` drops that map. Once the connection is gone there is no channel on which the server could deliver an answer for that id, so a Broker-side window would wait forever. The two real options are (a) require MCP servers to expose a re-query keyed by business identity, so the client can ask again after `outcome_unknown`, or (b) accept `outcome_unknown` as terminal and let the caller redo the work, accepting a duplicate side effect. This document recommends (b) for the current contract and records (a) as the change that would lift the limit.
-3. **One writer per operation id.** Concurrent `mcp-status` queries inside the window coalesce onto the same held operation rather than each starting a hold; the first conclusive answer settles it and every waiter reads that answer.
-4. **The window is a configuration constant, not a per-call argument.** The client cannot extend it, so retry pressure cannot hold a Runtime open.
-5. **The gate must be able to go red.** The witness is a fixture that drops the connection after dispatch and answers on a replacement connection; the gate asserts one committed settle, one physical effect and one `mcp-invoke`, and a mutation that removes the hold makes it red.
+3. **Record the limitation; do not build a hold.** With the dedup and the record intact but no transport left, `outcome_unknown` is terminal for a closed connection: retrying the same id inside the same Runtime returns the same unknown, so a re-send cannot recover the answer and a Broker window would wait forever.
+4. **Name what would lift it, and leave it out of scope.** Either MCP servers expose a re-query keyed by business identity, so a caller can ask again after `outcome_unknown`, or the producer keeps a durable store that survives the Runtime. A bounded in-memory window is neither.
+5. **Claim no gate for this case.** The live-connection variant is already gated by #14892; the closed-connection variant is documented as a limitation until item 4 lands, so no acceptance criteria below assume a hold.
 
 ## Open questions
 
-- Window length: long enough to cover a reconnect (seconds), short enough that an abandoned operation does not pin a Runtime slot. Needs a measurement on the Hosted lane before the value is pinned.
-- Where the hold is keyed: by `operationId` alone, or by `(runtimeSessionId, operationId)`, since the former is already unique per Session.
-- Whether `mcp-cancel` arriving inside the window should close the hold early; the safe default is yes.
+- Which lifting option to pursue: a server-side re-query contract, or a durable producer-side store.
+- Whether a caller redoing the work after `outcome_unknown` may accept a duplicate side effect, or whether the domain needs idempotency keys first.
 
 ## Acceptance
 
-- A design review settles the three open questions above before any code lands.
-- The eventual implementation lands with its gate in the same diff, and the gate fails when the hold is removed.
+- Both language versions state the same limitation, the same two lifting options and the same absence of a gate.
+- The claims about `control()`, `client.onclose` and `connection.pending` match the tree at the reviewed commit.
