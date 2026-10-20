@@ -531,8 +531,8 @@
                                  to 176 minutes. The FG13b Hook plan-result
                                  store-rejection cell adds 150 s: the healthy
                                  sum becomes 9465 s, so the fork moves to
-                                 10065 s and the Verify step to 178 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10075</forkedProcessTimeoutInSeconds>
+                                 10065 s and the Verify step to 178 minutes; the FG12f late-reply class rises from 30 s to 50 s, so the healthy sum becomes 9485 s, the fork moves to 10085 s and the Verify step to 179 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10085</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
