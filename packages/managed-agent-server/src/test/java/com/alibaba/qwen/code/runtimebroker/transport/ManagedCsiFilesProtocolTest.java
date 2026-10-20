@@ -91,9 +91,31 @@ public class ManagedCsiFilesProtocolTest {
     }
 
     @Test
-    void refusesFinalizationBootOutsideTheOriginalReadyScope() throws Exception {
+    void sharesFinalizationBoot6AndRejectsMissingCrossedOrDowngradedAuthority() throws Exception {
         var fixture = fixtures();
-        assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(map(fixture.get("finalizationBoot6"))));
+        var expected = map(fixture.get("finalizationBoot6"));
+        var boot = ManagedCsiFilesProtocol.finalizationBoot(request(fixture), seed(fixture),
+                map(expected.get("storage")), map(expected.get("authority")));
+        assertTrue(BrokerValues.sameJsonMap(expected, boot));
+        for (String key : boot.keySet()) {
+            var changed = new LinkedHashMap<>(boot);
+            changed.remove(key);
+            assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(changed), key);
+        }
+        for (Object pin : List.of("foreign", 1, List.of(ManagedCsiFilesProtocol.FINALIZATION_FORMAT))) {
+            var changed = new LinkedHashMap<>(boot);
+            changed.put("finalization", pin);
+            assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(changed));
+        }
+        for (int version : List.of(4, 5, 7)) {
+            var changed = new LinkedHashMap<>(boot);
+            changed.put("version", version);
+            assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(changed));
+        }
+        var extra = new LinkedHashMap<>(boot);
+        extra.put("token", "foreign");
+        assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(extra));
+        assertThrows(IllegalArgumentException.class, () -> ManagedCsiProtocol.validateBoot(boot));
     }
 
     @Test

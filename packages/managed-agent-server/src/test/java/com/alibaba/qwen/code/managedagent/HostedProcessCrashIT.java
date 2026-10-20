@@ -42,8 +42,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedProcessCrashIT {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final List<String> CASES = List.of("harness-prepare", "harness-start", "harness-result",
-            "spring-kill", "worker-kill", "worker-stop");
+    private static final List<String> CASES = List.of("harness-prepare", "harness-start", "harness-unknown",
+            "harness-result", "spring-kill", "worker-kill", "worker-stop");
     @TempDir
     private Path temporary;
 
@@ -524,7 +524,7 @@ class HostedProcessCrashIT {
             assertThat(execution.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
             assertThat(execution.get("turn_id")).isEqualTo(report.path("promptId").asText());
             boolean prepared = fault.equals("harness-prepare");
-            boolean settled = List.of("harness-start", "harness-result").contains(fault);
+            boolean settled = List.of("harness-start", "harness-result", "harness-unknown").contains(fault);
             assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(prepared ? 0 : 1);
             assertThat(execution.get("execution_state")).isEqualTo(prepared ? "PREPARED" : settled ? "SETTLED"
                     : fault.equals("spring-kill") ? "EXECUTING" : "UNKNOWN");
