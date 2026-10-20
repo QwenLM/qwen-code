@@ -1091,27 +1091,7 @@ export function freePastePlaceholderId(
   activeIds.get(charCount)?.delete(id);
 }
 
-/** Restores every placeholder in `value` to its pasted content on submit. */
-export function expandPendingPastePlaceholders(
-  value: string,
-  pendingPastes: ReadonlyMap<string, string>,
-): string {
-  if (pendingPastes.size === 0) {
-    return value;
-  }
-  const placeholders = Array.from(pendingPastes.keys()).sort(
-    (a, b) => b.length - a.length,
-  );
-  const escapedPlaceholders = placeholders.map((placeholderValue) =>
-    placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-  );
-  const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
-  return value.replace(
-    placeholderRegex,
-    (matchedPlaceholder) =>
-      pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
-  );
-}
+export { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 
 /** The double-Esc clear state machine (500ms arm window). */
 export class EscapeClearModel {

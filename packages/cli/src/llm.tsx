@@ -1103,6 +1103,13 @@ export async function main() {
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
     if (settingsWatcher && !config.getShellExecutionSandbox?.()) {
+      registerCleanup(
+        settingsWatcher.addChangeListener(() => {
+          config.setWorkflowKeywordTriggerEnabled(
+            settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+          );
+        }),
+      );
       const disposeMcpHotReload = registerMcpHotReload(
         settingsWatcher,
         settings,

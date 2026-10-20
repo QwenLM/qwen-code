@@ -118,6 +118,8 @@ export const Composer = ({ footerRef }: ComposerProps) => {
       {uiState.isInputActive && (
         <InputPrompt
           buffer={uiState.buffer}
+          pendingPastes={uiState.pendingPastes}
+          onPendingPastesChange={uiActions.setPendingPastes}
           inputWidth={uiState.inputWidth}
           suggestionsWidth={uiState.suggestionsWidth}
           onSubmit={uiActions.handleFinalSubmit}

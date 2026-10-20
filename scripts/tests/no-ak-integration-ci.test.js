@@ -214,6 +214,8 @@ describe('no-AK integration CI wiring', () => {
       './cli/headless-workflow-skill.test.ts',
       './cli/workflow-ancestor-discovery.test.ts',
       './cli/daemon-workflow-ancestor-trust.test.ts',
+      './cli/workflow-intent.test.ts',
+      './cli/daemon-workflow-intent.test.ts',
       './cli/list_directory.test.ts',
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',
@@ -221,6 +223,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/qwen-serve-streaming.test.ts',
       './cli/qwen-serve-standalone-concurrency.test.ts',
       './interactive/workflow-completion.test.ts',
+      './interactive/workflow-intent.test.ts',
       './interactive/mods-tool-middleware.test.ts',
       './sdk-typescript/abort-and-lifecycle.test.ts',
       './sdk-typescript/permission-control.test.ts',
@@ -228,6 +231,7 @@ describe('no-AK integration CI wiring', () => {
       './sdk-typescript/subagents.test.ts',
       './sdk-typescript/system-control.test.ts',
       './sdk-typescript/tool-control.test.ts',
+      './sdk-typescript/workflow-intent.test.ts',
     ];
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [

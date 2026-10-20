@@ -6,6 +6,9 @@
 
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
+import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import { logWorkflowKeyword } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import { WorkflowKeywordEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
@@ -6992,6 +6995,19 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
+            const workflowIntent =
+              isUserSubmissionTurn &&
+              !isSlashInput &&
+              !isSlashCommand(submittedPrompt) &&
+              !goalTurn &&
+              !pendingSend.signal.aborted &&
+              submittedPrompt.trim().length > 0
+                ? resolveWorkflowIntent(this.config, { text: submittedPrompt })
+                : null;
+            if (workflowIntent) {
+              systemReminders.push({ text: workflowIntent.reminder });
+              logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
+            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on

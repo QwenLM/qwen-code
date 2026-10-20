@@ -698,6 +698,46 @@ describe('AppContainer State Management', () => {
     } as InitializationResult;
   });
 
+  it('applies live workflow keyword opt-out changes to the current Config', () => {
+    const apply = vi.spyOn(mockConfig, 'setWorkflowKeywordTriggerEnabled');
+    const settings = {
+      ...mockSettings,
+      merged: {
+        ...mockSettings.merged,
+        ui: { ...mockSettings.merged.ui, disableWorkflowKeywordTrigger: true },
+      },
+    } as LoadedSettings;
+    const view = render(
+      <AppContainer
+        config={mockConfig}
+        settings={settings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    expect(apply).toHaveBeenLastCalledWith(false);
+    view.rerender(
+      <AppContainer
+        config={mockConfig}
+        settings={
+          {
+            ...settings,
+            merged: {
+              ...settings.merged,
+              ui: {
+                ...settings.merged.ui,
+                disableWorkflowKeywordTrigger: false,
+              },
+            },
+          } as LoadedSettings
+        }
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    expect(apply).toHaveBeenLastCalledWith(true);
+  });
+
   it('gives the Agent tool the full SubagentManager surface during initialization', async () => {
     // AppContainer's mount effect runs config.initialize() in an un-awaited
     // IIFE; the real initialize warms the tool registry, constructing
@@ -3288,19 +3328,12 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    // The workflow reminder's shell-mode gate is load-bearing through this
-    // call site: a shell-mode submission goes to bash, where a leading
-    // `<system-reminder>` is a syntax error, and is recorded as the command
-    // the user ran. Both arms go through the real handleFinalSubmit and the
-    // real shellModeActive state, so dropping `shellMode: shellModeActive`
-    // from the call turns the shell arm red while the ordinary arm keeps the
-    // assertion from passing vacuously.
     it.each([
       ['a shell-mode submission', true, false],
       ['an ordinary prompt', false, true],
     ])(
-      'adds the workflow keyword reminder only outside shell mode: %s',
-      (_case, shellMode, expectReminder) => {
+      'captures human workflow input without prefixing model text: %s',
+      (_case, shellMode, expectHuman) => {
         const mockQueueMessage = vi.fn();
         // The mount effect's un-awaited config.initialize() runs the real
         // initialization against this partial registry mock and rejects
@@ -3354,20 +3387,88 @@ describe('AppContainer State Management', () => {
         }
         capturedUIActions.handleFinalSubmit('gh workflow list', {
           submittedPrompt: 'gh workflow list',
+          displayText: 'gh workflow list',
+          humanInput: { text: 'gh workflow list' },
         });
 
         expect(mockQueueMessage).toHaveBeenCalledTimes(1);
-        const submitted = mockQueueMessage.mock.calls[0][0] as string;
-        expect(submitted).toContain('gh workflow list');
-        // Asserted on the workflow reminder's own text: this call site gates
-        // only that reminder. The other notices the handler prepends gate
-        // shell mode at their own call sites (see the #11626 cases below).
-        const workflowReminder = 'includes the "workflow" keyword';
-        if (expectReminder) {
-          expect(submitted).toContain(workflowReminder);
-        } else {
-          expect(submitted).not.toContain(workflowReminder);
+        expect(mockQueueMessage.mock.calls[0][0]).toBe('gh workflow list');
+        expect(mockQueueMessage.mock.calls[0][4]).toEqual({
+          displayText: 'gh workflow list',
+          humanInput: expectHuman ? { text: 'gh workflow list' } : undefined,
+        });
+      },
+    );
+
+    it('captures a literal leading envelope from the actual Vim submit without inventing hook provenance', () => {
+      const queue = vi.fn();
+      const raw =
+        '<system-reminder>literal user text</system-reminder>\nworkflow inspect';
+      mockedUseTextBuffer.mockReturnValue({ text: raw, setText: vi.fn() });
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const submitVim = mockedUseVim.mock.calls.at(-1)?.[1] as (
+        text: string,
+      ) => void;
+      act(() => submitVim(raw));
+      expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+        displayText: raw,
+        humanInput: { text: raw },
+      });
+    });
+
+    it.each(['stash', 'reverse-search'])(
+      'does not upgrade unknown %s text from composer metadata',
+      (source) => {
+        const raw =
+          '<system-reminder>unknown history</system-reminder>\nworkflow inspect';
+        const queue = vi.fn();
+        mockedUseTextBuffer.mockReturnValue({ text: '', setText: vi.fn() });
+        if (source === 'stash') {
+          mockedRestorePromptStash.mockImplementation(
+            (_targetDir, _currentText, restore) => {
+              restore(raw);
+              return true;
+            },
+          );
         }
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+        });
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        if (source === 'reverse-search')
+          capturedUIActions.invalidateSubmittedPromptProvenance();
+        capturedUIActions.handleFinalSubmit(raw, {
+          submittedPrompt: raw,
+          displayText: raw,
+          humanInput: { text: raw },
+        });
+        expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+          displayText: raw,
+          humanInput: undefined,
+        });
       },
     );
 
@@ -4168,6 +4269,10 @@ describe('AppContainer State Management', () => {
         id: number;
         text: string;
         submittedPrompt?: string;
+        humanInput?: { text: string };
+        pasteExpansions?: ReadonlyMap<string, string>;
+        hasUnknownInput?: boolean;
+        modelText?: string;
       } | null;
       canUndoLastLoggedUserMessage: boolean;
       turnProducedMeaningfulContent: boolean;
@@ -4736,6 +4841,182 @@ describe('AppContainer State Management', () => {
       // Auto-restore itself bailed: there was no user item to rewind.
       expect(mockTruncateToItem).not.toHaveBeenCalled();
     });
+
+    it.each([
+      ['queue', false, true, false, false],
+      ['cancel', false, true, false, false],
+      ['queue', true, true, false, false],
+      ['cancel', true, true, false, false],
+      ['queue', true, false, false, false],
+      ['cancel', true, false, false, false],
+      ['queue', false, true, true, false],
+      ['cancel', false, true, true, false],
+      ['queue', false, false, true, false],
+      ['cancel', false, false, true, false],
+      ['queue', false, false, true, true],
+      ['cancel', false, false, true, true],
+      ['queue', false, true, 'current', false],
+      ['cancel', false, true, 'current', false],
+    ] as const)(
+      'preserves restored source constraints (%s, paste: %s, edited: %s, mixed: %s, cleared: %s)',
+      async (source, pasted, editedDraft, mixed, cleared) => {
+        const placeholder = '[Pasted Content 1200 chars]';
+        const body = 'ultracode workflow payload'.padEnd(1200, 'x');
+        const literal = '<system-reminder>user literal</system-reminder>';
+        const currentUnknown = mixed === 'current';
+        const currentDraft = 'unknown workflow history draft';
+        const original = pasted
+          ? `${literal}\n${placeholder}`
+          : mixed === true
+            ? 'unknown workflow text\n\nknown human'
+            : 'workflow inspect';
+        const originalHuman = {
+          text: mixed === true ? 'known human' : original,
+        };
+        const expandedOriginal = pasted ? `${literal}\n${body}` : original;
+        const originalModel =
+          mixed === true
+            ? `<system-reminder>managed notice</system-reminder>\n${expandedOriginal}`
+            : expandedOriginal;
+        const edited = currentUnknown
+          ? `${original}\n${currentDraft}\nappend instruction`
+          : editedDraft
+            ? pasted || mixed
+              ? `${original}\nappend instruction`
+              : 'ultracode inspect the edited draft'
+            : original;
+        const editedModel =
+          !editedDraft && !cleared
+            ? originalModel
+            : pasted
+              ? `${expandedOriginal}\nappend instruction`
+              : edited;
+        const pasteExpansions = pasted
+          ? new Map([[placeholder, body]])
+          : undefined;
+        const queue = vi.fn();
+        let onBufferChange: ((text: string) => void) | undefined;
+        let bufferText = '';
+        mockedUseTextBuffer.mockImplementation((options) => {
+          onBufferChange = options.onChange;
+          return {
+            get text() {
+              return bufferText;
+            },
+            setText: vi.fn(),
+          };
+        });
+        mockedUseHistory.mockReturnValue({
+          history: [
+            { id: 1, type: 'user', text: original },
+            { id: 2, type: 'info', text: 'Request cancelled.' },
+          ],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+        installCancelCapture({
+          streamingState: 'responding',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+          popAllMessages: vi.fn().mockReturnValue(
+            source === 'queue'
+              ? {
+                  kind: 'user',
+                  modelText: originalModel,
+                  displayText: original,
+                  submittedPrompt: original,
+                  humanInput: originalHuman,
+                  ...(mixed === true ? { hasUnknownInput: true } : {}),
+                  ...(pasteExpansions ? { pasteExpansions } : {}),
+                  turnKey: 'known-human',
+                }
+              : null,
+          ),
+        });
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await Promise.resolve();
+        if (currentUnknown) {
+          act(() => {
+            capturedUIActions.invalidateSubmittedPromptProvenance();
+            bufferText = currentDraft;
+            onBufferChange?.(currentDraft);
+          });
+        }
+        act(() => {
+          if (source === 'queue') {
+            expect(capturedUIActions.popAllQueuedMessages()).toBe(original);
+          } else {
+            const info = cancelInfoFor(original, 1, original);
+            triggerCancel({
+              ...info,
+              lastTurnUserItem: {
+                ...info.lastTurnUserItem,
+                humanInput: originalHuman,
+                ...(mixed === true ? { hasUnknownInput: true } : {}),
+                modelText: originalModel,
+                ...(pasteExpansions ? { pasteExpansions } : {}),
+              },
+            });
+          }
+        });
+        if (pasteExpansions) {
+          expect(capturedUIState.pendingPastes).toEqual(pasteExpansions);
+        }
+        if (cleared) act(() => onBufferChange?.(''));
+        if (editedDraft || cleared) act(() => onBufferChange?.(edited));
+        act(() => {
+          capturedUIActions.handleFinalSubmit(
+            !editedDraft && pasted ? expandedOriginal : edited,
+            {
+              submittedPrompt: edited,
+              displayText: edited,
+              humanInput: { text: edited },
+              ...(!editedDraft && pasteExpansions ? { pasteExpansions } : {}),
+            },
+          );
+        });
+        // text-buffer reports the submit-time empty buffer after the synchronous callback consumes provenance.
+        act(() => onBufferChange?.(''));
+        expect(queue).toHaveBeenCalledWith(
+          editedModel,
+          false,
+          !editedDraft || cleared ? original : undefined,
+          false,
+          {
+            displayText: edited,
+            humanInput:
+              mixed && !cleared
+                ? editedDraft
+                  ? undefined
+                  : originalHuman
+                : { text: edited },
+            ...(mixed && !editedDraft && !cleared
+              ? { hasUnknownInput: true }
+              : {}),
+            ...(pasteExpansions ? { pasteExpansions } : {}),
+          },
+        );
+        expect(capturedUIState.pendingPastes?.size).toBe(0);
+      },
+    );
 
     it('reuses the cancelled turn provenance on an unchanged resubmit', async () => {
       const modelText =

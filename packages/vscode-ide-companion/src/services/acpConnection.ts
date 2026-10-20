@@ -42,6 +42,7 @@ import { Readable, Writable } from 'node:stream';
 import * as fs from 'node:fs';
 import { AcpFileHandler } from './acpFileHandler.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
+import type { PromptSubmissionOptions } from '../types/connectionTypes.js';
 
 const SHUTDOWN_GRACE_MS = 75_000;
 const SIGTERM_GRACE_MS = 75_000;
@@ -510,7 +511,10 @@ export class AcpConnection {
     return response;
   }
 
-  async sendPrompt(prompt: string | ContentBlock[]): Promise<PromptResponse> {
+  async sendPrompt(
+    prompt: string | ContentBlock[],
+    options?: PromptSubmissionOptions,
+  ): Promise<PromptResponse> {
     const conn = this.ensureConnection();
     const promptSessionId = this.sessionId;
     if (!promptSessionId) {
@@ -523,6 +527,9 @@ export class AcpConnection {
     const response: PromptResponse = await conn.prompt({
       sessionId: promptSessionId,
       prompt: promptBlocks,
+      ...(options?.submittedPrompt !== undefined && {
+        _meta: { 'qwen.submittedPrompt': options.submittedPrompt },
+      }),
     });
     // Only a truly superseded connection (or a prompt rejected/cancelled by
     // the SDK) should error. Switching to another session on the SAME live

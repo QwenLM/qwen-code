@@ -23,6 +23,7 @@ import {
   DaemonSessionClient as SdkDaemonSessionClient,
 } from '@qwen-code/sdk';
 import type { AskUserQuestionRequest } from '../types/acpTypes.js';
+import type { PromptSubmissionOptions } from '../types/connectionTypes.js';
 
 export interface DaemonIdeEvent {
   id?: number;
@@ -47,7 +48,7 @@ export interface DaemonIdeSessionClient {
   readonly lastEventId?: number;
   setLastEventId?(lastEventId: number | undefined): void;
   prompt(
-    req: { prompt: ContentBlock[] },
+    req: { prompt: ContentBlock[]; _meta?: Record<string, unknown> },
     signal?: AbortSignal,
   ): Promise<DaemonIdePromptResult>;
   events(opts?: {
@@ -233,6 +234,7 @@ export class DaemonIdeConnection {
 
   async sendPrompt(
     prompt: string | ContentBlock[],
+    options?: PromptSubmissionOptions,
   ): Promise<DaemonIdePromptResult> {
     const session = this.ensureSession();
     const promptBlocks = normalizePrompt(prompt);
@@ -241,7 +243,12 @@ export class DaemonIdeConnection {
     });
     try {
       const response = await session.prompt(
-        { prompt: promptBlocks },
+        {
+          prompt: promptBlocks,
+          ...(options?.submittedPrompt !== undefined && {
+            _meta: { 'qwen.submittedPrompt': options.submittedPrompt },
+          }),
+        },
         this.eventController?.signal,
       );
       logger.debug('[DaemonIdeConnection] Prompt completed:', {

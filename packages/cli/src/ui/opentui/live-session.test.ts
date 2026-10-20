@@ -1009,6 +1009,29 @@ describe('livePromptEvents', () => {
     expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
   });
 
+  it('forwards a human declaration only on the initial send, independently from submittedPrompt', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'intent-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const humanInput = { text: 'ultracode inspect @notes' };
+    await drain(
+      livePromptEvents(config, 'expanded payload', undefined, { humanInput }),
+    );
+    expect((sendMessageStream.mock.calls[0] as unknown[])[3]).toMatchObject({
+      type: SendMessageType.UserQuery,
+      humanInput,
+    });
+    expect(
+      (sendMessageStream.mock.calls[0] as unknown[])[3],
+    ).not.toHaveProperty('submittedPrompt');
+    expect(
+      (sendMessageStream.mock.calls[1] as unknown[])[3],
+    ).not.toHaveProperty('humanInput');
+  });
+
   it('expands an @-mention where the prompt enters the stream', async () => {
     const sendMessageStream = vi.fn(function* () {});
     const config = createFakeConfig(sendMessageStream);

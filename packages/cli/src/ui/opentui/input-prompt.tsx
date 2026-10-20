@@ -33,6 +33,8 @@
  *    the line, Shift+Enter inserts a newline.
  */
 
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import type { OpenTuiRestoredDraft } from './live-turn.js';
 import {
   useCallback,
   useEffect,
@@ -184,7 +186,16 @@ function promptChrome(approvalMode: ApprovalMode | undefined): {
 }
 
 export interface InputPromptProps {
-  onSubmit: (text: string, imagePaths?: string[]) => void;
+  onSubmit: (
+    text: string,
+    imagePaths?: string[],
+    metadata?: {
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      pasteExpansions?: ReadonlyMap<string, string>;
+      restoredDraft?: OpenTuiRestoredDraft;
+    },
+  ) => void;
   /** Submitted prompts (chronological) feeding history navigation. */
   userMessages: readonly string[];
   config?: Config;
@@ -205,7 +216,10 @@ export interface InputPromptProps {
   /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
   queueLength?: number;
   /** Pops all queued prompts into the composer (returns joined text). */
-  onPopQueue?: () => string | null;
+  onPopQueue?: (
+    pendingPastes?: ReadonlyMap<string, string>,
+    restoreDraft?: (draft: OpenTuiRestoredDraft, release: () => void) => void,
+  ) => string | null;
   /** Recently used slash commands feeding recency-weighted ranking. */
   recentSlashCommands?: ReadonlyMap<string, RecentSlashCommand>;
   /** U-7: finished follow-up suggestion published by the entry layer. */
@@ -324,6 +338,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // History-restored text suppresses re-opening the dropdown, like the
   // original's isHistoryRestoredText.
   const historyRestoredTextRef = useRef<string | null>(null);
+  const unknownHistoryInputRef = useRef(false);
+  const restoredQueueDraftRef = useRef<{
+    draft: OpenTuiRestoredDraft;
+    release: () => void;
+  } | null>(null);
   const dismissedUntilChangeRef = useRef<string | null>(null);
   const commandsRef = useRef<readonly SlashCommand[]>([]);
   // Query-relative replacement range for the current buffer's SLASH target.
@@ -340,6 +359,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // submit (ink pendingPastes).
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const activePlaceholderIdsRef = useRef<Map<number, Set<number>>>(new Map());
+  const pasteSessionId = config?.getSessionId?.();
+  useLayoutEffect(() => {
+    pendingPastesRef.current.clear();
+    activePlaceholderIdsRef.current.clear();
+    restoredQueueDraftRef.current?.release();
+    restoredQueueDraftRef.current = null;
+    return () => {
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
+    };
+  }, [config, pasteSessionId]);
 
   // U-7: follow-up suggestion lifecycle, shared with ink via the
   // renderer-neutral controller hook. Acceptance inserts into the composer
@@ -370,6 +400,26 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     followupState.isVisible || promptSuggestion
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
+
+  const restoreQueuedDraft = useCallback(
+    (draft: OpenTuiRestoredDraft, release: () => void) => {
+      const snapshot = draft.pasteExpansions ?? new Map<string, string>();
+      pendingPastesRef.current = new Map(snapshot);
+      unknownHistoryInputRef.current ||= draft.hasUnknownInput;
+      restoredQueueDraftRef.current = { draft, release };
+      activePlaceholderIdsRef.current.clear();
+      for (const placeholder of snapshot.keys()) {
+        const parsed = parsePastePlaceholder(placeholder);
+        if (!parsed) continue;
+        const ids =
+          activePlaceholderIdsRef.current.get(parsed.charCount) ??
+          new Set<number>();
+        ids.add(parsed.id);
+        activePlaceholderIdsRef.current.set(parsed.charCount, ids);
+      }
+    },
+    [],
+  );
 
   // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
   // over the approval-mode prefix). The label itself lives in the footer, as
@@ -527,6 +577,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   useEffect(() => {
     const el = editorRef.current;
     if (!el || textVersion === 0) return;
+    if (el.plainText.length === 0) {
+      unknownHistoryInputRef.current = false;
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
+      pendingPastesRef.current.clear();
+      activePlaceholderIdsRef.current.clear();
+    }
     // Any real edit that moves away from a restored history entry re-enables
     // completions, mirroring the original's historyRestoredText handling.
     if (
@@ -583,7 +640,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         // pending paste placeholders, collect attachments, then clear
         // everything — an accepted completion must not leave placeholders or
         // chips behind.
-        let finalText = applied.submitNow;
+        const rawText = applied.submitNow;
+        const humanInput = unknownHistoryInputRef.current
+          ? undefined
+          : { text: rawText };
+        const pasteExpansions =
+          pendingPastesRef.current.size > 0
+            ? new Map(pendingPastesRef.current)
+            : undefined;
+        let finalText = rawText;
         if (pendingPastesRef.current.size > 0) {
           finalText = expandPendingPastePlaceholders(
             finalText,
@@ -593,13 +658,21 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           activePlaceholderIdsRef.current.clear();
         }
         const images = attachments.map((a) => a.path);
+        const restoredDraft = restoredQueueDraftRef.current?.draft;
+        restoredQueueDraftRef.current?.release();
+        restoredQueueDraftRef.current = null;
         el.clear();
         setTextVersion((v) => v + 1);
         historyRef.current?.reset();
         historyRestoredTextRef.current = null;
         setRawSuggestions([]);
         setAttachments([]);
-        onSubmit(finalText, images.length > 0 ? images : undefined);
+        onSubmit(finalText, images.length > 0 ? images : undefined, {
+          displayText: rawText,
+          humanInput,
+          ...(pasteExpansions ? { pasteExpansions } : {}),
+          ...(restoredDraft ? { restoredDraft } : {}),
+        });
         // Same dismissal as the real submit path below: a submitOnAccept
         // command that only opens a dialog never flips streaming, so without
         // this the consumed suggestion survives as the ghost placeholder
@@ -845,7 +918,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
 
-      let finalText = decision.text.trim();
+      const rawText = decision.text.trim();
+      const humanInput = unknownHistoryInputRef.current
+        ? undefined
+        : { text: rawText };
+      const pasteExpansions =
+        pendingPastesRef.current.size > 0
+          ? new Map(pendingPastesRef.current)
+          : undefined;
+      let finalText = rawText;
       if (pendingPastesRef.current.size > 0) {
         finalText = expandPendingPastePlaceholders(
           finalText,
@@ -855,6 +936,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         activePlaceholderIdsRef.current.clear();
       }
       const images = attachments.map((a) => a.path);
+      const restoredDraft = restoredQueueDraftRef.current?.draft;
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
       el.clear();
       setTextVersion((v) => v + 1);
       setAttachments([]);
@@ -862,7 +946,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       historyRestoredTextRef.current = null;
       setRawSuggestions([]);
       setLoadingSuggestions(false);
-      onSubmit(finalText, images.length > 0 ? images : undefined);
+      onSubmit(finalText, images.length > 0 ? images : undefined, {
+        displayText: rawText,
+        humanInput,
+        ...(pasteExpansions ? { pasteExpansions } : {}),
+        ...(restoredDraft ? { restoredDraft } : {}),
+      });
       // Ink dismisses on submit so a synchronous command (/clear, /help)
       // can't leave the stale suggestion as the ghost placeholder.
       dismissFollowup();
@@ -966,7 +1055,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // clear (original parity; the streaming branch above already guards
       // the respond-cancel case).
       if (queueLength > 0) {
-        const popped = onPopQueue?.();
+        const popped = onPopQueue?.(
+          pendingPastesRef.current,
+          restoreQueuedDraft,
+        );
         if (popped) {
           const current = el.plainText;
           el.setText(current ? `${popped}\n${current}` : popped);
@@ -1103,7 +1195,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     if (historyNavActive && navigationUp && queueLength > 0) {
       const topCursor = el.logicalCursor;
       if (topCursor.row === 0 && topCursor.col === 0) {
-        const popped = onPopQueue?.();
+        const popped = onPopQueue?.(
+          pendingPastesRef.current,
+          restoreQueuedDraft,
+        );
         if (popped) {
           const current = el.plainText;
           el.setText(current ? `${popped}\n${current}` : popped);
@@ -1133,6 +1228,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
       historyRestoredTextRef.current = decision.text;
+      unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
       el.setCursor(0, 0);
       setTextVersion((v) => v + 1);
@@ -1159,6 +1255,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
       historyRestoredTextRef.current = decision.text;
+      unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
       setTextVersion((v) => v + 1);
       return;
