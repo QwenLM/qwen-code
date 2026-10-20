@@ -23,8 +23,10 @@ import { describe, expect, it } from 'vitest';
 import { parse, stringify } from 'yaml';
 
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
+import { checkReleaseTarballExecBits } from '../check-release-tarball-exec-bits.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
 import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -43,6 +45,36 @@ function readPackageJson() {
 
 function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
+}
+
+/**
+ * Writes a throwaway package shaped like the generated CLI for the
+ * vendored-ripgrep packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
+ * for a `-win32` platform) at the given mode, and the manifest entry that makes
+ * a packer pick the tree up.
+ */
+function writeVendoredRipgrepFixture(directory, platforms) {
+  writeFileSync(
+    path.join(directory, 'package.json'),
+    JSON.stringify({
+      name: 'vendored-ripgrep-fixture',
+      version: '1.0.0',
+      files: ['vendor'],
+    }),
+  );
+  for (const [platform, mode] of Object.entries(platforms)) {
+    const binary = path.join(
+      directory,
+      'vendor',
+      'ripgrep',
+      platform,
+      platform.endsWith('-win32') ? 'rg.exe' : 'rg',
+    );
+    mkdirSync(path.dirname(binary), { recursive: true });
+    writeFileSync(binary, '#!/bin/sh\n');
+    chmodSync(binary, mode);
+  }
+  return directory;
 }
 
 const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
@@ -1779,12 +1811,90 @@ describe('package scripts', () => {
     expect(releaseStepScript).toContain('already published; skipping');
     expect(releaseStepScript).toContain('exit 0');
     expect(releaseStepScript).toContain(
-      'corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"',
+      'npm publish --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
       'corepack pnpm -r publish "${publish_args[@]}"',
     );
   });
+
+  it('publishes the generated CLI with a packer that keeps the ripgrep exec bit', () => {
+    // #12668: pnpm's packer writes 0644 for every entry outside `bin`, so a CLI
+    // published with it ships a vendored ripgrep that nobody can spawn. The
+    // generated CLI is the only package carrying vendored binaries and the only
+    // one `publish_package` is called for, so it alone goes back to npm.
+    expect(releaseStepScript).toContain("publish_package 'dist'");
+    expect(releaseStepScript).not.toContain('corepack pnpm publish');
+    expect(releaseStepScript).toContain(
+      'npm publish --provenance "${publish_args[@]}"',
+    );
+
+    // The gate runs in the arm that produces `dist`, before the publish step
+    // consumes it, so no release can publish a tarball it never checked.
+    const buildPackageArm = releaseStepScript.slice(
+      releaseStepScript.indexOf('build-package)'),
+      releaseStepScript.indexOf('build-archives)'),
+    );
+    expect(buildPackageArm).toContain(
+      'node scripts/check-release-tarball-exec-bits.mjs dist',
+    );
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'npm pack keeps the exec bit on every vendored ripgrep in the CLI tarball',
+    () => {
+      // The archive is where the bit is lost (#12668), so assert on its
+      // recorded modes rather than on the staged tree. A `-win32` directory
+      // ships a 0644 `rg.exe` by design and the gate excludes it structurally.
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-exec-bit-'));
+      try {
+        writeVendoredRipgrepFixture(fixture, {
+          'x64-linux': 0o755,
+          'arm64-darwin': 0o755,
+          'x64-win32': 0o644,
+        });
+        const { entries } = checkReleaseTarballExecBits(fixture);
+        expect(entries.map(([name]) => name)).toEqual([
+          'package/vendor/ripgrep/arm64-darwin/rg',
+          'package/vendor/ripgrep/x64-linux/rg',
+        ]);
+        for (const [name, mode] of entries) {
+          expect(mode & 0o111, name).toBe(0o111);
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'release tarball gate rejects a vendored ripgrep without an exec bit',
+    () => {
+      const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-gate-'));
+      try {
+        writeVendoredRipgrepFixture(fixture, { 'x64-linux': 0o644 });
+        expect(() => checkReleaseTarballExecBits(fixture)).toThrow(
+          /package\/vendor\/ripgrep\/x64-linux\/rg: 0644 lacks an exec bit/,
+        );
+
+        // A package whose vendor/ripgrep holds no unix platform must not pass
+        // vacuously: the gate refuses before it ever packs.
+        const empty = mkdtempSync(path.join(tmpdir(), 'cli-rg-none-'));
+        try {
+          mkdirSync(path.join(empty, 'vendor', 'ripgrep'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(empty)).toThrow(
+            /no unix vendored ripgrep under/,
+          );
+        } finally {
+          rmSync(empty, { force: true, recursive: true });
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true });
+      }
+    },
+  );
 
   it('meets npm trusted publishing requirements', () => {
     for (const [workflowPath, jobName, publishStepName] of [
