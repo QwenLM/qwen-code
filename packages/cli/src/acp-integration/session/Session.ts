@@ -10,6 +10,8 @@ import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/ag
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import { getTurnToolCallCapHalt } from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
+import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -39,6 +41,7 @@ import {
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
+  type LoopStopDetail,
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
   type ToolResult,
@@ -198,7 +201,6 @@ import {
   GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   logRepeatedToolFailureGuard,
   LoopDetectedEvent,
@@ -859,6 +861,8 @@ export type DaemonToolLoopState = {
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
   loopType?: LoopType;
+  /** Reason and tool-call numbers of the stop, for shared loop types. */
+  loopDetail?: LoopStopDetail;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
   explorationBudget?: ToolExplorationBudget;
@@ -1030,17 +1034,19 @@ function recordDaemonLoopDetected(
   loopType: LoopType,
   message: string,
   loopState: DaemonToolLoopState,
-  options: { recordToQwenLogger?: boolean } = {},
+  options: { recordToQwenLogger?: boolean; loopDetail?: LoopStopDetail } = {},
 ): true {
   if (!loopState.loopDetected) {
+    const { loopDetail, ...logOptions } = options;
     loopState.loopDetected = true;
     loopState.loopType = loopType;
+    loopState.loopDetail = loopDetail;
     debugLogger.warn(message);
     try {
       logLoopDetected(
         config,
-        new LoopDetectedEvent(loopType, promptId),
-        options,
+        new LoopDetectedEvent(loopType, promptId, loopDetail),
+        logOptions,
       );
     } catch (error) {
       debugLogger.debug(
@@ -1069,10 +1075,18 @@ function managedOutcomeUnknownError(error: Error): RequestError {
 function createLoopDetectedTurnError(
   loopState: DaemonToolLoopState,
 ): RequestError {
+  const detail = loopState.loopDetail;
   return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
     code: 'LOOP_DETECTED',
     errorKind: 'loop_detected',
     ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+    ...(detail?.loopReason ? { loopReason: detail.loopReason } : {}),
+    ...(detail?.toolCallCount !== undefined
+      ? { toolCallCount: detail.toolCallCount }
+      : {}),
+    ...(detail?.toolCallLimit !== undefined
+      ? { toolCallLimit: detail.toolCallLimit }
+      : {}),
   });
 }
 
@@ -1113,7 +1127,7 @@ function recordDaemonToolCalls(
     }
   }
   // Same per-turn cap semantics as the core LoopDetectionService — the
-  // shouldHaltOnTurnToolCallCap predicate is shared with core's
+  // getTurnToolCallCapHalt classifier is shared with core's
   // checkTurnToolCallCap so the two runtimes cannot drift (an explicit
   // model.maxToolCallsPerTurn is a hard cap; the default is adaptive —
   // past the soft cap a productive turn continues until the
@@ -1128,20 +1142,26 @@ function recordDaemonToolCalls(
   // daemon stream loops discard the failed attempt's accumulated calls
   // (functionCalls.length = 0) before re-streaming, so a failed attempt's
   // calls never reach this function to be double-counted.
-  if (
-    shouldHaltOnTurnToolCallCap(
-      loopState.totalToolCalls,
-      loopState.maxToolCallKeyRepeat,
-      config.getMaxToolCallsPerTurn(),
-      config.isMaxToolCallsPerTurnExplicit(),
-    )
-  ) {
+  const capHalt = getTurnToolCallCapHalt(
+    loopState.totalToolCalls,
+    loopState.maxToolCallKeyRepeat,
+    config.getMaxToolCallsPerTurn(),
+    config.isMaxToolCallsPerTurnExplicit(),
+  );
+  if (capHalt) {
     return recordDaemonLoopDetected(
       config,
       promptId,
       LoopType.TURN_TOOL_CALL_CAP,
       `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
       loopState,
+      {
+        loopDetail: {
+          loopReason: capHalt.reason,
+          toolCallCount: loopState.totalToolCalls,
+          toolCallLimit: capHalt.limit,
+        },
+      },
     );
   }
   // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
@@ -1165,6 +1185,7 @@ function recordDaemonToolCalls(
       LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
+      { loopDetail: { loopReason: LoopReason.REPEATED_CALL } },
     );
   }
   // Deliberately after both halt checks: a halted batch is skipped whole and
@@ -13845,6 +13866,7 @@ export class Session implements SessionContext {
           LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
           message,
           toolLoopState,
+          { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
         );
       } else {
         debugLogger.warn(message);

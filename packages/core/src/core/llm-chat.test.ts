@@ -4013,6 +4013,46 @@ describe('LlmChat', async () => {
       expect(hasChunkText(events, 'answer after compact')).toBe(true);
     });
 
+    it('re-issues the durability snapshot after reactive compaction', async () => {
+      const compressedHistory = [
+        userText('summary'),
+        modelText('ack'),
+        userText('latest'),
+      ];
+      // The fixture appends the answer to the same array, so freeze what the
+      // retry must have captured before the send runs.
+      const expectedContents = structuredClone(compressedHistory);
+      reactiveCompaction(135_000, compressedHistory);
+      mockRequests(
+        new Error(
+          "This model's maximum context length is 128000 tokens. However, your messages resulted in 135000 tokens.",
+        ),
+        textStream('answer after compact'),
+      );
+      const snapshots: Content[][] = [];
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-recompress-resnapshot',
+        undefined,
+        {
+          onPreparedRequest: async (prepared) => {
+            snapshots.push(prepared.request.contents);
+          },
+        },
+      );
+      await drain(stream);
+
+      // One capture per attempt. The retry must capture the compacted history:
+      // its snapshot is what recovery re-sends, so replaying the captured
+      // pre-compaction contents would durably persist the oversized request
+      // that the provider just rejected.
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[1]).not.toEqual(snapshots[0]);
+      expect(snapshots[1]).toEqual(expectedContents);
+    });
+
     /** Reactive overflow without an actual count: the baseline is a `~` projection. */
     async function expectProjectedBaseline(
       message: string,
