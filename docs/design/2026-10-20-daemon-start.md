@@ -31,9 +31,16 @@ start command removes the parent's session and worker bindings before spawn:
 `QWEN_CODE_SESSION_ID`, `QWEN_CODE_PROMPT_ID`, `QWEN_CODE_PROJECT_DIR`,
 `QWEN_CODE_SERVE`, `QWEN_CODE_AGENT_ID`, `QWEN_DAEMON_TOKEN`,
 `QWEN_CODE_MESSAGING_TOKEN`, `QWEN_CODE_MESSAGING_SOCKET`,
-`QWEN_CODE_CLI`, `QWEN_CODE_NO_RELAUNCH`, and the `QWEN_CODE_PRIVATE_*`
-capability/guard/provenance keys. The operator's model and auth environment is
-kept.
+`QWEN_CODE_CLI`, `QWEN_CODE_NO_RELAUNCH`, and every key starting with
+`QWEN_CODE_PRIVATE_` (including the Conversations runtime and guard-provider
+markers). Relative `QWEN_RUNTIME_DIR` and `QWEN_HOME` values are resolved
+against the launching directory before spawn, so the parent polls the same
+discovery namespace the child writes. The operator's model and auth
+environment is kept.
+
+The command canonicalizes workspaces with the same function `serve` uses, so a
+symlink alias and its target are treated as one workspace for the
+duplicate-start check and in the child's arguments.
 
 A supplied token is passed through `QWEN_SERVER_TOKEN`, never as a child
 argument. `--token` is visible in the launching shell's process list, so the
@@ -43,9 +50,10 @@ command warns and recommends the environment variable.
 
 Startup stdout and stderr go to a `0600` file in the runtime daemon directory.
 The file is removed after a successful start; on failure it is kept and its
-tail is printed. A non-loopback bind requires `QWEN_SERVER_TOKEN`: the command
-refuses to let the child generate an ephemeral token that would otherwise be
-written to the startup log.
+tail is printed. Startup logs older than 24 hours are swept on the next start.
+A non-loopback bind requires `QWEN_SERVER_TOKEN`: the command refuses to let
+the child generate an ephemeral token that would otherwise be written to the
+startup log.
 
 ## Failure handling
 
@@ -54,7 +62,8 @@ written to the startup log.
 - A missing workspace, missing `--require-auth` token, or missing
   non-loopback token fails before spawning.
 - If the child exits or does not publish a record within 30 seconds, the
-  command exits non-zero and prints the startup log path and tail.
+  command exits non-zero, says the detached child may still start, points at
+  `qwen daemon status`, and prints the startup log path and tail.
 
 ## Non-goals
 
@@ -64,9 +73,10 @@ written to the startup log.
 
 ## Validation
 
-- 18 daemon command tests cover argument construction, summary formatting,
-  environment isolation, record selection, and the existing status/log/stop
-  behavior.
+- The daemon command suite covers argument construction, summary formatting,
+  environment isolation (including the private-key prefix and relative runtime
+  paths), workspace canonicalization, startup-log sweeping, record selection,
+  and the existing status/log/stop behavior.
 - Full workspace typecheck and ESLint pass.
 - Local E2E: `daemon start --port 0 --no-web --json` published a record,
   `daemon status --json` reported it running, `daemon stop --port <port>`

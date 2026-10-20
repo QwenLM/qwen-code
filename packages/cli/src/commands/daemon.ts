@@ -352,26 +352,79 @@ const START_ENV_DROP = [
   'QWEN_DAEMON_TOKEN',
   'QWEN_CODE_MESSAGING_TOKEN',
   'QWEN_CODE_MESSAGING_SOCKET',
-  'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
-  'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD',
-  'QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE',
 ] as const;
+
+const START_LOG_MAX_AGE_MS = 24 * 60 * 60_000;
 
 /**
  * The child is a new daemon, not a worker of the session that launched it.
- * Drop the parent's session/worker bindings so it derives its own workspace
- * and sessions, while keeping the operator's model/auth environment.
+ * Drop the parent's session/worker bindings and every private marker, then
+ * pin relative runtime directories to the launching directory so the parent
+ * and child keep using the same discovery/config namespace after the child
+ * changes its cwd to the workspace. The operator's model/auth environment is
+ * kept.
  */
 export function buildDaemonStartEnv(
   env: NodeJS.ProcessEnv,
   token: string | undefined,
+  cwd: string = process.cwd(),
 ): NodeJS.ProcessEnv {
   const child = { ...env };
   for (const key of START_ENV_DROP) {
     delete child[key];
   }
+  for (const key of Object.keys(child)) {
+    if (key.startsWith('QWEN_CODE_PRIVATE_')) {
+      delete child[key];
+    }
+  }
+  for (const key of ['QWEN_RUNTIME_DIR', 'QWEN_HOME'] as const) {
+    const value = child[key];
+    if (
+      !value ||
+      value === '~' ||
+      value.startsWith('~/') ||
+      value.startsWith('~\\') ||
+      path.isAbsolute(value)
+    ) {
+      continue;
+    }
+    child[key] = path.resolve(cwd, value);
+  }
   if (token) child['QWEN_SERVER_TOKEN'] = token;
   return child;
+}
+
+/**
+ * Remove startup logs left by failed starts after a retention window.
+ */
+export function sweepStaleStartLogs(dir: string, now = Date.now()): void {
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith('start-') || !name.endsWith('.log')) continue;
+      const file = path.join(dir, name);
+      try {
+        if (now - fs.statSync(file).mtimeMs > START_LOG_MAX_AGE_MS) {
+          fs.rmSync(file, { force: true });
+        }
+      } catch {
+        // Best-effort sweep.
+      }
+    }
+  } catch {
+    // The discovery directory may not exist yet.
+  }
+}
+
+export async function canonicalizeStartWorkspaces(
+  rawWorkspaces: readonly string[],
+): Promise<string[]> {
+  const { validateAndCanonicalizeWorkspaceInput } = await import(
+    '../serve/run-qwen-serve.js'
+  );
+  return rawWorkspaces.map((workspace) =>
+    validateAndCanonicalizeWorkspaceInput(path.resolve(workspace)),
+  );
 }
 
 async function printStartLogTail(file: string): Promise<void> {
@@ -396,31 +449,20 @@ async function handleStart(argv: StartArgs): Promise<void> {
     return;
   }
 
-  const workspaces = (
-    Array.isArray(argv.workspace)
-      ? argv.workspace
-      : argv.workspace
-        ? [argv.workspace]
-        : [process.cwd()]
-  ).map((workspace) => path.resolve(workspace));
-  for (const workspace of workspaces) {
-    try {
-      if (!fs.statSync(workspace).isDirectory()) {
-        writeStderrLine(
-          `qwen daemon: workspace is not a directory: ${workspace}`,
-        );
-        process.exitCode = 1;
-        return;
-      }
-    } catch (error) {
-      writeStderrLine(
-        `qwen daemon: workspace is unavailable: ${workspace}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      process.exitCode = 1;
-      return;
-    }
+  const rawWorkspaces = Array.isArray(argv.workspace)
+    ? argv.workspace
+    : argv.workspace
+      ? [argv.workspace]
+      : [process.cwd()];
+  let workspaces: string[];
+  try {
+    workspaces = await canonicalizeStartWorkspaces(rawWorkspaces);
+  } catch (error) {
+    writeStderrLine(
+      `qwen daemon: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exitCode = 1;
+    return;
   }
 
   const hostname = argv.hostname;
@@ -468,6 +510,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
 
   const logDir = resolveDaemonDiscoveryDir();
   fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
+  sweepStaleStartLogs(logDir);
   const startLog = path.join(logDir, `start-${process.pid}-${Date.now()}.log`);
   const logFd = fs.openSync(startLog, 'a', 0o600);
   const { command, args } = buildDaemonStartArgs({
@@ -512,6 +555,8 @@ async function handleStart(argv: StartArgs): Promise<void> {
     spawnError = error;
   });
 
+  // The record pid is the spawned child: serve blocks in blockForever() after
+  // its listener is ready, so the CLI relaunch path cannot replace it.
   const deadline = Date.now() + START_TIMEOUT_MS;
   let record: DaemonDiscoveryRecord | undefined;
   while (Date.now() < deadline) {
@@ -548,7 +593,9 @@ async function handleStart(argv: StartArgs): Promise<void> {
   }
 
   writeStderrLine(
-    `qwen daemon: daemon pid ${child.pid} did not publish a discovery record within ${START_TIMEOUT_MS / 1000}s.`,
+    `qwen daemon: daemon pid ${child.pid} did not publish a discovery record within ${
+      START_TIMEOUT_MS / 1000
+    }s. The detached child may still start; run \`qwen daemon status\` to check.`,
   );
   if (spawnError) {
     writeStderrLine(`qwen daemon: spawn failed: ${spawnError.message}`);

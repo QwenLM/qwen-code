@@ -29,6 +29,7 @@ vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
 import {
   buildDaemonStartArgs,
   buildDaemonStartEnv,
+  canonicalizeStartWorkspaces,
   daemonCommand,
   formatDaemonAge,
   formatDaemonStartSummary,
@@ -38,6 +39,7 @@ import {
   processStartMatchesRecord,
   processStartTime,
   selectDaemonEntries,
+  sweepStaleStartLogs,
   tailLines,
   terminateTree,
 } from './daemon.js';
@@ -157,6 +159,69 @@ describe('qwen daemon command', () => {
     expect(env['QWEN_CODE_SERVE']).toBeUndefined();
     expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
+  });
+
+  it('pins relative runtime directories to the launching directory', () => {
+    const cwd = path.join(os.tmpdir(), 'qwen-start-launch');
+    const env = buildDaemonStartEnv(
+      { QWEN_RUNTIME_DIR: 'runtime', QWEN_HOME: 'home' },
+      undefined,
+      cwd,
+    );
+    expect(env['QWEN_RUNTIME_DIR']).toBe(path.resolve(cwd, 'runtime'));
+    expect(env['QWEN_HOME']).toBe(path.resolve(cwd, 'home'));
+  });
+
+  it('drops every private marker by prefix', () => {
+    const env = buildDaemonStartEnv(
+      {
+        QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+        QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER: '1',
+        QWEN_CODE_PRIVATE_ACP_CAPABILITY: '1',
+      },
+      undefined,
+    );
+    expect(env['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME']).toBeUndefined();
+    expect(
+      env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER'],
+    ).toBeUndefined();
+    expect(env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'canonicalizes a symlinked workspace',
+    async () => {
+      const root = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-start-workspace-'),
+      );
+      const real = path.join(root, 'real');
+      const alias = path.join(root, 'alias');
+      await fsp.mkdir(real);
+      await fsp.symlink(real, alias);
+      try {
+        const [canonical] = await canonicalizeStartWorkspaces([alias]);
+        expect(canonical).toBe(await fsp.realpath(real));
+      } finally {
+        await fsp.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('sweeps stale start logs', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-start-logs-'));
+    const oldFile = path.join(dir, 'start-old.log');
+    const newFile = path.join(dir, 'start-new.log');
+    await fsp.writeFile(oldFile, 'old');
+    await fsp.writeFile(newFile, 'new');
+    const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    await fsp.utimes(oldFile, old, old);
+    try {
+      sweepStaleStartLogs(dir);
+      await expect(fsp.stat(oldFile)).rejects.toThrow();
+      await expect(fsp.stat(newFile)).resolves.toBeDefined();
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('selects exactly one daemon only when the choice is unambiguous', () => {
