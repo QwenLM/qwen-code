@@ -646,6 +646,14 @@ export async function verifyRecoverySession(
     const outcome = object(json(await read(outcomeRef)));
     const envelope = parseToolResultEnvelope(outcome['envelope']);
     const manifestRef = envelope.capture?.manifest ?? null;
+    const lostCancellation =
+      outcome['version'] === 1 &&
+      outcome['decision'] === 'blocked' &&
+      envelope.executionStatus === 'cancelled' &&
+      envelope.capture?.captureStatus === 'unavailable' &&
+      envelope.capture.captureReason === 'producer_lost' &&
+      envelope.capture.deliveryStatus === 'pending' &&
+      manifestRef === null;
     requireValue(
       event.payload['historyRevision'] === event.sequence &&
         isDeepStrictEqual(event.payload['resultRef'], manifestRef) &&
@@ -658,7 +666,8 @@ export async function verifyRecoverySession(
           (outcome['decision'] === 'committed' &&
             envelope.capture?.captureStatus === 'complete') ||
           (outcome['decision'] === 'blocked' &&
-            envelope.capture?.captureStatus === 'detached')),
+            envelope.capture?.captureStatus === 'detached') ||
+          lostCancellation),
       'unsettled or conflicting Shell receipt',
     );
     if (outcome['version'] === 1) {
@@ -669,7 +678,8 @@ export async function verifyRecoverySession(
           identity['executionCallId'] === event.payload['executionCallId'],
         'local Shell identity conflicts',
       );
-      if (envelope.executionStatus === 'not_started') return;
+      if (envelope.executionStatus === 'not_started' || lostCancellation)
+        return;
       requireValue(manifestRef, 'local Shell receipt has no capture');
       const parsed = await manifest(manifestRef);
       requireValue(
@@ -1044,7 +1054,7 @@ export async function verifyRecoverySession(
       await enqueueRefs(state, io);
     } else if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
       for (const nested of hostedRecoveryReferences(
-        parseHostedRecoveryResource(bytes, key ?? undefined),
+        parseHostedRecoveryResource(bytes, key ?? undefined, ref.kind),
       ))
         await io.enqueue(nested);
     } else if (ref.kind === 'managed-agent-instructions') {

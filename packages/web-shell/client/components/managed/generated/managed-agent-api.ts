@@ -508,7 +508,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the next-Turn policy of an idle built-in Workspace Session. Requires its recorded owner and current OPERATOR access. Changes are revision-checked and actor/session-scoped idempotent. */
+        /** @description Change the next-user-Turn policy of an idle eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -559,7 +559,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. recovery_blocked is terminal and preserves the original physical owner; querying never unlocks it or starts a Runtime worker. */
+        /** @description Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. A registration refused before it reserved its directory fails. One that may have reached its node is recovery_blocked and keeps the directory reserved while Java reads the node again, never registering anything: the registration's marker completes it, and a root without the marker, or holding another directory, fails it and releases the directory. Querying never unlocks it or starts a Runtime worker. */
         post: operations["webShellGetWorkspaceOperation"];
         delete?: never;
         options?: never;
@@ -601,15 +601,149 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-mcp/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read the selected Session's sanitized, committed MCP catalog. Requires a trusted actor and Workspace read access. Discovery states describe the published snapshot, not live Runtime health. Does not configure servers, discover capabilities or execute tools, resources or prompts. */
+        post: operations["queryWebShellSessionMcp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-skills/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read only names and descriptions from the Session's pinned static Skill catalog. Requires a trusted actor and Workspace read access. Never resolves the latest AgentDefinition or discovers host Skills. */
+        post: operations["queryWebShellSessionSkills"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/files/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read-only Workspace file query
+         * @description Browse directories or search file names within the persisted Workspace working directory. Requires a trusted actor with current OPERATOR or OWNER access to an ACTIVE Workspace, the deployment Workspace-files opt-in, and verified LOCAL or SSH_LOCAL storage. Authorization and binding are rechecked after I/O. Paths are relative to the working directory; host paths and Runtime credentials are never returned. Unsupported storage never falls back to the local daemon, and no Session, worker or model request is created.
+         */
+        post: operations["webShellWorkspaceFilesQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/files/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read-only Workspace file read
+         * @description Read one selection-time snapshot of a nonempty, NUL-free UTF-8 file, at most 24 KiB, using the scope revision returned by query. Requires a trusted actor with current OPERATOR or OWNER access to an ACTIVE Workspace, the deployment Workspace-files opt-in, and verified LOCAL or SSH_LOCAL storage. Authorization and binding are rechecked after I/O. Paths are relative to the working directory; host paths and Runtime credentials are never returned. Unsupported storage never falls back to the local daemon, and no Session, worker or model request is created.
+         */
+        post: operations["webShellWorkspaceFilesRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/tool-details/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["getWebShellToolDetails"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        InputBlock: {
-            /** @enum {string} */
-            type: "input_text";
-            text: string;
+        PublicMcpCatalog: {
+            /** @constant */
+            object: "agent.mcp_catalog";
+            /** Format: uuid */
+            session_id: string;
+            servers: components["schemas"]["PublicMcpServerCatalog"][];
         };
+        PublicMcpServerCatalog: {
+            server_id: string;
+            server_revision: number;
+            /** @description The pinned catalog revision; null while no catalog has been published. */
+            catalog_revision: number | null;
+            tools: components["schemas"]["PublicMcpTool"][];
+            resources: components["schemas"]["PublicMcpResource"][];
+            prompts: components["schemas"]["PublicMcpPrompt"][];
+            discovery: components["schemas"]["PublicMcpDiscovery"];
+        };
+        PublicMcpTool: {
+            name: string;
+            description?: string;
+            input_schema: {
+                [key: string]: unknown;
+            };
+        };
+        PublicMcpResource: {
+            name: string;
+            uri: string;
+            description?: string;
+            mime_type?: string;
+        };
+        PublicMcpPrompt: {
+            name: string;
+            description?: string;
+            arguments?: components["schemas"]["PublicMcpPromptArgument"][];
+        };
+        PublicMcpPromptArgument: {
+            name: string;
+            description?: string;
+            required?: boolean;
+        };
+        PublicMcpDiscovery: {
+            /** @enum {string} */
+            tools: "complete" | "partial" | "failed" | "stale";
+            /** @enum {string} */
+            resources: "complete" | "partial" | "failed" | "stale";
+            /** @enum {string} */
+            prompts: "complete" | "partial" | "failed" | "stale";
+        };
+        InputBlock: components["schemas"]["InputTextBlock"] | components["schemas"]["InputFileBlock"] | components["schemas"]["InputImageBlock"];
         PublicArtifact: {
             /** @constant */
             object: "agent.artifact";
@@ -665,15 +799,17 @@ export interface components {
             environmentId?: string | null;
             /** @description The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title. */
             title?: string | null;
-            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
+            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             workspace?: components["schemas"]["WebShellWorkspaceSelection"];
             /**
-             * @description Optional policy for Workspace-bound creation only. Omission preserves the existing default and idempotency digest. Explicit selection is validated against the resolved Agent and tool profile and frozen in the Session; Shell refuses yolo and definitions retain their compiled policy.
+             * @description Optional initial execution policy for Workspace creation, validated against the resolved Agent and profile. Omission preserves its default and idempotency digest. Independent of planMode.
              * @enum {string}
              */
             approvalMode?: "default" | "auto-edit" | "yolo";
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -681,9 +817,15 @@ export interface components {
             idempotencyKey: string;
             /** Format: uuid */
             sessionId: string;
-            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
+            /** @description Text has a 4,000,000-character aggregate budget and per-block 1,000,000-character cap, counted in code points. Hosted also enforces its 64 KiB durable-record limit for text-only inputs and a 32 MiB prepared-snapshot ceiling. A complete canonical input containing file/image attachments must fit within 8 MiB and requires input-attachments/1. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
+            /**
+             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
+             * @default harness_confirmed
+             * @enum {string}
+             */
+            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         WebShellCancelRequest: {
             /** @description Trace correlation only. */
@@ -692,18 +834,29 @@ export interface components {
             /** Format: uuid */
             sessionId: string;
             turnId: string;
+            /**
+             * @description D7-3. java_durable asks for the java_durable admission view: the 202 then names the command's operation (operationId, admissionStage, deliveryState), so a lost response resolves through that operation. Only a deployment whose Sessions advertise durableOperations admits it; elsewhere it answers 400 unsupported_feature before anything is read or written. Absent or harness_confirmed keeps today's response. harness_confirmed is the pinned reference design's qwen_confirmed. The request digest leaves this field out, so a retry under the same idempotencyKey replays the same command in either view.
+             * @default harness_confirmed
+             * @enum {string}
+             */
+            admissionProfile?: "harness_confirmed" | "java_durable";
         };
         /** @description Arbitrary caller metadata, as a JSON object (or null). Accepted and ignored in Phase 1: nothing from it is persisted. On WebShellCreateRequest the Session title travels in that request's own `title` field; WebShellSubmitRequest has no title surface. Any keys are valid. */
         WebShellMetadata: {
             [key: string]: unknown;
         } | null;
-        /** @description With durable_operations enabled, all three target fields are returned. accepted means Java durable delivery responsibility, not model execution. Missing fields retain the deployed legacy response semantics. */
+        /** @description accepted means Java durable delivery responsibility, not model execution. The three operation fields come together, and only on a Turn input or cancel admission that asked for admissionProfile java_durable on a deployment advertising durableOperations (D7-3): operationId names the command's original submit_input or cancel operation, readable through the operation query, and admissionStage and deliveryState are that operation's latest durable values. A fresh input reads java_durable and pending; a cancel of a Turn that already ended reads its settled values. A retry under the same key answers the same operation with replayed true. Missing fields keep the legacy harness_confirmed response semantics, also for Session creation and for a replayed command recorded before v1.58. */
         WebShellAdmission: {
             /** Format: uuid */
             sessionId: string;
             turnId?: string | null;
             status: string;
             replayed: boolean;
+            operationId?: string;
+            /** @enum {string} */
+            admissionStage?: "java_durable" | "harness_confirmed";
+            /** @enum {string} */
+            deliveryState?: "pending" | "leased" | "confirmed" | "blocked";
         };
         WebShellTurn: {
             turnId: string;
@@ -748,6 +901,10 @@ export interface components {
              * @enum {string}
              */
             initialApprovalMode?: "default" | "auto-edit" | "yolo";
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
+            /** @description Optional deployment capability; missing means false. */
+            planModeSupported?: boolean;
         };
         WebShellSessionCapabilities: {
             /**
@@ -755,6 +912,11 @@ export interface components {
              * @default false
              */
             cwdChange?: boolean;
+            /**
+             * @description D7-3. Present only on a deployment that enables the java_durable admission profile, where it is true while the Session is readable: a Turn input or cancel may then ask for admissionProfile java_durable. Omitted elsewhere, where asking for it answers 400 unsupported_feature.
+             * @default false
+             */
+            durableOperations?: boolean;
             /** @default false */
             actions: boolean;
             /**
@@ -788,8 +950,10 @@ export interface components {
             foregroundShell?: boolean;
             /** @description The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply. */
             modelChange?: boolean;
-            /** @description The caller owns this built-in Workspace Session with OPERATOR access and the Harness supports approval-selection/1. Idle-state admission is checked separately. Missing means false. */
+            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
             approvalModeChange?: boolean;
+            /** @description Optional deployment capability; missing means false. */
+            inputAttachments?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -1000,7 +1164,7 @@ export interface components {
             allowText: boolean;
             options: components["schemas"]["WebShellActionOption"][];
         };
-        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input completion means a Harness admitted its Turn, not that the Turn completed. Cancel completion means its Turn reached cancelled; a cancel fails with turn_already_settled when its Turn ended otherwise. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance. A completed task cancel carries admission stage harness_confirmed and delivery state confirmed with the authority's receipt; failed and recovery_blocked carry java_durable and blocked, so they are never delivered again without reconciliation. */
+        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input completion means a Harness admitted its Turn, not that the Turn completed; an input whose Turn failed after a submission no Harness answered is recovery_blocked until the Session journal proves whether a Harness admitted it. For submit_input and task cancel, recovery_blocked means acceptance is unknown: the operation is never delivered again and settles only from its own durable evidence. For close and delete it is a published wait that delivery re-drives. Cancel completion means its Turn reached cancelled; a cancel fails with turn_already_settled when its Turn ended otherwise, except one that already existed when its Turn failed with managed_runtime_recovery_blocked after a Harness admitted it or a submission was attempted, which parks recovery_blocked with cancel_unconfirmed. A cancel submitted after the Turn ended still fails turn_already_settled. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance. A completed task cancel carries admission stage harness_confirmed and delivery state confirmed with the authority's receipt; failed and recovery_blocked carry java_durable and blocked, so they are never delivered again without reconciliation. A cancel parked as recovery_blocked/cancel_unconfirmed by unobserved-Turn recovery reconciles only from the original prompt's retained durable terminal event: cancelled completes it, completed or error fails it with turn_already_settled, and missing or unreadable evidence stays parked. A recorded stop request alone does not prove cancellation completed. */
         WebShellCommandOperation: {
             operationId: string;
             /** Format: uuid */
@@ -1017,7 +1181,7 @@ export interface components {
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
             actionResolution?: components["schemas"]["WebShellActionResolution"];
-            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. A lifecycle operation that exhausted its retry budget fails with the settle's failure: session_lifecycle_delivery_failed, managed_capability_mismatch or hosted_harness_protocol_error when the Hosted Harness refused to negotiate, a workspace close or lifecycle refusal (a workspace_close_* or workspace_lifecycle_* code, or runtime_admission_closed; a Runtime Broker runtime_broker_recovery_blocked refusal is reported as workspace_close_identity_unverified), or another Runtime Broker refusal code; one whose settle reached the Harness but stayed unsettled past the larger settled budget fails with session_close_completion_unsettled. A lifecycle recovery_blocked operation reports the refusal it waits on, original resource identity or unsettled execution for a Workspace close, session_close_writer_live while a Harness holds the journal writer or while that check itself fails, or hosted_harness_generation_mismatch while this replica's view of the Harness boot is stale; the Session remains closing. A submit_input failure carries its Turn's error code; a cancel fails with turn_already_settled when its Turn completed or failed without being cancelled. */
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. A lifecycle operation that exhausted its retry budget fails with the settle's failure: session_lifecycle_delivery_failed, managed_capability_mismatch or hosted_harness_protocol_error when the Hosted Harness refused to negotiate, a workspace close or lifecycle refusal (a workspace_close_* or workspace_lifecycle_* code, or runtime_admission_closed; a Runtime Broker runtime_broker_recovery_blocked refusal is reported as workspace_close_identity_unverified), or another Runtime Broker refusal code; one whose settle reached the Harness but stayed unsettled past the larger settled budget fails with session_close_completion_unsettled. A lifecycle recovery_blocked operation reports the refusal it waits on, original resource identity or unsettled execution for a Workspace close, session_close_writer_live while a Harness holds the journal writer or while that check itself fails, or hosted_harness_generation_mismatch while this replica's view of the Harness boot is stale, or hosted_lifecycle_recovery_required while the daemon settles a previous prompt, or hosted_turn_active while a turn, MCP call or hook is still draining; the Session remains closing. A submit_input failure carries its Turn's error code, and a recovery_blocked submit_input reports submit_input_unconfirmed; a cancel fails with turn_already_settled when its Turn completed or failed without being cancelled, except one that already existed when its Turn failed with managed_runtime_recovery_blocked after a Harness admitted it or a submission was attempted: it parks recovery_blocked with cancel_unconfirmed. A cancel submitted after the Turn ended still fails turn_already_settled. A cancel parked as recovery_blocked/cancel_unconfirmed by unobserved-Turn recovery reconciles only from the original prompt's retained durable terminal event: cancelled completes it, completed or error fails it with turn_already_settled, and missing or unreadable evidence stays parked. A recorded stop request alone does not prove cancellation completed. */
             failureCode?: string;
             replayed: boolean;
         } & (unknown & unknown & unknown & unknown & unknown);
@@ -1144,7 +1308,7 @@ export interface components {
          */
         TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
         /**
-         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent, 1.46 for workflow and 1.54 for background_shell and monitor, tasks of those kinds in pending, running, waiting or degraded, and since 1.57 for channel_delivery, a delivery still pending because no adapter has claimed it, each in an active Session); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent, 1.46 for workflow and 1.54 for background_shell and monitor, tasks of those kinds in pending, running, waiting or degraded, and since 1.57 for channel_delivery, a delivery still pending because no adapter has claimed it, each in an active Session, and since 1.65 for automation_run in pending, running, waiting or degraded in an active Session; only that occurrence is cancelled and its schedule is preserved); whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
          * @enum {string}
          */
         TaskActionCapability: "cancel" | "send_input" | "read_output";
@@ -1314,7 +1478,7 @@ export interface components {
         };
         /** @description Optional preview for requested native read_file, write_file, edit or run_shell_command approvals. Missing or invalid input, and internal MCP inputs, omit the preview. No general secret redaction is performed; visibility follows Session read permissions. Deploy the version 2 Java reader before a Harness producer starts writing version 2 options. */
         WebShellActionInputPreview: {
-            /** @description Exact prefix of the stored payloadJson ({toolName,input}), at most 8192 UTF-8 bytes ending at a complete code point. Truncated text may not be valid JSON. */
+            /** @description Exact UTF-8 prefix of payloadJson ({toolName,input}). Ordinary tools retain the 8192-byte preview. exit_plan_mode includes its complete input within the 64 KiB resource ceiling so a plan can be reviewed after refresh. Truncated ordinary previews may not be valid JSON. */
             text: string;
             /** @description True when text is shorter than the complete UTF-8 input. */
             truncated: boolean;
@@ -1337,8 +1501,12 @@ export interface components {
         WebShellSessionOptions: {
             /** @enum {string} */
             approvalMode: "default" | "auto-edit" | "yolo";
-            /** @description Effective modes for this Agent/profile. Stored definitions offer only their pinned mode; auto and plan are unsupported. */
+            /** @description Execution policies available at creation. Stored definitions retain their initial policy; existing eligible Sessions may select a policy separately. Plan is an independent overlay. */
             availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
+            /** @description Optional deployment capability; missing means false. */
+            planModeSupported?: boolean;
+            /** @description Optional deployment capability; missing means false. */
+            inputAttachments?: boolean;
         };
         /** @description Safe allowlisted observation for a Workspace-bound Session. Unknown counts are omitted, never estimated. */
         WebShellModelContext: {
@@ -1391,6 +1559,10 @@ export interface components {
             approvalRevision: number;
             availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
             supported: boolean;
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
+            /** @description Optional deployment capability; missing means false. */
+            planModeSupported?: boolean;
         };
         WebShellChangeApprovalRequest: {
             sessionId: string;
@@ -1400,6 +1572,8 @@ export interface components {
             requestId?: string;
             /** @enum {string} */
             approvalMode: "default" | "auto-edit" | "yolo";
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
         };
         WebShellApprovalChangeResult: {
             sessionId: string;
@@ -1408,6 +1582,8 @@ export interface components {
             /** Format: int64 */
             approvalRevision: number;
             replayed: boolean;
+            /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
+            planMode?: boolean;
         };
         WebShellRuntimeNode: {
             nodeId: string;
@@ -1434,7 +1610,7 @@ export interface components {
         WebShellWorkspaceOperationRequest: {
             operationId: string;
         };
-        /** @description workspaceId is returned only after completed registration. recovery_blocked preserves the original ownership and requires administrator review; a new browser draft does not release it. replayed=true identifies an existing operation returned by a repeated key or a query. */
+        /** @description workspaceId is returned only after completed registration. recovery_blocked means the registration may have reached its node: it keeps the original ownership until Java reads the node and completes it, or fails it and releases the directory. A node that cannot be read, no longer admits the actor or holds another registration's marker leaves it for administrator review, and a new browser draft does not release it. failed releases the directory if the registration reserved it. replayed=true identifies an existing operation returned by a repeated key or a query. */
         WebShellWorkspaceCreateOperation: {
             operationId: string;
             /** @constant */
@@ -1466,6 +1642,98 @@ export interface components {
         WebShellWorkspaceDirectoryQueryRequest: {
             workspaceId: string;
             cwdRelative: string;
+        };
+        InputTextBlock: {
+            /** @enum {string} */
+            type: "input_text" | "text";
+            text: string;
+        };
+        /** @description Inline UTF-8 text file. No host paths, URLs, binary or NUL. Conservative text MIME/extension validation; the complete canonical input containing attachments is limited to 8 MiB. */
+        InputFileBlock: {
+            /** @enum {string} */
+            type: "input_file";
+            name: string;
+            mime_type: string;
+            text: string;
+        };
+        /** @description Canonical base64 PNG, JPEG, GIF or WebP image with a matching signature. The image/jpg alias is normalized to image/jpeg. The complete canonical input containing attachments is limited to 8 MiB. */
+        InputImageBlock: {
+            /** @enum {string} */
+            type: "input_image";
+            /** @enum {string} */
+            mime_type: "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp";
+            data: string;
+        };
+        WebShellSkill: {
+            name: string;
+            description: string;
+        };
+        WebShellSessionSkills: {
+            skills: components["schemas"]["WebShellSkill"][];
+        };
+        WebShellWorkspaceFileQueryRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+            directory: string;
+            query?: string;
+            expectedScopeRevision?: string;
+        };
+        WebShellWorkspaceFileReadRequest: {
+            workspaceId: string;
+            cwdRelative: string;
+            path: string;
+            expectedScopeRevision: string;
+        };
+        WebShellWorkspaceFileEntry: {
+            path: string;
+            name: string;
+            /** @enum {string} */
+            kind: "file" | "directory";
+        };
+        WebShellWorkspaceFilePage: {
+            scopeRevision: string;
+            directory: string;
+            entries: components["schemas"]["WebShellWorkspaceFileEntry"][];
+            truncated: boolean;
+        };
+        WebShellWorkspaceFileSnapshot: {
+            scopeRevision: string;
+            path: string;
+            name: string;
+            /** @enum {string} */
+            mimeType: "text/plain";
+            text: string;
+            byteLength: number;
+            sha256: string;
+        };
+        WebShellToolDetails: {
+            /** @description Allowlisted display arguments, or null when unavailable or larger than 4 KiB. */
+            input: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Recorded text or error, bounded to 8 KiB and 200 lines; null means unavailable, an empty string means recorded empty output. */
+            output: string | null;
+            truncated: boolean;
+            /** @description Validated saved Shell display, when available. Text fields share an 8 KiB/200-line budget; directory and output-file paths share an 8 KiB UTF-8 budget. Legacy text remains in output. */
+            shellResult?: components["schemas"]["WebShellShellResult"];
+        };
+        WebShellShellResult: {
+            /** @constant */
+            type: "shell_result";
+            /** @constant */
+            version: 1;
+            text: string;
+            output: string;
+            directory: string;
+            exitCode: number | null;
+            signal: number | null;
+            pid: number | null;
+            error: string | null;
+            /** @enum {string} */
+            outcome: "completed" | "failed" | "cancelled" | "timed_out";
+            notices: string[];
+            truncated: boolean;
+            outputFiles: string[];
         };
     };
     responses: {
@@ -2742,6 +3010,189 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    queryWebShellSessionMcp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session MCP catalog snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicMcpCatalog"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellSessionSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session static Skill metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellSessionSkills"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellWorkspaceFilesQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceFileQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized Workspace file result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFilePage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellWorkspaceFilesRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceFileReadRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized Workspace file result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFileSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getWebShellToolDetails: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellToolResultRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded saved ReadFile/Shell input and text output, read on demand; requires a trusted actor and current Session/Workspace read access. Available to authorized readers without a feature switch. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "private, no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellToolDetails"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
 }

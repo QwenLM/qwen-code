@@ -78,6 +78,12 @@ For changes to shared contracts or TypeScript consumers, also run the affected
 consumer tests and the root build/typecheck requirements. Documentation-only
 changes need formatting and reference checks.
 
+Maven report output under `target/` (javadoc `reports/apidocs`, JaCoCo
+`site/jacoco`) contains generated JavaScript that the repository-root ESLint
+sweep does not ignore, so a root `npm run lint` fails while those directories
+exist. Run `mvn clean` or delete the `target/` directories before running root
+checks in the same checkout.
+
 ## Code Review
 
 - Preserve each changed route's tenant isolation, actor checks, Workspace

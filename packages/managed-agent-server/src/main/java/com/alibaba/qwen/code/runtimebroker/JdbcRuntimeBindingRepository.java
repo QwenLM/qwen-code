@@ -1,6 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
+import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
+
+import javax.sql.DataSource;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -11,13 +16,14 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
-
-import javax.sql.DataSource;
 
 /** JDBC Runtime binding repository coordinated through a shared database. */
 public final class JdbcRuntimeBindingRepository
@@ -126,7 +132,7 @@ public final class JdbcRuntimeBindingRepository
             var authority = claim.getRequest().getScope().getLifecycleAuthority();
             if (authority != null) {
                 requireHarnessAdmission(connection, claim.getRequest().getScope(), claim.getRequest().getIsolationKey(),
-                        authority, false, false, true);
+                        authority, fence(false, HarnessFence.CLEANUP));
             }
             RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true);
             RuntimeAdmission.requireStoppedRelease(binding, claim, expected, JdbcRepositorySupport.databaseNowPrecise(connection));
@@ -497,10 +503,7 @@ public final class JdbcRuntimeBindingRepository
                                 candidate.getSession().getScope(),
                                 candidate.getSession().getHarnessSessionId(),
                                 candidate.getSession().getScope().getLifecycleAuthority(),
-                                false,
-                                false,
-                                false,
-                                HarnessOwnership.sharesRuntimeSessions(binding.getRequest()));
+                                fence(HarnessOwnership.sharesRuntimeSessions(binding.getRequest())));
                     }
                     RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
                     RuntimeScope scope = candidate.getSession().getScope();
@@ -558,8 +561,8 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord binding = selectById(connection, candidate.getBindingId(), true);
             RuntimeAdmission.requireRelease(binding, candidate);
             requireHarnessAdmission(connection, scope, candidate.getSession().getHarnessSessionId(),
-                    scope.getLifecycleAuthority(), false, true, false,
-                    HarnessOwnership.sharesRuntimeSessions(binding.getRequest()));
+                    scope.getLifecycleAuthority(),
+                    fence(HarnessOwnership.sharesRuntimeSessions(binding.getRequest()), HarnessFence.RETIREMENT));
             RuntimeSessionRecord existing = JdbcRuntimeSessionRepository.selectSession(
                     connection, scope, candidate.getRuntimeSessionId(), true);
             if (existing != null) {
@@ -609,8 +612,7 @@ public final class JdbcRuntimeBindingRepository
                             requireStorageAdmission(connection, binding.getRequest());
                             requireHarnessAdmission(connection, binding.getRequest().getScope(),
                                     candidate.getHarnessSessionId(),
-                                    binding.getRequest().getScope().getLifecycleAuthority(),
-                                    false, false, false, true);
+                                    binding.getRequest().getScope().getLifecycleAuthority(), fence(true));
                         } else if (binding != null) {
                             requireHarnessAdmission(connection, binding.getRequest());
                         }
@@ -698,11 +700,17 @@ public final class JdbcRuntimeBindingRepository
     }
 
     Map<String, Object> readCsiBatch(
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeBindingRecord hint, String promptId, String batchId) {
+        return readCsiBatch(sessions, executions, hint, promptId, batchId, null);
+    }
+
+    Map<String, Object> readCsiBatch(
             RuntimeSessionRepository sessions,
             ToolExecutionRepository executions,
             RuntimeBindingRecord hint,
             String promptId,
-            String batchId) {
+            String batchId, Map<String, Object> recoveryOwner) {
         requireCsiRepositories(sessions, executions);
         return JdbcRepositorySupport.transaction(
                 dataSource,
@@ -729,6 +737,10 @@ public final class JdbcRuntimeBindingRepository
                                 "Original CSI Runtime Session is not ready",
                                 false);
                     }
+                    if (recoveryOwner != null) {
+                        admission.head().requireRecoveryOwner(recoveryOwner);
+                        JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head());
+                    }
                     var result =
                             CsiNativeToolReservation.read(
                                     connection,
@@ -736,7 +748,7 @@ public final class JdbcRuntimeBindingRepository
                                     admission.prefix(),
                                     resources,
                                     promptId,
-                                    batchId);
+                                    batchId, recoveryOwner != null);
                     admission.head().requireCurrentTime(connection);
                     return result;
                 });
@@ -845,15 +857,15 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
-    public void requireHarnessAdmission(RuntimeProvisionRequest binding, RuntimeScope scope, String harnessSessionId,
+    public void requireHarnessAdmission(RuntimeProvisionRequest bindingRequest, RuntimeScope scope, String harnessSessionId,
             RuntimeLifecycleAuthority authority) {
-        if (!HarnessOwnership.sharesRuntimeSessions(binding)) {
+        if (!HarnessOwnership.sharesRuntimeSessions(bindingRequest)) {
             requireHarnessAdmission(scope, harnessSessionId, authority);
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, scope.getTenantId());
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, false, false, false, true);
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true));
             return null;
         });
     }
@@ -864,9 +876,9 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
-    public boolean requireHarnessRecovery(RuntimeProvisionRequest binding, RuntimeScope scope, String harnessSessionId,
+    public boolean requireHarnessRecovery(RuntimeProvisionRequest bindingRequest, RuntimeScope scope, String harnessSessionId,
             RuntimeLifecycleAuthority authority) {
-        return requireHarnessRecovery(scope, harnessSessionId, authority, HarnessOwnership.sharesRuntimeSessions(binding));
+        return requireHarnessRecovery(scope, harnessSessionId, authority, HarnessOwnership.sharesRuntimeSessions(bindingRequest));
     }
 
     private boolean requireHarnessRecovery(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority,
@@ -913,10 +925,7 @@ public final class JdbcRuntimeBindingRepository
                                     scope,
                                     harnessSessionId,
                                     authority,
-                                    false,
-                                    false,
-                                    true,
-                                    runtimeSessionOwner);
+                                    fence(runtimeSessionOwner, HarnessFence.CLEANUP));
                             return true;
                         }
                     }
@@ -927,7 +936,21 @@ public final class JdbcRuntimeBindingRepository
     public void requireHarnessCleanup(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, scope.getTenantId());
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, false, false, true);
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.CLEANUP));
+            return null;
+        });
+    }
+
+    @Override
+    public void requireHarnessCleanup(RuntimeProvisionRequest bindingRequest, RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (!HarnessOwnership.sharesRuntimeSessions(bindingRequest)) {
+            requireHarnessCleanup(scope, harnessSessionId, authority);
+            return;
+        }
+        JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, scope.getTenantId());
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.CLEANUP));
             return null;
         });
     }
@@ -936,55 +959,64 @@ public final class JdbcRuntimeBindingRepository
     public void requireHookAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, scope.getTenantId());
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, true);
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.LEGACY_HOOK));
             return null;
         });
     }
 
     @Override
-    public void requireHookAdmission(RuntimeProvisionRequest binding, RuntimeScope scope, String harnessSessionId,
+    public void requireHookAdmission(RuntimeProvisionRequest bindingRequest, RuntimeScope scope, String harnessSessionId,
             RuntimeLifecycleAuthority authority) {
-        if (!HarnessOwnership.sharesRuntimeSessions(binding)) {
+        if (!HarnessOwnership.sharesRuntimeSessions(bindingRequest)) {
             requireHookAdmission(scope, harnessSessionId, authority);
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, scope.getTenantId());
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, true, false, false, true);
+            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.LEGACY_HOOK));
             return null;
         });
     }
 
     public static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority) throws SQLException {
-        requireHarnessAdmission(connection, scope, harnessSessionId, authority, false);
+        requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false));
     }
 
-    private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
-            String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook) throws SQLException {
-        requireHarnessAdmission(connection, scope, harnessSessionId, authority, legacyHook, false, false);
+    /** What a Harness fence admits beyond ordinary new work. */
+    private enum HarnessFence {
+        LEGACY_HOOK,
+        RETIREMENT,
+        CLEANUP,
+        /** Fences a shared binding by the admitted Runtime Session's own Harness Session. */
+        RUNTIME_SESSION_OWNER
     }
 
-    private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
-            String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook, boolean retirement, boolean cleanup) throws SQLException {
-        requireHarnessAdmission(connection, scope, harnessSessionId, authority, legacyHook, retirement, cleanup, false);
+    private static Set<HarnessFence> fence(boolean runtimeSessionOwner, HarnessFence... fences) {
+        Set<HarnessFence> result = EnumSet.noneOf(HarnessFence.class);
+        result.addAll(List.of(fences));
+        if (runtimeSessionOwner) {
+            result.add(HarnessFence.RUNTIME_SESSION_OWNER);
+        }
+        return result;
     }
 
     /**
-     * {@code runtimeSessionOwner} fences a shared binding by the Harness
-     * Session of the Runtime Session or execution being admitted. Lifecycle
-     * authority over a shared binding stays refused.
+     * Lifecycle authority over a shared binding is fenced by the Runtime
+     * Session's own Harness Session lifecycle claim: Hook placement and
+     * cleanup proceed only while that claim matches.
      */
     private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
-            String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook, boolean retirement,
-            boolean cleanup, boolean runtimeSessionOwner) throws SQLException {
-        if (runtimeSessionOwner) {
-            if (authority != null) {
-                throw admissionClosed();
-            }
+            String harnessSessionId, RuntimeLifecycleAuthority authority, Set<HarnessFence> fence) throws SQLException {
+        boolean legacyHook = fence.contains(HarnessFence.LEGACY_HOOK);
+        boolean retirement = fence.contains(HarnessFence.RETIREMENT);
+        boolean cleanup = fence.contains(HarnessFence.CLEANUP);
+        if (fence.contains(HarnessFence.RUNTIME_SESSION_OWNER)) {
             BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         } else if (!"session".equals(scope.getIsolationClass())
-                && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)) {
+                && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)
+                && !(WorkspaceExecutionProfile.isBoundWorkspaceScope(scope) && harnessSessionId != null
+                        && authority != null)) {
             if (authority != null) {
                 throw admissionClosed();
             }
@@ -1226,6 +1258,44 @@ public final class JdbcRuntimeBindingRepository
                 });
     }
 
+    /** A binding's request columns, aliased with the {@code b_} prefix, for a join on alias {@code b}. */
+    static final String REQUEST_COLUMNS_AS_B = String.join(", ", List.of("tenant_id", "workspace_id",
+                    "workspace_generation", "canonical_cwd", "capability_digest", "isolation_class", "isolation_key",
+                    "provisioner_kind", "storage_id").stream().map(column -> "b." + column + " AS b_" + column).toList());
+
+    /** Whether the prefixed binding columns describe a shared binding; a malformed request does not. */
+    static boolean sharesRuntimeSessions(ResultSet rows, String prefix) throws SQLException {
+        try {
+            return HarnessOwnership.sharesRuntimeSessions(new RuntimeProvisionRequest(
+                    new RuntimeScope(rows.getString(prefix + "tenant_id"), rows.getString(prefix + "workspace_id"),
+                            rows.getString(prefix + "workspace_generation"), rows.getString(prefix + "canonical_cwd"),
+                            rows.getString(prefix + "capability_digest"), rows.getString(prefix + "isolation_class")),
+                    rows.getString(prefix + "isolation_key"), rows.getString(prefix + "provisioner_kind"),
+                    rows.getString(prefix + "storage_id")));
+        } catch (IllegalArgumentException malformed) {
+            return false;
+        }
+    }
+
+    /** Whether any Runtime Session of the Harness Session was placed on a shared binding. */
+    public static boolean hasSharedRuntimeSessions(Connection connection, String tenantId, String harnessSessionId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT " + REQUEST_COLUMNS_AS_B
+                + " FROM ma_runtime_session s JOIN ma_runtime_binding b ON b.binding_id = s.binding_id"
+                + " WHERE s.harness_session_id = ? AND s.tenant_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
+            JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (sharesRuntimeSessions(rows, "b_")) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     @Override
     public List<RuntimeBindingRecord> verifyHarnessResources(Connection connection, String tenantId,
             String harnessSessionId) throws SQLException {
@@ -1264,6 +1334,16 @@ public final class JdbcRuntimeBindingRepository
                 while (rows.next()) {
                     String bindingId = rows.getString("binding_id");
                     RuntimeBindingRecord original = bindings.stream().filter(binding -> binding.getBindingId().equals(bindingId)).findFirst().orElse(null);
+                    if (original == null) {
+                        // A shared binding outlives this Session: its own Runtime
+                        // Sessions must be released, never the binding drained.
+                        RuntimeBindingRecord shared = selectById(connection, bindingId, true);
+                        if (shared != null && HarnessOwnership.sharesRuntimeSessions(shared.getRequest())
+                                && tenantId.equals(shared.getRequest().getScope().getTenantId())) {
+                            original = shared;
+                            bindings.add(shared);
+                        }
+                    }
                     if (original == null || rows.getLong("runtime_generation") < 1
                             || original.getGeneration() < rows.getLong("runtime_generation")) {
                         throw new RuntimeBrokerException(
@@ -1341,6 +1421,69 @@ public final class JdbcRuntimeBindingRepository
                 }
             }
         }
+        verifySharedSessionsStopped(connection, tenantId, harnessSessionId);
+    }
+
+    /**
+     * A shared binding keeps serving other Sessions, so this Session's stop
+     * proof is its own Runtime Sessions released, their executions settled
+     * and no storage holder naming one of them.
+     */
+    private void verifySharedSessionsStopped(Connection connection, String tenantId, String harnessSessionId)
+            throws SQLException {
+        List<RuntimeSessionRecord> sessions = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT " + JdbcRuntimeSessionRepository.SESSION_COLUMNS
+                + " FROM ma_runtime_session WHERE harness_session_id = ? AND tenant_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
+            JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    RuntimeSessionRecord session = JdbcRuntimeSessionRepository.mapSession(rows);
+                    if (tenantId.equals(session.getSession().getScope().getTenantId())
+                            && harnessSessionId.equals(session.getSession().getHarnessSessionId())) {
+                        sessions.add(session);
+                    }
+                }
+            }
+        }
+        Map<String, Boolean> shared = new HashMap<>();
+        for (RuntimeSessionRecord session : sessions) {
+            Boolean sharing = shared.get(session.getBindingId());
+            if (sharing == null) {
+                RuntimeBindingRecord binding = selectById(connection, session.getBindingId(), false);
+                sharing = binding != null && HarnessOwnership.sharesRuntimeSessions(binding.getRequest());
+                shared.put(session.getBindingId(), sharing);
+            }
+            if (sharing && (session.isActive()
+                    || JdbcToolExecutionRepository.hasActiveByRuntimeSession(connection, session.getBindingId(),
+                            session.getRuntimeGeneration(), session.getRuntimeSessionId())
+                    || hasStorageHolder(connection, session))) {
+                throw new RuntimeBrokerException(
+                        409,
+                        "workspace_close_execution_unsettled",
+                        "Original resources remain active",
+                        false);
+            }
+        }
+    }
+
+    private static boolean hasStorageHolder(Connection connection, RuntimeSessionRecord session) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT binding_id, runtime_session_id FROM ma_storage_owner"
+                                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
+            statement.setLong(2, session.getRuntimeGeneration());
+            JdbcRepositorySupport.setIdentity(statement, 3, session.getRuntimeSessionId());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (session.getBindingId().equals(rows.getString("binding_id"))
+                            && session.getRuntimeSessionId().equals(rows.getString("runtime_session_id"))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     @Override
@@ -1395,6 +1538,27 @@ public final class JdbcRuntimeBindingRepository
                 });
     }
 
+    private static void requireResidentWorkspaceAdmission(Connection connection,
+            RuntimeProvisionRequest request) throws SQLException {
+        if (!ResidentWorkspaceProfile.selects(request)) {
+            return;
+        }
+        var scope = request.getScope();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT workspace_generation, storage_id, state FROM ma_workspace"
+                        + " WHERE tenant_id = ? AND workspace_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, scope.getWorkspaceId());
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next() || !"ACTIVE".equals(row.getString("state"))
+                        || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
+                        || !request.getStorageId().equals(row.getString("storage_id"))) {
+                    throw admissionClosed();
+                }
+            }
+        }
+    }
+
     @Override
     public RuntimeBindingRecord findOrCreate(
             RuntimeProvisionRequest request) {
@@ -1403,6 +1567,7 @@ public final class JdbcRuntimeBindingRepository
                 dataSource,
                 connection -> {
                     lockPlacementDomain(connection, request.getScope().getTenantId());
+                    requireResidentWorkspaceAdmission(connection, request);
                     boolean csiFiles =
                             JdbcCsiFilesRetirementGuard.requireProvisionPin(connection, request);
                     requireHarnessAdmission(connection, request);
@@ -1420,6 +1585,11 @@ public final class JdbcRuntimeBindingRepository
                         }
                         if (csiFiles) {
                             JdbcCsiFilesRetirementGuard.lockBinding(connection, active);
+                        }
+                        if (ResidentWorkspaceProfile.selects(request)
+                                && (active.getState() == RuntimeBindingRecord.State.DRAINING
+                                        || active.isDrainRequested())) {
+                            throw admissionClosed();
                         }
                         return active;
                     }
@@ -1641,9 +1811,7 @@ public final class JdbcRuntimeBindingRepository
                                 current.getRequest().getScope(),
                                 current.getRequest().getIsolationKey(),
                                 authority,
-                                false,
-                                false,
-                                true);
+                                fence(false, HarnessFence.CLEANUP));
                     }
                     if (current.getState() == RuntimeBindingRecord.State.LOST
                             && replacement.getState() == RuntimeBindingRecord.State.DRAINING
@@ -1685,14 +1853,21 @@ public final class JdbcRuntimeBindingRepository
         String ownerId = BrokerValues.requireId(owner, "owner");
         Duration duration = JdbcRepositorySupport.requireDuration(
                 leaseDuration);
+        RuntimeBindingRecord hint = findById(id);
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
+                    if (hint != null && ResidentWorkspaceProfile.selects(hint.getRequest())) {
+                        lockPlacementDomain(connection, hint.getRequest().getScope().getTenantId());
+                    }
                     BindingControl control = lockBindingControl(connection, id);
                     RuntimeBindingRecord current = selectById(connection, id, true);
                     requireControlBinding(control, current);
                     Instant now = controlTime(connection, control);
-                    if (current == null || !current.isActive()) {
+                    if (current == null || !current.isActive()
+                            || ResidentWorkspaceProfile.selects(current.getRequest())
+                                    && (current.getState() == RuntimeBindingRecord.State.DRAINING
+                                            || current.isDrainRequested())) {
                         return null;
                     }
                     if (ownerId.equals(current.getOperationOwner())
@@ -1807,7 +1982,7 @@ public final class JdbcRuntimeBindingRepository
             return new BindingControl(connection, original, null);
         }
         return new BindingControl(
-                connection, original, JdbcCsiReadyAdmission.lock(connection, original));
+                connection, original, JdbcCsiApplicationProgress.lock(connection, original));
     }
 
     private static void requireControlBinding(
@@ -1879,7 +2054,7 @@ public final class JdbcRuntimeBindingRepository
     private record BindingControl(
             Connection connection,
             JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiReadyAdmission.Admission progress) {}
+            JdbcCsiApplicationProgress.Continuation progress) {}
 
     private static void ensureSlot(Connection connection, String requestKey,
             RuntimeProvisionRequest request) throws SQLException {

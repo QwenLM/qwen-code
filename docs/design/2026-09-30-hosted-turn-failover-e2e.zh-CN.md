@@ -27,7 +27,7 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
    `AuthenticatedTenantActor` 替身，让 E2E 能经公开路由创建 Workspace 绑定会话。在不可信
    客户端可达的部署上绝不能开启。
 4. **解禁与 CI。** 两个模式移除过期门禁、改用 `write_file`（公开准入的 profile）驱动物理
-   工具、接入 Hosted MySQL CI 任务，README 改为如实描述。
+   工具、接入 Hosted MySQL CI 任务（现为 `hosted-failover-e2e`），README 改为如实描述。
 
 不在范围内：公开 Shell profile 选择、G2 接管对账扫描、G3 取消 owner 粘性、多 Runtime
 接管。取消接管为契约完整性而实现，但没有对应 E2E 模式。
@@ -78,14 +78,17 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
   先退掉死亡 worker 的 Runtime 绑定，才能重驱动挂起的执行。该回收只存在于 durable
   local-process provisioner，其可信宿主身份只在 Linux 上可用。runner 对这两个模式开启
   `durable-local-process`、把 state 目录建成属主私有，并在其他平台上以明确报错拒绝并指向
-  Hosted MySQL CI 任务。这正是 #12766 已记录的边界；G1 不改变它。
+  运行它们的 Linux CI 任务（现为 Hosted failover E2E 任务）。这正是 #12766 已记录的
+  边界；G1 不改变它。
 - **E2E 把 Workspace 准入当部署数据种子化**（registry 行、access 授权、Broker mount），并在
   两个 Spring owner 上都开启 `harness.workspace-files-enabled` 与可信 actor 头。物理副作用是
   固定的 `write_file`；恰好一次断言由持久执行记录、dispatch generation 与模型请求次数承载，
   而不是文件字节。`--session-failover` 仍创建非绑定 Session，但这套准入接线不再按模式
   门控：每个模式的 owner 都携带它(#13258)，其配置与其他模式一致。
 - **两个模式并入 `hosted-harness-mysql` 任务**，该任务安装 runner 私有 `mysqld` 所需的
-  MySQL 二进制。
+  MySQL 二进制。它们现在与后来的 failover 支路一起在 `hosted-failover-e2e` 任务中运行，
+  该任务自己安装这些二进制（见
+  [可替换 Harness 设计](2026-10-02-hosted-replaceable-harness.zh-CN.md) D11）。
 
 ## 改动与归属
 

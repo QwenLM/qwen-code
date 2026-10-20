@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ChildResultRelay;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
-import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
+import com.alibaba.qwen.code.managedagent.session.WakeRecovery;
+import com.alibaba.qwen.code.managedagent.workspace.ChildResultRelay;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -405,6 +406,17 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void theWakeRecoveryScanUsesItsDedicatedSchedulerAndMillisecondCadence() {
+        assertThat(schedulesOn(WakeRecovery.class, "wake-recovery.scan-delay"))
+                .hasSize(1).allSatisfy(scheduled -> {
+                    assertThat(scheduled.fixedDelayString()).isEqualTo(
+                            "${qwen.managed-agent.wake-recovery.scan-delay:2s}");
+                    assertThat(scheduled.scheduler()).isEqualTo("wakeRecoveryScheduler");
+                    assertThat(scheduled.timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
+                });
+    }
+
+    @Test
     void theThreeScanDelaySchedulesShareOneFallback() throws java.io.IOException {
         // The Dispatch comment claims the three sites read the identical
         // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
@@ -480,7 +492,8 @@ class ManagedAgentPropertiesTest {
                 "dispatch.scan-delay",
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
-                "runtime-broker.retention.scan-delay");
+                "runtime-broker.retention.scan-delay",
+                "wake-recovery.scan-delay");
         var placeholderOnly = new java.util.TreeSet<String>();
         for (String key : swept) {
             if (!hasTypedField(key)) {
@@ -881,6 +894,64 @@ class ManagedAgentPropertiesTest {
         missing.getHarness().setWorkspaceFilesEnabled(true);
         missing.getHarness().setApprovalMode(null);
         assertThatThrownBy(missing::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void boundSessionIsolationDefaultsToSessionAndWorkspaceRequiresADurableLocalBrokerWithoutChildren() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().getBoundSessionIsolationClass()).isEqualTo("session");
+        plain.validateWorkspaceFiles();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties unknown = new ManagedAgentProperties();
+        unknown.getRuntimeBroker().setBoundSessionIsolationClass("tenant");
+        assertThatThrownBy(unknown::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("session or workspace");
+
+        ManagedAgentProperties notDurable = new ManagedAgentProperties();
+        notDurable.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        notDurable.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThatThrownBy(notDurable::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("durable");
+
+        ManagedAgentProperties withChildren = new ManagedAgentProperties();
+        withChildren.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        withChildren.getRuntimeBroker().setChildWorkspacesEnabled(true);
+        assertThatThrownBy(withChildren::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("child Workspaces");
+
+        ManagedAgentProperties nonLocal = new ManagedAgentProperties();
+        nonLocal.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        nonLocal.getRuntimeBroker().setProvisioner("static");
+        assertThatThrownBy(nonLocal::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("local-process");
+    }
+
+    @Test
+    void sessionCreateWarmDefaultsOffAndRequiresWorkspaceIsolationWithoutSshNodes() {
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        assertThat(plain.getRuntimeBroker().isSessionCreateWarm()).isFalse();
+
+        ManagedAgentProperties workspace = new ManagedAgentProperties();
+        workspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        workspace.getRuntimeBroker().setSessionCreateWarm(true);
+        workspace.validateWorkspaceFiles();
+
+        ManagedAgentProperties session = new ManagedAgentProperties();
+        session.getRuntimeBroker().setSessionCreateWarm(true);
+        assertThatThrownBy(session::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Session-create warm");
+
+        ManagedAgentProperties ssh = new ManagedAgentProperties();
+        ssh.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        ssh.getRuntimeBroker().setSessionCreateWarm(true);
+        ssh.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node("mac", "Mac", "test-host",
+                "/node", "/cli.js", "/state", List.of("/work"), 41270, "0.25.1", List.of())));
+        assertThatThrownBy(ssh::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Session-create warm");
     }
 
     @Configuration(proxyBeanMethods = false)

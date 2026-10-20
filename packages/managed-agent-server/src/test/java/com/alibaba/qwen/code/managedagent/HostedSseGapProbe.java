@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,7 +68,8 @@ final class HostedSseGapProbe implements AutoCloseable {
                         assertThat(terminalHeld.getCount()).isZero();
                         var events = events();
                         assertThat(events).extracting(row -> row.get("event_type"))
-                                .containsExactly("session.created", "item.output_text.delta");
+                                .containsExactly("session.created", "item.tool_call.updated",
+                                        "item.tool_call.updated", "item.output_text.delta");
                         yield events;
                     }
                     case "release" -> {
@@ -186,10 +187,11 @@ final class HostedSseGapProbe implements AutoCloseable {
         assertExecution(true);
         var events = events();
         assertThat(events).extracting(row -> row.get("event_type"))
-                .containsExactly("session.created", "item.output_text.delta", "turn.completed");
+                .containsExactly("session.created", "item.tool_call.updated",
+                        "item.tool_call.updated", "item.output_text.delta", "turn.completed");
         assertThat(events.stream().skip(1).map(row -> row.get("source_key")).toList()).isEqualTo(sourceKeys);
         assertThat(events.stream().map(row -> ((Number) row.get("sequence_id")).longValue()).toList())
-                .containsExactly(1L, 2L, 3L);
+                .containsExactly(1L, 2L, 3L, 4L, 5L);
         System.out.println("FG6E_LEDGER " + session + " " + report);
     }
 

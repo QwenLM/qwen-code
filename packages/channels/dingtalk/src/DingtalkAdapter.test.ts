@@ -16,6 +16,8 @@ import { DWClient } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   BackgroundResponseContext,
+  BackgroundOutputDelivery,
+  BackgroundOutputPacket,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelPermissionRequestContext,
@@ -8563,6 +8565,38 @@ describe('DingtalkChannel reply mentions', () => {
     expect(body).not.toHaveProperty('at');
   });
 
+  it('sends the synthetic knowledge-search fixture in multiple messages with intact citation URLs and tables', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const text = readFileSync(
+      new URL(
+        '../../base/src/fixtures/synthetic-knowledge-search.md',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    await channel.sendMessage('cid123', text);
+    const contents = fetchSpy.mock.calls.map(
+      ([, init]) =>
+        JSON.parse(String((init as RequestInit).body)).markdown.text as string,
+    );
+    expect(contents.length).toBeGreaterThan(1);
+    const urls = [...text.matchAll(/\[来源\]\((https:\/\/[^)]+)\)/gu)].map(
+      (match) => match[1]!,
+    );
+    expect(urls).toHaveLength(12);
+    for (const url of urls)
+      expect(contents.filter((chunk) => chunk.includes(url))).toHaveLength(1);
+    expect(contents.find((chunk) => chunk.includes('示例指标五'))).toContain(
+      '| 文档 | 内容摘要 |\n|---|---|',
+    );
+    for (const chunk of contents)
+      expect(chunk.length).toBeLessThanOrEqual(20_000);
+  });
+
   it('reserves the mention prefix within the first markdown chunk limit', async () => {
     const channel = createChannel({ atSender: true });
     seedWebhook(channel, 'cid123');
@@ -8604,7 +8638,7 @@ describe('DingtalkChannel reply mentions', () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }));
-    const text = `\`\`\`\n${'a'.repeat(3800)}\n\`\`\``;
+    const text = `\`\`\`\n${'a'.repeat(40_000)}\n\`\`\``;
 
     getPromptHook(channel, 'onPromptStart')('cid123', 'session-1', 'm1');
     await getResponseHook(channel)('cid123', text, 'session-1');
@@ -8615,6 +8649,7 @@ describe('DingtalkChannel reply mentions', () => {
         ? body.markdown.text.slice('@staff-1\n\n'.length)
         : body.markdown.text;
     });
+    expect(contents.length).toBeGreaterThan(1);
     expect(contents[0]).toMatch(/^```/u);
     expect(contents.at(-1)).toMatch(/```$/u);
     expect(contents.join('').replace(/[`\n]/gu, '')).toBe(
@@ -8623,7 +8658,7 @@ describe('DingtalkChannel reply mentions', () => {
     expect(
       fetchSpy.mock.calls.every(([, init]) => {
         const body = JSON.parse(String((init as RequestInit).body));
-        return body.markdown.text.length <= 3800;
+        return body.markdown.text.length <= 20_000;
       }),
     ).toBe(true);
   });
@@ -13908,6 +13943,244 @@ describe('DingtalkChannel proactive send', () => {
     expect(tokenCalls()).toHaveLength(1);
   });
 
+  it.each([
+    ['escaped controls', '\u0001'.repeat(3790)],
+    ['Chinese code', '```ts\n' + '中'.repeat(6000) + '\n```'],
+    ['escaped code', '```text\n' + '\\'.repeat(9000) + '\n```'],
+    [
+      'indivisible URL',
+      '[source](https://docs.example.com/' + 'a'.repeat(18_000) + ')',
+    ],
+  ])(
+    'keeps serialized proactive msgParam within 15000 bytes for %s',
+    async (_name, text) => {
+      const channel = proactive(createChannel());
+      const { sendCalls } = stubProactiveFetch();
+      await channel.pushProactive(groupTarget, text);
+      const sends = sendCalls();
+      expect(sends.length).toBeGreaterThan(1);
+      for (const call of sends) {
+        expect(
+          Buffer.byteLength(JSON.parse(String(call[1]?.body)).msgParam),
+        ).toBeLessThanOrEqual(15_000);
+      }
+      if (text.startsWith('[source]')) {
+        expect(
+          sends.every((call) =>
+            msgParamOf(call).text.includes('original text follows in parts'),
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+
+  it.each(['\u0001', '\ud800'])(
+    'delivers nested lists with serialization-amplifying content (%j)',
+    async (character) => {
+      const channel = proactive(createChannel());
+      const { sendCalls } = stubProactiveFetch();
+      const text =
+        Array.from(
+          { length: 15 },
+          (_, i) => '  '.repeat(i) + '- level ' + i,
+        ).join('\n') +
+        '\n' +
+        '  '.repeat(15) +
+        character.repeat(32000);
+
+      await channel.pushProactive(groupTarget, text);
+
+      const sends = sendCalls();
+      expect(sends.length).toBeGreaterThan(1);
+      for (const call of sends) {
+        expect(
+          Buffer.byteLength(JSON.parse(String(call[1]?.body)).msgParam),
+        ).toBeLessThanOrEqual(15_000);
+      }
+      expect(
+        sends
+          .map(
+            (call) =>
+              msgParamOf(call).text.match(/```text\n([\s\S]*)\n```$/u)?.[1],
+          )
+          .join(''),
+      ).toBe(text);
+    },
+  );
+
+  it.each([
+    ['Worker one', 14_939, 'ts'],
+    ['S'.repeat(3775), 11_142, 'ts'],
+    ['Worker one', 30000, 'z'.repeat(3789)],
+  ] as const)(
+    'rechecks serialized payload budgets after an unsent background header changes (%#)',
+    async (sourceLabel, length, info) => {
+      const channel = proactive(createChannel({ interactiveCards: undefined }));
+      const { sendCalls } = stubProactiveFetch(
+        (index) => new Response('{}', { status: index === 0 ? 429 : 200 }),
+      );
+      const deliver = (
+        channel as unknown as {
+          createBackgroundOutputDelivery(
+            sessionId: string,
+            target: { target: SessionTarget; sourceLabel: string },
+          ): BackgroundOutputDelivery;
+        }
+      ).createBackgroundOutputDelivery('synthetic-session', {
+        target: groupTarget,
+        sourceLabel,
+      });
+      const value = 'x'.repeat(length);
+      const packet: BackgroundOutputPacket = {
+        kind: 'agent',
+        status: 'running',
+        text: `\`\`\`${info}\n${value}\n\`\`\``,
+        partial: false,
+        turnComplete: false,
+      };
+      await expect(deliver(packet)).rejects.toThrow();
+      await expect(
+        deliver({
+          ...packet,
+          status: 'completed',
+          text: '',
+          turnComplete: true,
+        }),
+      ).resolves.toBeDefined();
+      const retried = sendCalls().slice(1).map(msgParamOf);
+      expect(retried.length).toBeGreaterThan(1);
+      expect(retried.length).toBeLessThanOrEqual(
+        4 * Math.ceil(packet.text.length / 3800),
+      );
+      for (const message of retried) {
+        expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(
+          15_000,
+        );
+        expect(message.text.startsWith(sourceLabel + '\n\n')).toBe(true);
+      }
+      expect(
+        retried
+          .map((message) =>
+            [...message.text.matchAll(/x+/g)].map((run) => run[0]).join(''),
+          )
+          .join(''),
+      ).toBe(value);
+      expect(retried[0]!.text).toContain('✅ Background task completed');
+      for (const message of retried.slice(1)) {
+        expect(message.text).toContain('\n\n```' + info + '\n');
+        expect(message.text).toMatch(/x+\n```$/u);
+      }
+    },
+  );
+
+  it.each([
+    [undefined, 'Worker 1'],
+    ['synthetic-user', 'Worker 1'],
+    [undefined, 'S'.repeat(3775)],
+  ] as const)(
+    'rechecks reply budgets after an unsent background header changes (%#)',
+    async (atUserId, sourceLabel) => {
+      const channel = createChannel({
+        interactiveCards: undefined,
+        atSender: true,
+      });
+      seedWebhook(channel, 'synthetic-dm');
+      if (atUserId)
+        (
+          channel as unknown as { sessionMentionTargets: Map<string, string> }
+        ).sessionMentionTargets.set('synthetic-session', atUserId);
+      const messages: string[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+        const body = JSON.parse(String(init?.body)) as {
+          markdown: { text: string };
+        };
+        messages.push(body.markdown.text);
+        return Promise.resolve(
+          new Response('{}', { status: messages.length === 1 ? 429 : 200 }),
+        );
+      });
+      const deliver = (
+        channel as unknown as {
+          createBackgroundOutputDelivery(
+            sessionId: string,
+            target: {
+              target: SessionTarget;
+              sourceLabel: string;
+            },
+          ): BackgroundOutputDelivery;
+        }
+      ).createBackgroundOutputDelivery('synthetic-session', {
+        target: { ...directTarget, chatId: 'synthetic-dm' },
+        sourceLabel,
+      });
+      const prefix = `${atUserId ? `@${atUserId}\n\n` : ''}${sourceLabel}\n\n`;
+      const value = 'x'.repeat(20_000 - prefix.length - 10);
+      const packet: BackgroundOutputPacket = {
+        kind: 'agent',
+        status: 'running',
+        text: `\`\`\`ts\n${value}\n\`\`\``,
+        partial: false,
+        turnComplete: false,
+      };
+      await expect(deliver(packet)).rejects.toThrow();
+      expect(messages[0]!.length).toBe(20_000);
+      const receipt = await deliver({
+        ...packet,
+        status: 'completed',
+        text: '',
+        turnComplete: true,
+      });
+      expect(receipt?.turnComplete).toBe(true);
+      const retried = messages.slice(1);
+      expect(retried.length).toBeGreaterThan(1);
+      for (const message of retried.slice(1)) {
+        expect(message).toMatch(/\n\n```ts\nx+\n```$/u);
+      }
+      expect(retried[0]).toContain('✅ Background task completed');
+      expect(retried[0]!.startsWith(prefix)).toBe(true);
+      for (const message of retried) {
+        expect(message.length).toBeLessThanOrEqual(20_000);
+        expect(message).toContain(sourceLabel + '\n\n');
+      }
+      expect(
+        retried.map((message) => message.match(/x+/g)?.join('') ?? '').join(''),
+      ).toBe(value);
+      if (atUserId)
+        expect(retried.join('').match(/@synthetic-user/g)).toHaveLength(1);
+    },
+  );
+
+  it.each([3789, 19985])(
+    'bounds the complete proactive batch for large code metadata (%s)',
+    async (length) => {
+      const channel = proactive(createChannel());
+      const { sendCalls } = stubProactiveFetch();
+      const text =
+        '```' + 'x'.repeat(length) + '\n' + 'y'.repeat(30000) + '\n```';
+      await channel.pushProactive(groupTarget, text);
+      const sends = sendCalls();
+      expect(sends.length).toBeLessThanOrEqual(
+        4 * Math.ceil(text.length / 3800),
+      );
+      const messages = sends.map(msgParamOf);
+      expect(
+        messages.reduce((sum, message) => sum + message.text.length, 0),
+      ).toBeLessThanOrEqual(4 * text.length + 20000);
+      expect(
+        messages
+          .map((message) => message.text)
+          .join('')
+          .match(/y/g),
+      ).toHaveLength(30000);
+      for (const message of messages) {
+        expect(message.text.length).toBeLessThanOrEqual(20000);
+        expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(
+          15000,
+        );
+      }
+    },
+  );
+
   it('splits long proactive messages into continuation chunks', async () => {
     const channel = proactive(createChannel());
     const { sendCalls } = stubProactiveFetch();
@@ -13991,8 +14264,11 @@ describe('DingtalkChannel proactive send', () => {
       });
 
       const sends = sendCalls();
-      expect(sends).toHaveLength(4);
-      expect(msgParamOf(sends[3]!).text).toBe('✅ Background task completed');
+      expect(sends.length).toBeGreaterThanOrEqual(4);
+      expect(msgParamOf(sends[1]!).text).toBe(msgParamOf(sends[2]!).text);
+      expect(msgParamOf(sends.at(-1)!).text).toBe(
+        '✅ Background task completed',
+      );
     } finally {
       vi.useRealTimers();
     }

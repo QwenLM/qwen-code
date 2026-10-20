@@ -1,10 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.net.URI;
 import java.time.Duration;
@@ -14,9 +13,12 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.function.Executable;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** A shared Workspace binding answers each Runtime Session for its own Harness Session. */
 class SharedHarnessOwnershipTest {
@@ -59,6 +61,87 @@ class SharedHarnessOwnershipTest {
         bindings.requireHarnessAdmission(new RuntimeProvisionRequest(SCOPE, null, "kubernetes-workspace", "storage"),
                 SCOPE, "harness-a", null);
         bindings.requireHarnessAdmission(SCOPE, "harness-a", null);
+    }
+
+    @Test
+    void cleanupAuthorityFollowsTheRuntimeSessionsHarnessClaim() throws Exception {
+        var binding = ready(bindings, SHARED);
+        var authority = new RuntimeLifecycleAuthority("close", 1);
+        assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a", authority));
+        bindings.requestHarnessDrain("tenant", "harness-a");
+        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                "UPDATE ma_session_head SET operation_id = ?, claim_generation = 1, claim_lease_until = ?"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, "close");
+            statement.setLong(2, System.currentTimeMillis() + 30_000);
+            JdbcRepositorySupport.setIdentity(statement, 3, "tenant");
+            JdbcRepositorySupport.setIdentity(statement, 4, "harness-a");
+            assertEquals(1, statement.executeUpdate());
+        }
+        bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a", authority);
+        assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("other", 1)));
+        assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("close", 2)));
+        assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-b", authority));
+        assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority));
+        assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority));
+        assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(binding.getBindingId()).getState());
+    }
+
+    @Test
+    void lifecycleWorkPlacesOnASharedBindingUnderTheClosingSessionsClaim() throws Exception {
+        var binding = ready(bindings, SHARED);
+        var authority = new RuntimeLifecycleAuthority("close", 1);
+        assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority));
+        assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority));
+        JdbcRepositorySupport.transaction(source, connection -> {
+            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            return null;
+        });
+        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                "UPDATE ma_session_head SET claim_generation = 1, claim_lease_until = ?"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+            statement.setLong(1, System.currentTimeMillis() + 30_000);
+            JdbcRepositorySupport.setIdentity(statement, 2, "tenant");
+            JdbcRepositorySupport.setIdentity(statement, 3, "harness-a");
+            assertEquals(1, statement.executeUpdate());
+        }
+        bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority);
+        bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority);
+        assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("other", 1)));
+        assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("close", 2)));
+        assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-b", authority));
+        assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(binding.getBindingId()).getState());
+    }
+
+    @Test
+    void scopeOnlyAdmissionFencesBoundWorkspaceScopesByTheHarnessClaim() throws Exception {
+        var binding = ready(bindings, SHARED);
+        var authority = new RuntimeLifecycleAuthority("close", 1);
+        // The scope-only admission used by authorizeLifecycle and findOrCreate no longer
+        // refuses a bound Workspace scope outright; the Harness claim fences it.
+        assertClosed(() -> bindings.requireHarnessAdmission(SCOPE, "harness-a", authority));
+        JdbcRepositorySupport.transaction(source, connection -> {
+            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            return null;
+        });
+        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                "UPDATE ma_session_head SET claim_generation = 1, claim_lease_until = ?"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+            statement.setLong(1, System.currentTimeMillis() + 30_000);
+            JdbcRepositorySupport.setIdentity(statement, 2, "tenant");
+            JdbcRepositorySupport.setIdentity(statement, 3, "harness-a");
+            assertEquals(1, statement.executeUpdate());
+        }
+        bindings.requireHarnessAdmission(SCOPE, "harness-a", authority);
+        assertClosed(() -> bindings.requireHarnessAdmission(SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("other", 1)));
+        assertClosed(() -> bindings.requireHarnessAdmission(SCOPE, "harness-a",
+                new RuntimeLifecycleAuthority("close", 2)));
+        assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(binding.getBindingId()).getState());
     }
 
     @Test

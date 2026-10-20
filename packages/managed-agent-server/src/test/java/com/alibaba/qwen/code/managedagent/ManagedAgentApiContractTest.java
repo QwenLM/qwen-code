@@ -3,69 +3,69 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
-import com.alibaba.qwen.code.managedagent.api.ApiModels;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeCwdRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellContentPart;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.SshWorkspaceController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
-import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
-import com.alibaba.qwen.code.managedagent.service.SshWorkspaceService;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
-import com.alibaba.qwen.code.managedagent.store.SshWorkspaceStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.model.ApiModels;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.ChangeCwdRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContentPart;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItem;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTurn;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicWorkspace;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionCapabilities;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionEventRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionResyncRequired;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.UpdateSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCancelRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellChangeCwdRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellContentPart;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCwdOperation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellItem;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellOperationRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellResyncRequired;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSession;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionCapabilities;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellStreamRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSubmitRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEventQueryRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskGetRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskQueryRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscriptRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTurn;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellWorkspace;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.session.SessionRenameCoordinator;
+import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -164,6 +164,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.ArtifactAccess.class, List.of("ArtifactAccess")),
                     entry(ApiModels.ArtifactResponse.class, List.of("ArtifactResponse")),
                     entry(ApiModels.ToolResultResponse.class, List.of("ToolResultResponse")),
+                    entry(ApiModels.WebShellToolDetails.class, List.of("WebShellToolDetails")),
+                    entry(ApiModels.WebShellShellResult.class, List.of("WebShellShellResult")),
                     entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
@@ -263,6 +265,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellApprovalSelection.class, List.of("WebShellApprovalSelection")),
                     entry(ApiModels.WebShellSessionModelsRequest.class, List.of("WebShellSessionModelsRequest")),
                     entry(ApiModels.WebShellSessionModels.class, List.of("WebShellSessionModels")),
+                    entry(ApiModels.WebShellSkill.class, List.of("WebShellSkill")),
+                    entry(ApiModels.WebShellSessionSkills.class, List.of("WebShellSessionSkills")),
                     entry(ApiModels.WebShellChangeModelRequest.class, List.of("WebShellChangeModelRequest")),
                     entry(ApiModels.WebShellModelChangeResult.class, List.of("WebShellModelChangeResult")),
                     entry(WebShellSessionCapabilities.class,
@@ -318,6 +322,12 @@ class ManagedAgentApiContractTest {
     @Autowired
     private SshWorkspaceStore sshWorkspaces;
 
+    // D7-3: present only where the deployment enables the java_durable
+    // admission profile (JavaDurableAdmissionContractTest).
+    @Autowired(required = false)
+    private com.alibaba.qwen.code.managedagent.session.JavaDurableAdmission
+            javaDurableAdmission;
+
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
@@ -350,7 +360,7 @@ class ManagedAgentApiContractTest {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, actor.actorId().getBytes(StandardCharsets.UTF_8));
         new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
-                new com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector("fixture", new byte[32]))
+                new com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector("fixture", new byte[32]))
                 .requestStorageFence(tenant, "storage", UUID.randomUUID().toString());
         assertThat(CONTRACT.node("/components/schemas/ErrorEnvelope/properties/error/properties/retryable/type").asText())
                 .isEqualTo("boolean");
@@ -452,7 +462,7 @@ class ManagedAgentApiContractTest {
                         || pattern.startsWith("/error")) {
                     continue;
                 }
-                if (!com.alibaba.qwen.code.managedagent.api.PublicSurface
+                if (!com.alibaba.qwen.code.managedagent.security.PublicSurface
                         .covers(pattern)) {
                     uncovered.add(pattern);
                 }
@@ -611,6 +621,9 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getArtifactContent", 401,
                 get("/v1/agents/sessions/%s/artifacts/artifact_missing/content".formatted(sessionId))
                         .header(TENANT, tenant), null);
+        exchange(drift, "getWebShellToolDetails", 401,
+                post("/api/agent/web-shell/v1/tool-details/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
         exchange(drift, "getWebShellToolResult", 401,
                 post("/api/agent/web-shell/v1/tool-results/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
@@ -1222,6 +1235,14 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/directories/query")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\"}");
+        exchange(drift, "webShellWorkspaceFilesQuery", 409,
+                post(WEB_SHELL + "/workspaces/files/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"directory\":\".\"}");
+        exchange(drift, "webShellWorkspaceFilesRead", 409,
+                post(WEB_SHELL + "/workspaces/files/read")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"path\":\"a.txt\",\"expectedScopeRevision\":\"old\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
@@ -1275,6 +1296,12 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
         exchange(drift, "queryWebShellSessionModels", 200,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 200,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionSkills", 401,
+                post(WEB_SHELL + "/session-skills/query").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\"}");
         exchange(drift, "queryWebShellSessionModels", 401,
                 post(WEB_SHELL + "/session-models/query").header(TENANT, workspaceTenant),
@@ -1422,6 +1449,22 @@ class ManagedAgentApiContractTest {
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
                         .header(TENANT, workspaceTenant).principal(actor), null);
         assertThat(json(mcpCatalog).path("servers")).isEmpty();
+        String webMcp = exchange(drift, "queryWebShellSessionMcp", 200,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        assertThat(json(webMcp)).isEqualTo(json(mcpCatalog));
+        exchange(drift, "queryWebShellSessionMcp", 401,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 404,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, otherTenant).principal(actor(otherTenant)),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 403,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor(otherTenant)),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 400,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
+                "{}");
         exchange(drift, "getSessionMcpCatalog", 404,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
                         .header(TENANT, otherTenant), null);
@@ -1516,6 +1559,8 @@ class ManagedAgentApiContractTest {
         String tenant = "contract-registration-" + UUID.randomUUID();
         var operation = sshWorkspaces.begin(tenant, "actor-a", "original", "mac", "/work/project", "Project");
         var intent = sshWorkspaces.claim(tenant, "actor-a", operation.operationId(), "fixture");
+        // D7-2: only a reserved registration parks recovery_blocked.
+        sshWorkspaces.reserve(intent, "fixture", SurfaceAdmissionAcceptanceTest.reservedRegistration(intent, tenant));
         sshWorkspaces.fail(intent, "fixture", "ssh_runtime_identity_conflict", false);
         String body = objectMapper.writeValueAsString(Map.of("operationId", operation.operationId()));
         Map<String, String> drift = new TreeMap<>();
@@ -1832,8 +1877,7 @@ class ManagedAgentApiContractTest {
     /** A committed record body for a synthetic child_run row. */
     private void childRunResource(String tenant, String sessionId,
             String resourceId, String json) {
-        String scope = com.alibaba.qwen.code.managedagent.store
-                .ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         byte[] body = json.getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key,"
                 + " session_scope_key, tenant_id, workspace_id, session_id,"
@@ -1871,7 +1915,7 @@ class ManagedAgentApiContractTest {
                         + " ?, 'child_run', 'run-contract', ?, 1,"
                         + " 'resource-run-contract', 'child_agent', 'running',"
                         + " 'ready', 'session', 'planned', 1, 2)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 recordKey, tenant, sessionId, "d".repeat(64));
         // #13746 F2: the run's committed record names its child Session,
@@ -1995,7 +2039,7 @@ class ManagedAgentApiContractTest {
         // and its view advertises the action.
         String workflowKey = "e".repeat(64);
         jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'child_run', 'run-contract-wf', ?, 1, 'resource-run-contract-wf', 'workflow', 'running', 'ready', 'session', 'planned', 1, 2)",
-                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
                         .sessionScopeKey(tenant, sessionId),
                 workflowKey, tenant, sessionId, "f".repeat(64));
         childRunResource(tenant, sessionId, "resource-run-contract-wf",
@@ -2046,6 +2090,37 @@ class ManagedAgentApiContractTest {
         assertThat(workflowWebShell.get("operationId").asText())
                 .isEqualTo(workflowAdmitted.get("id").asText());
         assertThat(workflowWebShell.get("replayed").asBoolean()).isTrue();
+
+        String automationKey = "1".repeat(64);
+        jdbc.update("UPDATE ma_operation SET state = 'COMPLETED'"
+                + " WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_kind = 'TASK_CANCEL'"
+                + " AND state IN ('PENDING', 'RUNNING')", tenant, sessionId);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create, started_at) VALUES (?, ?, ?, 'workspace-contract', ?, 'automation_run', 'arun-contract', ?, 2, 'resource-automation-contract', 'automation_run', 'running', 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                automationKey, tenant, sessionId, "2".repeat(64));
+        childRunResource(tenant, sessionId, "resource-automation-contract",
+                "{\"scheduleId\":\"asch_" + "1".repeat(32)
+                        + "\",\"occurrenceKey\":\"manual:contract\"}");
+        String automationTask = "task_" + automationKey;
+        assertThat(json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        automationTask).header(TENANT, tenant), null))
+                .get("action_capabilities").toString()).isEqualTo("[\"cancel\"]");
+        JsonNode automationAdmitted = json(exchange(drift, "cancelSessionTask", 202,
+                post(cancelPath, sessionId, automationTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-automation-cancel"), null));
+        assertThat(automationAdmitted.get("type").asText()).isEqualTo("task_cancel");
+        assertThat(automationAdmitted.get("task_id").asText()).isEqualTo(automationTask);
+        JsonNode automationWebShell = json(exchange(drift, "cancelWebShellTask", 202,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-automation-cancel\"}")
+                        .formatted(sessionId, automationTask)));
+        assertThat(automationWebShell.get("operationId").asText())
+                .isEqualTo(automationAdmitted.get("id").asText());
+        assertThat(automationWebShell.get("replayed").asBoolean()).isTrue();
     }
 
     /**
@@ -2362,13 +2437,13 @@ class ManagedAgentApiContractTest {
                         + " 1, 'connected', 'channel-reader', 'ws-channel',"
                         + " '.', '{}', 1000, 1000)", channelTenant);
         String sessionId = UUID.randomUUID().toString();
-        var routeRepository = new com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository(jdbc);
-        routeRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.store.ChannelRouteRepository.ChannelRoute(
+        var routeRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository(jdbc);
+        routeRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.persistence.ChannelRouteRepository.ChannelRoute(
                 channelTenant, "a".repeat(64), "mail-1", 1, "1700:42", 1, sessionId,
                 "alice@example.com", "alice@example.com", "thread-1", "admitted", "chin-" + "a".repeat(64),
                 List.of("sha256:" + "b".repeat(64)), 1000, 1000));
-        var deliveryRepository = new com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository(jdbc);
-        deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository.ChannelDelivery(
+        var deliveryRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository(jdbc);
+        deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.persistence.ChannelDeliveryRepository.ChannelDelivery(
                 channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000));
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "planned", "sending", null);
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "sending", "delivered", "<m1@example.com>");
@@ -2594,11 +2669,17 @@ class ManagedAgentApiContractTest {
         for (JsonNode session : List.of(publicSession, publicListed)) {
             assertThat(session.get("id").asText()).isEqualTo(sessionId);
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
-            assertThat(session.get("capabilities")).isEqualTo(json("""
+            // D7-3: durable_operations appears only where the profile is on.
+            JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
                      "session_archive":true,"session_unarchive":true,"session_delete":true}
-                    """));
+                    """);
+            if (javaDurableAdmission != null) {
+                ((com.fasterxml.jackson.databind.node.ObjectNode) capabilities)
+                        .put("durable_operations", true);
+            }
+            assertThat(session.get("capabilities")).isEqualTo(capabilities);
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
                     .isPositive().isEqualTo(snapshotThrough);
@@ -2612,11 +2693,15 @@ class ManagedAgentApiContractTest {
                 assertThat(other.get("lastSequence").asLong())
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
-                assertThat(other.get("capabilities"))
-                        .isEqualTo(json("""
+                JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false}
-                                """));
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false}
+                                """);
+                if (javaDurableAdmission != null) {
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)
+                            .put("durableOperations", true);
+                }
+                assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }
         }
 
@@ -2692,7 +2777,7 @@ class ManagedAgentApiContractTest {
         assertThat(publishedKib * 1024)
                 .as("published durable-record limit is the enforced one")
                 .isEqualTo(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
-        assertThat(CONTRACT.node("/components/schemas/InputBlock"
+        assertThat(CONTRACT.node("/components/schemas/InputTextBlock"
                 + "/properties/text/maxLength").asLong())
                 .as("published per-block maxLength is the enforced"
                         + " per-block cap")
@@ -2878,6 +2963,200 @@ class ManagedAgentApiContractTest {
                         .contentType(MediaType.APPLICATION_JSON).content(body))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8);
+    }
+
+    // D7-3, profile off (the default): asking for java_durable is refused
+    // before anything is admitted, harness_confirmed answers the legacy
+    // body, and no Session advertises durable_operations.
+    @Test
+    void javaDurableAdmissionIsRefusedWhileTheProfileIsOff() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                javaDurableAdmission == null);
+        String tenant = "contract-durable-off-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        String sessionId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-off-create"),
+                """
+                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
+                """)).get("id").asText();
+        JsonNode session = json(exchange(drift, "getSession", 200,
+                get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, tenant), null));
+        assertThat(session.path("capabilities").has("durable_operations"))
+                .isFalse();
+        for (String body : List.of("""
+                {"type":"agent.session.input.message","admission_profile":"java_durable",
+                 "input":[{"type":"input_text","text":"refused"}]}
+                """, """
+                {"type":"agent.session.cancel","admission_profile":"java_durable",
+                 "turn_id":"turn_absent"}
+                """)) {
+            assertThat(json(exchange(drift, "postSessionEvent", 400,
+                    post("/v1/agents/sessions/{id}/events", sessionId)
+                            .header(TENANT, tenant)
+                            .header(IDEMPOTENCY_KEY, "durable-off-refused"),
+                    body)).at("/error/code").asText())
+                    .isEqualTo("unsupported_feature");
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE"
+                + " tenant_id = ?", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE"
+                + " tenant_id = ? AND operation_kind IN ('SUBMIT_INPUT', 'CANCEL')",
+                Integer.class, tenant)).isZero();
+        JsonNode legacy = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-off-default"),
+                """
+                {"type":"agent.session.input.message","admission_profile":"harness_confirmed",
+                 "input":[{"type":"input_text","text":"default"}]}
+                """));
+        assertThat(legacy.has("operation_id")).isFalse();
+        assertThat(legacy.has("admission_stage")).isFalse();
+        String webSessionId = json(exchange(drift, "webShellCreateSession",
+                202, post(WEB_SHELL + "/sessions/create")
+                        .header(TENANT, tenant),
+                """
+                {"requestId":"durable-off","idempotencyKey":"durable-off-web",
+                 "agentId":"qwen-code","title":"web","input":[]}
+                """)).get("sessionId").asText();
+        assertThat(json(exchange(drift, "webShellSubmitTurn", 400,
+                post(WEB_SHELL + "/turns/submit").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"durable-off-web-submit","sessionId":"%s",
+                 "admissionProfile":"java_durable",
+                 "input":[{"type":"input_text","text":"refused"}]}
+                """.formatted(webSessionId))).at("/error/code").asText())
+                .isEqualTo("unsupported_feature");
+        assertThat(json(exchange(drift, "webShellCancelTurn", 400,
+                post(WEB_SHELL + "/turns/cancel").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"durable-off-web-cancel","sessionId":"%s",
+                 "turnId":"turn_absent","admissionProfile":"java_durable"}
+                """.formatted(webSessionId))).at("/error/code").asText())
+                .isEqualTo("unsupported_feature");
+        assertThat(drift).isEmpty();
+    }
+
+    // D7-3, profile on: an admission that asks for java_durable names the
+    // operation it saved, before the dispatcher runs; a retry under the key
+    // answers the same operation; the default stays harness_confirmed.
+    @Test
+    void javaDurableAdmissionNamesTheOperationItsAdmissionSaved()
+            throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                javaDurableAdmission != null);
+        String tenant = "contract-durable-on-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        String sessionId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-create"),
+                """
+                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
+                """)).get("id").asText();
+        assertThat(json(exchange(drift, "getSession", 200,
+                get("/v1/agents/sessions/{id}", sessionId)
+                        .header(TENANT, tenant), null))
+                .at("/capabilities/durable_operations").asBoolean()).isTrue();
+        String hold = """
+                {"type":"agent.session.input.message","admission_profile":"java_durable",
+                 "input":[{"type":"input_text","text":"hold"}]}
+                """;
+        JsonNode input = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-input"), hold));
+        String operationId = input.get("operation_id").asText();
+        assertThat(operationId).startsWith("op_");
+        assertThat(input.get("admission_stage").asText())
+                .isEqualTo("java_durable");
+        assertThat(input.get("delivery_state").asText()).isEqualTo("pending");
+        assertThat(input.get("replayed").asBoolean()).isFalse();
+        String turnId = input.get("turn_id").asText();
+        int cancels = awaitHeldTurn();
+        // A lost response: the retry names the same operation, whatever its
+        // latest stage; without the profile it keeps the legacy body.
+        JsonNode retry = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-input"), hold));
+        assertThat(retry.get("replayed").asBoolean()).isTrue();
+        assertThat(retry.get("operation_id").asText()).isEqualTo(operationId);
+        assertThat(retry.get("turn_id").asText()).isEqualTo(turnId);
+        JsonNode legacyRetry = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-input"),
+                """
+                {"type":"agent.session.input.message",
+                 "input":[{"type":"input_text","text":"hold"}]}
+                """));
+        assertThat(legacyRetry.get("replayed").asBoolean()).isTrue();
+        assertThat(legacyRetry.has("operation_id")).isFalse();
+        JsonNode cancel = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", sessionId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-cancel"),
+                """
+                {"type":"agent.session.cancel","admission_profile":"java_durable",
+                 "turn_id":"%s"}
+                """.formatted(turnId)));
+        String cancelId = cancel.get("operation_id").asText();
+        assertThat(cancelId).startsWith("op_").isNotEqualTo(operationId);
+        assertThat(cancel.get("admission_stage").asText())
+                .isEqualTo("java_durable");
+        assertThat(cancel.get("delivery_state").asText()).isEqualTo("pending");
+        settleCancelledTurn(tenant, sessionId, cancels);
+        // Each id resolves through the operation query to its own command.
+        for (var expected : Map.of(operationId, "submit_input", cancelId,
+                "cancel").entrySet()) {
+            JsonNode operation = json(exchange(drift, "getSessionCwdOperation",
+                    200, get("/v1/agents/sessions/{id}/operations/{op}",
+                            sessionId, expected.getKey())
+                            .header(TENANT, tenant), null));
+            assertThat(operation.get("type").asText())
+                    .isEqualTo(expected.getValue());
+            assertThat(operation.get("status").asText()).isEqualTo("completed");
+        }
+        // harness_confirmed stays the default with the profile on. The
+        // fixture Harness serves one Turn per Session, so it gets its own.
+        String plainId = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-plain-create"),
+                """
+                {"agent_id":"qwen-code","agent_revision":"1","input":[]}
+                """)).get("id").asText();
+        JsonNode plain = json(exchange(drift, "postSessionEvent", 202,
+                post("/v1/agents/sessions/{id}/events", plainId)
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "durable-on-plain"),
+                """
+                {"type":"agent.session.input.message",
+                 "input":[{"type":"input_text","text":"plain"}]}
+                """));
+        assertThat(plain.has("operation_id")).isFalse();
+        assertThat(plain.has("admission_stage")).isFalse();
+        awaitIdle(tenant, plainId);
+        String webSessionId = json(exchange(drift, "webShellCreateSession",
+                202, post(WEB_SHELL + "/sessions/create")
+                        .header(TENANT, tenant),
+                """
+                {"requestId":"durable-on","idempotencyKey":"durable-on-web",
+                 "agentId":"qwen-code","title":"web","input":[]}
+                """)).get("sessionId").asText();
+        JsonNode web = json(exchange(drift, "webShellSubmitTurn", 202,
+                post(WEB_SHELL + "/turns/submit").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"durable-on-web-submit","sessionId":"%s",
+                 "admissionProfile":"java_durable",
+                 "input":[{"type":"input_text","text":"web"}]}
+                """.formatted(webSessionId)));
+        assertThat(web.get("operationId").asText()).startsWith("op_");
+        assertThat(web.get("admissionStage").asText()).isEqualTo("java_durable");
+        assertThat(web.get("deliveryState").asText()).isEqualTo("pending");
+        awaitIdle(tenant, webSessionId);
+        assertThat(drift).isEmpty();
     }
 
     private String exchange(Map<String, String> drift, String operationId,

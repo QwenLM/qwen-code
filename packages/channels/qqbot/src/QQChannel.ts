@@ -55,9 +55,11 @@ import type {
   GroupMsgToggleEvent,
 } from './types.js';
 import {
+  QQ_FILE_MAX_BYTES,
   QQ_IMAGE_MAX_BYTES,
   QQ_MAX_ATTACHMENTS,
   QQ_VIDEO_MAX_BYTES,
+  QQ_VOICE_MAX_BYTES,
   classifyQQAttachment,
   downloadQQAttachment,
 } from './media.js';
@@ -115,7 +117,7 @@ export function isValidChatId(id: string): boolean {
 
 interface QQInboundMedia {
   attachment: QQMessageAttachment;
-  kind: 'image' | 'video';
+  kind: 'image' | 'video' | 'file' | 'voice';
 }
 
 /** Attachments actually handled: the per-message cap applies everywhere. */
@@ -123,11 +125,16 @@ function cappedMedia(media: QQInboundMedia[]): QQInboundMedia[] {
   return media.slice(0, QQ_MAX_ATTACHMENTS);
 }
 
-/** Placeholder for a media-only message: images win when both are present. */
+/**
+ * Placeholder for a media-only message: images win, then videos, then files,
+ * then voice.
+ */
 function mediaPlaceholder(media: QQInboundMedia[]): string {
-  return cappedMedia(media).some((entry) => entry.kind === 'image')
-    ? '(image)'
-    : '(video)';
+  const selected = cappedMedia(media);
+  if (selected.some((entry) => entry.kind === 'image')) return '(image)';
+  if (selected.some((entry) => entry.kind === 'video')) return '(video)';
+  if (selected.some((entry) => entry.kind === 'file')) return '(file)';
+  return '(voice)';
 }
 
 /** Truncate to a byte budget without splitting a code point. */
@@ -144,7 +151,23 @@ function truncateToBytes(text: string, maxBytes: number): string {
   return result;
 }
 
-function canonicalExtension(kind: 'image' | 'video', mimeType: string): string {
+function canonicalExtension(
+  kind: 'image' | 'video' | 'file' | 'voice',
+  mimeType: string,
+  senderName: string,
+): string {
+  if (kind === 'file') {
+    // QQ reports `content_type: file`, not a MIME type, so there is nothing to
+    // map from. The read tool classifies by extension, so the sender's own
+    // extension is kept — restricted to a safe alphabet, else `.bin`.
+    const extension = senderName.match(/\.([A-Za-z0-9]{1,10})$/)?.[1];
+    return extension ? `.${extension}` : '.bin';
+  }
+  if (kind === 'voice') {
+    // QQ sends no filename for a voice message; the extension comes from the
+    // URL that was downloaded (the converted WAV, else the SILK original).
+    return mimeType === 'audio/silk' ? '.silk' : '.wav';
+  }
   switch (mimeType) {
     case 'image/jpeg':
       return '.jpg';
@@ -161,19 +184,20 @@ function canonicalExtension(kind: 'image' | 'video', mimeType: string): string {
 
 /**
  * Build the on-disk name from the resolved MIME: the read tool classifies
- * media by extension, so a sender-supplied extension must never win. The stem
- * is capped by bytes, not code points, to stay under the 255-byte limit.
+ * media by extension, so a sender-supplied extension must never win — except
+ * for `file`, whose extension is the only classifier available. The stem is
+ * capped by bytes, not code points, to stay under the 255-byte limit.
  */
 function attachmentFileName(
   name: string | undefined,
-  kind: 'image' | 'video',
+  kind: 'image' | 'video' | 'file' | 'voice',
   mimeType: string,
 ): string {
   const base = (name ?? '').split(/[\\/]/).pop() ?? '';
   const stem = base.replace(/\.[^.]*$/, '');
   const cleaned = stem.replace(/[^\p{L}\p{N}._-]/gu, '_').replace(/^\.+/, '_');
   const safeStem = truncateToBytes(cleaned, 200) || `qq_${kind}`;
-  return `${safeStem}${canonicalExtension(kind, mimeType)}`;
+  return `${safeStem}${canonicalExtension(kind, mimeType, base)}`;
 }
 
 export class QQChannel extends ChannelBase {
@@ -2685,15 +2709,39 @@ export class QQChannel extends ChannelBase {
     const attachments: Attachment[] = [];
     for (const { attachment, kind } of selected) {
       try {
+        const maxBytes =
+          kind === 'image'
+            ? QQ_IMAGE_MAX_BYTES
+            : kind === 'video'
+              ? QQ_VIDEO_MAX_BYTES
+              : kind === 'voice'
+                ? QQ_VOICE_MAX_BYTES
+                : QQ_FILE_MAX_BYTES;
+        // A voice message offers the SILK-converted WAV alongside the original
+        // SILK URL; the WAV is preferred because it needs no conversion to be
+        // read.
+        const downloadUrl =
+          kind === 'voice'
+            ? (attachment.voice_wav_url ?? attachment.url)
+            : attachment.url;
         const { buffer, mimeType } = await downloadQQAttachment(
-          attachment.url,
-          kind === 'image' ? QQ_IMAGE_MAX_BYTES : QQ_VIDEO_MAX_BYTES,
+          downloadUrl,
+          maxBytes,
           attachment.content_type,
         );
+        // The download helper cannot label a voice attachment: its declared
+        // `content_type` is the literal `voice`, which resolveMimeType drops to
+        // application/octet-stream. The URL that was fetched decides instead.
+        const attachmentMimeType =
+          kind === 'voice'
+            ? attachment.voice_wav_url
+              ? 'audio/wav'
+              : 'audio/silk'
+            : mimeType;
         const fileName = attachmentFileName(
           attachment.filename,
           kind,
-          mimeType,
+          attachmentMimeType,
         );
         const dir = join(tmpdir(), 'channel-files', randomUUID());
         mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -2705,13 +2753,25 @@ export class QQChannel extends ChannelBase {
           attachments.push({
             type: 'image',
             data: buffer.toString('base64'),
-            mimeType,
+            mimeType: attachmentMimeType,
             fileName,
           });
-          attachments.push({ type: 'file', filePath, mimeType, fileName });
+          attachments.push({
+            type: 'file',
+            filePath,
+            mimeType: attachmentMimeType,
+            fileName,
+          });
           continue;
         }
-        attachments.push({ type: 'video', filePath, mimeType, fileName });
+        // Voice is delivered once, by path: the base layer has no audio content
+        // part, so only the `filePath` line reaches the prompt.
+        attachments.push({
+          type: kind === 'voice' ? 'audio' : kind,
+          filePath,
+          mimeType: attachmentMimeType,
+          fileName,
+        });
       } catch (err) {
         process.stderr.write(
           `[QQ:${this.name}] skipping ${kind} attachment: ${sanitizeLogText(

@@ -67,6 +67,9 @@ public final class HostedHarnessClient implements AutoCloseable {
             Set.of("prepared", "executing", "cancel_requested", "settled",
                     "abandoned");
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
+    // The Harness writes keepalive comments on its events route while no
+    // event is committed; only then can silence bound a stream (#14135).
+    static final String EVENT_KEEPALIVE_FEATURE = "event-keepalive/1";
     // Sessions whose terminal-event record is kept (see terminalPromptIds).
     private static final int TERMINAL_RECORD_LIMIT = 4096;
 
@@ -286,6 +289,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (request.getApprovalSelection() != null
                 && !capabilities().getFeatures().contains("approval-selection/1")) {
             throw new DaemonException("Hosted approval selection is unavailable");
+        }
+        if (request.getApprovalSelection() != null && Boolean.TRUE.equals(request.getApprovalSelection().get("planMode"))
+                && !capabilities().getFeatures().contains("plan-mode/1")) {
+            throw new DaemonException("Hosted Plan mode is unavailable");
+        }
+        if (request.getPromptContent().stream().anyMatch(block -> List.of("image", "resource").contains(block.get("type")))
+                && !capabilities().getFeatures().contains("input-attachments/1")) {
+            throw new DaemonException("Hosted input attachments are unavailable");
         }
         ActivePrompt candidate = new ActivePrompt(request.getPromptId(),
                 request.getPayloadDigest(), session.getHarnessClientId(),
@@ -1605,6 +1616,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         return sseIdleTimeout;
     }
 
+    boolean advertisesEventKeepalive() {
+        return capabilities.getFeatures().contains(EVENT_KEEPALIVE_FEATURE);
+    }
+
     ScheduledThreadPoolExecutor scheduler() {
         return scheduler;
     }
@@ -2561,7 +2576,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         /**
          * Bounds how long a consumer parked in {@code next()} waits without
          * any bytes from the peer before the client force-closes the stream
-         * and {@code next()} fails with a {@link DaemonTransportException}.
+         * and {@code next()} fails with a
+         * {@link HostedHarnessStreamIdleException}.
          * Time between {@code next()} calls is not charged: this watchdog
          * never aborts a caller that pauses consumption (an approval wait
          * handled outside the stream, a slow event handler). The peer does
@@ -2573,10 +2589,12 @@ public final class HostedHarnessClient implements AutoCloseable {
          * early. The bound relies on the peer proving liveness during long
          * silent phases, the way the hosted events route's keepalive
          * comments do every 15 seconds, so a custom bound should stay
-         * comfortably above that interval; against a peer that stays quiet
-         * while a consumer is waiting, legitimate silence is treated as a
-         * dead connection. {@link Duration#ZERO} disables the watchdog for
-         * callers that own the deadline themselves.
+         * comfortably above that interval. The client arms the watchdog
+         * only against a Harness that advertises those keepalives as the
+         * {@code event-keepalive/1} feature: against any other, a read stays
+         * unbounded whatever this value says. {@link Duration#ZERO}
+         * disables the watchdog for callers that own the deadline
+         * themselves.
          */
         public Builder sseIdleTimeout(Duration sseIdleTimeout) {
             if (sseIdleTimeout == null || sseIdleTimeout.isNegative()) {

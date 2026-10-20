@@ -56,6 +56,58 @@ function responseMock(): {
   return { response: response as unknown as Response, set, status, json };
 }
 
+describe('message deletion errors', () => {
+  it('does not certify a later request as persisted while context recovery is required', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reload the session', {
+        errorKind: 'session_history_context_unavailable',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reload the session',
+      code: 'session_history_context_unavailable',
+    });
+  });
+
+  it('preserves committed deletion identities in the 503 response', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reopen the session', {
+        errorKind: 'message_deletion_context_unavailable',
+        deletedGroupIds: ['group'],
+        deletedPromptIds: ['prompt'],
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reopen the session',
+      code: 'message_deletion_context_unavailable',
+      persisted: true,
+      deletedGroupIds: ['group'],
+      deletedPromptIds: ['prompt'],
+    });
+  });
+
+  it('reports invalid stored history separately from invalid selections', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32602, 'Invalid history', {
+        errorKind: 'message_history_invalid',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid history',
+      code: 'message_history_invalid',
+    });
+  });
+});
+
 describe('session attachment upload errors', () => {
   it('records storage failures with their cause without exposing it to clients', () => {
     const { response, status, json } = responseMock();

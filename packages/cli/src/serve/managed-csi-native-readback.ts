@@ -490,7 +490,7 @@ export async function readCurrentCsiNative(
   action: CsiNativeReadbackRequest['action'],
   subject: CsiNativeReadbackRequest['subject'],
 ): Promise<CsiNativeReadbackResponse> {
-  if (boot.version !== 5) throw invalid();
+  if (boot.version !== 5 && boot.version !== 6) throw invalid();
   const request = readCsiNativeRequest({
     protocolVersion: 1,
     requestId: randomUUID(),

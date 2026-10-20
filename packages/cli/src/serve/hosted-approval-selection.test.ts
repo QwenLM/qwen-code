@@ -80,6 +80,31 @@ describe('Hosted approval selection', () => {
       initial,
     );
   });
+  it('keeps Plan independent of the execution policy and requires a positive snapshot revision', async () => {
+    for (const mode of ['default', 'auto-edit', 'yolo']) {
+      expect(
+        parseHostedApprovalSelection({ mode, revision: 1, planMode: true }),
+      ).toEqual({ mode, revision: 1, planMode: true });
+      expect(
+        await hostedTurnApproval(
+          committed({ mode, revision: 1, planMode: true }),
+          'prompt',
+          { mode: 'default', timeoutMs: 1000 },
+        ),
+      ).toEqual({ mode, timeoutMs: 1000 });
+    }
+    for (const planMode of [false, null, 'true', 1])
+      expect(() =>
+        parseHostedApprovalSelection({ mode: 'yolo', revision: 1, planMode }),
+      ).toThrow();
+    expect(() =>
+      parseHostedApprovalSelection({
+        mode: 'yolo',
+        revision: 0,
+        planMode: true,
+      }),
+    ).toThrow();
+  });
   it('refuses mismatched prompts and conflicting revision-zero snapshots', async () => {
     const initial = { mode: 'default' as const, timeoutMs: 1000 };
     await expect(
