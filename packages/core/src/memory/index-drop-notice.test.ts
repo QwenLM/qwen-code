@@ -104,6 +104,38 @@ describe('memory index omission diagnostics', () => {
     expect(buildManagedAutoMemoryPrompt('/tmp/memory', index)).toContain(index);
   });
 
+  it('does not blame a long entry already excluded by the line cap', () => {
+    const docs = Array.from({ length: 200 }, (_, i) => doc(i));
+    docs.push({
+      ...doc(200),
+      relativePath: `reference/${'x'.repeat(25_003)}.md`,
+    });
+    const index = buildManagedAutoMemoryIndex(docs);
+    expect(entries(index)).toHaveLength(165);
+    expect(index).toContain('too many index entries');
+    expect(index).not.toContain('index entries are too long');
+    expect(index).toContain('Dropped 36 of 201 entries:');
+  });
+
+  it('keeps the largest two-set name sample inside the reader notice bound', () => {
+    const docs = Array.from({ length: 205 }, (_, i) => ({
+      ...doc(i),
+      title: `${i} ${'名'.repeat(120)}`,
+    }));
+    const index = buildManagedAutoMemoryIndex(
+      docs.slice(0, 200),
+      undefined,
+      docs.slice(200),
+    );
+    const notice = index.slice(index.indexOf(NOTICE_START));
+    expect(notice).toContain('entries:');
+    expect(notice).toContain('topic files:');
+    expect(notice.length).toBeLessThanOrEqual(1024);
+    expect(buildManagedAutoMemoryPrompt('/tmp/memory', index)).toContain(
+      notice,
+    );
+  });
+
   it('names an oversized early entry rather than assuming omissions form a tail', () => {
     const huge = {
       ...doc(0),

@@ -237,8 +237,9 @@ function assembleIndex(
   if (lines.length > MAX_INDEX_LINES) {
     reasons.push(`${lines.length} entries (limit: ${MAX_INDEX_LINES})`);
   }
-  const charCount = lines.slice(0, MAX_INDEX_LINES).join('\n').length;
-  const hasOverlongEntry = lines.some(
+  const candidates = lines.slice(0, MAX_INDEX_LINES);
+  const charCount = candidates.join('\n').length;
+  const hasOverlongEntry = candidates.some(
     (line) => line.length > MAX_INDEX_LINE_CHARS,
   );
   if (charCount > MAX_INDEX_CHARS) {
