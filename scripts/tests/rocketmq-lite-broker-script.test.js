@@ -98,6 +98,30 @@ async function isFree(port) {
   });
 }
 
+// The holder binds 0.0.0.0, and a bind probe on 127.0.0.1 still succeeds
+// against a wildcard listener (macOS lets the specific address through), so
+// freeing a held port has to be checked the way the script checks it: by the
+// port's listener. A killed holder also closes its socket when it exits, not
+// when the kill returns.
+const listenerOf = (port) =>
+  spawnSync(
+    'sh',
+    [
+      '-c',
+      `lsof -nP -iTCP:${port} -sTCP:LISTEN -t 2> /dev/null || ` +
+        `ss -ltnpH "sport = :${port}" 2> /dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p'`,
+    ],
+    { encoding: 'utf8' },
+  ).stdout.trim();
+
+async function waitForNoListener(port) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (!listenerOf(port)) return true;
+    await new Promise((done) => setTimeout(done, 20));
+  }
+  return false;
+}
+
 // A listener this test owns, in a process of its own like any other user's.
 async function foreignListener(port) {
   const child = spawn(
@@ -304,7 +328,7 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
 
     expect(existsSync(chosen.RMQ_HOLDER_DIR)).toBe(false);
     for (const port of parkedPorts(chosen)) {
-      expect(await isFree(port)).toBe(true);
+      expect(await waitForNoListener(port)).toBe(true);
     }
   }, 200_000);
 });
