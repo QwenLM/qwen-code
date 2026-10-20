@@ -38,14 +38,15 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    # One per-host lock wait plus the locked Maven work it guards. In job
-    # 117729316936 (run 39145783034) this step spent 1515 s waiting behind
-    # sibling holds and then held sdk-java-tests.lock for 925 s while Maven
-    # ran, so the old 40-minute wait lost to a queue of holds rather than to
-    # one hold (#14608). A wait now covers about 5.8 such holds (5400 s); the
-    # ceiling is that wait plus one hold (925 s) plus the ~11 minutes of
-    # uncapped setup, plus margin: 150. Hosted lanes never take the lock and
-    # inherit this ceiling as a bound, not as an expected duration.
+    # 5400 s per lock wait, sized on job 117729316936 (run 39145783034):
+    # 1515 s waiting, 925 s held. The shared 2400 s budget lost run
+    # 39143975111 on both attempts (#14608); the shared 3600 s budget
+    # (#14522) then starved jobs 118003538607 and 118024095341. 5400 s is
+    # 5.8 warm holds (925 s), but only 1.9 of the longest recorded hold
+    # (2846 s), so the margin is thin on a cold host. Ceiling: 90 min wait
+    # + 925 s hold + 11 min setup + 10 min post-lock Maven (Checkstyle x2,
+    # release package, fast-tier pnpm install) + 24 min margin = 150 min.
+    # Hosted lanes skip the lock step and inherit this as a bound.
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -423,23 +424,19 @@ jobs:
     # pool-safe: the database is a per-job service container on a random host
     # port, and every Maven run holds the test job's per-host sdk-java lock.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # 15 covered the hosted lane. On the pool this job takes the per-host
-    # sdk-java lock once per Maven step — two acquisitions today. The
-    # 20-minute per-acquisition budget was sized on one quiet window
-    # (measured run 37743332082: 1193 s of waits against 818 s of holds),
-    # and main run 38258395829 exhausted it — the verify step below starved
-    # a full 1200 s behind cross-run pool traffic and failed before Maven
-    # started (#13989). The 40-minute budget then lost to the same queue: the
-    # sibling test job holds the lock for the sdk-java suite plus the full
-    # managed-agent H2 suite, 925 s of Maven work per hold in job 117729316936
-    # (run 39145783034), and main run 39143975111 starved on both attempts
-    # (#14608). That hold can only arrive cross-run, because this lane runs
-    # only on the full tier and the full-H2 hold sits on the fast tier, so a
-    # wait covers a queue of holds rather than one: 5400 s is about 5.8 of
-    # them. The ceiling is both waits plus the ~50 minutes of measured Maven
-    # work main's ceiling was sized on plus 30 minutes of uncapped setup and
-    # margin: 280. Hosted lanes never take the lock and inherit this ceiling
-    # as a bound, not a duration.
+    # Two lock waits plus the Maven work each guards. The 20-minute wait,
+    # sized on run 37743332082 (1193 s waits / 818 s holds), was exhausted
+    # by run 38258395829's verify step (#13989). The shared 40-minute wait
+    # then lost the sibling test job in run 39143975111 (#14608), and the
+    # 3600 s wait raised by #14522 starved this job twice: jobs 118003538607
+    # and 118024095341 waited 3109 s and 2654 s, then hit the 3600 s wall on
+    # the next Maven step. This lane shares one budget with the sibling,
+    # whose fast-tier hold of the full H2 suite (925 s in job 117729316936)
+    # only arrives cross-run; 5400 s is 5.8 warm holds but 1.9 of the
+    # longest recorded hold (2846 s). Ceiling: 2 x 90 min waits + 3258 s
+    # measured Maven + 10 min setup + 36 min margin = 280 min. Both Maven
+    # steps take the lock on hosted lanes too (they are not environment-
+    # gated), but nothing contends there: a bound, not a duration.
     timeout-minutes: 280
     services:
       mariadb:

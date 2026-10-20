@@ -730,25 +730,35 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     const lockWait = waitSeconds[0];
     // The ceiling must absorb one full wait per acquisition — this job takes
     // the lock once per Maven step — plus the measured Maven work inside the
-    // lock plus the uncapped setup the wait does not cover. Run 39097018288
-    // held the host lock for 47m26s, and the sibling test job's fast-tier leg
-    // now also runs the full managed-agent H2 suite inside the lock: 925 s of
-    // Maven work per hold in job 117729316936 (run 39145783034), where the
-    // step waited 1515 s and held 925 s. Main run 39143975111 then starved on
-    // both attempts because the 40-minute budget lost to a queue of holds, not
-    // to one hold (#14608). The wait now covers about 5.8 such holds, 5400 s.
-    const measuredMavenSeconds = 50 * 60;
-    const mavenSetupSeconds = 30 * 60;
+    // lock plus the uncapped setup. Run 39097018288's two locked steps held
+    // 412 s and 2846 s. The sibling test job's fast-tier leg now also runs
+    // the full managed-agent H2 suite inside the lock: 925 s per hold in job
+    // 117729316936 (run 39145783034), where the step waited 1515 s. Main run
+    // 39143975111 starved on both attempts under the old 2400 s budget
+    // (#14608), and the 3600 s budget from #14522 starved jobs 118003538607
+    // and 118024095341. The wait covers 5.8 warm holds (925 s) but only 1.9
+    // of the longest recorded hold (2846 s).
+    const measuredMavenSeconds = 3258;
+    const mavenSetupSeconds = 10 * 60;
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(
       mavenSteps.length * lockWait + measuredMavenSeconds + mavenSetupSeconds,
     );
     // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus one measured hold (925 s of Maven work in job
-    // 117729316936) plus the ~11 minutes of uncapped setup.
+    // cover one full wait per lock site plus one measured hold (925 s of
+    // Maven work in job 117729316936), the ~11 minutes of uncapped setup,
+    // and the unlocked work the lock does not cover (Checkstyle x2, Build
+    // release artifacts, fast-tier pnpm install).
+    const testLocks = parsed.jobs.test.steps
+      .filter((s) => typeof s.run === 'string')
+      .reduce(
+        (n, s) => n + [...s.run.matchAll(/flock --wait \d+ 9/g)].length,
+        0,
+      );
+    const unlockedMavenSeconds = 10 * 60;
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      lockWait + 925 + 11 * 60,
+      testLocks * lockWait + 925 + 11 * 60 + unlockedMavenSeconds,
     );
   });
 
