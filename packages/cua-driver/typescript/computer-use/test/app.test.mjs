@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ComputerUse } from "../index.js";
+import { appIdentity, resolveApp } from "../app.js";
 
 function result(structured, extra = {}) {
   return { text: "", structuredJson: JSON.stringify(structured), images: [], isError: false, ...extra };
@@ -11,14 +12,15 @@ const document = { window_id: 7, title: "Document", z_index: 2, is_on_screen: tr
 const dialog = { window_id: 9, title: "Save", z_index: 10, is_on_screen: true, is_app_target: false };
 const compactState = '[37] TextField "Name" value="draft"\n[38] StaticText "Keep frame=1,2 and <AXButton> verbatim"';
 
-function fixture({ apps = [{ ...appRecord }], windows = [{ ...document }], observe, action } = {}) {
+function fixture({ platform = "macos", apps = [{ ...appRecord }], windows = [{ ...document }], observe, action, launch } = {}) {
   const calls = [];
   let revision = 0;
   const driver = {
     async listToolsJson() {
-      return JSON.stringify({ platform: "macos", tools: [{ name: "get_window_state", capabilities: ["accessibility.observation_revision.v1"] }] });
+      return JSON.stringify({ platform, tools: [{ name: "get_window_state", capabilities: ["accessibility.observation_revision.v1"] }] });
     },
     async listApps(input) { calls.push({ method: "listApps", input }); return result({ apps }); },
+    async launchApp(input) { calls.push({ method: "launchApp", input }); await launch?.(input); return result({}); },
     async listWindows(input) { calls.push({ method: "listWindows", input }); return result({ windows }); },
     async getWindowState(input) {
       calls.push({ method: "getWindowState", input });
@@ -81,6 +83,48 @@ test("app resolution rejects ambiguous names instead of selecting the first proc
   const { computer } = fixture({ apps: [appRecord, { ...appRecord, pid: 84, bundle_id: "org.other.fixture", launch_path: "/Applications/OtherFixture.app" }] });
   await assert.rejects(computer.getApp("Fixture"), { code: "app_ambiguous" });
   assert.equal((await computer.getApp("org.other.fixture")).name, "Fixture");
+});
+
+test("Windows launcher identity round-trips and preserves shortcut arguments on launch", async () => {
+  const exe = "C:\\Program Files\\Fixture\\fixture.exe";
+  const command = `"${exe}" --profile-directory="CaseSensitive Profile"`;
+  const apps = [{ ...appRecord, bundle_id: exe, launch_path: command, running: false, pid: 0 }];
+  const { computer, calls } = fixture({ platform: "windows", apps, launch: () => {
+    apps[0] = { ...apps[0], running: true, pid: 42 };
+  } });
+  const app = await computer.getApp("Fixture");
+  assert.equal((await app.getState()).window, "Document");
+  assert.equal(calls.find(call => call.method === "launchApp").input.launchPath, command);
+  assert.equal(app, await computer.getApp(exe));
+  await app.click(37);
+  assert.equal(calls.at(-1).method, "windowClick");
+});
+
+test("Windows launcher arguments are opaque while executable aliases remain case insensitive", () => {
+  const exe = "C:\\Fixture\\fixture.exe";
+  const app = { ...appRecord, bundle_id: exe, launch_path: `${exe} --profile=CaseSensitive` };
+  assert.equal(resolveApp([app], appIdentity(app)), app);
+  assert.equal(resolveApp([app], exe.toLowerCase()), app);
+  assert.throws(() => resolveApp([app], app.launch_path.toLowerCase()), { code: "app_not_running" });
+});
+
+test("application identity preserves POSIX syntax and case on every Node host", () => {
+  const app = { ...appRecord, launch_path: "/Nonexistent/Fixture.app/Contents/MacOS/Fixture" };
+  const identity = appIdentity(app);
+  assert.equal(identity, app.launch_path);
+  assert.equal(appIdentity({ ...app, launch_path: identity }), identity);
+  assert.equal(resolveApp([app], identity), app);
+  assert.throws(() => resolveApp([app], identity.toLowerCase()), { code: "app_not_running" });
+});
+
+test("App scroll carries its context without changing exact-window foreground scroll", async () => {
+  const { computer, calls } = fixture({ platform: "linux" });
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  await app.scroll({ x: 2, y: 3 }, { direction: "down", amount: 1 });
+  assert.equal(calls.at(-1).input.appContext, true);
+  await computer.scroll({ pid: 42, windowId: 7, x: 2, y: 3, direction: "down", amount: 1, deliveryMode: "foreground" });
+  assert.equal(calls.at(-1).input.appContext, undefined);
 });
 
 test("macOS app discovery exposes only stable application identity", async () => {
@@ -526,4 +570,59 @@ test("native compact diffs pass through without rewriting literal content", asyn
   const state = await app.getState();
   assert.equal(state.mode, "diff");
   assert.equal(state.text, text);
+});
+
+for (const platform of ["macos", "linux", "windows"]) {
+  test(`${platform} App handles follow native modal targets and refuse old IDs`, async () => {
+    const record = platform === "windows"
+      ? { ...appRecord, bundle_id: undefined, launch_path: "C:\\Program Files\\Fixture\\fixture.exe" }
+      : platform === "linux" ? { ...appRecord, bundle_id: "fixture.desktop", launch_path: "/usr/bin/fixture" } : appRecord;
+    const { computer, calls, windows } = fixture({ platform, apps: [record] });
+    const app = await computer.getApp(record.launch_path);
+    assert.equal(app, await computer.getApp(record.name));
+    if (platform === "windows") assert.equal(app, await computer.getApp("c:/program files/fixture/FIXTURE.EXE"));
+    assert.deepEqual(Object.keys((await computer.listApps())[0]).sort(), ["displayName", "id", "isRunning"]);
+    await app.getState();
+    await app.click(37);
+    assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+    windows[0].is_app_target = false;
+    windows.push({ ...dialog, is_app_target: true });
+    await assert.rejects(app.click(37), { code: "app_observation_required" });
+    assert.equal(calls.filter((call) => call.method === "windowClick").length, 1);
+    assert.equal((await app.getState()).window, "Save");
+    await app.click(37);
+    assert.equal(calls.at(-1).input.windowId, 9n);
+    assert.equal(calls.at(-1).input.elementToken, "rv1:window_9:25");
+    windows.pop();
+    windows[0].is_app_target = true;
+    await assert.rejects(app.click(37), { code: "app_observation_required" });
+    assert.equal((await app.getState()).window, "Document");
+    if (platform !== "macos") {
+      await assert.rejects(app.paste("text"), { code: "unsupported_platform" });
+      await assert.rejects(app.selectText(37, "draft"), { code: "unsupported_platform" });
+    }
+  });
+}
+
+test("App operations on one connection serialize across app handles", async () => {
+  const { ComputerUseApp } = await import("../app.js");
+  let release;
+  let firstDispatched;
+  const dispatched = new Promise((resolve) => { firstDispatched = resolve; });
+  const { computer, apps, calls } = fixture({ action: async () => {
+    if (release) return result({ effect: "confirmed" });
+    firstDispatched();
+    await new Promise((resolve) => { release = resolve; });
+    return result({ effect: "confirmed" });
+  } });
+  const a = await computer.getApp("Fixture");
+  const b = new ComputerUseApp(computer, appRecord, () => {}, async () => apps);
+  const first = a.pressKey("Tab");
+  await dispatched;
+  const second = b.pressKey("Tab");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter((call) => call.method === "windowPressKey").length, 1);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(calls.filter((call) => call.method === "windowPressKey").length, 2);
 });

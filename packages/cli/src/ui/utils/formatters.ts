@@ -11,12 +11,6 @@ import { t } from '../../i18n/index.js';
 export { formatMemoryUsage } from '@qwen-code/qwen-code-core';
 
 /**
- * Formats a duration in milliseconds into a concise, human-readable string (e.g., "1h 5s").
- * It omits any time units that are zero.
- * @param milliseconds The duration in milliseconds.
- * @returns A formatted string representing the duration.
- */
-/**
  * Formats a timestamp into a human-readable relative time string.
  * @param timestamp The timestamp in milliseconds since epoch.
  * @returns A formatted string like "just now", "5 minutes ago", "2 days ago".
@@ -90,6 +84,12 @@ export interface FormatDurationOptions {
   hideTrailingZeros?: boolean;
 }
 
+/**
+ * Formats a duration in milliseconds into a concise, human-readable string (e.g., "1h 5s").
+ * @param milliseconds The duration in milliseconds.
+ * @param options Controls whether whole sub-minute seconds omit the trailing `.0`.
+ * @returns A formatted string representing the duration.
+ */
 export const formatDuration = (
   milliseconds: number,
   options?: FormatDurationOptions,

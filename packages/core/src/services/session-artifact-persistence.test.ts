@@ -16,15 +16,18 @@ import {
   selectActiveSideArtifactRecordUuids,
   type PersistedSessionArtifact,
   type SessionArtifactEventRecordPayload,
+  type SessionArtifactPersistedChange,
   type SessionArtifactSnapshotRecordPayload,
 } from './session-artifact-persistence.js';
+
+const V = SESSION_ARTIFACT_PERSISTENCE_VERSION;
+const T0 = '2026-07-04T00:00:00.000Z';
 
 function artifact(
   sessionId: string,
   url: string,
   overrides: Partial<PersistedSessionArtifact> = {},
 ): PersistedSessionArtifact {
-  const now = '2026-07-04T00:00:00.000Z';
   return {
     id: stableSessionArtifactId(sessionId, `url:${url}`),
     kind: 'link',
@@ -35,24 +38,93 @@ function artifact(
     url,
     retention: 'restorable',
     clientRetained: true,
-    createdAt: now,
-    updatedAt: now,
-    persistedAt: now,
+    createdAt: T0,
+    updatedAt: T0,
+    persistedAt: T0,
     ...overrides,
   };
 }
 
-function event(payload: SessionArtifactEventRecordPayload): {
-  type: 'system';
-  subtype: 'session_artifact_event';
-  systemPayload: SessionArtifactEventRecordPayload;
-} {
-  return {
-    type: 'system',
-    subtype: 'session_artifact_event',
-    systemPayload: payload,
-  };
-}
+/** An artifact of `source-session` at `https://example.com/<path>`. */
+const src = (path: string, overrides?: Partial<PersistedSessionArtifact>) =>
+  artifact('source-session', `https://example.com/${path}`, overrides);
+/** The id a `src(path)` artifact gets in `forked-session`. */
+const forkedId = (path: string) =>
+  stableSessionArtifactId('forked-session', `url:https://example.com/${path}`);
+/** The fallback forked id for a source id without identity metadata. */
+const fallbackId = (sourceId: string) =>
+  stableSessionArtifactId('forked-session', `fork:source-session:${sourceId}`);
+const managedCopy = (contentId: string) => ({
+  kind: 'managed_copy' as const,
+  contentId,
+  sha256: 'a'.repeat(64),
+  sizeBytes: 12,
+  createdAt: T0,
+});
+
+/** Payload header; `sec` is the second of `recordedAt`. */
+const hdr = (sequence: number, sec = 0, sessionId = 's1', v: number = V) => ({
+  v,
+  sessionId,
+  sequence,
+  recordedAt: `2026-07-04T00:00:0${sec}.000Z`,
+});
+const record = (subtype: 'event' | 'snapshot', systemPayload: object) => ({
+  type: 'system',
+  subtype: `session_artifact_${subtype}`,
+  systemPayload,
+});
+const event = (sequence: number, changes: unknown[], sec = 0) =>
+  record('event', { ...hdr(sequence, sec), changes });
+const snapshotRecord = (
+  sequence: number,
+  sec: number,
+  artifacts: PersistedSessionArtifact[],
+  tombstonedIds: string[] = [],
+  v: number = V,
+) =>
+  record('snapshot', {
+    ...hdr(sequence, sec, 's1', v),
+    artifacts,
+    tombstonedIds,
+    stickyEphemeralIds: [],
+  });
+const created = (a: PersistedSessionArtifact) => ({
+  action: 'created' as const,
+  artifactId: a.id,
+  artifact: a,
+});
+const removed = (
+  a: PersistedSessionArtifact,
+  reason: SessionArtifactPersistedChange['reason'],
+) => ({ action: 'removed' as const, artifactId: a.id, artifact: a, reason });
+/** Rebuilds from one sequence-1 event creating `a`. */
+const rebuildCreated = (a: PersistedSessionArtifact, artifactId = a.id) =>
+  rebuildSessionArtifactSnapshot([
+    event(1, [{ action: 'created', artifactId, artifact: a }]),
+  ]);
+
+const forkEvent = (
+  sequence: number,
+  changes: SessionArtifactPersistedChange[],
+  sec = 0,
+  remappedIds?: Map<string, string>,
+) =>
+  remapSessionArtifactPayloadForFork(
+    { ...hdr(sequence, sec, 'source-session'), changes },
+    'source-session',
+    'forked-session',
+    remappedIds,
+  ) as SessionArtifactEventRecordPayload;
+const forkSnapshot = (
+  body: Partial<SessionArtifactSnapshotRecordPayload>,
+  sequence = 7,
+) =>
+  remapSessionArtifactPayloadForFork(
+    { ...hdr(sequence, 0, 'source-session'), ...body },
+    'source-session',
+    'forked-session',
+  ) as SessionArtifactSnapshotRecordPayload;
 
 describe('source snapshots beside artifact history', () => {
   it.each(['session_sources_snapshot', 'custom_title'])(
@@ -104,32 +176,17 @@ describe('session artifact persistence records', () => {
       ...saved,
       id: stableSessionArtifactId('forked-session', `managed:preview-${uuid}`),
     };
-    const base = {
-      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-      sessionId: 'source-session',
-      sequence: 1,
-      recordedAt: saved.createdAt,
-    };
-    const forkEvent = remapSessionArtifactPayloadForFork(
-      {
-        ...base,
-        changes: [{ action: 'created', artifactId: saved.id, artifact: saved }],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactEventRecordPayload;
-    expect(forkEvent.changes[0]?.artifact).toMatchObject(expected);
-    const forkSnapshot = remapSessionArtifactPayloadForFork(
-      {
-        ...base,
-        artifacts: [saved],
-        tombstonedIds: [],
-        stickyEphemeralIds: [],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactSnapshotRecordPayload;
-    expect(forkSnapshot.artifacts).toEqual([expect.objectContaining(expected)]);
+    const forkSaved = (a: PersistedSessionArtifact) =>
+      forkSnapshot(
+        { artifacts: [a], tombstonedIds: [], stickyEphemeralIds: [] },
+        1,
+      );
+    expect(forkEvent(1, [created(saved)]).changes[0]?.artifact).toMatchObject(
+      expected,
+    );
+    expect(forkSaved(saved).artifacts).toEqual([
+      expect.objectContaining(expected),
+    ]);
     expect(getWebPreviewSnapshotId(saved)).toBe(uuid);
 
     const invalidOverrides: Array<Partial<PersistedSessionArtifact>> = [
@@ -148,17 +205,7 @@ describe('session artifact persistence records', () => {
     for (const override of invalidOverrides) {
       const invalid = { ...saved, ...override };
       expect(getWebPreviewSnapshotId(invalid)).toBeUndefined();
-      const rejected = remapSessionArtifactPayloadForFork(
-        {
-          ...base,
-          artifacts: [invalid],
-          tombstonedIds: [],
-          stickyEphemeralIds: [],
-        },
-        'source-session',
-        'forked-session',
-      ) as SessionArtifactSnapshotRecordPayload;
-      expect(rejected.artifacts).toEqual([]);
+      expect(forkSaved(invalid).artifacts).toEqual([]);
     }
   });
 
@@ -171,19 +218,7 @@ describe('session artifact persistence records', () => {
     });
 
     const snapshot = rebuildSessionArtifactSnapshot([
-      {
-        type: 'system',
-        subtype: 'session_artifact_snapshot',
-        systemPayload: {
-          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-          sessionId: 's1',
-          sequence: 1,
-          recordedAt: '2026-07-04T00:00:00.000Z',
-          artifacts: [document],
-          tombstonedIds: [],
-          stickyEphemeralIds: [],
-        },
-      },
+      snapshotRecord(1, 0, [document]),
     ]);
 
     expect(snapshot?.artifacts).toEqual([
@@ -200,38 +235,15 @@ describe('session artifact persistence records', () => {
     const second = artifact('s1', 'https://example.com/second');
 
     const snapshot = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'created', artifactId: first.id, artifact: first },
-          {
-            action: 'created',
-            artifactId: second.id,
-            artifact: { ...second, retention: 'ephemeral' },
-          },
-        ],
-      }),
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 2,
-        recordedAt: '2026-07-04T00:00:01.000Z',
-        changes: [
-          {
-            action: 'removed',
-            artifactId: first.id,
-            artifact: first,
-            reason: 'explicit',
-          },
-        ],
-      }),
+      event(1, [
+        created(first),
+        created({ ...second, retention: 'ephemeral' }),
+      ]),
+      event(2, [removed(first, 'explicit')], 1),
     ]);
 
     expect(snapshot).toMatchObject({
-      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      v: V,
       sessionId: 's1',
       sequence: 2,
       artifacts: [],
@@ -247,29 +259,8 @@ describe('session artifact persistence records', () => {
     });
 
     const snapshot = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'created', artifactId: pinned.id, artifact: pinned },
-        ],
-      }),
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 2,
-        recordedAt: '2026-07-04T00:00:01.000Z',
-        changes: [
-          {
-            action: 'removed',
-            artifactId: pinned.id,
-            artifact: pinned,
-            reason: 'unpin_to_ephemeral',
-          },
-        ],
-      }),
+      event(1, [created(pinned)]),
+      event(2, [removed(pinned, 'unpin_to_ephemeral')], 1),
     ]);
 
     expect(snapshot).toMatchObject({
@@ -287,34 +278,8 @@ describe('session artifact persistence records', () => {
     });
 
     const snapshot = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          {
-            action: 'removed',
-            artifactId: pinned.id,
-            artifact: pinned,
-            reason: 'unpin_to_ephemeral',
-          },
-        ],
-      }),
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 2,
-        recordedAt: '2026-07-04T00:00:01.000Z',
-        changes: [
-          {
-            action: 'removed',
-            artifactId: pinned.id,
-            artifact: pinned,
-            reason: 'eviction',
-          },
-        ],
-      }),
+      event(1, [removed(pinned, 'unpin_to_ephemeral')]),
+      event(2, [removed(pinned, 'eviction')], 1),
     ]);
 
     expect(snapshot).toMatchObject({
@@ -331,26 +296,8 @@ describe('session artifact persistence records', () => {
     const second = artifact('s1', 'https://example.com/second');
 
     const snapshot = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [{ action: 'created', artifactId: first.id, artifact: first }],
-      }),
-      {
-        type: 'system',
-        subtype: 'session_artifact_snapshot',
-        systemPayload: {
-          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-          sessionId: 's1',
-          sequence: 3,
-          recordedAt: '2026-07-04T00:00:02.000Z',
-          artifacts: [second],
-          tombstonedIds: [first.id],
-          stickyEphemeralIds: [],
-        },
-      },
+      event(1, [created(first)]),
+      snapshotRecord(3, 2, [second], [first.id]),
     ]);
 
     expect(snapshot?.artifacts).toEqual([second]);
@@ -363,26 +310,8 @@ describe('session artifact persistence records', () => {
     const stale = artifact('s1', 'https://example.com/stale');
 
     const snapshot = rebuildSessionArtifactSnapshot([
-      {
-        type: 'system',
-        subtype: 'session_artifact_snapshot',
-        systemPayload: {
-          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-          sessionId: 's1',
-          sequence: 10,
-          recordedAt: '2026-07-04T00:00:00.000Z',
-          artifacts: [first],
-          tombstonedIds: [],
-          stickyEphemeralIds: [],
-        },
-      },
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 9,
-        recordedAt: '2026-07-04T00:00:01.000Z',
-        changes: [{ action: 'created', artifactId: stale.id, artifact: stale }],
-      }),
+      snapshotRecord(10, 0, [first]),
+      event(9, [created(stale)], 1),
     ]);
 
     expect(snapshot?.artifacts).toEqual([first]);
@@ -393,69 +322,24 @@ describe('session artifact persistence records', () => {
 
   it('warns when artifact records use an unsupported version', () => {
     const restored = rebuildSessionArtifactSnapshot([
-      {
-        type: 'system',
-        subtype: 'session_artifact_snapshot',
-        systemPayload: {
-          v: SESSION_ARTIFACT_PERSISTENCE_VERSION + 1,
-          sessionId: 's1',
-          sequence: 1,
-          recordedAt: '2026-07-04T00:00:00.000Z',
-          artifacts: [],
-          tombstonedIds: [],
-          stickyEphemeralIds: [],
-        },
-      },
-      {
-        type: 'system',
-        subtype: 'session_artifact_event',
-        systemPayload: {
-          v: SESSION_ARTIFACT_PERSISTENCE_VERSION + 1,
-          sessionId: 's1',
-          sequence: 2,
-          recordedAt: '2026-07-04T00:00:01.000Z',
-          changes: [],
-        },
-      },
-      {
-        type: 'system',
-        subtype: 'session_artifact_snapshot',
-        systemPayload: {
-          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-          sessionId: 's1',
-          sequence: 3,
-          recordedAt: '2026-07-04T00:00:02.000Z',
-          artifacts: [],
-          tombstonedIds: [],
-          stickyEphemeralIds: [],
-        },
-      },
+      snapshotRecord(1, 0, [], [], V + 1),
+      record('event', { ...hdr(2, 1, 's1', V + 1), changes: [] }),
+      snapshotRecord(3, 2, []),
     ]);
 
     expect(restored?.warnings).toEqual([
-      `skipped v${SESSION_ARTIFACT_PERSISTENCE_VERSION + 1} snapshot record (expected v${SESSION_ARTIFACT_PERSISTENCE_VERSION})`,
-      `skipped v${SESSION_ARTIFACT_PERSISTENCE_VERSION + 1} event record (expected v${SESSION_ARTIFACT_PERSISTENCE_VERSION})`,
+      `skipped v${V + 1} snapshot record (expected v${V})`,
+      `skipped v${V + 1} event record (expected v${V})`,
     ]);
   });
 
   it('warns when oversized metadata is stripped during restore', () => {
-    const restored = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          {
-            action: 'created',
-            artifactId: 'oversized-metadata',
-            artifact: artifact('s1', 'https://example.com/metadata', {
-              metadata: { blob: 'x'.repeat(5000) },
-            }),
-          },
-        ],
+    const restored = rebuildCreated(
+      artifact('s1', 'https://example.com/metadata', {
+        metadata: { blob: 'x'.repeat(5000) },
       }),
-    ]);
+      'oversized-metadata',
+    );
 
     expect(restored?.warnings).toEqual([
       `skipped oversized metadata for artifact ${stableSessionArtifactId(
@@ -467,131 +351,67 @@ describe('session artifact persistence records', () => {
   });
 
   it('filters prototype metadata keys during restore normalization', () => {
-    const restored = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          {
-            action: 'created',
-            artifactId: 'prototype-metadata',
-            artifact: artifact('s1', 'https://example.com/prototype', {
-              metadata: JSON.parse(
-                '{"__proto__":null,"constructor":"blocked","prototype":"blocked","safe":"ok"}',
-              ) as Record<string, string | number | boolean | null>,
-            }),
-          },
-        ],
+    const restored = rebuildCreated(
+      artifact('s1', 'https://example.com/prototype', {
+        metadata: JSON.parse(
+          '{"__proto__":null,"constructor":"blocked","prototype":"blocked","safe":"ok"}',
+        ) as Record<string, string | number | boolean | null>,
       }),
-    ]);
+      'prototype-metadata',
+    );
     const metadata = restored?.artifacts[0]?.metadata;
+    const hasOwn = (key: string) =>
+      Object.prototype.hasOwnProperty.call(metadata, key);
 
     expect(metadata).toEqual({ safe: 'ok' });
     expect(Object.getPrototypeOf(metadata)).toBe(Object.prototype);
-    expect(Object.prototype.hasOwnProperty.call(metadata, '__proto__')).toBe(
-      false,
-    );
-    expect(Object.prototype.hasOwnProperty.call(metadata, 'constructor')).toBe(
-      false,
-    );
-    expect(Object.prototype.hasOwnProperty.call(metadata, 'prototype')).toBe(
-      false,
-    );
+    expect(hasOwn('__proto__')).toBe(false);
+    expect(hasOwn('constructor')).toBe(false);
+    expect(hasOwn('prototype')).toBe(false);
   });
 
   it('filters unsafe persisted metadata during restore normalization', () => {
-    const restored = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          {
-            action: 'created',
-            artifactId: 'unsafe-metadata',
-            artifact: artifact('s1', 'https://example.com/unsafe-metadata', {
-              metadata: {
-                safe: 'ok',
-                '<script>': 'blocked',
-                title: 'javascript:alert(1)',
-                hidden: 'zero\u200bwidth',
-              },
-            }),
-          },
-        ],
+    const restored = rebuildCreated(
+      artifact('s1', 'https://example.com/unsafe-metadata', {
+        metadata: {
+          safe: 'ok',
+          '<script>': 'blocked',
+          title: 'javascript:alert(1)',
+          hidden: 'zero​width',
+        },
       }),
-    ]);
+      'unsafe-metadata',
+    );
 
     expect(restored?.artifacts[0]?.metadata).toEqual({ safe: 'ok' });
   });
 
   it('drops malformed content refs during restore normalization', () => {
-    const pinned = artifact('s1', 'https://example.com/pinned', {
-      retention: 'pinned',
-      contentRef: {
-        kind: 'managed_copy',
-        contentId: '../../escape',
-        sha256: 'a'.repeat(64),
-        sizeBytes: 12,
-        createdAt: '2026-07-04T00:00:00.000Z',
-      },
-    });
-
-    const snapshot = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'created', artifactId: pinned.id, artifact: pinned },
-        ],
+    const snapshot = rebuildCreated(
+      artifact('s1', 'https://example.com/pinned', {
+        retention: 'pinned',
+        contentRef: managedCopy('../../escape'),
       }),
-    ]);
+    );
 
     expect(snapshot?.artifacts[0]).not.toHaveProperty('contentRef');
   });
 
   it('drops runtime warning fields during restore normalization', () => {
-    const restored = artifact('s1', 'https://example.com/sticky', {
-      persistenceWarning: 'sticky_override_active',
-    } as Partial<PersistedSessionArtifact>);
-
-    const snapshot = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'created', artifactId: restored.id, artifact: restored },
-        ],
-      }),
-    ]);
+    const snapshot = rebuildCreated(
+      artifact('s1', 'https://example.com/sticky', {
+        persistenceWarning: 'sticky_override_active',
+      } as Partial<PersistedSessionArtifact>),
+    );
 
     expect(snapshot?.artifacts[0]).not.toHaveProperty('persistenceWarning');
   });
 
   it('preserves persisted client ids during restore normalization', () => {
-    const restored = {
+    const snapshot = rebuildCreated({
       ...artifact('s1', 'https://example.com/client-owned'),
       clientId: 'client-a',
-    } satisfies PersistedSessionArtifact;
-
-    const snapshot = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'created', artifactId: restored.id, artifact: restored },
-        ],
-      }),
-    ]);
+    } satisfies PersistedSessionArtifact);
 
     expect(snapshot?.artifacts[0]).toHaveProperty('clientId', 'client-a');
   });
@@ -608,63 +428,35 @@ describe('session artifact persistence records', () => {
     ) {
       metadata.payload = metadata.payload.slice(0, -1);
     }
-    const restored = artifact('s1', 'https://example.com/workspace-budget', {
-      storage: 'workspace',
-      workspacePath: 'budget.txt',
-      url: undefined,
-      sizeBytes: 6,
-      metadata,
-    });
 
-    const snapshot = rebuildSessionArtifactSnapshot([
-      event({
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 's1',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'created', artifactId: restored.id, artifact: restored },
-        ],
+    const snapshot = rebuildCreated(
+      artifact('s1', 'https://example.com/workspace-budget', {
+        storage: 'workspace',
+        workspacePath: 'budget.txt',
+        url: undefined,
+        sizeBytes: 6,
+        metadata,
       }),
-    ]);
+    );
 
     expect(snapshot?.artifacts[0]?.metadata).toMatchObject(metadata);
   });
 
   it('remaps forked payloads to the new session without carrying pinned content', () => {
-    const source = artifact('source-session', 'https://example.com/report', {
+    const source = src('report', {
       retention: 'pinned',
-      contentRef: {
-        kind: 'managed_copy',
-        contentId: 'content-1',
-        sha256: 'a'.repeat(64),
-        sizeBytes: 12,
-        createdAt: '2026-07-04T00:00:00.000Z',
-      },
+      contentRef: managedCopy('content-1'),
       expiresAt: '2026-08-01T00:00:00.000Z',
     });
 
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 5,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'updated', artifactId: source.id, artifact: source },
-        ],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactEventRecordPayload;
+    const remapped = forkEvent(5, [
+      { action: 'updated', artifactId: source.id, artifact: source },
+    ]);
 
     const forked = remapped.changes[0]?.artifact;
     expect(remapped.sessionId).toBe('forked-session');
     expect(forked).toMatchObject({
-      id: stableSessionArtifactId(
-        'forked-session',
-        'url:https://example.com/report',
-      ),
+      id: forkedId('report'),
       retention: 'restorable',
     });
     expect(forked).not.toHaveProperty('contentRef');
@@ -675,156 +467,60 @@ describe('session artifact persistence records', () => {
   });
 
   it('remaps forked tombstone changes when artifact metadata is present', () => {
-    const source = artifact('source-session', 'https://example.com/deleted');
-
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 6,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          {
-            action: 'removed',
-            artifactId: source.id,
-            artifact: source,
-            reason: 'unpin_to_ephemeral',
-          },
-        ],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactEventRecordPayload;
+    const remapped = forkEvent(6, [
+      removed(src('deleted'), 'unpin_to_ephemeral'),
+    ]);
 
     expect(remapped.changes).toEqual([
       expect.objectContaining({
         action: 'removed',
-        artifactId: stableSessionArtifactId(
-          'forked-session',
-          'url:https://example.com/deleted',
-        ),
+        artifactId: forkedId('deleted'),
         reason: 'unpin_to_ephemeral',
       }),
     ]);
-    expect(remapped.changes[0]?.artifact).toMatchObject({
-      id: stableSessionArtifactId(
-        'forked-session',
-        'url:https://example.com/deleted',
-      ),
+    const forked = remapped.changes[0]?.artifact;
+    expect(forked).toMatchObject({
+      id: forkedId('deleted'),
       retention: 'restorable',
     });
-    expect(remapped.changes[0]?.artifact).not.toHaveProperty('restoreState');
-    expect(remapped.changes[0]?.artifact).not.toHaveProperty(
-      'persistenceWarning',
-    );
-    expect(remapped.changes[0]?.artifact).not.toHaveProperty('clientId');
+    expect(forked).not.toHaveProperty('restoreState');
+    expect(forked).not.toHaveProperty('persistenceWarning');
+    expect(forked).not.toHaveProperty('clientId');
   });
 
   it('drops unsafe forked event artifact payloads but keeps safe identity tombstones', () => {
-    const unsafe = artifact(
-      'source-session',
-      'https://example.com/deleted-unsafe-event',
-      {
-        metadata: { apiKey: 'redacted' },
-        clientId: 'legacy-owner',
-      },
-    );
+    const unsafe = src('deleted-unsafe-event', {
+      metadata: { apiKey: 'redacted' },
+      clientId: 'legacy-owner',
+    });
 
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 6,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          {
-            action: 'removed',
-            artifactId: unsafe.id,
-            artifact: unsafe,
-            reason: 'explicit',
-          },
-        ],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactEventRecordPayload;
-
-    expect(remapped.changes).toEqual([
+    expect(forkEvent(6, [removed(unsafe, 'explicit')]).changes).toEqual([
       {
         action: 'removed',
-        artifactId: stableSessionArtifactId(
-          'forked-session',
-          'url:https://example.com/deleted-unsafe-event',
-        ),
+        artifactId: forkedId('deleted-unsafe-event'),
         reason: 'explicit',
       },
     ]);
   });
 
   it('drops forked event artifact payloads with encoded secret fragments', () => {
-    const unsafe = artifact(
-      'source-session',
-      'https://example.com/report#access%5Ftoken=sk-abcdefghijkl',
-    );
+    const unsafe = src('report#access%5Ftoken=sk-abcdefghijkl');
 
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 6,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          {
-            action: 'created',
-            artifactId: unsafe.id,
-            artifact: unsafe,
-          },
-        ],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactEventRecordPayload;
-
-    expect(remapped.changes).toEqual([]);
+    expect(forkEvent(6, [created(unsafe)]).changes).toEqual([]);
   });
 
   it('remaps forked tombstone changes that omit artifact metadata', () => {
-    const source = artifact('source-session', 'https://example.com/deleted');
+    const source = src('deleted');
 
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 7,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'created', artifactId: source.id, artifact: source },
-          {
-            action: 'removed',
-            artifactId: source.id,
-            reason: 'explicit',
-          },
-        ],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactEventRecordPayload;
+    const remapped = forkEvent(7, [
+      created(source),
+      { action: 'removed', artifactId: source.id, reason: 'explicit' },
+    ]);
 
-    const forkedId = stableSessionArtifactId(
-      'forked-session',
-      'url:https://example.com/deleted',
-    );
+    const id = forkedId('deleted');
     expect(remapped.changes).toMatchObject([
-      {
-        action: 'created',
-        artifactId: forkedId,
-        artifact: { id: forkedId },
-      },
-      {
-        action: 'removed',
-        artifactId: forkedId,
-        reason: 'explicit',
-      },
+      { action: 'created', artifactId: id, artifact: { id } },
+      { action: 'removed', artifactId: id, reason: 'explicit' },
     ]);
   });
 
@@ -834,129 +530,54 @@ describe('session artifact persistence records', () => {
       'fork:source-session:metadata-less',
     );
 
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 7,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [{ action: 'updated', artifactId: sourceId }],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactEventRecordPayload;
+    const remapped = forkEvent(7, [
+      { action: 'updated', artifactId: sourceId },
+    ]);
 
     expect(remapped.changes).toEqual([
-      {
-        action: 'updated',
-        artifactId: stableSessionArtifactId(
-          'forked-session',
-          `fork:source-session:${sourceId}`,
-        ),
-      },
+      { action: 'updated', artifactId: fallbackId(sourceId) },
     ]);
   });
 
   it('reuses remapped ids across separate forked event payloads', () => {
-    const source = artifact(
-      'source-session',
-      'https://example.com/deleted-later',
-    );
+    const source = src('deleted-later');
     const remappedIds = new Map<string, string>();
-    const forkedId = stableSessionArtifactId(
-      'forked-session',
-      'url:https://example.com/deleted-later',
-    );
 
-    remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 7,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes: [
-          { action: 'created', artifactId: source.id, artifact: source },
-        ],
-      },
-      'source-session',
-      'forked-session',
+    forkEvent(7, [created(source)], 0, remappedIds);
+    const remappedRemove = forkEvent(
+      8,
+      [{ action: 'removed', artifactId: source.id, reason: 'explicit' }],
+      1,
       remappedIds,
     );
-    const remappedRemove = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 8,
-        recordedAt: '2026-07-04T00:00:01.000Z',
-        changes: [
-          {
-            action: 'removed',
-            artifactId: source.id,
-            reason: 'explicit',
-          },
-        ],
-      },
-      'source-session',
-      'forked-session',
-      remappedIds,
-    ) as SessionArtifactEventRecordPayload;
 
     expect(remappedRemove.changes).toEqual([
       {
         action: 'removed',
-        artifactId: forkedId,
+        artifactId: forkedId('deleted-later'),
         reason: 'explicit',
       },
     ]);
   });
 
   it('remaps forked snapshot payloads and marker state', () => {
-    const source = artifact('source-session', 'https://example.com/snapshot', {
+    const source = src('snapshot', {
       retention: 'pinned',
-      contentRef: {
-        kind: 'managed_copy',
-        contentId: 'content-1',
-        sha256: 'a'.repeat(64),
-        sizeBytes: 12,
-        createdAt: '2026-07-04T00:00:00.000Z',
-      },
+      contentRef: managedCopy('content-1'),
       expiresAt: '2026-08-01T00:00:00.000Z',
     });
-    const deleted = artifact(
-      'source-session',
-      'https://example.com/deleted-in-source',
-    );
-    const sticky = artifact(
-      'source-session',
-      'https://example.com/ephemeral-in-source',
-    );
+    const deleted = src('deleted-in-source');
+    const sticky = src('ephemeral-in-source');
 
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 7,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        artifacts: [source],
-        tombstonedIds: [source.id, deleted.id],
-        stickyEphemeralIds: [source.id, sticky.id],
-        markerArtifacts: [deleted, sticky],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactSnapshotRecordPayload;
-    const forkedSourceId = stableSessionArtifactId(
-      'forked-session',
-      'url:https://example.com/snapshot',
-    );
-    const forkedDeletedId = stableSessionArtifactId(
-      'forked-session',
-      'url:https://example.com/deleted-in-source',
-    );
-    const forkedStickyId = stableSessionArtifactId(
-      'forked-session',
-      'url:https://example.com/ephemeral-in-source',
-    );
+    const remapped = forkSnapshot({
+      artifacts: [source],
+      tombstonedIds: [source.id, deleted.id],
+      stickyEphemeralIds: [source.id, sticky.id],
+      markerArtifacts: [deleted, sticky],
+    });
+    const forkedSourceId = forkedId('snapshot');
+    const forkedDeletedId = forkedId('deleted-in-source');
+    const forkedStickyId = forkedId('ephemeral-in-source');
 
     expect(remapped.sessionId).toBe('forked-session');
     expect(remapped.tombstonedIds).toEqual([forkedSourceId, forkedDeletedId]);
@@ -979,121 +600,63 @@ describe('session artifact persistence records', () => {
   });
 
   it('drops unsafe snapshot marker artifacts but keeps safe identity tombstones', () => {
-    const unsafe = artifact(
-      'source-session',
-      'https://example.com/deleted-unsafe',
-      {
-        metadata: { apiKey: 'redacted' },
-      },
-    );
-    const safe = artifact(
-      'source-session',
-      'https://example.com/deleted-safe',
-      {
-        metadata: { label: 'safe' },
-      },
-    );
+    const unsafe = src('deleted-unsafe', { metadata: { apiKey: 'redacted' } });
+    const safe = src('deleted-safe', { metadata: { label: 'safe' } });
 
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 7,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        artifacts: [],
-        tombstonedIds: [unsafe.id, safe.id],
-        markerArtifacts: [unsafe, safe],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactSnapshotRecordPayload;
+    const remapped = forkSnapshot({
+      artifacts: [],
+      tombstonedIds: [unsafe.id, safe.id],
+      markerArtifacts: [unsafe, safe],
+    });
 
-    const forkedSafeId = stableSessionArtifactId(
-      'forked-session',
-      'url:https://example.com/deleted-safe',
-    );
-    const forkedUnsafeId = stableSessionArtifactId(
-      'forked-session',
-      'url:https://example.com/deleted-unsafe',
-    );
-    expect(remapped.tombstonedIds).toEqual([forkedUnsafeId, forkedSafeId]);
+    expect(remapped.tombstonedIds).toEqual([
+      forkedId('deleted-unsafe'),
+      forkedId('deleted-safe'),
+    ]);
     expect(remapped.markerArtifacts).toEqual([
       expect.objectContaining({
-        id: forkedSafeId,
+        id: forkedId('deleted-safe'),
         metadata: { label: 'safe' },
       }),
     ]);
   });
 
   it('falls back for snapshot marker ids without identity metadata', () => {
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 7,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        artifacts: [],
-        tombstonedIds: ['deleted-in-source'],
-        stickyEphemeralIds: ['ephemeral-in-source'],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactSnapshotRecordPayload;
+    const remapped = forkSnapshot({
+      artifacts: [],
+      tombstonedIds: ['deleted-in-source'],
+      stickyEphemeralIds: ['ephemeral-in-source'],
+    });
 
-    expect(remapped.tombstonedIds).toEqual([
-      stableSessionArtifactId(
-        'forked-session',
-        'fork:source-session:deleted-in-source',
-      ),
-    ]);
+    expect(remapped.tombstonedIds).toEqual([fallbackId('deleted-in-source')]);
     expect(remapped.stickyEphemeralIds).toEqual([
-      stableSessionArtifactId(
-        'forked-session',
-        'fork:source-session:ephemeral-in-source',
-      ),
+      fallbackId('ephemeral-in-source'),
     ]);
     expect(remapped.markerArtifacts).toBeUndefined();
   });
 
   it('does not keep unremapped source marker artifacts in forked snapshots', () => {
-    const staleMarker = artifact(
-      'source-session',
-      'https://example.com/stale-marker',
-    );
-    const remapped = remapSessionArtifactPayloadForFork(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'source-session',
-        sequence: 7,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        artifacts: [],
-        tombstonedIds: ['deleted-in-source'],
-        stickyEphemeralIds: [],
-        markerArtifacts: [staleMarker],
-      },
-      'source-session',
-      'forked-session',
-    ) as SessionArtifactSnapshotRecordPayload;
+    const remapped = forkSnapshot({
+      artifacts: [],
+      tombstonedIds: ['deleted-in-source'],
+      stickyEphemeralIds: [],
+      markerArtifacts: [src('stale-marker')],
+    });
 
     expect(remapped.markerArtifacts).toBeUndefined();
   });
 
   it('normalizes inbound snapshot payloads with bounded artifacts and sticky ids', () => {
     const warnings: string[] = [];
-    const artifacts = Array.from({ length: 501 }, (_, index) =>
-      artifact('session-A', `https://example.com/${index}`),
-    );
-    const markerArtifacts = Array.from({ length: 1001 }, (_, index) =>
-      artifact('session-A', `https://example.com/marker-${index}`),
-    );
+    const artifacts = (length: number, prefix = '') =>
+      Array.from({ length }, (_, index) =>
+        artifact('session-A', `https://example.com/${prefix}${index}`),
+      );
     const snapshot = normalizeSnapshotPayload(
       {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'session-A',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        artifacts,
-        markerArtifacts,
+        ...hdr(1, 0, 'session-A'),
+        artifacts: artifacts(501),
+        markerArtifacts: artifacts(1001, 'marker-'),
         stickyEphemeralIds: Array.from(
           { length: 501 },
           (_, index) => `sticky-${index}`,
@@ -1114,23 +677,12 @@ describe('session artifact persistence records', () => {
 
   it('normalizes inbound event payloads with bounded changes', () => {
     const warnings: string[] = [];
-    const changes = Array.from({ length: 801 }, (_, index) => {
-      const item = artifact('session-A', `https://example.com/event-${index}`);
-      return {
-        action: 'created' as const,
-        artifactId: item.id,
-        artifact: item,
-      };
-    });
+    const changes = Array.from({ length: 801 }, (_, index) =>
+      created(artifact('session-A', `https://example.com/event-${index}`)),
+    );
 
     const normalized = normalizeEventPayload(
-      {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'session-A',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
-        changes,
-      },
+      { ...hdr(1, 0, 'session-A'), changes },
       warnings,
     );
 
@@ -1141,21 +693,10 @@ describe('session artifact persistence records', () => {
   it('warns when inbound artifact payloads are malformed', () => {
     const warnings: string[] = [];
 
-    expect(
-      normalizeSnapshotPayload(
-        { v: SESSION_ARTIFACT_PERSISTENCE_VERSION },
-        warnings,
-      ),
-    ).toBeUndefined();
+    expect(normalizeSnapshotPayload({ v: V }, warnings)).toBeUndefined();
     expect(
       normalizeEventPayload(
-        {
-          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-          sessionId: 'session-A',
-          sequence: 1,
-          recordedAt: '2026-07-04T00:00:00.000Z',
-          changes: [{ action: 'created' }],
-        },
+        { ...hdr(1, 0, 'session-A'), changes: [{ action: 'created' }] },
         warnings,
       )?.changes,
     ).toEqual([]);
@@ -1169,10 +710,7 @@ describe('session artifact persistence records', () => {
   it('drops overlong persisted string array items', () => {
     const snapshot = normalizeSnapshotPayload(
       {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'session-A',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
+        ...hdr(1, 0, 'session-A'),
         artifacts: [],
         tombstonedIds: ['deleted', 'x'.repeat(201)],
         stickyEphemeralIds: ['sticky', 'y'.repeat(201)],
@@ -1188,10 +726,7 @@ describe('session artifact persistence records', () => {
     const warnings: string[] = [];
     const normalized = normalizeSnapshotPayload(
       {
-        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-        sessionId: 'session-A',
-        sequence: 1,
-        recordedAt: '2026-07-04T00:00:00.000Z',
+        ...hdr(1, 0, 'session-A'),
         artifacts: [
           {
             ...artifact('session-A', 'https://example.com/metadata'),

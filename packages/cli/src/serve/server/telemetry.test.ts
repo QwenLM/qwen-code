@@ -476,6 +476,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes tool-call reads to a stable workspace route and decoded session', () => {
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq('GET', '/workspaces/ws/session/session%2F1/tool-calls'),
+      ),
+    ).toEqual({
+      route: 'GET /workspaces/:workspace/session/:id/tool-calls',
+      sessionId: 'session/1',
+    });
+  });
+
   it('attributes workspace session-info reads to the shared session-info route', () => {
     const mw = daemonTelemetryMiddleware(() => '/ws');
     const res = mockRes(200);
@@ -670,23 +681,26 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     }
   });
 
-  it('normalizes the plural workspace upload route to a stable route label', () => {
-    const mw = daemonTelemetryMiddleware(() => '/ws');
-    const res = mockRes(200);
-    mw(
-      mockReq('POST', '/workspaces/ws-secondary/file/upload'),
-      res,
-      vi.fn() as unknown as NextFunction,
-    );
-    res.emit('finish');
-    expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        method: 'POST',
-        route: 'POST /workspace/file/upload',
-      }),
-      expect.any(Function),
-    );
-  });
+  it.each(['upload', 'delete'])(
+    'normalizes the plural workspace %s route to a stable route label',
+    (operation) => {
+      const mw = daemonTelemetryMiddleware(() => '/ws');
+      const res = mockRes(200);
+      mw(
+        mockReq('POST', `/workspaces/ws-secondary/file/${operation}`),
+        res,
+        vi.fn() as unknown as NextFunction,
+      );
+      res.emit('finish');
+      expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          method: 'POST',
+          route: `POST /workspace/file/${operation}`,
+        }),
+        expect.any(Function),
+      );
+    },
+  );
 
   it('attributes plural workspace voice requests to the selected workspace', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
@@ -1127,17 +1141,19 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 74 unique routes with the audited 72/2 attribution split', () => {
+  // Shell runtime and message group routes resolve the live session owner
+  // in the handler, preserving the two pre-resolved routes.
+  it('contains 83 unique routes with the audited 81/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(74);
-    expect(new Set(keys).size).toBe(74);
+    expect(keys).toHaveLength(83);
+    expect(new Set(keys).size).toBe(83);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(72);
+    ).toHaveLength(81);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

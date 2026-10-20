@@ -23,7 +23,11 @@ model, approval, dictation, and send controls. Hide the width toggle on touch;
 retain the context-usage control when enabled by the host. Put workspace
 selection and Git controls
 in a separate context row so starting a task in a particular workspace or
-branch remains possible. Preserve host-provided toolbar slots.
+branch remains possible. The row's measured height, two lines when it wraps,
+is added to the composer's height cap, so it does not come out of the
+attachments' room when a soft keyboard shrinks the viewport. The rows stack
+without overlapping touch targets.
+Preserve host-provided toolbar slots.
 
 Use 44px touch targets and wrap controls on very narrow viewports rather than
 clip them. Keep Plan as an active-state chip. While a turn runs, stop remains
@@ -31,12 +35,13 @@ available alongside send when there is a draft; stopping never clears that
 draft. Voice capture retains its existing reduced toolbar and hides the context and
 editing rows.
 
-Add a small editing row with previous/next input history on the left, expand,
-and, while the textarea is focused, hide keyboard. The history arrows call the
-existing navigation actions directly: up recalls older inputs, down recalls
-newer inputs and then restores the draft saved before browsing. They never
-submit. History search in Add remains available for finding a specific input.
-The row wraps on extra-narrow screens and its history controls are disabled with the
+Add a small editing row with expand and, while the textarea is focused, hide
+keyboard. Its leading slots stay free unless there is something contextual to
+show: the labelled history button when the host has no Add entry, and the
+Shell toggle. Recall goes through the history search panel, which lists and
+filters past inputs. One-entry-at-a-time stepping is not offered on touch,
+where the plain textarea restore cannot rebuild inline tag chips.
+The row wraps on extra-narrow screens and its controls are disabled with the
 composer. Hide keyboard blurs without returning focus through the composer
 surface click handler. A modal expanded editor edits the same controlled draft,
 preserves its selection when returning, and does not submit when closed. Its
@@ -76,6 +81,19 @@ Hosts without Add retain Shell and history-search buttons in the editing row;
 this fallback does not enable file ingestion or references.
 
 The history search must have a visible close action and remain touch usable.
+It opens upward from the composer, so its height is also capped by the room
+between the composer and the top of the visible chat area. When even its
+minimum height does not fit, it overlaps the top of the composer instead of
+going under the header, so its search field and close action stay on screen
+with a soft keyboard open. The same positioning applies to desktop history
+search: when a short window leaves insufficient room above the composer,
+the panel overlaps its top so the search field stays visible. Desktop editing
+and keyboard shortcuts retain their existing behavior.
+The bound is the top of the lowest ancestor that
+clips overflow. A host whose own header overlays the shell without clipping
+it must declare `--web-shell-popover-safe-top`; that variable is also how a
+host opts out of the default clearance, and a declared `0px` is honoured
+rather than swallowed.
 File selection must stay in a user gesture, and deferred insertions must run
 after the drawer releases focus. Expanded editing must preserve attachment
 and reference state in the shared composer, including IME input. Image/file
@@ -99,8 +117,18 @@ harness for deterministic UI coverage. Verify local bundled UI when available.
 Record any runtime limitations separately from mocked browser results.
 
 - At phone widths, the old action grid and simulated keyboard keys are absent;
-  labelled history arrows remain in the editing row. Toolbar
-  actions are reachable with no horizontal overflow. Desktop behavior remains.
+  the editing row keeps only its contextual and editing controls. Toolbar
+  actions are reachable with no horizontal overflow. Desktop toolbar behavior
+  remains.
+- Desktop Ctrl+R keeps the search field visible and focused in a short window
+  (1280x300), overlapping the composer when necessary. Escape preserves the
+  draft and returns focus to the editor. With enough room, the panel remains
+  above the composer.
+- With a soft keyboard open at a Pixel 7 keyboard height (about 412x450),
+  attachments stay reachable beside the context row, and the history search
+  field and close action stay reachable below the header. Below roughly 430px
+  of viewport height the composer is already at its cap, so the attachments
+  strip shrinks toward a sliver.
 - Stop works with a pending draft and keeps the draft; send still queues it.
 - Hide keyboard blurs the editor; expand/edit/Done preserves text, selection,
   attachments, and references. Switching sessions cannot leak expanded drafts.
@@ -109,9 +137,10 @@ Record any runtime limitations separately from mocked browser results.
   actions remain honest, and Plan toggles exactly once.
 - Commands and skills preserve existing drafts and tags; history can be opened,
   selected, or dismissed. Live voice remains accessible.
-- History arrows recall older/newer inputs and restore a multiline draft
-  without submitting. Empty history is inert, and both arrows remain reachable
-  with 44px targets at 390px and 240px widths.
+- History search restores a selected input and the draft focus without
+  submitting. The editing row's always-rendered controls (Expand editor, and
+  Hide keyboard while the textarea is focused) keep a 44px target and stay
+  inside the viewport at 390px and 240px widths.
 - Run focused unit/browser tests, build, typecheck, bundle, and two clean
   self-audit passes plus independent review.
 

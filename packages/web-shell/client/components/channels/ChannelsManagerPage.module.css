@@ -39,12 +39,6 @@
   padding: 20px 24px 32px;
 }
 
-.intro {
-  color: var(--muted-foreground);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
 .toolbar {
   display: flex;
   align-items: center;
@@ -52,42 +46,23 @@
   gap: 12px;
 }
 
-.count {
-  min-width: 0;
-  color: var(--foreground);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.4;
-}
-
-.toolbarActions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-}
-
 .workspacePicker {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 8px;
-}
-
-.workspacePickerLabel {
-  color: var(--muted-foreground);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
 }
 
 .workspacePickerTrigger {
   width: 220px;
+  min-width: 0;
   min-height: 34px;
   background: var(--background);
 }
 
 .refreshButton {
   min-height: 34px;
+  margin-inline-start: auto;
 }
 
 .loadingState {
@@ -129,7 +104,7 @@
 
 .emptyState {
   min-height: 140px;
-  border: 0;
+  border: 1px solid var(--border);
   background: transparent;
 }
 
@@ -357,9 +332,8 @@
       flex-direction: column;
     }
 
-    .toolbarActions {
-      align-items: stretch;
-      flex-wrap: wrap;
+    .refreshButton {
+      margin-inline-start: 0;
     }
 
     .workspacePicker {

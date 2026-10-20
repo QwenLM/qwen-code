@@ -23,6 +23,12 @@ const BUFFER = '\u2592'; // ▒ - medium shade (autocompact buffer)
 const EMPTY = '\u2591'; // ░ - light shade (free space)
 
 const CONTENT_WIDTH = 56;
+/** Label column of a category row; a wider translated label wraps the row. */
+export const CATEGORY_LABEL_WIDTH = 24;
+/** Label column of a compaction-threshold row. */
+export const THRESHOLD_LABEL_WIDTH = 22;
+/** Label column of a loaded skill's body sub-row. */
+export const BODY_LOADED_LABEL_WIDTH = 30;
 
 interface ContextUsageProps {
   modelName: string;
@@ -130,7 +136,7 @@ const CategoryRow: React.FC<{
       <Box width={2}>
         <Text color={symbolColor || theme.text.secondary}>{symbol}</Text>
       </Box>
-      <Box width={24}>
+      <Box width={CATEGORY_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{label}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -160,7 +166,7 @@ const ThresholdRow: React.FC<{
           {isCurrent ? '▶' : ' '}
         </Text>
       </Box>
-      <Box width={22}>
+      <Box width={THRESHOLD_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{label}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -230,7 +236,7 @@ const CompactionThresholds: React.FC<{
       <Box width={2}>
         <Text> </Text>
       </Box>
-      <Box width={22}>
+      <Box width={THRESHOLD_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{t('Current tier')}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -295,7 +301,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
   );
   // Sort skills: loaded first, then by total token cost descending
   const sortedSkills = [...skills].sort((a, b) => {
-    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
     const aTotal = a.tokens + (a.bodyTokens ?? 0);
     const bTotal = b.tokens + (b.bodyTokens ?? 0);
     return bTotal - aTotal;
@@ -320,13 +326,20 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           {/* No API data yet — show hint instead of progress bar */}
           <Box marginBottom={1}>
             <Text color={theme.status.warning} italic>
-              {t('No API response yet. Send a message to see actual usage.')}
+              {breakdown.messages > 0
+                ? t(
+                    'No provider usage yet. These are local estimates, including the conversation.',
+                  )
+                : t('No API response yet. Send a message to see actual usage.')}
             </Text>
           </Box>
 
-          {/* Estimated overhead categories */}
+          {/* Estimated categories; they include the conversation after
+              /model, /restore or a resume (#12235). */}
           <Text bold color={theme.text.primary}>
-            {t('Estimated pre-conversation overhead')}
+            {breakdown.messages > 0
+              ? t('Estimated usage, including the conversation')
+              : t('Estimated pre-conversation overhead')}
           </Text>
           <Text color={theme.text.secondary}>
             {t('Model')}: {modelName}
@@ -468,8 +481,10 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           symbolColor={theme.text.accent}
         />
       )}
-      {/* Show Messages whenever a numeric token count is available. */}
-      {hasTokenCount && (
+      {/* Show Messages whenever a token count is available, or when an
+          estimated history (after /model, /restore or a resume) drives the
+          tier. */}
+      {(hasTokenCount || breakdown.messages > 0) && (
         <CategoryRow
           symbol={FILLED}
           label={t('Messages')}
@@ -561,9 +576,6 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
                       <Text color={theme.text.link}>
                         {truncateName(skill.name, DETAIL_NAME_MAX_LEN)}
                       </Text>
-                      {skill.loaded && (
-                        <Text color={theme.status.success}> {t('active')}</Text>
-                      )}
                     </Box>
                     <Box flexGrow={1} justifyContent="flex-end">
                       <Text color={theme.text.secondary}>
@@ -576,7 +588,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
                     skill.bodyTokens > 0 && (
                       <Box width={CONTENT_WIDTH} paddingLeft={4}>
                         <Text color={theme.text.secondary}>{'  \u2514'} </Text>
-                        <Box width={30}>
+                        <Box width={BODY_LOADED_LABEL_WIDTH}>
                           <Text color={theme.text.secondary} italic>
                             {t('body loaded')}
                           </Text>

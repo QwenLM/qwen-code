@@ -27,9 +27,13 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { stateIdOf } from './lib/local-anchor.js';
+import { cacheCommitCommand } from './cache-commit.js';
 import { captureLocalCommand } from './capture-local.js';
 import { buildChunkAgentPrompt } from './agent-prompt.js';
-import { isolateHostGitConfig } from './lib/test-utils.js';
+import {
+  isLedgerOnlyCandidate,
+  isolateHostGitConfig,
+} from './lib/test-utils.js';
 import type { IncrementalScope } from './lib/report.js';
 
 // The refusal contract is "every reason is said out loud" and SKILL.md
@@ -63,7 +67,14 @@ function write(rel: string, content: string): void {
   writeFileSync(abs, content);
 }
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
+  // A candidate anchors only under a published identity (without one it
+  // promotes as the findings ledger alone), so the fixtures publish one;
+  // `capture` overrides it per test through its `model` argument.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
   stderrLines.length = 0;
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-loc-inc-')));
   cwd = process.cwd();
@@ -77,6 +88,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (savedIdentity === undefined)
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  else process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
   process.chdir(cwd);
   rmSync(repo, { recursive: true, force: true });
   gitIsolation.dispose();
@@ -107,6 +121,7 @@ type Plan = Record<string, unknown> & {
   files: Array<{ path: string }>;
   incremental?: { scope?: IncrementalScope };
   cacheCandidatePath: string;
+  cacheCandidateStateId: string;
   diffPath: string;
 };
 
@@ -678,6 +693,94 @@ describe('capture-local — round-2 regressions from the stop work', () => {
     ).toBe(false);
   });
 });
+describe('capture-local — promotion through the REAL cache-commit', () => {
+  it("keeps a file review's anchor across the promotion", () => {
+    // The unit tests either side of this seam both passed while the seam
+    // itself was broken: `cache-commit`'s allowlist dropped `source`, and
+    // this suite's own `promoteCandidate` helper spreads the whole candidate
+    // instead of running the command — so the field survived in every test
+    // and in no real round. Drive the actual command.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    const ledgerPath = join(repo, '.qwen/tmp/ledger.json');
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({ round: 1, verdict: 'Comment', findings: [] }),
+    );
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    // `--state-id` exactly as Step 8 passes it: off the plan, not off the
+    // candidate file — the point of the flag is that the command re-reads
+    // that file and a concurrent round may have replaced it since.
+    (cacheCommitCommand.handler as (argv: unknown) => void)({
+      candidate: first.cacheCandidatePath,
+      ledger: ledgerPath,
+      out: first['cachePath'],
+      stateId: first['cacheCandidateStateId'],
+    });
+
+    write('src/foo.ts', 'export const real = 2;\n');
+    const second = capture({
+      file: 'src/foo.ts',
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    expect(second.incremental?.scope?.deltaFiles).toEqual(['src/foo.ts']);
+  });
+
+  it('bootstraps on a checkout with no .qwen/review-cache yet (R26-2)', () => {
+    // Step 1 passes the DIRECTORY on every high round, including the first
+    // one on a fresh clone, where it does not exist. The plan published it
+    // unchanged as `cachePath`, `cache-commit --out <that directory>` was
+    // refused as a cross-target promotion, and nothing ever created it — so
+    // no round on that checkout ever persisted an anchor or a ledger.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+    const cacheDir = join(repo, '.qwen/review-cache');
+    for (const file of [undefined, 'src/foo.ts']) {
+      rmSync(cacheDir, { recursive: true, force: true });
+      const first = capture({ file, cache: cacheDir, model: 'model-a' });
+      expect(first['cachePath']).toMatch(/\.json$/);
+      const ledgerPath = join(repo, '.qwen/tmp/ledger.json');
+      writeFileSync(
+        ledgerPath,
+        JSON.stringify({ round: 1, verdict: 'Comment', findings: [] }),
+      );
+      (cacheCommitCommand.handler as (argv: unknown) => void)({
+        candidate: first.cacheCandidatePath,
+        ledger: ledgerPath,
+        out: first['cachePath'],
+        stateId: first['cacheCandidateStateId'],
+      });
+      stderrLines.length = 0;
+      const second = capture({ file, cache: cacheDir, model: 'model-a' });
+      // Nothing moved since the promotion: the anchor holds and scopes the
+      // round to an empty delta instead of full-reviewing.
+      expect(stderrLines.join('\n')).not.toContain(
+        'Incremental anchor not used',
+      );
+      expect(second.incremental?.scope?.deltaFiles).toEqual([]);
+    }
+    // A ledger-only cache (a round with no identity) is named as such, not
+    // as "missing or unreadable" — the skill relays that line to the user.
+    writeFileSync(
+      join(cacheDir, 'local.json'),
+      JSON.stringify({ v: 1, target: 'local', round: 1, findings: [] }),
+    );
+    stderrLines.length = 0;
+    capture({ cache: cacheDir, model: 'model-a' });
+    expect(stderrLines.join('\n')).toContain(
+      'the cache holds the findings ledger only',
+    );
+    // A caller-named cache FILE that does not exist yet stays that file —
+    // only a non-`.json` name is read as the directory.
+    const named = join(repo, 'caches', 'local.json');
+    expect(capture({ cache: named, model: 'model-a' })['cachePath']).toBe(
+      named,
+    );
+  });
+});
 
 describe('capture-local — a narrower round cannot certify a wider one', () => {
   it('refuses the anchor when this round excludes untracked files', () => {
@@ -1024,13 +1127,15 @@ describe('capture-local — the decided stops are machine-readable', () => {
     rmSync(sub, { recursive: true, force: true });
   });
 
-  it('withholds the candidate when a cached path dropped out while on disk', () => {
+  it('writes no anchor when a cached path dropped out while on disk', () => {
     // R23: the candidate write gated on treeHeldStill and the visibility
     // bits, never on the dropped-out set — so a refused-anchor round wrote
     // a candidate silently OMITTING the dropped path, Step 8 promoted the
     // omission, and two rounds later a scope-emptied stop certified bytes
     // no round read. The same uncertainty that refuses the anchor withholds
-    // the candidate.
+    // the anchor. The ledger-only candidate is still published (#12657): the
+    // condition persists for as long as the ignore rule does, and a round's
+    // new Criticals must not miss the cache for all of it.
     seedDirtyTree();
     write('deploy.sh', 'echo v1\n');
     const cachePath = promoteCandidate(
@@ -1045,10 +1150,68 @@ describe('capture-local — the decided stops are machine-readable', () => {
     const second = capture({ cache: cachePath, model: 'model-a' });
     expect(second['incremental']).toBeUndefined();
     expect(stderrLines.join('\n')).toContain('still on disk');
-    expect(second['cacheCandidatePath']).toBeDefined();
-    expect(existsSync(second['cacheCandidatePath'] as string)).toBe(false);
+    expect(isLedgerOnlyCandidate(second['cacheCandidatePath'])).toBe(true);
+    expect(
+      JSON.parse(readFileSync(second['cacheCandidatePath'], 'utf8'))[
+        'ledgerOnly'
+      ],
+    ).toBe('1 cached path(s) dropped out of this capture while still on disk');
     expect(stderrLines.join('\n')).toContain(
-      'candidate would record their absence as reviewed state',
+      'an anchor would record their absence as reviewed state',
+    );
+  });
+
+  it('keeps a no-chunk FILE review\u2019s ledger when a bit elsewhere makes it ledger-only (#12657)', () => {
+    // An unmodified tracked file has no chunks on every round and is still
+    // reviewed whole, with a verdict — while the visibility oracle is
+    // repo-wide, so a bit on ANY other path makes the round ledger-only.
+    // The 0-chunk rule for plain local rounds must not reach it.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/a.ts', 'export const a = 0;\n');
+    write('src/b.ts', 'export const b = 0;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    git('update-index', '--assume-unchanged', 'src/b.ts');
+    const plan = capture({ file: 'src/a.ts', model: 'model-a' });
+    expect(plan.chunks).toEqual([]);
+    expect(plan.cacheCandidatePath).toBeTruthy();
+    expect(plan.cacheCandidateStateId).toMatch(/^ledger-/);
+    expect(isLedgerOnlyCandidate(plan.cacheCandidatePath)).toBe(true);
+  });
+
+  it('re-anchors after a dropped-out path, and reviews it once visible again (#12657)', () => {
+    // The dropped-out branch fires once: its ledger-only promotion leaves no
+    // cached set for the path to drop out of, so the next round reviews in
+    // full and anchors WITHOUT the hidden path. That must not certify it:
+    // when the path is visible again it is new to the cache and in scope.
+    seedDirtyTree();
+    write('deploy.sh', 'echo v1\n');
+    const promote = (plan: Plan): void => {
+      const ledger = join(repo, '.qwen/tmp/ledger.json');
+      writeFileSync(ledger, JSON.stringify({ round: 1, findings: [] }));
+      (cacheCommitCommand.handler as (argv: unknown) => void)({
+        candidate: plan.cacheCandidatePath,
+        ledger,
+        out: plan['cachePath'],
+        stateId: plan.cacheCandidateStateId,
+      });
+    };
+    const cacheDir = join(repo, '.qwen/review-cache');
+    promote(capture({ cache: cacheDir, model: 'model-a' }));
+    write('.git/info/exclude', 'deploy.sh\n');
+    write('deploy.sh', 'echo v2\n');
+    const hidden = capture({ cache: cacheDir, model: 'model-a' });
+    expect(isLedgerOnlyCandidate(hidden.cacheCandidatePath)).toBe(true);
+    promote(hidden);
+    const reanchored = capture({ cache: cacheDir, model: 'model-a' });
+    expect(reanchored.incremental).toBeUndefined();
+    expect(isLedgerOnlyCandidate(reanchored.cacheCandidatePath)).toBe(false);
+    promote(reanchored);
+    write('.git/info/exclude', '');
+    const visible = capture({ cache: cacheDir, model: 'model-a' });
+    expect(visible['nothingToReview']).toBeUndefined();
+    expect(readFileSync(join(repo, visible.diffPath), 'utf8')).toContain(
+      'echo v2',
     );
   });
 
@@ -2028,7 +2191,7 @@ describe('capture-local — round-13 findings: visibility bits and empty anchors
 });
 
 describe('capture-local — round-15 findings: the candidate under visibility bits', () => {
-  it('a visibility bit withholds the cache candidate (R14-1)', () => {
+  it('a visibility bit writes no anchor — and the ledger still persists (R14-1, #12657)', () => {
     // The three decided stops are conditioned on the visibility bits, but
     // the candidate write was not: `hash-object` reads the worktree bytes
     // THROUGH a set bit while `git diff` cannot see them, so the candidate
@@ -2038,7 +2201,8 @@ describe('capture-local — round-15 findings: the candidate under visibility bi
     // every visibility gate read clean, and the unchanged-since stop
     // certified them: the loop decided "nothing to re-review" over bytes no
     // round ever read. The same uncertainty that withholds a stop withholds
-    // the candidate.
+    // the anchor — while the findings ledger, which has nowhere else to
+    // live, is still written and promoted.
     write('.gitignore', '.qwen/\nplan.json\n');
     write('src/foo.ts', 'export const v = 0;\n');
     git('add', '-A');
@@ -2048,6 +2212,7 @@ describe('capture-local — round-15 findings: the candidate under visibility bi
     git('add', 'src/foo.ts');
     const plain = capture({ model: 'model-a' });
     expect(existsSync(plain.cacheCandidatePath)).toBe(true);
+    expect(isLedgerOnlyCandidate(plain.cacheCandidatePath)).toBe(false);
 
     // A further edit hidden behind the bit on the SAME file: the diff still
     // shows the staged hunk alone, while the candidate hashes read through.
@@ -2055,19 +2220,37 @@ describe('capture-local — round-15 findings: the candidate under visibility bi
     write('src/foo.ts', 'export const v = 999; // hidden edit\n');
     stderrLines.length = 0;
     const hidden = capture({ model: 'model-a' });
-    // Withheld — including the unlink of the earlier round's candidate,
-    // whose name this plan publishes and Step 8 would otherwise promote.
-    expect(existsSync(hidden.cacheCandidatePath)).toBe(false);
+    // No anchor — and the earlier round's anchored candidate at the same
+    // stable name is replaced, not left for Step 8 to promote.
+    expect(isLedgerOnlyCandidate(hidden.cacheCandidatePath)).toBe(true);
     const err = stderrLines.join('\n');
     expect(err).toContain('carry an --assume-unchanged or');
-    expect(err).toContain('the cache candidate is withheld');
+    expect(err).toContain('findings ledger only, no anchor');
     // The round itself still proceeds on the first capture — only the
     // anchor is withheld.
     expect(hidden.chunks.length).toBeGreaterThan(0);
 
-    // The hole the withholding closes, end to end: nothing was promoted, so
-    // clearing the bit between rounds keeping the bytes cannot produce an
-    // "unchanged since last round" stop over the hidden bytes — the next
+    // Promote it exactly as Step 8 does: the round's open Critical survives.
+    const ledgerPath = join(repo, '.qwen/tmp/ledger.json');
+    const blocker = { id: 'R2-1', severity: 'Critical', status: 'open' };
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({ round: 2, verdict: 'Comment', findings: [blocker] }),
+    );
+    (cacheCommitCommand.handler as (argv: unknown) => void)({
+      candidate: hidden.cacheCandidatePath,
+      ledger: ledgerPath,
+      out: hidden['cachePath'],
+      stateId: hidden['cacheCandidateStateId'],
+    });
+    const promoted = JSON.parse(
+      readFileSync(String(hidden['cachePath']), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(promoted['findings']).toEqual([blocker]);
+
+    // The hole the withholding closes, end to end: no anchor was promoted,
+    // so clearing the bit between rounds keeping the bytes cannot produce
+    // an "unchanged since last round" stop over the hidden bytes — the next
     // round captures full and the now-visible edit is in scope.
     git('update-index', '--no-assume-unchanged', 'src/foo.ts');
     stderrLines.length = 0;

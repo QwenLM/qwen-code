@@ -332,6 +332,84 @@ describe('createDaemonTurnNavigationStore', () => {
     expect(store.getViewportSnapshot().pages.size).toBe(0);
   });
 
+  it.each([true, false])(
+    'searches across a trimmed live boundary only when it can reopen (reachable=%s)',
+    async (reachable) => {
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      const originalMaterialize = client.materializeTranscriptEvents;
+      client.materializeTranscriptEvents = (...args) => {
+        const result = originalMaterialize(...args);
+        return {
+          ...result,
+          blocks: result.blocks.map((block) =>
+            block.sourceRecordIds?.includes('turn')
+              ? block
+              : { ...block, kind: 'assistant' as const },
+          ),
+        };
+      };
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));
+      getTranscriptPage.mockResolvedValue(
+        transcriptPage(['turn', 'a1'], { targetRecordId: 'turn' }),
+      );
+      const store = createDaemonTurnNavigationStore({
+        captureLiveBoundary: () => ({
+          beforeRecordId: 'a2',
+          reachable,
+          isCurrent: () => true,
+        }),
+      });
+      await ready(store, client);
+      store.observeLiveBlocks([assistantBlock('live-one', 'a1')]);
+      await store.locateOrdinal(0);
+      expect(store.getViewportSnapshot().ranges[0]?.newer.kind).toBe('live');
+      const revision = store.getViewportSnapshot().revision;
+      store.observeLiveBlocks([assistantBlock('live-two', 'a2')]);
+      expect(store.getViewportSnapshot().revision).toBe(revision);
+      getTranscriptPage.mockImplementation(async (options) =>
+        transcriptPage(
+          options.beforeRecordId ? ['turn', 'a1'] : ['turn', 'a1', 'a2'],
+          { targetRecordId: 'turn' },
+        ),
+      );
+      const hit = (
+        await store.scanConversation('a1', { isCurrent: () => true })
+      ).hits[0]!;
+      expect(hit).toMatchObject({
+        recordId: 'a1',
+        turnId: 'turn',
+        role: 'assistant',
+        revision,
+      });
+      getTranscriptPage.mockClear();
+      const location = store.locateViewportSearchHit(
+        hit,
+        { isCurrent: () => true },
+        () => {},
+      );
+      if (!reachable) {
+        await expect(location).rejects.toThrow(
+          'Conversation search message is unavailable',
+        );
+        expect(getTranscriptPage).not.toHaveBeenCalled();
+        return;
+      }
+      const located = await location;
+      expect(located.view).toBe('historical');
+      const block = store
+        .getViewportSnapshot()
+        .pages.get(located.pageId!)
+        ?.blocks.find((block) => block.id === located.blockId);
+      expect(block?.sourceRecordIds).toContain('a1');
+      expect(getTranscriptPage).toHaveBeenCalledOnce();
+      expect(getTranscriptPage).toHaveBeenCalledWith({
+        beforeRecordId: 'a2',
+        snapshot: 'snapshot-1',
+        limit: 200,
+      });
+    },
+  );
+
   it('recovers a trimmed live connection for a globally located range before continuing', async () => {
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();
     getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn', 'live-1']));
@@ -1561,6 +1639,69 @@ describe('createDaemonTurnNavigationStore', () => {
     expect(store.getSnapshot().error).toBeUndefined();
   });
 
+  it.each(['loading', 'ready'] as const)(
+    'does not clear a newer %s selection when an older viewport request is cancelled',
+    async (status) => {
+      const store = createDaemonTurnNavigationStore();
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn-0', 'turn-1']));
+      let resolveFirst!: (page: DaemonSessionTranscriptPage) => void;
+      let resolveSecond!: (page: DaemonSessionTranscriptPage) => void;
+      getTranscriptPage
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveFirst = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveSecond = resolve;
+            }),
+        );
+      store.configure({ sessionId: 'session-1', supported: true, client });
+      await flushInitialHead(store);
+      let firstCurrent = true;
+      const first = store.locateViewportOrdinal(
+        0,
+        { isCurrent: () => firstCurrent },
+        () => {},
+      );
+      await vi.waitFor(() =>
+        expect(getTranscriptPage).toHaveBeenCalledTimes(1),
+      );
+      const second = store.locateViewportOrdinal(
+        1,
+        { isCurrent: () => true },
+        () => {},
+      );
+      await vi.waitFor(() =>
+        expect(getTranscriptPage).toHaveBeenCalledTimes(2),
+      );
+      if (status === 'ready') {
+        resolveSecond(transcriptPage('turn-1'));
+        await second;
+      }
+      firstCurrent = false;
+      resolveFirst(transcriptPage('turn-0'));
+      await expect(first).rejects.toThrow('Selection changed');
+      expect(store.getSnapshot().selected).toMatchObject({
+        ordinal: 1,
+        status,
+      });
+      expect(store.getSnapshot().error).toBeUndefined();
+      if (status === 'loading') {
+        resolveSecond(transcriptPage('turn-1'));
+        await second;
+      }
+      expect(store.getSnapshot().selected).toMatchObject({
+        ordinal: 1,
+        status: 'ready',
+      });
+    },
+  );
+
   it('drops an older locate result after a later selection wins', async () => {
     const store = createDaemonTurnNavigationStore();
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();
@@ -1665,6 +1806,86 @@ describe('createDaemonTurnNavigationStore', () => {
       retryable: false,
     });
   });
+
+  it.each(['chart rendered', ''])(
+    'degrades oversized MCP App HTML with fallback %j instead of failing the historical page',
+    async (fallbackText) => {
+      const store = createDaemonTurnNavigationStore();
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      getTurnIndexPage.mockResolvedValueOnce(
+        turnPage(0, ['turn-0'], { totalTurns: 1 }),
+      );
+      getTranscriptPage.mockResolvedValueOnce(transcriptPage('turn-0'));
+      // Two documents at the 4 MiB ceiling: each estimates at two bytes per
+      // UTF-16 code unit, so together they exceed the default 16 MiB
+      // historical-page budget.
+      const html = 'x'.repeat(4 * 1024 * 1024);
+      const mcpAppBlock = (
+        id: string,
+        recordId: string,
+      ): DaemonTranscriptBlock => ({
+        id,
+        kind: 'tool',
+        toolCallId: `call-${recordId}`,
+        title: 'chart',
+        status: 'success',
+        preview: {
+          kind: 'mcp_invocation',
+          serverId: 'demo',
+          toolName: 'chart',
+        },
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/chart',
+          html,
+          toolResult: {
+            content: fallbackText ? [{ type: 'text', text: fallbackText }] : [],
+          },
+          toolArguments: {},
+          fallbackText,
+        },
+        sourceRecordIds: [recordId],
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      client.materializeTranscriptEvents = (_events, nextBlockOrdinal) => ({
+        blocks: [
+          userBlock(`block-${nextBlockOrdinal}`, 'turn-0'),
+          mcpAppBlock(`block-${nextBlockOrdinal + 1}`, 'record-app-1'),
+          mcpAppBlock(`block-${nextBlockOrdinal + 2}`, 'record-app-2'),
+        ],
+        nextBlockOrdinal: nextBlockOrdinal + 3,
+        encounteredRecordIds: ['turn-0', 'record-app-1', 'record-app-2'],
+      });
+      store.configure({ sessionId: 'session-1', supported: true, client });
+      await flushInitialHead(store);
+
+      const location = await store.locateOrdinal(0);
+
+      expect(store.getSnapshot().selected).toMatchObject({
+        ordinal: 0,
+        status: 'ready',
+      });
+      const page = store.getSnapshot().historicalPages.get(location.pageId!);
+      const appOutputs = page?.blocks
+        .filter((block) => block.kind === 'tool')
+        .map(
+          (block) => block.rawOutput as { html: string; fallbackText: string },
+        );
+      expect(appOutputs).toHaveLength(2);
+      for (const output of appOutputs ?? []) {
+        // Dropped whole, never truncated; the fallback keeps the turn
+        // navigable.
+        expect(output.html).toBe('');
+        expect(output.fallbackText).toBe(
+          fallbackText ||
+            'MCP App HTML omitted because the historical page exceeds its size limit.',
+        );
+      }
+    },
+  );
 
   it('keeps index navigation ready when one transcript page is too large', async () => {
     const store = createDaemonTurnNavigationStore();

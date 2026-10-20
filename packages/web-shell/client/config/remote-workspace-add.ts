@@ -126,7 +126,7 @@ export function clearRemoteWorkspaceAddStep(): void {
   const url = new URL(window.location.href);
   if (!url.searchParams.has(FLOW_PARAM)) return;
   url.searchParams.delete(FLOW_PARAM);
-  window.history.replaceState(null, '', url);
+  window.history.replaceState(window.history.state, '', url);
 }
 
 export function startRemoteWorkspaceAdd(
@@ -149,7 +149,7 @@ export function startRemoteWorkspaceAdd(
   });
   if (started) return true;
 
-  window.history.replaceState(null, '', returnUrl);
+  window.history.replaceState(window.history.state, '', returnUrl);
   try {
     window.sessionStorage.removeItem(RETURN_URL_KEY);
   } catch {

@@ -14,6 +14,7 @@ import type {
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
 import { isSettingsChangedData } from '../events.js';
 import type {
+  DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
   DaemonUiToolProvenance,
@@ -29,6 +30,7 @@ import {
   getString,
   getTextContent,
   extractContentPart,
+  getFiniteNumber,
   isRecord,
   redactSensitiveFields,
   stringifyJson,
@@ -246,6 +248,10 @@ export function normalizeDaemonEvent(
       const code = getString(event.data, 'code');
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
+      const loop =
+        errorKind === 'loop_detected'
+          ? parseDaemonLoopStop(event.data)
+          : undefined;
       return [
         {
           ...base,
@@ -255,6 +261,7 @@ export function normalizeDaemonEvent(
           ...(code ? { code } : {}),
           ...(errorKind ? { errorKind } : {}),
           ...(promptId ? { promptId } : {}),
+          ...(loop ? { loop } : {}),
           text:
             getString(event.data, 'message') ??
             'Prompt failed (no details available)',
@@ -266,6 +273,9 @@ export function normalizeDaemonEvent(
 
     case 'history_truncated':
       return normalizeHistoryTruncated(event, base);
+
+    case 'session_messages_deleted':
+      return [];
 
     case 'session_rewound':
       return normalizeSessionRewound(event, base);
@@ -1051,6 +1061,15 @@ function normalizeSessionUpdate(
       // the web UI has its own activity indicator, so drop the frame.
       const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
       if (
+        meta &&
+        Object.hasOwn(meta, 'toolLifecycle') &&
+        update['status'] === undefined &&
+        update['content'] === undefined &&
+        update['title'] === undefined &&
+        update['kind'] === undefined
+      )
+        return [];
+      if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
         (meta?.['shellProgress'] !== undefined ||
@@ -1266,10 +1285,14 @@ function normalizeToolUpdate(
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
+  const startedAt = numberField(metadata, 'startedAt');
+  const durationMs = numberField(metadata, 'durationMs');
   return {
     ...base,
     type: 'tool.update',
     toolCallId,
+    ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
+    ...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
     ...(status ? { status } : {}),
     ...(title ? { title } : {}),
     ...(toolName ? { toolName } : {}),
@@ -1396,6 +1419,21 @@ function extractToolProvenance(
     }
   }
   return {};
+}
+
+function parseDaemonLoopStop(data: unknown): DaemonLoopStop | undefined {
+  if (!isRecord(data)) return undefined;
+  const loopType = getString(data, 'loopType');
+  const loopReason = getString(data, 'loopReason');
+  const toolCallCount = getFiniteNumber(data, 'toolCallCount');
+  const toolCallLimit = getFiniteNumber(data, 'toolCallLimit');
+  if (!loopType && !loopReason) return undefined;
+  return {
+    ...(loopType ? { loopType } : {}),
+    ...(loopReason ? { loopReason } : {}),
+    ...(toolCallCount !== undefined ? { toolCallCount } : {}),
+    ...(toolCallLimit !== undefined ? { toolCallLimit } : {}),
+  };
 }
 
 function asDaemonErrorKind(

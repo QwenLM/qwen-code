@@ -30,6 +30,7 @@ import {
   count as countTestSurface,
   measure as measureTestSurface,
 } from '../../.github/scripts/count-test-surface.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 // A hung-runner bound, not a performance budget, so it rides the suite's own
 // knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
@@ -1319,6 +1320,14 @@ describe('qwen-autofix workflow', () => {
           'The self-hosted runner lost communication with the server',
       }),
     ).toEqual({ reran: true, continued: true });
+    // A per-host test lock starving past its budget (#14550) is capacity
+    // contention on the shared pool, not the PR's change: no test ran.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'sdk-java host lock not acquired within 40 minutes',
+      }),
+    ).toEqual({ reran: true, continued: true });
     // A REAL failure (no infra signature in the annotation) → never rerun; the
     // agent/human handles it. This is the gate that stops masking real bugs.
     expect(
@@ -1372,6 +1381,8 @@ describe('qwen-autofix workflow', () => {
       'The runner has been terminated',
       'fatal: fetch-pack: invalid index-pack output',
       'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
+      // #13622: the hosted pool never assigned a runner — no step ran.
+      'The job was not started because it repeatedly failed to be acquired (5 attempts).',
     ]) {
       expect(run({ checks: [FAIL], annotations: msg })).toEqual({
         reran: true,
@@ -13287,7 +13298,7 @@ exit 1
           workspaces: [
             'packages/*',
             'packages/channels/*',
-            '!packages/desktop-shell',
+            '!packages/desktop',
           ],
         }),
       );
@@ -13296,7 +13307,7 @@ exit 1
         'packages/brandnew', // a new top-level workspace the branch adds
         'packages/channels/base',
         'packages/channels/newchannel', // a new nested workspace the branch adds
-        'packages/desktop-shell', // excluded by the ! glob
+        'packages/desktop', // excluded by the ! glob
         'packages/cli/src/commands/examples/starter', // fixture, NOT a workspace
       ]) {
         mkdirSync(join(dir, pkg), { recursive: true });
@@ -13308,7 +13319,7 @@ exit 1
           'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
           'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
           'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
-          'packages/desktop-shell/src/d.ts', // excluded workspace -> dropped
+          'packages/desktop/src/d.ts', // excluded workspace -> dropped
           'packages/sdk-python/foo.py', // no manifest -> dropped
           'README.md', // outside packages/ -> dropped
         ].join('\n') + '\n';
@@ -13324,7 +13335,7 @@ exit 1
       ]);
       expect(out).not.toContain('examples/starter'); // fixture never owns
       expect(out).not.toContain('sdk-python');
-      expect(out).not.toContain('packages/desktop-shell'); // ! negation honoured
+      expect(out).not.toContain('packages/desktop'); // ! negation honoured
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -13776,7 +13787,7 @@ exit 1
       'patches/ink+7.0.3.patch',
       '.gitattributes',
       'packages/core/.gitattributes',
-      'packages/desktop-shell/.npmrc',
+      'packages/desktop/.npmrc',
       'eslint.legacy-filenames.mjs',
       'eslint.legacy-core-barrel-imports.mjs',
       '.github/workflows/qwen-pr-safety-precheck.yml',
@@ -13805,7 +13816,7 @@ exit 1
     expect(classes).toContain(
       'packages/core/.gitattributes=measurement-config',
     );
-    expect(classes).toContain('packages/desktop-shell/.npmrc=toolchain-config');
+    expect(classes).toContain('packages/desktop/.npmrc=toolchain-config');
     expect(classes).toContain('eslint.legacy-filenames.mjs=lint-config');
     expect(classes).toContain(
       'eslint.legacy-core-barrel-imports.mjs=lint-config',
@@ -25148,13 +25159,22 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // Two siblings a main merge added went ungated and turned the revived
     // macOS lane red; the pin keeps a dropped gate from doing it again.
     const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
-    for (const title of [
-      'keeps the green path intact',
-      'rejects a conflict verdict whose round completed as fixed',
-      'locks the runner file-command backing files against env plants',
+    for (const [title, guard] of [
+      ['keeps the green path intact', '!hasBashMapfile'],
+      [
+        'rejects a conflict verdict whose round completed as fixed',
+        '!hasBashMapfile',
+      ],
+      [
+        'locks the runner file-command backing files against env plants',
+        // Its read-only lock also needs permission bits to bind.
+        '!hasBashMapfile || !arePermissionBitsEnforced()',
+      ],
     ]) {
+      const exact = guard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       expect(self).toMatch(
-        new RegExp(`it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*'${title}'`),
+        // However Prettier wraps the guard.
+        new RegExp(`it\\.skipIf\\(\\s*${exact},?\\s*\\)\\(\\s*'${title}'`),
       );
     }
   });
@@ -25761,7 +25781,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('kiss_audit=true');
   });
 
-  it.skipIf(!hasBashMapfile)(
+  // The lock is a read-only mode, which only binds where permission bits do:
+  // root with its DAC capabilities appends to the backing file anyway.
+  it.skipIf(!hasBashMapfile || !arePermissionBitsEnforced())(
     'locks the runner file-command backing files against env plants',
     () => {
       // The strip removes the GITHUB_ENV VARIABLE from the checks, but the
@@ -27683,7 +27705,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(accepting.length).toBeGreaterThan(8);
     expect(
       accepting
-        .filter((chunk) => !chunk.startsWith('.skipIf(!hasBashMapfile)('))
+        // Alone or ahead of another guard, however Prettier wraps it.
+        .filter(
+          (chunk) =>
+            !/^\.skipIf\(\s*!hasBashMapfile\s*(?:,?\s*\)|\|\|)/.test(chunk),
+        )
         .map((chunk) => chunk.slice(0, 90)),
     ).toEqual([]);
   });
@@ -28301,8 +28327,6 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       // measurement that quietly went UNAVAILABLE.
       [{ dropCounter: true }, 'removed after staging'],
       [{ dropParser: true }, 'removed after staging'],
-      // ...and so is one that can no longer be read.
-      [{ unreadableCounter: true }, 'made unreadable after staging'],
     ]) {
       const r = runGate({ weaken: 'assert', ...knob });
       expect(r.status).toBe(1);
@@ -28311,6 +28335,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       expect(r.rejection).toContain(reason);
     }
   });
+
+  // An unreadable mode only binds where permission bits do: not for root
+  // with its DAC capabilities.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'refuses an instrument made unreadable after staging',
+    () => {
+      // One that can no longer be read is tampering too.
+      const r = runGate({ weaken: 'assert', unreadableCounter: true });
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.outputs).not.toContain('retryable=true');
+      expect(r.rejection).toContain('made unreadable after staging');
+    },
+  );
 
   it.skipIf(!hasBashMapfile)(
     'does not charge non-test files or non-JS test edits',

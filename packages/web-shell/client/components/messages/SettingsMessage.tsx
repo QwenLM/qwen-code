@@ -90,7 +90,7 @@ interface SettingsMessageProps {
   chatWidthMode: ChatWidthMode;
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
   /** Model list/add/delete/select, rendered inside the Model category. */
-  modelManagement?: ModelManagementProps;
+  modelManagementSectionProps?: ModelManagementProps;
   /** Browser-local remote computer catalog and connection controls. */
   connections?: ReactNode;
   embedded?: boolean;
@@ -121,6 +121,7 @@ const SUB_DIALOG_KEYS = new Set([
   'modelFallbacks',
 ]);
 const HIDDEN_SETTING_KEYS = new Set([
+  'ui.allowedApprovalModes',
   'ui.hideTips',
   'ui.enableUserFeedback',
   // Compact behavior is fixed on in the web shell; the daemon schema still
@@ -436,7 +437,7 @@ export function SettingsMessage({
   onThemeChange,
   chatWidthMode,
   onChatWidthModeChange,
-  modelManagement,
+  modelManagementSectionProps,
   connections,
   embedded = false,
   initialCategory,
@@ -523,7 +524,7 @@ export function SettingsMessage({
         items: [{ type: 'local-control' }],
       });
     }
-    if (modelManagement && !showInitialLoading) {
+    if (modelManagementSectionProps && !showInitialLoading) {
       const model = groups.find((group) => group.id === 'Model');
       if (model) model.items.push({ type: 'model-management' });
       else
@@ -568,7 +569,7 @@ export function SettingsMessage({
     settings,
     t,
     hasNotifications,
-    modelManagement,
+    modelManagementSectionProps,
     connections,
     presentation,
     showInitialLoading,
@@ -1067,9 +1068,9 @@ export function SettingsMessage({
                     </CardContent>
                   </Card>
                 )}
-                {showModelManagement && modelManagement && (
+                {showModelManagement && modelManagementSectionProps && (
                   <div className={activeRows.length > 0 ? 'mt-4' : undefined}>
-                    <ModelManagementSection {...modelManagement} />
+                    <ModelManagementSection {...modelManagementSectionProps} />
                   </div>
                 )}
                 {showConnections && connections}

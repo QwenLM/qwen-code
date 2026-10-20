@@ -12,11 +12,62 @@ import {
   isInlineModelOverrideAllowed,
   parseAcpBaseModelId,
   parseAcpModelOption,
+  publicProviderBaseUrl,
   resolveAcpModelOption,
+  resolveAcpFastModelSelector,
   sanitizeProviderBaseUrl,
 } from './acpModelUtils.js';
 
 describe('acpModelUtils', () => {
+  it('resolves fast-model ACP rows without exposing or losing endpoint identity', () => {
+    const privateUrl = 'https://user:secret@two.example/v1?token=value';
+    const models = [
+      {
+        id: 'shared',
+        label: 'First',
+        authType: AuthType.USE_OPENAI,
+        registryBaseUrl: 'https://one.example/v1',
+      },
+      {
+        id: 'shared',
+        label: 'Second',
+        authType: AuthType.USE_OPENAI,
+        registryBaseUrl: privateUrl,
+      },
+      { id: 'implicit', label: 'Implicit', authType: AuthType.USE_OPENAI },
+      { id: 'oauth', label: 'OAuth', authType: AuthType.QWEN_OAUTH },
+      {
+        id: 'vision',
+        label: 'Vision only',
+        authType: AuthType.USE_OPENAI,
+        visionOnly: true,
+      },
+      {
+        id: 'runtime',
+        label: 'Runtime',
+        authType: AuthType.USE_OPENAI,
+        isRuntimeModel: true,
+      },
+    ];
+    const second = buildAcpModelOptions(models)[1]!.modelId;
+    expect(resolveAcpFastModelSelector(second, models)).toBe(
+      `openai:shared\0${privateUrl}`,
+    );
+    expect(resolveAcpFastModelSelector('implicit(openai)', models)).toBe(
+      'openai:implicit\0',
+    );
+    expect(resolveAcpFastModelSelector('oauth(qwen-oauth)', models)).toBe(
+      'qwen-oauth:oauth',
+    );
+    for (const input of [
+      'qwen-route:v1:stale',
+      'vision(openai)',
+      'runtime(openai)',
+    ]) {
+      expect(resolveAcpFastModelSelector(input, models)).toBeNull();
+    }
+  });
+
   it('uses opaque ids only to disambiguate colliding model routes', () => {
     const models = [
       {
@@ -251,6 +302,39 @@ describe('acpModelUtils', () => {
     ['https://user:secret@api.example', 'https://api.example'],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
+  });
+
+  describe('publicProviderBaseUrl', () => {
+    it.each([
+      ['a clean endpoint byte-identically', 'https://api.example/v1'],
+      ['userinfo stripped', 'https://user:sk-secret@api.example/v1'],
+      ['query and hash dropped', 'https://api.example/v1?a=sk-secret#frag'],
+    ])('publishes %s without the credential', (_label, input) => {
+      expect(publicProviderBaseUrl(input) ?? '').not.toContain('sk-secret');
+    });
+
+    it.each([
+      ['a plain slash', 'https://gw.example/v1/https://user:sk-secret@o.e/v1'],
+      ['a semicolon', 'https://gw.example/v1;https://user:sk-secret@o.e/v1'],
+      ['a brace', 'https://gw.example/v1{https://user:sk-secret@o.e/v1'],
+    ])('refuses a second authority joined behind %s', (_label, input) => {
+      // Clearing username/password/search/hash never touches `pathname`, so
+      // all four read empty on these shapes while the credential is still in
+      // the string `url.href` returns. A caller that reads a defined result as
+      // "provably public" — `shareableAuxSelector`'s identity check at the
+      // workspace-scope persist point — would then keep the suffix and write
+      // the secret into the committable `.qwen/settings.json`. Enumerating
+      // join characters does not converge: the slash case involves no folding
+      // at all, and the brace case only differed by percent-encoding luck.
+      expect(publicProviderBaseUrl(input)).toBeUndefined();
+    });
+
+    it.each(['localhost:11434', 'ftp://user:sk@host/v1', 'not a url'])(
+      'refuses the non-http(s) shape %s',
+      (input) => {
+        expect(publicProviderBaseUrl(input)).toBeUndefined();
+      },
+    );
   });
 
   describe('isInlineModelOverrideAllowed', () => {

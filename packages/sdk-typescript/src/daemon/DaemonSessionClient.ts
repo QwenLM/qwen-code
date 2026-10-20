@@ -15,6 +15,7 @@ import {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
@@ -23,6 +24,8 @@ import type {
   DaemonBackgroundTurn,
   DaemonForkSessionResult,
   DaemonEvent,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
@@ -38,6 +41,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -61,6 +65,7 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -87,6 +92,8 @@ import type {
 export interface DaemonReplaySnapshot {
   compactedReplay: DaemonEvent[];
   liveJournal: DaemonEvent[];
+  lifecycleReplay?: DaemonEvent[];
+  lifecycleReplayIncomplete?: boolean;
 }
 
 export interface DaemonSessionClientOptions {
@@ -196,6 +203,8 @@ function createStandaloneRestoredClient(
     hasActivePrompt,
     compactedReplay,
     liveJournal,
+    lifecycleReplay,
+    lifecycleReplayIncomplete,
     historyHasMore,
     historyAnchorRecordId,
     replayDegraded,
@@ -217,6 +226,10 @@ function createStandaloneRestoredClient(
           replaySnapshot: {
             compactedReplay: compactedReplay ?? [],
             liveJournal: liveJournal ?? [],
+            ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+            ...(lifecycleReplayIncomplete !== undefined
+              ? { lifecycleReplayIncomplete }
+              : {}),
           },
           replaySnapshotComplete:
             Array.isArray(compactedReplay) && Array.isArray(liveJournal),
@@ -405,6 +418,8 @@ export class DaemonSessionClient {
       hasActivePrompt,
       compactedReplay,
       liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete,
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
@@ -424,6 +439,10 @@ export class DaemonSessionClient {
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
+        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+        ...(lifecycleReplayIncomplete !== undefined
+          ? { lifecycleReplayIncomplete }
+          : {}),
       },
       replaySnapshotComplete,
       replayPartial: partial === true,
@@ -445,7 +464,7 @@ export class DaemonSessionClient {
   static async resume(
     client: DaemonClient,
     sessionId: string,
-    req: RestoreSessionRequest = {},
+    req: ResumeSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
     const {
@@ -573,12 +592,19 @@ export class DaemonSessionClient {
   }
 
   /**
-   * Present when this client was created with a `modelServiceId`: `false`
-   * means the spawn-time model switch failed and the session is running on
-   * the agent default model.
+   * Only present on a fresh spawn (`attached: false`) that carried
+   * `modelServiceId` or `startupConfig`; an attach omits the key or, when
+   * it coalesced with an in-flight spawn, reports the spawn owner's
+   * outcome. Startup preparation succeeds only with true; legacy false
+   * means the switch was rejected (surfaced via `model_switch_failed`)
+   * and the session uses the agent default model.
    */
   get modelApplied(): DaemonSession['modelApplied'] {
     return this.session.modelApplied;
+  }
+
+  get startupConfigApplied(): DaemonSession['startupConfigApplied'] {
+    return this.session.startupConfigApplied;
   }
 
   get lastEventId(): number | undefined {
@@ -647,7 +673,11 @@ export class DaemonSessionClient {
       const onAbort = () => {
         const pending = this._pendingPrompts.get(accepted.promptId);
         if (pending && this._pendingPrompts.delete(accepted.promptId)) {
-          this.cancel().catch(() => {});
+          this.client
+            .cancel(this.sessionId, this.clientId, {
+              cancelReason: 'interrupted',
+            })
+            .catch(() => {});
           pending.reject(
             signal!.reason ?? new DOMException('Aborted', 'AbortError'),
           );
@@ -681,15 +711,24 @@ export class DaemonSessionClient {
    * register the prompt in `_pendingPrompts`, or wait for the matching
    * `turn_complete` / `turn_error` SSE event. Callers that need final turn
    * results should use `prompt()` or manage SSE terminal events themselves.
+   * `beforeDispatch` can reject a stale caller before each HTTP attempt,
+   * including the retry after client registration recovery.
    */
   async submitPrompt(
     req: PromptRequest,
     signal?: AbortSignal,
+    beforeDispatch?: (clientId: string | undefined) => void,
   ): Promise<NonBlockingPromptAccepted> {
-    signal?.throwIfAborted();
-    const accepted = await this.withClientIdSelfHeal(() =>
-      this.client.promptNonBlocking(this.sessionId, req, signal, this.clientId),
-    );
+    const accepted = await this.withClientIdSelfHeal(() => {
+      signal?.throwIfAborted();
+      beforeDispatch?.(this.clientId);
+      return this.client.promptNonBlocking(
+        this.sessionId,
+        req,
+        signal,
+        this.clientId,
+      );
+    });
     if (!isNonBlockingAccepted(accepted)) {
       throw new Error('Expected non-blocking prompt acceptance');
     }
@@ -699,12 +738,14 @@ export class DaemonSessionClient {
   /** Return continuation admission; terminal results arrive on the event stream. */
   async continueSession(
     signal?: AbortSignal,
+    options: { confirmCancellation?: string } = {},
   ): Promise<DaemonContinueSessionResult> {
     signal?.throwIfAborted();
     return await this.withClientIdSelfHeal(() =>
       this.client.continueSession(this.sessionId, {
         clientId: this.clientId,
         signal,
+        confirmCancellation: options.confirmCancellation,
       }),
     );
   }
@@ -852,6 +893,13 @@ export class DaemonSessionClient {
     }
   }
 
+  /** Stop lifecycle work while preserving recovery; use cancel() for a user stop. */
+  async interrupt(): Promise<void> {
+    await this.client.cancel(this.sessionId, this.clientId, {
+      cancelReason: 'interrupted',
+    });
+  }
+
   async cancel(): Promise<void> {
     const cancelling =
       this.cancelling ?? this.client.cancel(this.sessionId, this.clientId);
@@ -933,6 +981,22 @@ export class DaemonSessionClient {
       clientId: this.clientId,
       persist: opts?.persist,
     });
+  }
+
+  getMessageGroups(): Promise<DaemonMessageGroupsSnapshot> {
+    return this.client.getMessageGroups(this.sessionId);
+  }
+
+  deleteMessageGroups(
+    snapshot: string,
+    groupIds: string[],
+  ): Promise<DaemonDeleteMessageGroupsResult> {
+    return this.client.deleteMessageGroups(
+      this.sessionId,
+      snapshot,
+      groupIds,
+      this.clientId,
+    );
   }
 
   getRewindSnapshots(): Promise<{
@@ -1020,6 +1084,16 @@ export class DaemonSessionClient {
       ...(opts?.content && opts.content.length > 0
         ? { content: opts.content }
         : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /**
+   * Ask the daemon to deliver this session's queued mid-turn messages now.
+   * See `DaemonClient.sendMidTurnMessagesNow`.
+   */
+  sendMidTurnMessagesNow(): Promise<DaemonSendMidTurnMessagesNowResult> {
+    return this.client.sendMidTurnMessagesNow(this.sessionId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -1143,6 +1217,14 @@ export class DaemonSessionClient {
 
   tasks(): Promise<DaemonSessionTasksStatus> {
     return this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  taskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus> {
+    return this.client.sessionTaskRuntime(
+      this.sessionId,
+      taskId,
+      this.clientId,
+    );
   }
 
   agents(signal?: AbortSignal): Promise<DaemonSessionAgentsStatus> {

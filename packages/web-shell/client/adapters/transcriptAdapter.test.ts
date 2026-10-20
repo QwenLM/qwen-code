@@ -62,12 +62,24 @@ describe('extractPendingPermission', () => {
     },
   );
 
+  it('does not surface an empty parameter object as the approval body', () => {
+    const permission = extractPendingPermission([
+      genericPermission({ rawInput: {} }),
+    ]);
+    expect(permission?.content).toEqual([{ type: 'text', text: '{}' }]);
+    expect(permission?.contentIsInput).toBeUndefined();
+  });
+
   it('does not hide a parameter preview identical to the title', () => {
+    const input = { key: 'value' };
+    const text = JSON.stringify(input, null, 2);
     expect(
-      extractPendingPermission([genericPermission({ rawInput: {} })]),
+      extractPendingPermission([
+        { ...genericPermission({ rawInput: input }), title: text },
+      ]),
     ).toMatchObject({
-      title: '{}',
-      content: [{ type: 'text', text: '{}' }],
+      title: text,
+      content: [{ type: 'text', text }],
       contentIsInput: true,
     });
   });

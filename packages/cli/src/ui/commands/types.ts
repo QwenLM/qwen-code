@@ -238,6 +238,7 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'advisor-model'
     | 'voice-model'
     | 'vision-model'
     | 'compaction-model'
@@ -428,6 +429,9 @@ export interface SlashCommand {
    * a model turn or mutate conversation state owned by the active turn.
    */
   canRunDuringStreaming?: boolean;
+
+  /** Whether Esc may abandon a running action. Defaults to true. */
+  canCancel?: boolean;
 
   // ── Phase 1: visibility ────────────────────────────────────────────────
   /**

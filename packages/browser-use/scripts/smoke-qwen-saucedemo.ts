@@ -22,7 +22,13 @@ import { fileURLToPath } from 'node:url';
 import { ChromeExtensionTransport } from '../src/bridge/index.js';
 import { PlaywrightRuntime } from '../src/playwright/playwright-runtime.js';
 import { withManagedChrome } from './managed-chrome.js';
-import { collectAssistantReport } from './smoke-transcript.js';
+import {
+  collectAssistantReport,
+  collectSuccessfulNodeReplCalls,
+  isRecord,
+  moduleDirectoryRegistrationRequested,
+  type NodeReplCall,
+} from './smoke-transcript.js';
 
 const PROMPT = [
   '这是 Qwen Browser Use 的隔离 SauceDemo 冒烟测试。',
@@ -63,7 +69,6 @@ await withManagedChrome('sauce', async (chrome) => {
   const builtinSkillRoot = join(repositoryRoot, 'dist/bundled/browser-use');
   const browserRuntimeRoot = join(builtinSkillRoot, 'runtime');
   const browserRuntimeEntry = join(browserRuntimeRoot, 'index.js');
-  const browserModuleRoot = join(browserRuntimeRoot, 'node_modules');
   await Promise.all(
     [
       qwenEntry,
@@ -71,7 +76,7 @@ await withManagedChrome('sauce', async (chrome) => {
       join(builtinSkillRoot, 'SKILL.md'),
       browserRuntimeEntry,
       join(browserRuntimeRoot, 'native-host.js'),
-      join(browserModuleRoot, 'playwright-core/package.json'),
+      join(browserRuntimeRoot, 'node_modules/playwright-core/package.json'),
     ].map((path) => access(path)),
   );
   const runId = new Date()
@@ -230,10 +235,8 @@ await withManagedChrome('sauce', async (chrome) => {
         browserRuntimeRoot,
         builtinSkillRoot,
       ),
-      builtinModuleRootRegistered: successfulModuleRootRegistered(
-        events,
-        browserModuleRoot,
-      ),
+      noModuleDirectoryRegistered:
+        !moduleDirectoryRegistrationRequested(events),
       checkoutCompletionObserved:
         completion.url === 'https://www.saucedemo.com/checkout-complete.html' &&
         completion.snapshot.includes('Thank you for your order!'),
@@ -359,99 +362,6 @@ function assertNoSecret(secret: string, ...values: string[]): void {
     values.every((value) => !value.includes(secret)),
     'DASHSCOPE_API_KEY appeared in process output',
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-interface NodeReplCall {
-  code: string;
-  output: string;
-}
-
-function collectSuccessfulNodeReplCalls(events: unknown[]): NodeReplCall[] {
-  const calls = new Map<string, { code: string; name: string }>();
-  for (const event of events) {
-    if (!isRecord(event) || event['type'] !== 'assistant') continue;
-    const message = event['message'];
-    if (!isRecord(message) || !Array.isArray(message['content'])) continue;
-    for (const block of message['content']) {
-      if (
-        !isRecord(block) ||
-        block['type'] !== 'tool_use' ||
-        typeof block['id'] !== 'string' ||
-        typeof block['name'] !== 'string' ||
-        !isRecord(block['input']) ||
-        typeof block['input']['code'] !== 'string'
-      ) {
-        continue;
-      }
-      calls.set(block['id'], {
-        code: block['input']['code'],
-        name: block['name'],
-      });
-    }
-  }
-  const successful: NodeReplCall[] = [];
-  for (const event of events) {
-    if (!isRecord(event) || event['type'] !== 'user') continue;
-    const message = event['message'];
-    if (!isRecord(message) || !Array.isArray(message['content'])) continue;
-    for (const block of message['content']) {
-      if (
-        !isRecord(block) ||
-        block['type'] !== 'tool_result' ||
-        block['is_error'] !== false ||
-        typeof block['tool_use_id'] !== 'string' ||
-        typeof block['content'] !== 'string'
-      ) {
-        continue;
-      }
-      const call = calls.get(block['tool_use_id']);
-      if (call?.name === 'mcp__node-repl__node_repl') {
-        successful.push({ code: call.code, output: block['content'] });
-      }
-    }
-  }
-  return successful;
-}
-
-function successfulModuleRootRegistered(
-  events: unknown[],
-  moduleRoot: string,
-): boolean {
-  const calls = new Set<string>();
-  for (const event of events) {
-    if (!isRecord(event) || event['type'] !== 'assistant') continue;
-    const message = event['message'];
-    if (!isRecord(message) || !Array.isArray(message['content'])) continue;
-    for (const block of message['content']) {
-      if (
-        isRecord(block) &&
-        block['type'] === 'tool_use' &&
-        block['name'] === 'mcp__node-repl__node_repl_add_node_module_dir' &&
-        isRecord(block['input']) &&
-        block['input']['path'] === moduleRoot &&
-        typeof block['id'] === 'string'
-      ) {
-        calls.add(block['id']);
-      }
-    }
-  }
-  return events.some((event) => {
-    if (!isRecord(event) || event['type'] !== 'user') return false;
-    const message = event['message'];
-    if (!isRecord(message) || !Array.isArray(message['content'])) return false;
-    return message['content'].some(
-      (block) =>
-        isRecord(block) &&
-        block['type'] === 'tool_result' &&
-        block['is_error'] === false &&
-        typeof block['tool_use_id'] === 'string' &&
-        calls.has(block['tool_use_id']),
-    );
-  });
 }
 
 // A run proves it loaded the staged built-in runtime only through an import

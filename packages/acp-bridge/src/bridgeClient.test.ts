@@ -208,6 +208,19 @@ describe('BridgeClient — Live speak-to-user channel', () => {
       }),
     ).rejects.toMatchObject({ code: -32602 });
   });
+
+  it('reports an ended voice call without claiming that speech was delivered', async () => {
+    const client = makeLiveSpeakClient(
+      vi.fn(async () => false),
+      (sessionId) => sessionId === 'live-session',
+    );
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'live-session',
+        message: '任务完成了。',
+      }),
+    ).resolves.toEqual({ accepted: false });
+  });
 });
 
 describe('BridgeClient — background notification turn boundary', () => {
@@ -404,6 +417,73 @@ describe('BridgeClient — managed external tool guard', () => {
       effectiveCwd: '/workspace/worktree',
     });
   });
+
+  it.each([true, false, undefined])(
+    'forwards only a true top-level permissionChecked marker (%s)',
+    async (permissionChecked) => {
+      const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+        allowed: true,
+      });
+      const entry = {
+        sessionId: 'session-1',
+        effectiveCwd: '/workspace/worktree',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      };
+      const client = makeClient(undefined, {
+        resolveEntry: () => entry,
+        handler,
+      });
+      const args = { command: 'pwd', permissionChecked: true };
+
+      await expect(
+        client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: args,
+          ...(permissionChecked === undefined ? {} : { permissionChecked }),
+        }),
+      ).resolves.toEqual({ allowed: true });
+      expect(handler).toHaveBeenCalledExactlyOnceWith({
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: args,
+        effectiveCwd: '/workspace/worktree',
+        ...(permissionChecked === true ? { permissionChecked: true } : {}),
+      });
+    },
+  );
+
+  it.each(['true', 1, null, {}])(
+    'rejects a non-boolean permissionChecked marker (%j)',
+    async (permissionChecked) => {
+      const handler = vi.fn<ExternalToolGuardHandler>();
+      const client = makeClient(undefined, {
+        resolveEntry: () => ({
+          sessionId: 'session-1',
+          promptActive: true,
+          activePromptId: 'prompt-1',
+        }),
+        handler,
+      });
+
+      await expect(
+        client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: { command: 'pwd' },
+          permissionChecked,
+        }),
+      ).rejects.toThrow('Invalid external tool guard request');
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
 
   it('ignores a forged effective directory in the child payload', async () => {
     const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
@@ -2567,6 +2647,67 @@ describe('BridgeClient — artifact ingress', () => {
     ).toEqual({ toolName: 'record_artifact' });
   });
 
+  it('forwards the update-only flag of file-write tool artifacts', async () => {
+    const sessionId = 'sess:update-only-artifacts';
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-edit',
+        status: 'completed',
+        content: [],
+        _meta: {
+          toolName: 'edit',
+          artifacts: [
+            {
+              title: 'index.ts',
+              storage: 'workspace',
+              workspacePath: 'src/index.ts',
+              updateOnly: true,
+            },
+          ],
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(upsertMany).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          workspacePath: 'src/index.ts',
+          toolCallId: 'call-edit',
+          toolName: 'edit',
+          updateOnly: true,
+        }),
+      ],
+      { trustedPublisher: false },
+    );
+  });
+
   it('does not store artifact metadata from non-tool session updates', async () => {
     const sessionId = 'sess:non-tool-artifacts';
     const publish = vi.fn().mockReturnValue(true);
@@ -3855,6 +3996,44 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(settledMidTurnMessageIds).toEqual(['mid-1']);
   });
 
+  it('drains with the background turn id when promptId is omitted', async () => {
+    // R1-14 (#11768): with promptActive false and no requestedPromptId, the
+    // drain ownership chain resolves through the middle term —
+    // entry.backgroundTurn.turnId (currentTurnMetadata) — before falling
+    // back to activePromptId. A background-only execution must therefore
+    // drain and stamp its injected frames with the background turn id even
+    // though the caller sent no promptId.
+    const publish = vi.fn().mockReturnValue(true);
+    const queue = [{ messageId: 'mid-1', text: 'Check the result' }];
+    const settledMidTurnMessageIds: string[] = [];
+    const client = makeClientWithEntry('sess:drain', {
+      sessionId: 'sess:drain',
+      promptActive: false,
+      activePromptId: 'stale-prompt',
+      backgroundTurn: {
+        turnId: 'bg-turn-1',
+        taskId: 'task',
+        kind: 'agent',
+        startedAt: 1,
+      },
+      midTurnMessageQueue: queue,
+      settledMidTurnMessageIds,
+      pendingPromptList: [],
+      events: { publish },
+    });
+
+    const result = await client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:drain',
+    });
+
+    expect(result['messages']).toEqual(['Check the result']);
+    expect(queue).toEqual([]);
+    expect(settledMidTurnMessageIds).toEqual(['mid-1']);
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ promptId: 'bg-turn-1' }),
+    );
+  });
+
   it('drains the queue, returns the messages, and publishes one injected frame', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const entry = {
@@ -4037,12 +4216,13 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
   it('degrades a attachmentId reused across drained messages after its first use', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
+    const read = vi.spyOn(fsp, 'readFile');
     try {
       const reference = await media.putAttachment(
         Uint8Array.of(1, 2, 3),
         'image/png',
       );
-      const read = vi.spyOn(media, 'read');
+      read.mockClear();
       const entry = {
         sessionId: 'sess:shared-media',
         midTurnMessageQueue: [
@@ -4099,6 +4279,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       // serialized, so one stored blob cannot amplify the drain response.
       expect(read).toHaveBeenCalledTimes(1);
     } finally {
+      read.mockRestore();
       await media.close();
     }
   });
@@ -4295,6 +4476,112 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           { messageId: 'mid-b', content: [{ type: 'text', text: 'b' }] },
         ],
       });
+    } finally {
+      readFile.mockRestore();
+      await media.close();
+    }
+  });
+
+  it('requeues a failed send-now drain in its original order', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionAttachmentStore();
+    const queue: MidTurnQueueEntry[] = [];
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockImplementationOnce(async () => {
+        // Typed while the drain reads the attachment.
+        queue.push({ messageId: 'u3', text: 'u3' });
+        throw Object.assign(new Error('too many open files'), {
+          code: 'EMFILE',
+        });
+      });
+    try {
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
+      queue.push(
+        { messageId: 'u1', text: 'u1', content: [reference] },
+        { messageId: 'q1', text: 'q1', queueOnly: true },
+        { messageId: 'u2', text: 'u2' },
+      );
+      const entry = {
+        sessionId: 'sess:emfile-partial',
+        midTurnMessageQueue: queue,
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        attachments: media,
+      };
+      const client = makeClientWithEntry('sess:emfile-partial', entry);
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-partial',
+          userInputOnly: true,
+        }),
+      ).rejects.toThrow('too many open files');
+      expect(queue.map((item) => item.messageId)).toEqual([
+        'u1',
+        'q1',
+        'u2',
+        'u3',
+      ]);
+      expect(entry.settledMidTurnMessageIds).toEqual([]);
+      expect(publish).not.toHaveBeenCalled();
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-partial',
+        }),
+      ).resolves.toMatchObject({ messages: ['u1', 'q1', 'u2', 'u3'] });
+    } finally {
+      readFile.mockRestore();
+      await media.close();
+    }
+  });
+
+  it('does not requeue a queue-only entry settled while a send-now drain failed', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionAttachmentStore();
+    const queue: MidTurnQueueEntry[] = [];
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockImplementationOnce(async () => {
+        // The turn ends and settles the queue-only entry meanwhile.
+        queue.splice(
+          queue.findIndex((item) => item.messageId === 'q1'),
+          1,
+        );
+        queue.push({ messageId: 'u3', text: 'u3' });
+        throw Object.assign(new Error('too many open files'), {
+          code: 'EMFILE',
+        });
+      });
+    try {
+      const reference = await media.putAttachment(
+        Uint8Array.of(1, 2, 3),
+        'image/png',
+      );
+      queue.push(
+        { messageId: 'u1', text: 'u1', content: [reference] },
+        { messageId: 'q1', text: 'q1', queueOnly: true },
+        { messageId: 'u2', text: 'u2' },
+      );
+      const client = makeClientWithEntry('sess:emfile-settled', {
+        sessionId: 'sess:emfile-settled',
+        midTurnMessageQueue: queue,
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        attachments: media,
+      });
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:emfile-settled',
+          userInputOnly: true,
+        }),
+      ).rejects.toThrow('too many open files');
+      expect(queue.map((item) => item.messageId)).toEqual(['u1', 'u2', 'u3']);
     } finally {
       readFile.mockRestore();
       await media.close();

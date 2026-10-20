@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url"
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const driverRoot = resolve(scriptDirectory, "..")
 const packageRoot = join(driverRoot, "typescript")
-const skillResources = ["SKILL.md", "references/macos.md", "references/windows-linux.md"]
+const skillResources = ["SKILL.md"]
 
 function valueAfter(flag) {
   const index = process.argv.indexOf(flag)

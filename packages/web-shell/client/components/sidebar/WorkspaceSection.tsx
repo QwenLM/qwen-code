@@ -23,7 +23,9 @@ import {
   FolderClosedIcon,
   FolderOpenIcon,
   Globe2Icon,
+  InboxIcon,
 } from 'lucide-react';
+import { Empty, EmptyMedia, EmptyDescription } from '../ui/empty';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import {
@@ -121,8 +123,17 @@ export interface WorkspaceHeaderActionsContext {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  /**
+   * localStorage seed for the expansion/collapsed-group preferences,
+   * defaulting to the workspace id. Multi-host renderers pass an
+   * origin-prefixed id so two daemons hosting the same workspace id
+   * never share a preference; single-host callers leave it unset and
+   * keep the keys they always had.
+   */
+  storageKey?: string;
   remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
+  hideHeader?: boolean;
   client: DaemonClient;
   reloadToken: number;
   untrustedLabel: string;
@@ -140,6 +151,7 @@ interface WorkspaceSectionProps {
   searchQuery?: string;
   expanded?: boolean;
   autoExpandKey?: string;
+  forceAutoExpand?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
   renderSessions?: boolean;
   /**
@@ -153,6 +165,12 @@ interface WorkspaceSectionProps {
     session: DaemonSessionSummary,
     options?: { searchSnippet?: string | undefined },
   ) => ReactNode;
+  pendingSession?: {
+    key: string;
+    sessionId?: string;
+    sourceId?: string;
+    node: ReactNode;
+  };
   mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
   /**
@@ -227,8 +245,10 @@ interface WorkspaceSectionProps {
 
 export function WorkspaceSection({
   workspace,
+  storageKey,
   remote = false,
   renderHeader,
+  hideHeader = false,
   client,
   reloadToken,
   untrustedLabel,
@@ -246,9 +266,11 @@ export function WorkspaceSection({
   searchQuery = '',
   expanded: controlledExpanded,
   autoExpandKey,
+  forceAutoExpand = false,
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  pendingSession,
   mapSession,
   showSessionDetails = true,
   headerActions,
@@ -275,16 +297,18 @@ export function WorkspaceSection({
     catalog: DaemonChannelTypeCatalog;
     snapshot: DaemonChannelsSnapshot;
   }>();
+  const storageId = storageKey ?? workspace.id;
   const [internalExpanded, setInternalExpanded] = useState(() =>
-    readWorkspaceExpanded(workspace.id),
+    readWorkspaceExpanded(storageId),
   );
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
-    readWorkspaceCollapsedGroupIds(workspace.id),
+    readWorkspaceCollapsedGroupIds(storageId),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
+  const fulfilledPendingSessions = useRef(new Set<string>());
   const channelCatalogLoadRequestId = useRef(0);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
@@ -295,9 +319,9 @@ export function WorkspaceSection({
   // Uncontrolled workspace rows restore the user's last choice.
   useEffect(() => {
     if (controlledExpanded === undefined) {
-      setInternalExpanded(readWorkspaceExpanded(workspace.id));
+      setInternalExpanded(readWorkspaceExpanded(storageId));
     }
-  }, [controlledExpanded, workspace.id]);
+  }, [controlledExpanded, storageId]);
 
   useEffect(() => {
     // The five-row preview is scoped per source; reset the one-shot
@@ -308,18 +332,18 @@ export function WorkspaceSection({
   // The render site keys this component by workspace id, so an id change
   // always remounts and the lazy useState initializer re-reads storage.
   useEffect(() => {
-    writeWorkspaceCollapsedGroupIds(workspace.id, collapsedGroupIds);
-  }, [collapsedGroupIds, workspace.id]);
+    writeWorkspaceCollapsedGroupIds(storageId, collapsedGroupIds);
+  }, [collapsedGroupIds, storageId]);
 
   useEffect(() => {
     if (
       controlledExpanded === undefined &&
       autoExpandKey &&
-      !hasWorkspaceExpansionPreference(workspace.id)
+      (forceAutoExpand || !hasWorkspaceExpansionPreference(storageId))
     ) {
       setInternalExpanded(true);
     }
-  }, [autoExpandKey, controlledExpanded, workspace.id]);
+  }, [autoExpandKey, controlledExpanded, forceAutoExpand, storageId]);
 
   const sessionsEnabled = renderSessions && !disabled;
   const sessionsVisible = expanded || Boolean(searchQuery.trim());
@@ -641,6 +665,21 @@ export function WorkspaceSection({
         .join('|'),
     [sessions],
   );
+  const pendingSessionMatched = Boolean(
+    pendingSession &&
+      sessions.some(
+        (session) =>
+          (pendingSession.sessionId !== undefined &&
+            session.sessionId === pendingSession.sessionId) ||
+          (pendingSession.sourceId !== undefined &&
+            session.sourceId === pendingSession.sourceId),
+      ),
+  );
+  useEffect(() => {
+    if (!pendingSession) fulfilledPendingSessions.current.clear();
+    else if (pendingSessionMatched)
+      fulfilledPendingSessions.current.add(pendingSession.key);
+  }, [pendingSession, pendingSessionMatched]);
   const contentSearchHits = useSessionContentSearch(
     sessionsEnabled ? client : undefined,
     workspace.cwd,
@@ -766,7 +805,7 @@ export function WorkspaceSection({
     const nextExpanded = !expanded;
     setInternalExpanded(nextExpanded);
     if (controlledExpanded === undefined) {
-      writeWorkspaceExpanded(workspace.id, nextExpanded);
+      writeWorkspaceExpanded(storageId, nextExpanded);
     }
     onExpandedChange?.(nextExpanded);
   };
@@ -832,7 +871,7 @@ export function WorkspaceSection({
   );
   return (
     <div className={styles.section}>
-      {overviewEnabled && !renderHeader && !disabled ? (
+      {hideHeader ? null : overviewEnabled && !renderHeader && !disabled ? (
         <WorkspaceDetailsTooltip
           label={workspaceLabel(workspace)}
           cwd={workspace.ssh ? sshWorkspaceLabel(workspace.ssh) : gitPollCwd}
@@ -883,6 +922,11 @@ export function WorkspaceSection({
         (expanded || Boolean(searchQuery.trim())) &&
         !disabled && (
           <div className={styles.sessions}>
+            {pendingSession &&
+            !pendingSessionMatched &&
+            !fulfilledPendingSessions.current.has(pendingSession.key)
+              ? pendingSession.node
+              : null}
             {loadError ? (
               <div className={styles.error} role="status">
                 {loadErrorLabel}
@@ -903,7 +947,18 @@ export function WorkspaceSection({
               // A source switch swaps the query key; until the new source's
               // page settles there is no data yet, so the "no sessions" notice
               // would flash for a whole fetch round-trip.
-              sessionsLoading && sessionsPage === undefined ? null : (
+              pendingSession ||
+              (sessionsLoading &&
+                sessionsPage === undefined) ? null : hideHeader ? (
+                <Empty className="gap-2 py-8">
+                  <EmptyMedia className="mb-0 text-muted-foreground/40">
+                    <InboxIcon size={40} strokeWidth={1} aria-hidden="true" />
+                  </EmptyMedia>
+                  <EmptyDescription className="text-xs">
+                    {noSessionsLabel}
+                  </EmptyDescription>
+                </Empty>
+              ) : (
                 <div className={styles.empty}>{noSessionsLabel}</div>
               )
             ) : channelSessionGroups ? (

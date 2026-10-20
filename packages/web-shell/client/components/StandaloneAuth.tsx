@@ -22,6 +22,10 @@ import {
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
 } from '../config/remote-workspace-add';
+import {
+  openHostedWorkspace,
+  useWorkspaceHosts,
+} from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -35,6 +39,7 @@ import {
 } from './ui/card';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Spinner } from './ui/spinner';
 
 // A probe must give up well before the SDK's own 30s fetch timeout
 // (DaemonClient DEFAULT_FETCH_TIMEOUT_MS) so the gate keeps retrying while the
@@ -189,6 +194,7 @@ export function StandaloneAuth({
   const copy = COPY[language] ?? COPY.en;
   const remoteWorkspaceAddActive = isRemoteWorkspaceAddActive();
   const remoteConnectionAddActive = isRemoteConnectionAddActive();
+  const hosts = useWorkspaceHosts();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
@@ -383,6 +389,39 @@ export function StandaloneAuth({
   ]);
 
   if (accepted) return children(accepted.token);
+  // A credential supplied at boot (the desktop `#token=` URL, `serve --open`,
+  // or a per-tab stored token) almost always authenticates on the first
+  // probe. Painting the credential form during that round trip flashes a login
+  // screen at startup, so hold it back until the probe asks for input.
+  const verifyingBootCredential =
+    busy &&
+    attempt === 0 &&
+    !invalidTarget &&
+    !confirming &&
+    !awaitingPairing &&
+    Boolean(initialToken);
+  if (verifyingBootCredential) {
+    return (
+      <div
+        data-web-shell-root
+        data-web-shell-shadcn
+        data-web-shell-gate
+        className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
+          theme === WebShellThemeId.Light
+            ? AppStyles.themeLight
+            : `${AppStyles.themeDark} dark`
+        }`}
+      >
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+        >
+          <Spinner aria-hidden="true" />
+          <span>{copy.connecting}</span>
+        </div>
+      </div>
+    );
+  }
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());
   const changingTarget = invalidTarget || normalizedAddress !== baseUrl;
   return (
@@ -536,6 +575,26 @@ export function StandaloneAuth({
                   : copy.local}
             </Button>
           )}
+          {hosts
+            .filter(
+              (host) =>
+                host.origin !== baseUrl &&
+                host.origin !== window.location.origin,
+            )
+            .map((host) => (
+              <Button
+                key={host.origin}
+                variant="outline"
+                onClick={() => {
+                  // See the local-return button: leaving a target must retire
+                  // its probe loop before navigation is committed.
+                  retireProbe();
+                  openHostedWorkspace(host.origin);
+                }}
+              >
+                {host.origin}
+              </Button>
+            ))}
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">

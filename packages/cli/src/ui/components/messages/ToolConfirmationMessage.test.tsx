@@ -45,8 +45,27 @@ import {
   withProviders,
 } from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { render } from 'ink-testing-library';
+import { act, useEffect } from 'react';
+import { useKeypressContext } from '../../contexts/KeypressContext.js';
+import { useKeypress } from '../../hooks/useKeypress.js';
+import { ContextMenuOverlay } from '../../context-menu/ContextMenuOverlay.js';
+import {
+  ContextMenuProvider,
+  useContextMenu,
+  type ContextMenuContextValue,
+} from '../../context-menu/ContextMenuContext.js';
 
 describe('ToolConfirmationMessage', () => {
+  // The tree is wrapped in the real ContextMenuProvider (as DefaultAppLayout
+  // does) and `MenuProbe` captures its API so a case can open the menu the way
+  // ContentMouseController does on a right-click.
+  let menuApi: ContextMenuContextValue | null = null;
+  const MenuProbe = () => {
+    menuApi = useContextMenu();
+    return null;
+  };
+
   const mockConfig = {
     isTrustedFolder: () => true,
     getIdeMode: () => false,
@@ -1379,5 +1398,226 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Line 12');
       expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
     });
+  });
+
+  it.each([true, false])(
+    'handles a right-click and keys in one stdin chunk (menu items: %s)',
+    async (hasItems) => {
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const onMenuSelect = vi.fn();
+      const onUnderlyingKey = vi.fn();
+      const onMenuChange = vi.fn();
+      const OpenOnRightPress = () => {
+        const { subscribeMouse, unsubscribeMouse } = useKeypressContext();
+        const { menu, openMenu } = useContextMenu();
+        useKeypress(onUnderlyingKey, { isActive: menu === null });
+        useEffect(() => {
+          const handler = () => {
+            openMenu(
+              hasItems
+                ? [
+                    {
+                      id: 'open-link',
+                      label: 'Open Link',
+                      onSelect: onMenuSelect,
+                    },
+                  ]
+                : [],
+              { x: 0, y: 0 },
+            );
+            // AppContainer is outside the provider and relies on this callback.
+            expect(onMenuChange).toHaveBeenLastCalledWith(hasItems);
+          };
+          subscribeMouse(handler);
+          return () => unsubscribeMouse(handler);
+        }, [subscribeMouse, unsubscribeMouse, openMenu]);
+        return null;
+      };
+      const { stdin } = render(
+        withProviders(
+          <ContextMenuProvider onMenuChange={onMenuChange}>
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Execution',
+                command: 'echo test',
+                rootCommand: 'echo',
+                onConfirm,
+              }}
+              config={mockConfig}
+              availableTerminalHeight={30}
+              contentWidth={80}
+            />
+            <OpenOnRightPress />
+            <ContextMenuOverlay />
+          </ContextMenuProvider>,
+        ),
+      );
+      await act(async () => {});
+      await act(async () => {
+        stdin.write('\x1b[<2;10;5M\x1b[Z\x1b[C\r');
+      });
+      if (hasItems) {
+        expect(onUnderlyingKey).not.toHaveBeenCalled();
+        expect(onConfirm).not.toHaveBeenCalled();
+        expect(onMenuSelect).not.toHaveBeenCalled();
+        // Once rendered, Enter belongs to the menu, then to the dialog again.
+        await act(async () => {
+          stdin.write('\r');
+        });
+        expect(onMenuSelect).toHaveBeenCalledTimes(1);
+        expect(onConfirm).not.toHaveBeenCalled();
+        await act(async () => {
+          stdin.write('\r');
+        });
+      } else {
+        expect(onUnderlyingKey).toHaveBeenCalled();
+      }
+      await vi.waitFor(() =>
+        expect(onConfirm).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+        ),
+      );
+    },
+  );
+
+  it('does not act on a key aimed at an open context menu', async () => {
+    // The teammate tab mounts this dialog while AgentChatContent's
+    // ContentMouseController makes the right-click menu openable there.
+    // KeypressContext broadcasts to every subscriber and discards return
+    // values (the overlay cannot consume a key for us), so the dialog has to
+    // go quiet itself — RadioButtonSelect's initialIndex is 0 with
+    // "allow once" first, so one Enter aimed at "Open Link" would otherwise
+    // approve the pending call and Esc would silently deny it.
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      onConfirm,
+    };
+
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider>
+          <ToolConfirmationMessage
+            confirmationDetails={confirmationDetails}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <MenuProbe />
+        </ContextMenuProvider>,
+      ),
+    );
+
+    // Control: with no menu open, Enter still approves the pending call.
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    );
+    onConfirm.mockClear();
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\r'); // would approve (ProceedOnce is index 0)
+      stdin.write('\x1b'); // would deny (handleConfirm(Cancel))
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('does not submit a nested custom answer aimed at an open context menu', async () => {
+    // The `ask_user_question` flavour nests a free-text TextInput one level
+    // below the dialog's own subscriber. Quieting only the dialog left that
+    // input hot, so one Enter aimed at "Open Link" submitted the half-typed
+    // draft as the answer and the teammate round proceeded on it.
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'ask_user_question',
+      title: 'Question',
+      questions: [
+        {
+          question: 'What is your favorite color?',
+          header: 'Color',
+          options: [
+            { label: 'Red', description: 'A warm color' },
+            { label: 'Blue', description: 'A cool color' },
+            { label: 'Green', description: '' },
+          ],
+          multiSelect: false,
+        },
+      ],
+      onConfirm,
+    };
+
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider>
+          <ToolConfirmationMessage
+            confirmationDetails={confirmationDetails}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <MenuProbe />
+        </ContextMenuProvider>,
+      ),
+    );
+
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      });
+
+    // Row 4 is the custom answer; typing into it mounts the nested input.
+    await settle();
+    await act(async () => {
+      stdin.write('4');
+    });
+    await settle();
+    await act(async () => {
+      stdin.write('draft');
+    });
+    await settle();
+
+    // Control: with no menu open, Enter submits exactly that draft — which is
+    // also the proof the nested input is mounted and live.
+    await act(async () => {
+      stdin.write('\r');
+    });
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: 'draft' } },
+      ),
+    );
+    onConfirm.mockClear();
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\r'); // aimed at "Open Link", not at the draft
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

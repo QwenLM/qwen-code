@@ -6,6 +6,8 @@ Status: development-only spike under review, following [issue #11704](https://gi
 
 This document records the Phase 1 baseline. The [Phase 2 connection-profile design](mobile-connection-profiles.md) supersedes the single-profile and plaintext native-storage sections below; other production prerequisites still apply.
 
+Scoped native document selection is now implemented. The [native file-selection design](mobile-file-selection.md) supersedes the file-chooser follow-up below.
+
 ## Problem and Goals
 
 Use the existing daemon-served Web Shell in an Android WebView, with no second native session UI and no locally bundled H5. Establish a buildable native bootstrap and a precise origin boundary before adding production credentials or background connectivity.
@@ -40,7 +42,7 @@ Per-device revocable daemon credentials are a maintainer-owned prerequisite. Thi
 
 Phase 2 must implement N profiles with client-minted stable keys and display names; switching profiles navigates to a new origin. Native cached workspace state must be keyed by profile and workspace ID, and capability checks must be performed per profile and connection. Migration must remove the development plaintext token after moving it into the approved credential store.
 
-File chooser, microphone permission bridging, download handling, new-window handling, renderer-process recovery, lifecycle-aware SSE and notifications are not implemented here. System font-scale integration and complete pinch-zoom/accessibility acceptance also remain follow-ups. Browser H5 availability does not imply those native integrations already work.
+Microphone permission bridging is superseded by the [microphone integration design](mobile-microphone-permission.md), including its close-on-background constraint for dictation and Qwen Live. File chooser, download handling, new-window handling, renderer-process recovery, lifecycle-aware SSE and notifications are not implemented here. System font-scale integration and complete pinch-zoom/accessibility acceptance also remain follow-ups. Browser H5 availability does not imply those native integrations already work.
 
 ## Reviewer Test Plan
 
@@ -57,4 +59,4 @@ JVM tests cover origin comparison, saved-root validation and external scheme res
 
 ## Follow-ups
 
-Production profile UI and credential migration; maintainer-provided per-device revocation; Keystore-backed storage; capability negotiation; lifecycle-aware SSE and native notifications with runtime permission handling; file selection, microphone, downloads, new windows and renderer recovery; font scaling and accessibility acceptance.
+Production profile UI and credential migration; maintainer-provided per-device revocation; Keystore-backed storage; capability negotiation; lifecycle-aware SSE and native notifications with runtime permission handling; file selection, downloads, new windows and renderer recovery; font scaling and accessibility acceptance.

@@ -40,6 +40,7 @@ export type {
   AgentExternalMessageEvent,
   AgentFinishEvent,
   AgentHooks,
+  AgentRetryWaitEvent,
   AgentRoundEvent,
   AgentRoundTextEvent,
   AgentStartEvent,

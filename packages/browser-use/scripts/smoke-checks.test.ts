@@ -94,8 +94,7 @@ describe('smoke observation claims', () => {
       builtinSkillRoot: '/skill',
       stagedRuntimeImported,
       events: [],
-      browserModuleRoot: '/runtime/node_modules',
-      successfulModuleRootRegistered: () => true,
+      moduleDirectoryRegistrationRequested: () => false,
       completion: {
         url: 'https://www.saucedemo.com/checkout-complete.html',
         snapshot: 'Thank you for your order!',
@@ -160,8 +159,7 @@ describe('smoke observation claims', () => {
       builtinSkillRoot: '/skill',
       stagedRuntimeImported,
       events: [],
-      browserModuleRoot: '/runtime/node_modules',
-      successfulModuleRootRegistered: () => true,
+      moduleDirectoryRegistrationRequested: () => false,
       completion: {
         url: 'https://www.saucedemo.com/checkout-complete.html',
         snapshot: 'Thank you for your order!',

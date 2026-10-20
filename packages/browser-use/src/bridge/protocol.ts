@@ -25,6 +25,11 @@ export const CHROME_NATIVE_HOST_REVISION = 2;
 // rather than replaced, so without the bump it would keep rejecting the id.
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
 export const CHROME_WEB_STORE_EXTENSION_ID = 'hdhmmjclhibojdddmancfgbkleahfaph';
+// Where users install the extension. The store resolves any slug to the
+// listing's current one by id, so this link survives a rename.
+export const CHROME_WEB_STORE_URL =
+  'https://chromewebstore.google.com/detail/qwen-code/' +
+  CHROME_WEB_STORE_EXTENSION_ID;
 export const CHROME_EXTENSION_IDS: readonly string[] = [
   CHROME_EXTENSION_ID,
   CHROME_WEB_STORE_EXTENSION_ID,

@@ -22,7 +22,7 @@ import path from 'node:path';
 import os from 'node:os';
 import mime from 'mime/lite';
 import type { Part } from '@google/genai';
-import sharp from 'sharp';
+import sharp, { type PngOptions } from 'sharp';
 
 import {
   isWithinRoot,
@@ -35,6 +35,8 @@ import {
   readFileWithEncodingInfo,
   detectFileEncoding,
   fileExists,
+  type ProcessedFileReadResult,
+  type ProcessSingleFileContentOptions,
 } from './fileUtils.js';
 import { decodeBufferWithEncodingInfo } from '../services/sync-file-encoding.js';
 import { iconvEncode } from './iconvHelper.js';
@@ -113,11 +115,9 @@ const mockMimeGetType = mime.getType as Mock;
 const mockExecFile = vi.mocked(execFile);
 const mockRender = vi.mocked(renderPDFPagesToImages);
 
-function mockExecResult(result: {
-  stdout: string;
-  stderr: string;
-  code: number;
-}) {
+type ExecResult = { stdout: string; stderr: string; code: number };
+
+function mockExecResult(result: ExecResult) {
   mockExecFile.mockImplementationOnce(
     (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
       const callback = cb as (
@@ -139,6 +139,32 @@ function mockExecResult(result: {
     },
   );
 }
+
+// Canned exec results, queued in call order by mockExecResult: pdfinfo page
+// counts, the pdftotext version probe, and pdftotext output.
+const execOk = (stdout: string): ExecResult => ({
+  stdout,
+  stderr: '',
+  code: 0,
+});
+const pdfinfo = (pages: number) => execOk(`Pages:          ${pages}\n`);
+const NO_PDFINFO = { stdout: '', stderr: 'pdfinfo missing', code: 1 };
+const PDFTOTEXT = { stdout: '', stderr: 'pdftotext version', code: 0 };
+const DENSE = execOk('x'.repeat(80_000));
+const BLANK = execOk('   ');
+
+const MB = 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
+// A real, decodable two-frame GIF.
+const TWO_FRAME_GIF = Buffer.from(
+  '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
+  'hex',
+);
+// Needs enough GBK content for chardet to reliably detect the encoding.
+const GBK_TEXT = '你好世界这是中文内容用于测试编码检测';
+const GBK_BYTES = iconvEncode(GBK_TEXT, 'gbk');
 
 describe('fileUtils', () => {
   let tempRootDir: string;
@@ -174,6 +200,12 @@ describe('fileUtils', () => {
       }),
     }),
   } as unknown as Config;
+
+  const writeTemp = (name: string, data: string | Buffer) => {
+    const filePath = path.join(tempRootDir, name);
+    actualNodeFs.writeFileSync(filePath, data);
+    return filePath;
+  };
 
   beforeEach(() => {
     vi.resetAllMocks(); // Reset all mocks, including mime.getType
@@ -243,27 +275,21 @@ describe('fileUtils', () => {
 
     it('should handle different path separators (POSIX vs Windows)', () => {
       const posixRoot = '/project/root';
-      const posixPathInside = '/project/root/file.txt';
-      const posixPathOutside = '/project/other/file.txt';
-      expect(isWithinRoot(posixPathInside, posixRoot)).toBe(true);
-      expect(isWithinRoot(posixPathOutside, posixRoot)).toBe(false);
+      expect(isWithinRoot('/project/root/file.txt', posixRoot)).toBe(true);
+      expect(isWithinRoot('/project/other/file.txt', posixRoot)).toBe(false);
     });
 
     it('should return false for a root path that is a sub-path of the path to check', () => {
-      const pathToCheck = path.resolve('/project/root/sub');
-      const rootSub = path.resolve('/project/root');
-      expect(isWithinRoot(pathToCheck, rootSub)).toBe(true);
-
-      const pathToCheckSuper = path.resolve('/project/root');
-      const rootSuper = path.resolve('/project/root/sub');
-      expect(isWithinRoot(pathToCheckSuper, rootSuper)).toBe(false);
+      const parent = path.resolve('/project/root');
+      const child = path.resolve('/project/root/sub');
+      expect(isWithinRoot(child, parent)).toBe(true);
+      expect(isWithinRoot(parent, child)).toBe(false);
     });
   });
 
   describe('fileExists', () => {
     it('should return true if the file exists', async () => {
-      const testFile = path.join(tempRootDir, 'exists.txt');
-      actualNodeFs.writeFileSync(testFile, 'content');
+      const testFile = writeTemp('exists.txt', 'content');
       await expect(fileExists(testFile)).resolves.toBe(true);
     });
 
@@ -292,33 +318,32 @@ describe('fileUtils', () => {
       }
     });
 
-    it('should return false for an empty file', async () => {
-      actualNodeFs.writeFileSync(filePathForBinaryTest, '');
-      expect(await isBinaryFile(filePathForBinaryTest)).toBe(false);
-    });
-
-    it('should return false for a typical text file', async () => {
-      actualNodeFs.writeFileSync(
-        filePathForBinaryTest,
+    it.each<[string, string | Buffer, boolean]>([
+      ['should return false for an empty file', '', false],
+      [
+        'should return false for a typical text file',
         'Hello, world!\nThis is a test file with normal text content.',
-      );
-      expect(await isBinaryFile(filePathForBinaryTest)).toBe(false);
-    });
-
-    it('should return true for a file with many null bytes', async () => {
-      const binaryContent = Buffer.from([
-        0x48, 0x65, 0x00, 0x6c, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00,
-      ]); // "He\0llo\0\0\0\0\0"
-      actualNodeFs.writeFileSync(filePathForBinaryTest, binaryContent);
-      expect(await isBinaryFile(filePathForBinaryTest)).toBe(true);
-    });
-
-    it('should return true for a file with high percentage of non-printable ASCII', async () => {
-      const binaryContent = Buffer.from([
-        0x41, 0x42, 0x01, 0x02, 0x03, 0x04, 0x05, 0x43, 0x44, 0x06,
-      ]); // AB\x01\x02\x03\x04\x05CD\x06
-      actualNodeFs.writeFileSync(filePathForBinaryTest, binaryContent);
-      expect(await isBinaryFile(filePathForBinaryTest)).toBe(true);
+        false,
+      ],
+      [
+        'should return true for a file with many null bytes',
+        // "He\0llo\0\0\0\0\0"
+        Buffer.from([
+          0x48, 0x65, 0x00, 0x6c, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]),
+        true,
+      ],
+      [
+        'should return true for a file with high percentage of non-printable ASCII',
+        // AB\x01\x02\x03\x04\x05CD\x06
+        Buffer.from([
+          0x41, 0x42, 0x01, 0x02, 0x03, 0x04, 0x05, 0x43, 0x44, 0x06,
+        ]),
+        true,
+      ],
+    ])('%s', async (_title, content, expected) => {
+      actualNodeFs.writeFileSync(filePathForBinaryTest, content);
+      expect(await isBinaryFile(filePathForBinaryTest)).toBe(expected);
     });
 
     it('should return false if file access fails (e.g., ENOENT)', async () => {
@@ -332,6 +357,33 @@ describe('fileUtils', () => {
 
   describe('BOM detection and encoding', () => {
     let testDir: string;
+    const BOM = {
+      utf8: [0xef, 0xbb, 0xbf],
+      utf16le: [0xff, 0xfe],
+      utf16be: [0xfe, 0xff],
+      utf32le: [0xff, 0xfe, 0x00, 0x00],
+      utf32be: [0x00, 0x00, 0xfe, 0xff],
+    };
+    const withBom = (bom: number[], body: Buffer) =>
+      Buffer.concat([Buffer.from(bom), body]);
+    // Node has no UTF-16 BE / UTF-32 codecs: encode by hand (surrogate pairs
+    // included for the emoji).
+    const utf16be = (text: string) => Buffer.from(text, 'utf16le').swap16();
+    const utf32 = (text: string, littleEndian: boolean) => {
+      const codePoints = Array.from(text, (char) => char.codePointAt(0)!);
+      const buf = Buffer.alloc(codePoints.length * 4);
+      codePoints.forEach((cp, i) =>
+        littleEndian
+          ? buf.writeUInt32LE(cp, i * 4)
+          : buf.writeUInt32BE(cp, i * 4),
+      );
+      return buf;
+    };
+    const writeTestFile = async (name: string, data: string | Buffer) => {
+      const filePath = path.join(testDir, name);
+      await fsPromises.writeFile(filePath, data);
+      return filePath;
+    };
 
     beforeEach(async () => {
       testDir = await fsPromises.mkdtemp(
@@ -349,215 +401,101 @@ describe('fileUtils', () => {
     });
 
     describe('detectBOM', () => {
-      it('should detect UTF-8 BOM', () => {
-        const buf = Buffer.from([
-          0xef, 0xbb, 0xbf, 0x48, 0x65, 0x6c, 0x6c, 0x6f,
-        ]);
-        const result = detectBOM(buf);
-        expect(result).toEqual({ encoding: 'utf8', bomLength: 3 });
-      });
-
-      it('should detect UTF-16 LE BOM', () => {
-        const buf = Buffer.from([0xff, 0xfe, 0x48, 0x00, 0x65, 0x00]);
-        const result = detectBOM(buf);
-        expect(result).toEqual({ encoding: 'utf16le', bomLength: 2 });
-      });
-
-      it('should detect UTF-16 BE BOM', () => {
-        const buf = Buffer.from([0xfe, 0xff, 0x00, 0x48, 0x00, 0x65]);
-        const result = detectBOM(buf);
-        expect(result).toEqual({ encoding: 'utf16be', bomLength: 2 });
-      });
-
-      it('should detect UTF-32 LE BOM', () => {
-        const buf = Buffer.from([
-          0xff, 0xfe, 0x00, 0x00, 0x48, 0x00, 0x00, 0x00,
-        ]);
-        const result = detectBOM(buf);
-        expect(result).toEqual({ encoding: 'utf32le', bomLength: 4 });
-      });
-
-      it('should detect UTF-32 BE BOM', () => {
-        const buf = Buffer.from([
-          0x00, 0x00, 0xfe, 0xff, 0x00, 0x00, 0x00, 0x48,
-        ]);
-        const result = detectBOM(buf);
-        expect(result).toEqual({ encoding: 'utf32be', bomLength: 4 });
-      });
-
-      it('should return null for no BOM', () => {
-        const buf = Buffer.from([0x48, 0x65, 0x6c, 0x6c, 0x6f]);
-        const result = detectBOM(buf);
-        expect(result).toBeNull();
-      });
-
-      it('should return null for empty buffer', () => {
-        const buf = Buffer.alloc(0);
-        const result = detectBOM(buf);
-        expect(result).toBeNull();
-      });
-
-      it('should return null for partial BOM', () => {
-        const buf = Buffer.from([0xef, 0xbb]); // Incomplete UTF-8 BOM
-        const result = detectBOM(buf);
-        expect(result).toBeNull();
+      it.each<[string, number[], ReturnType<typeof detectBOM>]>([
+        [
+          'should detect UTF-8 BOM',
+          [0xef, 0xbb, 0xbf, 0x48, 0x65, 0x6c, 0x6c, 0x6f],
+          { encoding: 'utf8', bomLength: 3 },
+        ],
+        [
+          'should detect UTF-16 LE BOM',
+          [0xff, 0xfe, 0x48, 0x00, 0x65, 0x00],
+          { encoding: 'utf16le', bomLength: 2 },
+        ],
+        [
+          'should detect UTF-16 BE BOM',
+          [0xfe, 0xff, 0x00, 0x48, 0x00, 0x65],
+          { encoding: 'utf16be', bomLength: 2 },
+        ],
+        [
+          'should detect UTF-32 LE BOM',
+          [0xff, 0xfe, 0x00, 0x00, 0x48, 0x00, 0x00, 0x00],
+          { encoding: 'utf32le', bomLength: 4 },
+        ],
+        [
+          'should detect UTF-32 BE BOM',
+          [0x00, 0x00, 0xfe, 0xff, 0x00, 0x00, 0x00, 0x48],
+          { encoding: 'utf32be', bomLength: 4 },
+        ],
+        ['should return null for no BOM', [0x48, 0x65, 0x6c, 0x6c, 0x6f], null],
+        ['should return null for empty buffer', [], null],
+        ['should return null for partial BOM', [0xef, 0xbb], null], // Incomplete UTF-8 BOM
+      ])('%s', (_title, bytes, expected) => {
+        expect(detectBOM(Buffer.from(bytes))).toEqual(expected);
       });
     });
 
     describe('readFileWithEncoding', () => {
-      it('should read UTF-8 BOM file correctly', async () => {
-        const content = 'Hello, 世界! 🌍';
-        const utf8Bom = Buffer.from([0xef, 0xbb, 0xbf]);
-        const utf8Content = Buffer.from(content, 'utf8');
-        const fullBuffer = Buffer.concat([utf8Bom, utf8Content]);
+      const text = 'Hello, 世界! 🌍';
 
-        const filePath = path.join(testDir, 'utf8-bom.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await readFileWithEncoding(filePath);
-        expect(result).toBe(content);
-      });
-
-      it('should read UTF-16 LE BOM file correctly', async () => {
-        const content = 'Hello, 世界! 🌍';
-        const utf16leBom = Buffer.from([0xff, 0xfe]);
-        const utf16leContent = Buffer.from(content, 'utf16le');
-        const fullBuffer = Buffer.concat([utf16leBom, utf16leContent]);
-
-        const filePath = path.join(testDir, 'utf16le-bom.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await readFileWithEncoding(filePath);
-        expect(result).toBe(content);
-      });
-
-      it('should read UTF-16 BE BOM file correctly', async () => {
-        const content = 'Hello, 世界! 🌍';
-        // Manually encode UTF-16 BE: each char as big-endian 16-bit
-        const utf16beBom = Buffer.from([0xfe, 0xff]);
-        const chars = Array.from(content);
-        const utf16beBytes: number[] = [];
-
-        for (const char of chars) {
-          const code = char.codePointAt(0)!;
-          if (code > 0xffff) {
-            // Surrogate pair for emoji
-            const surrogate1 = 0xd800 + ((code - 0x10000) >> 10);
-            const surrogate2 = 0xdc00 + ((code - 0x10000) & 0x3ff);
-            utf16beBytes.push((surrogate1 >> 8) & 0xff, surrogate1 & 0xff);
-            utf16beBytes.push((surrogate2 >> 8) & 0xff, surrogate2 & 0xff);
-          } else {
-            utf16beBytes.push((code >> 8) & 0xff, code & 0xff);
-          }
-        }
-
-        const utf16beContent = Buffer.from(utf16beBytes);
-        const fullBuffer = Buffer.concat([utf16beBom, utf16beContent]);
-
-        const filePath = path.join(testDir, 'utf16be-bom.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await readFileWithEncoding(filePath);
-        expect(result).toBe(content);
-      });
-
-      it('should read UTF-32 LE BOM file correctly', async () => {
-        const content = 'Hello, 世界! 🌍';
-        const utf32leBom = Buffer.from([0xff, 0xfe, 0x00, 0x00]);
-
-        const utf32leBytes: number[] = [];
-        for (const char of Array.from(content)) {
-          const code = char.codePointAt(0)!;
-          utf32leBytes.push(
-            code & 0xff,
-            (code >> 8) & 0xff,
-            (code >> 16) & 0xff,
-            (code >> 24) & 0xff,
-          );
-        }
-
-        const utf32leContent = Buffer.from(utf32leBytes);
-        const fullBuffer = Buffer.concat([utf32leBom, utf32leContent]);
-
-        const filePath = path.join(testDir, 'utf32le-bom.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await readFileWithEncoding(filePath);
-        expect(result).toBe(content);
-      });
-
-      it('should read UTF-32 BE BOM file correctly', async () => {
-        const content = 'Hello, 世界! 🌍';
-        const utf32beBom = Buffer.from([0x00, 0x00, 0xfe, 0xff]);
-
-        const utf32beBytes: number[] = [];
-        for (const char of Array.from(content)) {
-          const code = char.codePointAt(0)!;
-          utf32beBytes.push(
-            (code >> 24) & 0xff,
-            (code >> 16) & 0xff,
-            (code >> 8) & 0xff,
-            code & 0xff,
-          );
-        }
-
-        const utf32beContent = Buffer.from(utf32beBytes);
-        const fullBuffer = Buffer.concat([utf32beBom, utf32beContent]);
-
-        const filePath = path.join(testDir, 'utf32be-bom.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await readFileWithEncoding(filePath);
-        expect(result).toBe(content);
-      });
-
-      it('should read file without BOM as UTF-8', async () => {
-        const content = 'Hello, 世界!';
-        const filePath = path.join(testDir, 'no-bom.txt');
-        await fsPromises.writeFile(filePath, content, 'utf8');
-
-        const result = await readFileWithEncoding(filePath);
-        expect(result).toBe(content);
-      });
-
-      it('should handle empty file', async () => {
-        const filePath = path.join(testDir, 'empty.txt');
-        await fsPromises.writeFile(filePath, '');
-
-        const result = await readFileWithEncoding(filePath);
-        expect(result).toBe('');
-      });
-
-      it('should read GBK-encoded file with Chinese characters correctly', async () => {
-        // GBK encoding of "你好世界这是中文内容用于测试编码检测"
-        // Needs enough content for chardet to reliably detect the encoding
-        const gbkBuffer = Buffer.from([
-          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
-          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
-          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
-          0xec, 0xb2, 0xe2,
-        ]);
-        const filePath = path.join(testDir, 'gbk-chinese.txt');
-        await fsPromises.writeFile(filePath, gbkBuffer);
-
-        const result = await readFileWithEncoding(filePath);
-        expect(result).toBe('你好世界这是中文内容用于测试编码检测');
+      it.each<[string, string, string | Buffer, string]>([
+        [
+          'should read UTF-8 BOM file correctly',
+          'utf8-bom.txt',
+          withBom(BOM.utf8, Buffer.from(text, 'utf8')),
+          text,
+        ],
+        [
+          'should read UTF-16 LE BOM file correctly',
+          'utf16le-bom.txt',
+          withBom(BOM.utf16le, Buffer.from(text, 'utf16le')),
+          text,
+        ],
+        [
+          'should read UTF-16 BE BOM file correctly',
+          'utf16be-bom.txt',
+          withBom(BOM.utf16be, utf16be(text)),
+          text,
+        ],
+        [
+          'should read UTF-32 LE BOM file correctly',
+          'utf32le-bom.txt',
+          withBom(BOM.utf32le, utf32(text, true)),
+          text,
+        ],
+        [
+          'should read UTF-32 BE BOM file correctly',
+          'utf32be-bom.txt',
+          withBom(BOM.utf32be, utf32(text, false)),
+          text,
+        ],
+        [
+          'should read file without BOM as UTF-8',
+          'no-bom.txt',
+          'Hello, 世界!',
+          'Hello, 世界!',
+        ],
+        ['should handle empty file', 'empty.txt', '', ''],
+        [
+          'should read GBK-encoded file with Chinese characters correctly',
+          'gbk-chinese.txt',
+          GBK_BYTES,
+          GBK_TEXT,
+        ],
+      ])('%s', async (_title, name, data, expected) => {
+        const filePath = await writeTestFile(name, data);
+        expect(await readFileWithEncoding(filePath)).toBe(expected);
       });
 
       it('should read GBK-encoded file with mixed ASCII and Chinese correctly', async () => {
-        // GBK encoding of "// 这是注释内容用于测试\nhello你好世界测试中文编码检测\n函数返回值正确"
         // Needs enough Chinese content for chardet to reliably detect as GB18030/GBK
-        const gbkBuffer = Buffer.from([
-          0x2f, 0x2f, 0x20, 0xd5, 0xe2, 0xca, 0xc7, 0xd7, 0xa2, 0xca, 0xcd,
-          0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3, 0xd3, 0xda, 0xb2, 0xe2, 0xca,
-          0xd4, 0x0a, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xc4, 0xe3, 0xba, 0xc3,
-          0xca, 0xc0, 0xbd, 0xe7, 0xb2, 0xe2, 0xca, 0xd4, 0xd6, 0xd0, 0xce,
-          0xc4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc, 0xec, 0xb2, 0xe2, 0x0a, 0xba,
-          0xaf, 0xca, 0xfd, 0xb7, 0xb5, 0xbb, 0xd8, 0xd6, 0xb5, 0xd5, 0xfd,
-          0xc8, 0xb7,
-        ]);
-        const filePath = path.join(testDir, 'gbk-mixed.txt');
-        await fsPromises.writeFile(filePath, gbkBuffer);
+        const filePath = await writeTestFile(
+          'gbk-mixed.txt',
+          iconvEncode(
+            '// 这是注释内容用于测试\nhello你好世界测试中文编码检测\n函数返回值正确',
+            'gbk',
+          ),
+        );
 
         const result = await readFileWithEncoding(filePath);
         expect(result).toContain('hello');
@@ -567,298 +505,159 @@ describe('fileUtils', () => {
     });
 
     describe('readFileWithEncodingInfo', () => {
-      it('should decode plain UTF-8 buffers without reading from a path', () => {
-        const result = decodeBufferWithEncodingInfo(
+      it.each<[string, Buffer, boolean]>([
+        [
+          'should decode plain UTF-8 buffers without reading from a path',
           Buffer.from('Hello', 'utf8'),
-        );
-        expect(result).toEqual({
+          false,
+        ],
+        [
+          'should decode UTF-8 BOM buffers without reading from a path',
+          withBom(BOM.utf8, Buffer.from('Hello', 'utf8')),
+          true,
+        ],
+      ])('%s', (_title, buffer, bom) => {
+        expect(decodeBufferWithEncodingInfo(buffer)).toEqual({
           content: 'Hello',
           encoding: 'utf-8',
-          bom: false,
+          bom,
         });
       });
 
-      it('should decode UTF-8 BOM buffers without reading from a path', () => {
-        const result = decodeBufferWithEncodingInfo(
-          Buffer.concat([
-            Buffer.from([0xef, 0xbb, 0xbf]),
-            Buffer.from('Hello', 'utf8'),
-          ]),
-        );
-        expect(result).toEqual({
-          content: 'Hello',
-          encoding: 'utf-8',
-          bom: true,
-        });
-      });
-
-      it('should return bom: false and encoding utf-8 for plain UTF-8 file', async () => {
-        const filePath = path.join(testDir, 'info-utf8.txt');
-        await fsPromises.writeFile(filePath, 'Hello', 'utf8');
-
+      it.each<[string, string, string | Buffer, string, string, boolean]>([
+        [
+          'should return bom: false and encoding utf-8 for plain UTF-8 file',
+          'info-utf8.txt',
+          'Hello',
+          'Hello',
+          'utf-8',
+          false,
+        ],
+        [
+          'should return bom: true and encoding utf-8 for UTF-8 BOM file',
+          'info-utf8-bom.txt',
+          withBom(BOM.utf8, Buffer.from('Hello', 'utf8')),
+          'Hello',
+          'utf-8',
+          true,
+        ],
+        [
+          // Non-UTF-8 BOM should also be flagged so it is preserved on write-back
+          'should return bom: true and encoding utf-16le for UTF-16LE BOM file',
+          'info-utf16le.txt',
+          withBom(BOM.utf16le, Buffer.from('Hi', 'utf16le')),
+          'Hi',
+          'utf-16le',
+          true,
+        ],
+        [
+          'should return bom: false for GBK file (no BOM)',
+          'info-gbk.txt',
+          GBK_BYTES,
+          GBK_TEXT,
+          'gb18030',
+          false,
+        ],
+      ])('%s', async (_title, name, data, content, encoding, bom) => {
+        const filePath = await writeTestFile(name, data);
         const result = await readFileWithEncodingInfo(filePath);
-        expect(result.content).toBe('Hello');
-        expect(result.encoding).toBe('utf-8');
-        expect(result.bom).toBe(false);
-      });
-
-      it('should return bom: true and encoding utf-8 for UTF-8 BOM file', async () => {
-        const utf8Bom = Buffer.from([0xef, 0xbb, 0xbf]);
-        const filePath = path.join(testDir, 'info-utf8-bom.txt');
-        await fsPromises.writeFile(
-          filePath,
-          Buffer.concat([utf8Bom, Buffer.from('Hello', 'utf8')]),
-        );
-
-        const result = await readFileWithEncodingInfo(filePath);
-        expect(result.content).toBe('Hello');
-        expect(result.encoding).toBe('utf-8');
-        expect(result.bom).toBe(true);
-      });
-
-      it('should return bom: true and encoding utf-16le for UTF-16LE BOM file', async () => {
-        const utf16leBom = Buffer.from([0xff, 0xfe]);
-        const utf16leContent = Buffer.from('Hi', 'utf16le');
-        const filePath = path.join(testDir, 'info-utf16le.txt');
-        await fsPromises.writeFile(
-          filePath,
-          Buffer.concat([utf16leBom, utf16leContent]),
-        );
-
-        const result = await readFileWithEncodingInfo(filePath);
-        expect(result.content).toBe('Hi');
-        expect(result.encoding).toBe('utf-16le');
-        // Non-UTF-8 BOM should also be flagged so it is preserved on write-back
-        expect(result.bom).toBe(true);
-      });
-
-      it('should return bom: false for GBK file (no BOM)', async () => {
-        const gbkBuffer = Buffer.from([
-          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
-          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
-          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
-          0xec, 0xb2, 0xe2,
-        ]);
-        const filePath = path.join(testDir, 'info-gbk.txt');
-        await fsPromises.writeFile(filePath, gbkBuffer);
-
-        const result = await readFileWithEncodingInfo(filePath);
-        expect(result.bom).toBe(false);
-        expect(result.encoding).toBe('gb18030');
-        expect(result.content).toBe('你好世界这是中文内容用于测试编码检测');
+        expect(result.content).toBe(content);
+        expect(result.encoding).toBe(encoding);
+        expect(result.bom).toBe(bom);
       });
     });
 
     describe('detectFileEncoding', () => {
-      it('should detect UTF-8 for plain ASCII file', async () => {
-        const filePath = path.join(testDir, 'ascii.txt');
-        await fsPromises.writeFile(filePath, 'Hello World', 'utf8');
-
-        const encoding = await detectFileEncoding(filePath);
-        expect(encoding).toBe('utf-8');
-      });
-
-      it('should detect UTF-8 for file with UTF-8 BOM', async () => {
-        const utf8Bom = Buffer.from([0xef, 0xbb, 0xbf]);
-        const content = Buffer.from('Hello', 'utf8');
-        const filePath = path.join(testDir, 'utf8-bom-detect.txt');
-        await fsPromises.writeFile(filePath, Buffer.concat([utf8Bom, content]));
-
-        const encoding = await detectFileEncoding(filePath);
-        expect(encoding).toBe('utf-8');
-      });
-
-      it('should detect GBK encoding for Chinese text in GBK', async () => {
-        // GBK encoding of "你好世界这是中文内容用于测试编码检测"
-        // Needs enough content for chardet to reliably detect
-        const gbkBuffer = Buffer.from([
-          0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0xd5, 0xe2, 0xca,
-          0xc7, 0xd6, 0xd0, 0xce, 0xc4, 0xc4, 0xda, 0xc8, 0xdd, 0xd3, 0xc3,
-          0xd3, 0xda, 0xb2, 0xe2, 0xca, 0xd4, 0xb1, 0xe0, 0xc2, 0xeb, 0xbc,
-          0xec, 0xb2, 0xe2,
-        ]);
-        const filePath = path.join(testDir, 'gbk-detect.txt');
-        await fsPromises.writeFile(filePath, gbkBuffer);
-
-        const encoding = await detectFileEncoding(filePath);
-        // chardet detects GBK as 'gb18030' (its superset)
-        expect(encoding).toBe('gb18030');
-      });
-
-      it('should return utf-8 for empty file', async () => {
-        const filePath = path.join(testDir, 'empty-detect.txt');
-        await fsPromises.writeFile(filePath, '');
-
-        const encoding = await detectFileEncoding(filePath);
-        expect(encoding).toBe('utf-8');
-      });
-
-      it('should return utf-8 for non-existent file', async () => {
-        const filePath = path.join(testDir, 'nonexistent-detect.txt');
-
-        const encoding = await detectFileEncoding(filePath);
-        expect(encoding).toBe('utf-8');
+      // `null` data: the file is never created.
+      it.each<[string, string, string | Buffer | null, string]>([
+        [
+          'should detect UTF-8 for plain ASCII file',
+          'ascii.txt',
+          'Hello World',
+          'utf-8',
+        ],
+        [
+          'should detect UTF-8 for file with UTF-8 BOM',
+          'utf8-bom-detect.txt',
+          withBom(BOM.utf8, Buffer.from('Hello', 'utf8')),
+          'utf-8',
+        ],
+        [
+          // chardet detects GBK as 'gb18030' (its superset)
+          'should detect GBK encoding for Chinese text in GBK',
+          'gbk-detect.txt',
+          GBK_BYTES,
+          'gb18030',
+        ],
+        ['should return utf-8 for empty file', 'empty-detect.txt', '', 'utf-8'],
+        [
+          'should return utf-8 for non-existent file',
+          'nonexistent-detect.txt',
+          null,
+          'utf-8',
+        ],
+      ])('%s', async (_title, name, data, expected) => {
+        const filePath =
+          data === null
+            ? path.join(testDir, name)
+            : await writeTestFile(name, data);
+        expect(await detectFileEncoding(filePath)).toBe(expected);
       });
     });
 
     describe('isBinaryFile with BOM awareness', () => {
-      it('should not treat UTF-8 BOM file as binary', async () => {
-        const content = 'Hello, world!';
-        const utf8Bom = Buffer.from([0xef, 0xbb, 0xbf]);
-        const utf8Content = Buffer.from(content, 'utf8');
-        const fullBuffer = Buffer.concat([utf8Bom, utf8Content]);
-
-        const filePath = path.join(testDir, 'utf8-bom-test.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await isBinaryFile(filePath);
-        expect(result).toBe(false);
-      });
-
-      it('should not treat UTF-16 LE BOM file as binary', async () => {
-        const content = 'Hello, world!';
-        const utf16leBom = Buffer.from([0xff, 0xfe]);
-        const utf16leContent = Buffer.from(content, 'utf16le');
-        const fullBuffer = Buffer.concat([utf16leBom, utf16leContent]);
-
-        const filePath = path.join(testDir, 'utf16le-bom-test.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await isBinaryFile(filePath);
-        expect(result).toBe(false);
-      });
-
-      it('should not treat UTF-16 BE BOM file as binary', async () => {
-        const utf16beBom = Buffer.from([0xfe, 0xff]);
-        // Simple ASCII in UTF-16 BE
-        const utf16beContent = Buffer.from([
-          0x00,
-          0x48, // H
-          0x00,
-          0x65, // e
-          0x00,
-          0x6c, // l
-          0x00,
-          0x6c, // l
-          0x00,
-          0x6f, // o
-          0x00,
-          0x2c, // ,
-          0x00,
-          0x20, // space
-          0x00,
-          0x77, // w
-          0x00,
-          0x6f, // o
-          0x00,
-          0x72, // r
-          0x00,
-          0x6c, // l
-          0x00,
-          0x64, // d
-          0x00,
-          0x21, // !
-        ]);
-        const fullBuffer = Buffer.concat([utf16beBom, utf16beContent]);
-
-        const filePath = path.join(testDir, 'utf16be-bom-test.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await isBinaryFile(filePath);
-        expect(result).toBe(false);
-      });
-
-      it('should not treat UTF-32 LE BOM file as binary', async () => {
-        const utf32leBom = Buffer.from([0xff, 0xfe, 0x00, 0x00]);
-        const utf32leContent = Buffer.from([
-          0x48,
-          0x00,
-          0x00,
-          0x00, // H
-          0x65,
-          0x00,
-          0x00,
-          0x00, // e
-          0x6c,
-          0x00,
-          0x00,
-          0x00, // l
-          0x6c,
-          0x00,
-          0x00,
-          0x00, // l
-          0x6f,
-          0x00,
-          0x00,
-          0x00, // o
-        ]);
-        const fullBuffer = Buffer.concat([utf32leBom, utf32leContent]);
-
-        const filePath = path.join(testDir, 'utf32le-bom-test.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await isBinaryFile(filePath);
-        expect(result).toBe(false);
-      });
-
-      it('should not treat UTF-32 BE BOM file as binary', async () => {
-        const utf32beBom = Buffer.from([0x00, 0x00, 0xfe, 0xff]);
-        const utf32beContent = Buffer.from([
-          0x00,
-          0x00,
-          0x00,
-          0x48, // H
-          0x00,
-          0x00,
-          0x00,
-          0x65, // e
-          0x00,
-          0x00,
-          0x00,
-          0x6c, // l
-          0x00,
-          0x00,
-          0x00,
-          0x6c, // l
-          0x00,
-          0x00,
-          0x00,
-          0x6f, // o
-        ]);
-        const fullBuffer = Buffer.concat([utf32beBom, utf32beContent]);
-
-        const filePath = path.join(testDir, 'utf32be-bom-test.txt');
-        await fsPromises.writeFile(filePath, fullBuffer);
-
-        const result = await isBinaryFile(filePath);
-        expect(result).toBe(false);
-      });
-
-      it('should still treat actual binary file as binary', async () => {
-        // PNG header + some binary data with null bytes
-        const pngHeader = Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-        ]);
-        const binaryData = Buffer.from([
-          0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-        ]); // IHDR chunk with nulls
-        const fullContent = Buffer.concat([pngHeader, binaryData]);
-        const filePath = path.join(testDir, 'test.png');
-        await fsPromises.writeFile(filePath, fullContent);
-
-        const result = await isBinaryFile(filePath);
-        expect(result).toBe(true);
-      });
-
-      it('should treat file with null bytes (no BOM) as binary', async () => {
-        const content = Buffer.from([
-          0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x77, 0x6f, 0x72, 0x6c, 0x64,
-        ]);
-        const filePath = path.join(testDir, 'null-bytes.bin');
-        await fsPromises.writeFile(filePath, content);
-
-        const result = await isBinaryFile(filePath);
-        expect(result).toBe(true);
+      it.each<[string, string, Buffer, boolean]>([
+        [
+          'should not treat UTF-8 BOM file as binary',
+          'utf8-bom-test.txt',
+          withBom(BOM.utf8, Buffer.from('Hello, world!', 'utf8')),
+          false,
+        ],
+        [
+          'should not treat UTF-16 LE BOM file as binary',
+          'utf16le-bom-test.txt',
+          withBom(BOM.utf16le, Buffer.from('Hello, world!', 'utf16le')),
+          false,
+        ],
+        [
+          'should not treat UTF-16 BE BOM file as binary',
+          'utf16be-bom-test.txt',
+          withBom(BOM.utf16be, utf16be('Hello, world!')),
+          false,
+        ],
+        [
+          'should not treat UTF-32 LE BOM file as binary',
+          'utf32le-bom-test.txt',
+          withBom(BOM.utf32le, utf32('Hello', true)),
+          false,
+        ],
+        [
+          'should not treat UTF-32 BE BOM file as binary',
+          'utf32be-bom-test.txt',
+          withBom(BOM.utf32be, utf32('Hello', false)),
+          false,
+        ],
+        [
+          // PNG header + an IHDR chunk with null bytes
+          'should still treat actual binary file as binary',
+          'test.png',
+          Buffer.concat([
+            PNG_SIGNATURE,
+            Buffer.from([0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52]),
+          ]),
+          true,
+        ],
+        [
+          'should treat file with null bytes (no BOM) as binary',
+          'null-bytes.bin',
+          Buffer.from([
+            0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x77, 0x6f, 0x72, 0x6c, 0x64,
+          ]),
+          true,
+        ],
+      ])('%s', async (_title, name, data, expected) => {
+        const filePath = await writeTestFile(name, data);
+        expect(await isBinaryFile(filePath)).toBe(expected);
       });
     });
   });
@@ -879,6 +678,27 @@ describe('fileUtils', () => {
       vi.restoreAllMocks(); // Restore spies on actualNodeFs
     });
 
+    // Mocks the next mime lookup, writes the file, classifies it, removes it.
+    async function detectWritten(
+      name: string,
+      data: string | Buffer,
+      mimeType: string | null,
+    ) {
+      mockMimeGetType.mockReturnValueOnce(mimeType);
+      const filePath = writeTemp(name, data);
+      try {
+        return await detectFileType(filePath);
+      } finally {
+        actualNodeFs.unlinkSync(filePath);
+      }
+    }
+    // Encrypted-volume sample: leading nulls and high bytes that trip
+    // isBinaryFile (>30% non-printable and at least one null).
+    const looksBinary = () =>
+      Buffer.from(
+        Array.from({ length: 64 }, (_, i) => (i % 4 === 0 ? 0 : 0xff)),
+      );
+
     it('should detect typescript type by extension (ts, mts, cts, tsx)', async () => {
       expect(await detectFileType('file.ts')).toBe('text');
       expect(await detectFileType('file.test.ts')).toBe('text');
@@ -888,42 +708,33 @@ describe('fileUtils', () => {
       expect(await detectFileType('component.tsx')).toBe('text');
     });
 
-    it('should detect image type by extension (png)', async () => {
-      mockMimeGetType.mockReturnValueOnce('image/png');
-      const pngPath = path.join(tempRootDir, 'file.png');
-      actualNodeFs.writeFileSync(
-        pngPath,
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      );
-
-      expect(await detectFileType(pngPath)).toBe('image');
-    });
-
-    it('should keep empty image files classified as images', async () => {
-      const emptyImagePath = path.join(tempRootDir, 'empty.png');
-      actualNodeFs.writeFileSync(emptyImagePath, '');
-      mockMimeGetType.mockReturnValueOnce('image/png');
-
-      expect(await detectFileType(emptyImagePath)).toBe('image');
-    });
-
-    it('should detect image type by extension (jpeg)', async () => {
-      mockMimeGetType.mockReturnValueOnce('image/jpeg');
-      const jpgPath = path.join(tempRootDir, 'file.jpg');
-      actualNodeFs.writeFileSync(jpgPath, Buffer.from([0xff, 0xd8, 0xff]));
-
-      expect(await detectFileType(jpgPath)).toBe('image');
-    });
-
-    it('should detect a canonical image saved with a different image extension', async () => {
-      mockMimeGetType.mockReturnValueOnce('image/jpeg');
-      const mislabeledPath = path.join(tempRootDir, 'photo.jpg');
-      actualNodeFs.writeFileSync(
-        mislabeledPath,
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      );
-
-      expect(await detectFileType(mislabeledPath)).toBe('image');
+    it.each<[string, string, string, string | Buffer]>([
+      [
+        'should detect image type by extension (png)',
+        'image/png',
+        'file.png',
+        PNG_SIGNATURE,
+      ],
+      [
+        'should keep empty image files classified as images',
+        'image/png',
+        'empty.png',
+        '',
+      ],
+      [
+        'should detect image type by extension (jpeg)',
+        'image/jpeg',
+        'file.jpg',
+        Buffer.from([0xff, 0xd8, 0xff]),
+      ],
+      [
+        'should detect a canonical image saved with a different image extension',
+        'image/jpeg',
+        'photo.jpg',
+        PNG_SIGNATURE,
+      ],
+    ])('%s', async (_title, mimeType, name, data) => {
+      expect(await detectWritten(name, data, mimeType)).toBe('image');
     });
 
     it('should preserve image classification when image sniffing cannot open the file', async () => {
@@ -941,27 +752,49 @@ describe('fileUtils', () => {
       expect(await detectFileType('image.icon.svg')).toBe('svg');
     });
 
-    it('should detect pdf type by extension', async () => {
-      mockMimeGetType.mockReturnValueOnce('application/pdf');
-      expect(await detectFileType('file.pdf')).toBe('pdf');
-    });
-
-    it('should detect audio type by extension', async () => {
-      mockMimeGetType.mockReturnValueOnce('audio/mpeg');
-      expect(await detectFileType('song.mp3')).toBe('audio');
-    });
-
-    it('should detect video type by extension', async () => {
-      mockMimeGetType.mockReturnValueOnce('video/mp4');
-      expect(await detectFileType('movie.mp4')).toBe('video');
-    });
-
-    it('should detect .m4v as video even though mime/lite omits video/x-m4v', async () => {
-      // mime/lite's standard database has no .m4v entry, so the real lookup
-      // returns null; the override map must still classify it as video rather
-      // than letting it fall through to the binary content sampler.
-      mockMimeGetType.mockReturnValueOnce(null);
-      expect(await detectFileType('tutorial.m4v')).toBe('video');
+    it.each<[string, string | null, string, string]>([
+      [
+        'should detect pdf type by extension',
+        'application/pdf',
+        'file.pdf',
+        'pdf',
+      ],
+      [
+        'should detect audio type by extension',
+        'audio/mpeg',
+        'song.mp3',
+        'audio',
+      ],
+      [
+        'should detect video type by extension',
+        'video/mp4',
+        'movie.mp4',
+        'video',
+      ],
+      [
+        // mime/lite's standard database has no .m4v entry, so the real lookup
+        // returns null; the override map must still classify it as video
+        // rather than letting it fall through to the binary content sampler.
+        'should detect .m4v as video even though mime/lite omits video/x-m4v',
+        null,
+        'tutorial.m4v',
+        'video',
+      ],
+      [
+        'should detect known binary extensions as binary (e.g. .zip)',
+        'application/zip',
+        'archive.zip',
+        'binary',
+      ],
+      [
+        'should detect known binary extensions as binary (e.g. .exe)',
+        'application/octet-stream', // Common for .exe
+        'app.exe',
+        'binary',
+      ],
+    ])('%s', async (_title, mimeType, fileName, expected) => {
+      mockMimeGetType.mockReturnValueOnce(mimeType);
+      expect(await detectFileType(fileName)).toBe(expected);
     });
 
     it.each([
@@ -980,22 +813,15 @@ describe('fileUtils', () => {
       },
     );
 
-    it('should detect known binary extensions as binary (e.g. .zip)', async () => {
-      mockMimeGetType.mockReturnValueOnce('application/zip');
-      expect(await detectFileType('archive.zip')).toBe('binary');
-    });
-    it('should detect known binary extensions as binary (e.g. .exe)', async () => {
-      mockMimeGetType.mockReturnValueOnce('application/octet-stream'); // Common for .exe
-      expect(await detectFileType('app.exe')).toBe('binary');
-    });
-
     it('should use isBinaryFile for unknown extensions and detect as binary', async () => {
       mockMimeGetType.mockReturnValueOnce(false); // Unknown mime type
       // Create a file that isBinaryFile will identify as binary
-      const binaryContent = Buffer.from([
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
-      ]);
-      actualNodeFs.writeFileSync(filePathForDetectTest, binaryContent);
+      actualNodeFs.writeFileSync(
+        filePathForDetectTest,
+        Buffer.from([
+          0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        ]),
+      );
       expect(await detectFileType(filePathForDetectTest)).toBe('binary');
     });
 
@@ -1010,53 +836,25 @@ describe('fileUtils', () => {
     });
 
     it('uses content detection for text-looking .dat files', async () => {
-      mockMimeGetType.mockReturnValueOnce(null);
-      const filePath = path.join(tempRootDir, 'controller.dat');
-      actualNodeFs.writeFileSync(
-        filePath,
-        '<?php\nfunction handleRequest() {\n  return true;\n}\n',
-      );
-      try {
-        expect(await detectFileType(filePath)).toBe('text');
-      } finally {
-        actualNodeFs.unlinkSync(filePath);
-      }
+      const php = '<?php\nfunction handleRequest() {\n  return true;\n}\n';
+      expect(await detectWritten('controller.dat', php, null)).toBe('text');
     });
 
     it('still treats binary-looking .dat files as binary', async () => {
-      mockMimeGetType.mockReturnValueOnce(null);
-      const filePath = path.join(tempRootDir, 'payload.dat');
-      actualNodeFs.writeFileSync(filePath, Buffer.from([0x00, 0xff, 0x00]));
-      try {
-        expect(await detectFileType(filePath)).toBe('binary');
-      } finally {
-        actualNodeFs.unlinkSync(filePath);
-      }
+      const data = Buffer.from([0x00, 0xff, 0x00]);
+      expect(await detectWritten('payload.dat', data, null)).toBe('binary');
     });
 
     it('returns text for files with a text/* mime even when the content looks binary (issue #3964 encrypted FS)', async () => {
-      // Frank-Shaw-FS reports `.cpp` / `.c` / `.h` source files on
-      // Windows encrypted / DRM-protected file systems being
-      // misclassified as binary. The OS surfaces encrypted bytes
-      // to `fs.open()` random-access reads, so the 4 KB
-      // `isBinaryFile` heuristic sees nulls / non-printables and
-      // concludes binary. The extension already declares a text
-      // mime, so we must trust that and skip the content sample.
-      mockMimeGetType.mockReturnValueOnce('text/x-c');
-      const filePath = path.join(tempRootDir, 'encrypted.cpp');
-      // Mimic the encrypted-FS sample: leading nulls and high
-      // bytes that would trip isBinaryFile (>30% non-printable
-      // and at least one null).
-      const fakeEncrypted = Buffer.alloc(64);
-      for (let i = 0; i < fakeEncrypted.length; i++) {
-        fakeEncrypted[i] = i % 4 === 0 ? 0 : 0xff;
-      }
-      actualNodeFs.writeFileSync(filePath, fakeEncrypted);
-      try {
-        expect(await detectFileType(filePath)).toBe('text');
-      } finally {
-        actualNodeFs.unlinkSync(filePath);
-      }
+      // Frank-Shaw-FS reports `.cpp` / `.c` / `.h` source files on Windows
+      // encrypted / DRM-protected file systems being misclassified as binary:
+      // the OS surfaces encrypted bytes to `fs.open()` random-access reads, so
+      // the 4 KB `isBinaryFile` heuristic sees nulls / non-printables. The
+      // extension already declares a text mime, so trust it and skip the
+      // content sample.
+      expect(
+        await detectWritten('encrypted.cpp', looksBinary(), 'text/x-c'),
+      ).toBe('text');
     });
 
     it('returns text for application/javascript and similar text-like application mimes', async () => {
@@ -1078,37 +876,23 @@ describe('fileUtils', () => {
     });
 
     it('returns text for known source-code extensions even when content looks binary (mime/lite gap)', async () => {
-      // `mime/lite`'s registry omits most languages: `.py`, `.kt`,
-      // `.go`, `.rb`, `.swift`, ... all return null. Without a
-      // curated extension override, an encrypted-volume read whose
-      // 4 KB sample looks binary would misclassify these as binary
-      // even though the extension is unambiguously text.
-      const looksBinary = Buffer.alloc(64);
-      for (let i = 0; i < looksBinary.length; i++) {
-        looksBinary[i] = i % 4 === 0 ? 0 : 0xff;
-      }
+      // `mime/lite`'s registry omits most languages (`.py`, `.kt`, `.go`,
+      // `.rb`, `.swift`, ... return null). Without a curated extension
+      // override, an encrypted-volume read whose 4 KB sample looks binary
+      // would misclassify these even though the extension is unambiguous.
       for (const ext of ['.py', '.kt', '.go', '.rb', '.swift']) {
-        mockMimeGetType.mockReturnValueOnce(null);
-        const filePath = path.join(tempRootDir, `encrypted${ext}`);
-        actualNodeFs.writeFileSync(filePath, looksBinary);
-        try {
-          expect(await detectFileType(filePath)).toBe('text');
-        } finally {
-          actualNodeFs.unlinkSync(filePath);
-        }
+        expect(
+          await detectWritten(`encrypted${ext}`, looksBinary(), null),
+        ).toBe('text');
       }
     });
 
     it('returns text for extensionless build/config basenames (Dockerfile, Makefile, go.mod, …)', async () => {
-      // Build / config / lockfile conventions carry no extension (or
-      // only an ambiguous one like .mod). `path.extname` returns `''`,
-      // so the extension allowlist misses them, and an encrypted-volume
-      // read whose 4 KB sample looks binary would misclassify these as
-      // binary even though the basename is unambiguously text.
-      const looksBinary = Buffer.alloc(64);
-      for (let i = 0; i < looksBinary.length; i++) {
-        looksBinary[i] = i % 4 === 0 ? 0 : 0xff;
-      }
+      // Build / config / lockfile conventions carry no extension (or only an
+      // ambiguous one like .mod): `path.extname` returns `''`, so the
+      // extension allowlist misses them, and an encrypted-volume read whose
+      // 4 KB sample looks binary would misclassify these even though the
+      // basename is unambiguously text.
       for (const basename of [
         'Dockerfile',
         'Makefile',
@@ -1118,34 +902,93 @@ describe('fileUtils', () => {
         '.gitignore',
         'LICENSE',
       ]) {
-        mockMimeGetType.mockReturnValueOnce(null);
-        const filePath = path.join(tempRootDir, basename);
-        actualNodeFs.writeFileSync(filePath, looksBinary);
-        try {
-          expect(await detectFileType(filePath)).toBe('text');
-        } finally {
-          actualNodeFs.unlinkSync(filePath);
-        }
+        expect(await detectWritten(basename, looksBinary(), null)).toBe('text');
       }
     });
 
     it('still classifies files in BINARY_EXTENSIONS as binary even with text-looking content', async () => {
-      // The extension overrides win-list must not weaken the
-      // existing binary-extension pre-empt. A `.png` whose first
-      // bytes happen to be ASCII still gets classified as binary
-      // because the extension is in BINARY_EXTENSIONS.
-      mockMimeGetType.mockReturnValueOnce(null);
-      const filePath = path.join(tempRootDir, 'looksLikeText.png');
-      actualNodeFs.writeFileSync(filePath, 'PNGheader plain text');
-      try {
-        expect(await detectFileType(filePath)).toBe('binary');
-      } finally {
-        actualNodeFs.unlinkSync(filePath);
-      }
+      // The extension overrides win-list must not weaken the existing
+      // binary-extension pre-empt: a `.png` whose first bytes happen to be
+      // ASCII is still binary because the extension is in BINARY_EXTENSIONS.
+      expect(
+        await detectWritten('looksLikeText.png', 'PNGheader plain text', null),
+      ).toBe('binary');
     });
   });
 
   describe('processSingleFileContent', () => {
+    type MediaPart = { text?: string; inlineData?: { data: string } };
+    const withConfig = (overrides: Record<string, unknown>) =>
+      ({ ...mockConfig, ...overrides }) as unknown as Config;
+    const withModalities = (modalities: Record<string, boolean>) =>
+      withConfig({ getContentGeneratorConfig: () => ({ modalities }) });
+    const noModalities = withModalities({});
+    // Vision without native PDF input: PDFs take the pdftotext path.
+    const imageOnly = withModalities({ image: true });
+    const nativePdf = withModalities({ image: true, pdf: true });
+
+    const read = (
+      filePath: string,
+      config: Config = mockConfig,
+      options?: ProcessSingleFileContentOptions,
+    ) => processSingleFileContent(filePath, config, options);
+    const readText = (
+      content: string,
+      config?: Config,
+      options?: ProcessSingleFileContentOptions,
+    ) => {
+      actualNodeFs.writeFileSync(testTextFilePath, content);
+      return read(testTextFilePath, config, options);
+    };
+    // Writes a temp file behind a sticky mime lookup, then reads it.
+    const readMedia = (
+      name: string,
+      data: string | Buffer,
+      mimeType: string | null,
+      config?: Config,
+      options?: ProcessSingleFileContentOptions,
+    ) => {
+      const filePath = writeTemp(name, data);
+      mockMimeGetType.mockReturnValue(mimeType);
+      return read(filePath, config, options);
+    };
+    const readFakePng = (
+      config?: Config,
+      options?: ProcessSingleFileContentOptions,
+    ) => readMedia('image.png', PNG_SIGNATURE, 'image/png', config, options);
+    const writePng = (
+      filePath: string,
+      width: number,
+      height: number,
+      options?: PngOptions,
+    ) =>
+      sharp({ create: { width, height, channels: 3, background: '#306090' } })
+        .png(options)
+        .toFile(filePath);
+    const expectInline = (
+      result: ProcessedFileReadResult,
+      bytes: string | Buffer,
+      mimeType: string,
+      displayName: string,
+    ) =>
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: Buffer.from(bytes).toString('base64'),
+          mimeType,
+          displayName,
+        },
+      });
+    const expectSkippedBinary = (
+      result: ProcessedFileReadResult,
+      name: string,
+    ) => {
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain(`Skipped binary file: ${name}`);
+      expect(result.error).toBeUndefined();
+    };
+
     beforeEach(() => {
       // Default: renderer unavailable, so PDF reads fall back to the text path
       // unless a test opts into rendering. Set after the global resetAllMocks.
@@ -1154,22 +997,22 @@ describe('fileUtils', () => {
         error: 'pdftoppm unavailable (test default)',
       });
       // Ensure files exist for statSync checks before readFile might be mocked
-      if (actualNodeFs.existsSync(testTextFilePath))
-        actualNodeFs.unlinkSync(testTextFilePath);
-      if (actualNodeFs.existsSync(testImageFilePath))
-        actualNodeFs.unlinkSync(testImageFilePath);
-      if (actualNodeFs.existsSync(testPdfFilePath))
-        actualNodeFs.unlinkSync(testPdfFilePath);
-      if (actualNodeFs.existsSync(testBinaryFilePath))
-        actualNodeFs.unlinkSync(testBinaryFilePath);
+      for (const filePath of [
+        testTextFilePath,
+        testImageFilePath,
+        testPdfFilePath,
+        testBinaryFilePath,
+      ]) {
+        if (actualNodeFs.existsSync(filePath))
+          actualNodeFs.unlinkSync(filePath);
+      }
     });
 
     it.each([undefined, '1-2'])(
       'rejects sandbox PDF processing before invoking host helpers (pages=%s)',
       async (pages) => {
         actualNodeFs.writeFileSync(testPdfFilePath, '%PDF-1.4\n');
-        const config = {
-          ...mockConfig,
+        const config = withConfig({
           getShellExecutionSandbox: () => ({
             workspace: tempRootDir,
             installation: '/installation',
@@ -1177,8 +1020,8 @@ describe('fileUtils', () => {
             filesystem: 'workspace-write',
             network: 'closed',
           }),
-        } as Config;
-        const result = await processSingleFileContent(testPdfFilePath, config, {
+        });
+        const result = await read(testPdfFilePath, config, {
           fileType: 'pdf',
           pages,
         });
@@ -1191,54 +1034,37 @@ describe('fileUtils', () => {
 
     it('should read a text file successfully', async () => {
       const content = 'Line 1\\nLine 2\\nLine 3';
-      actualNodeFs.writeFileSync(testTextFilePath, content);
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-      );
+      const result = await readText(content);
       expect(result.llmContent).toBe(content);
       expect(result.returnDisplay).toBe('');
       expect(result.error).toBeUndefined();
     });
 
     it('should handle file not found', async () => {
-      const result = await processSingleFileContent(
-        nonexistentFilePath,
-        mockConfig,
-      );
+      const result = await read(nonexistentFilePath);
       expect(result.error).toContain('File not found');
       expect(result.returnDisplay).toContain('File not found');
     });
 
     it('should handle read errors for text files', async () => {
-      actualNodeFs.writeFileSync(testTextFilePath, 'content'); // File must exist for initial statSync
       const readError = new Error('Simulated read error');
       vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce(readError);
 
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-      );
+      // File must exist for the initial stat
+      const result = await readText('content');
       expect(result.error).toContain('Simulated read error');
       expect(result.returnDisplay).toContain('Simulated read error');
     });
 
     it('should surface messages from plain object text read errors', async () => {
-      actualNodeFs.writeFileSync(testTextFilePath, 'content');
       vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
         code: -32603,
         message:
           'path escapes workspace: /root/.qwen/skills/dataworks-di-data-processor/instructions/interaction_norms.md',
-        data: {
-          errorKind: 'path_outside_workspace',
-          status: 400,
-        },
+        data: { errorKind: 'path_outside_workspace', status: 400 },
       });
 
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-      );
+      const result = await readText('content');
 
       expect(result.error).toContain('path escapes workspace');
       expect(result.returnDisplay).toContain('path escapes workspace');
@@ -1247,18 +1073,14 @@ describe('fileUtils', () => {
     });
 
     it('should surface messages from plain object notebook read errors', async () => {
-      const notebookPath = path.join(tempRootDir, 'analysis.ipynb');
-      actualNodeFs.writeFileSync(notebookPath, '{}');
+      const notebookPath = writeTemp('analysis.ipynb', '{}');
       vi.spyOn(fs.promises, 'readFile').mockRejectedValueOnce({
         code: -32603,
         message: 'notebook is outside allowed roots',
-        data: {
-          errorKind: 'path_outside_workspace',
-          status: 400,
-        },
+        data: { errorKind: 'path_outside_workspace', status: 400 },
       });
 
-      const result = await processSingleFileContent(notebookPath, mockConfig);
+      const result = await read(notebookPath);
 
       expect(result.error).toContain('notebook is outside allowed roots');
       expect(result.returnDisplay).toContain('Error reading notebook');
@@ -1268,28 +1090,19 @@ describe('fileUtils', () => {
     });
 
     it('should handle read errors for image/pdf files', async () => {
-      actualNodeFs.writeFileSync(
-        testImageFilePath,
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      );
-      mockMimeGetType.mockReturnValue('image/png');
       const readError = new Error('Simulated image read error');
       vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(readError);
 
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfig,
-      );
+      const result = await readFakePng();
       expect(result.error).toContain('Simulated image read error');
       expect(result.returnDisplay).toContain('Simulated image read error');
     });
 
     it('honors an explicitly provided file type without re-detecting content', async () => {
-      actualNodeFs.writeFileSync(testImageFilePath, 'plain text content');
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const result = await processSingleFileContent(
-        testImageFilePath,
+      const result = await readMedia(
+        'image.png',
+        'plain text content',
+        'image/png',
         mockConfig,
         { fileType: 'image' },
       );
@@ -1299,15 +1112,12 @@ describe('fileUtils', () => {
     });
 
     it('omits provider-unsupported image formats instead of forwarding raw bytes (#9291)', async () => {
-      // A MIME type the model endpoint cannot safely consume (image/heic on
+      // A MIME type the endpoint cannot safely consume (image/heic on
       // Responses-compatible routes) must not be forwarded verbatim: the
-      // provider rejects it with a 400 that aborts the whole session. The
-      // read must stay in-band — a text notice, no inline image, no error.
-      const heicPath = path.join(tempRootDir, 'photo.heic');
-      actualNodeFs.writeFileSync(heicPath, 'not decodable heic bytes');
-      mockMimeGetType.mockReturnValue('image/heic');
-
-      const result = await processSingleFileContent(heicPath, mockConfig);
+      // provider's 400 aborts the whole session. The read must stay in-band —
+      // a text notice, no inline image, no error.
+      const bytes = 'not decodable heic bytes';
+      const result = await readMedia('photo.heic', bytes, 'image/heic');
 
       expect(result.error).toBeUndefined();
       expect(typeof result.llmContent).toBe('string');
@@ -1315,74 +1125,36 @@ describe('fileUtils', () => {
       expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
     });
 
-    it('keeps provider-unsupported images inline for the vision bridge', async () => {
-      const heicPath = path.join(tempRootDir, 'photo.heic');
-      const bytes = Buffer.from('heic bytes for bridge');
-      actualNodeFs.writeFileSync(heicPath, bytes);
-      mockMimeGetType.mockReturnValue('image/heic');
-
-      const mockConfigNoImage = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        heicPath,
-        mockConfigNoImage,
-        { preserveUnsupportedImage: true },
-      );
-
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: bytes.toString('base64'),
-          mimeType: 'image/heic',
-          displayName: 'photo.heic',
-        },
+    it.each([
+      [
+        'keeps provider-unsupported images inline for the vision bridge',
+        'photo.heic',
+        'heic bytes for bridge',
+        'image/heic',
+      ],
+      [
+        'keeps undecodable images inline for the vision bridge',
+        'corrupt.png',
+        'not a png',
+        'image/png',
+      ],
+      [
+        'keeps corrupt GIF bytes inline for the vision bridge',
+        'broken.gif',
+        'not a real gif',
+        'image/gif',
+      ],
+    ])('%s', async (_title, name, bytes, mimeType) => {
+      const result = await readMedia(name, bytes, mimeType, noModalities, {
+        preserveUnsupportedImage: true,
       });
-    });
-
-    it('keeps undecodable images inline for the vision bridge', async () => {
-      const corruptPath = path.join(tempRootDir, 'corrupt.png');
-      const bytes = Buffer.from('not a png');
-      actualNodeFs.writeFileSync(corruptPath, bytes);
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const mockConfigNoImage = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        corruptPath,
-        mockConfigNoImage,
-        { preserveUnsupportedImage: true },
-      );
-
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: bytes.toString('base64'),
-          mimeType: 'image/png',
-          displayName: 'corrupt.png',
-        },
-      });
+      expectInline(result, bytes, mimeType, name);
     });
 
     it('should process an image file', async () => {
-      await sharp({
-        create: {
-          width: 20,
-          height: 10,
-          channels: 3,
-          background: '#306090',
-        },
-      })
-        .png()
-        .toFile(testImageFilePath);
+      await writePng(testImageFilePath, 20, 10);
       mockMimeGetType.mockReturnValue('image/png');
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfig,
-      );
+      const result = await read(testImageFilePath);
       const parts = result.llmContent as Part[];
       expect(parts[0]).toEqual({
         // The shared stub declares tool_search and defers zoom_image, so the
@@ -1454,24 +1226,22 @@ describe('fileUtils', () => {
     ])(
       'uses only exposed tools for image guidance: $declared, code mode $codeModeOnly',
       async ({ codeModeOnly, declared, deferred, bindings, hint }) => {
-        await sharp({
-          create: { width: 20, height: 10, channels: 3, background: '#306090' },
-        })
-          .png()
-          .toFile(testImageFilePath);
+        await writePng(testImageFilePath, 20, 10);
         mockMimeGetType.mockReturnValue('image/png');
-        const result = await processSingleFileContent(testImageFilePath, {
-          ...mockConfig,
-          getCodeModeOnly: () => codeModeOnly,
-          getToolRegistry: () => ({
-            getFunctionDeclarations: () => declared.map((name) => ({ name })),
-            getDeferredToolSummary: () => deferred.map((name) => ({ name })),
-            getCodeModeBindingPlan: () => ({
-              bindings: bindings.map((name) => ({ name })),
-              collisions: [],
+        const result = await read(
+          testImageFilePath,
+          withConfig({
+            getCodeModeOnly: () => codeModeOnly,
+            getToolRegistry: () => ({
+              getFunctionDeclarations: () => declared.map((name) => ({ name })),
+              getDeferredToolSummary: () => deferred.map((name) => ({ name })),
+              getCodeModeBindingPlan: () => ({
+                bindings: bindings.map((name) => ({ name })),
+                collisions: [],
+              }),
             }),
           }),
-        } as unknown as Config);
+        );
         const parts = result.llmContent as Part[];
         expect(parts[0]).toEqual({
           text: `Image overview: 20x10; oriented source: 20x10.${hint}`,
@@ -1481,25 +1251,12 @@ describe('fileUtils', () => {
     );
 
     it('points the zoom hint at tools.zoom_image in CodeModeOnly', async () => {
-      await sharp({
-        create: {
-          width: 20,
-          height: 10,
-          channels: 3,
-          background: '#306090',
-        },
-      })
-        .png()
-        .toFile(testImageFilePath);
+      await writePng(testImageFilePath, 20, 10);
       mockMimeGetType.mockReturnValue('image/png');
-      const codeModeConfig = {
-        ...mockConfig,
-        getCodeModeOnly: () => true,
-      } as unknown as Config;
 
-      const result = await processSingleFileContent(
+      const result = await read(
         testImageFilePath,
-        codeModeConfig,
+        withConfig({ getCodeModeOnly: () => true }),
       );
 
       const parts = result.llmContent as Part[];
@@ -1513,22 +1270,13 @@ describe('fileUtils', () => {
 
     it('returns a bounded overview when a PNG exceeds the old data URI limit', async () => {
       const largeImagePath = path.join(tempRootDir, 'large.png');
-      await sharp({
-        create: {
-          width: 2200,
-          height: 1800,
-          channels: 3,
-          background: '#306090',
-        },
-      })
-        .png({ compressionLevel: 0 })
-        .toFile(largeImagePath);
+      await writePng(largeImagePath, 2200, 1800, { compressionLevel: 0 });
       expect(actualNodeFs.statSync(largeImagePath).size).toBeGreaterThan(
-        9.9 * 1024 * 1024,
+        9.9 * MB,
       );
       mockMimeGetType.mockReturnValue('image/png');
 
-      const result = await processSingleFileContent(largeImagePath, mockConfig);
+      const result = await read(largeImagePath);
 
       expect(result.error).toBeUndefined();
       const parts = result.llmContent as Part[];
@@ -1538,7 +1286,7 @@ describe('fileUtils', () => {
       ).metadata();
       expect(overview.mimeType).toBe('image/jpeg');
       expect(Buffer.from(overview.data!, 'base64').length).toBeLessThanOrEqual(
-        9 * 1024 * 1024,
+        9 * MB,
       );
       expect(Math.max(metadata.width!, metadata.height!)).toBeLessThanOrEqual(
         1568,
@@ -1551,174 +1299,100 @@ describe('fileUtils', () => {
     it('rejects canonical image sources above 100 MB before decoding', async () => {
       const oversizedPath = path.join(tempRootDir, 'oversized.png');
       const handle = await fsPromises.open(oversizedPath, 'w');
-      await handle.truncate(100 * 1024 * 1024 + 1);
+      await handle.truncate(100 * MB + 1);
       await handle.close();
       mockMimeGetType.mockReturnValue('image/png');
 
-      const result = await processSingleFileContent(oversizedPath, mockConfig);
+      const result = await read(oversizedPath);
 
       expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
       expect(result.llmContent).toContain('100 MB source limit');
     });
 
     it('reads text-looking corrupt canonical image content as text', async () => {
-      const corruptPath = path.join(tempRootDir, 'corrupt.png');
-      const bytes = Buffer.from('not a real png');
-      await fsPromises.writeFile(corruptPath, bytes);
-      mockMimeGetType.mockReturnValue('image/png');
+      const text = 'not a real png';
+      const result = await readMedia('corrupt.png', text, 'image/png');
 
-      const result = await processSingleFileContent(corruptPath, mockConfig);
-
-      expect(result.llmContent).toBe(bytes.toString());
+      expect(result.llmContent).toBe(text);
       expect(result.error).toBeUndefined();
     });
 
     it('forwards an animated canonical image verbatim instead of failing the read', async () => {
-      const twoFrameGif = Buffer.from(
-        '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
-        'hex',
-      );
       const animatedPath = path.join(tempRootDir, 'animated.webp');
-      await sharp(twoFrameGif, { animated: true }).webp().toFile(animatedPath);
+      await sharp(TWO_FRAME_GIF, { animated: true })
+        .webp()
+        .toFile(animatedPath);
       mockMimeGetType.mockReturnValue('image/webp');
 
-      const result = await processSingleFileContent(animatedPath, mockConfig);
+      const result = await read(animatedPath);
 
       const onDisk = await fsPromises.readFile(animatedPath);
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: onDisk.toString('base64'),
-          mimeType: 'image/webp',
-          displayName: 'animated.webp',
-        },
-      });
+      expectInline(result, onDisk, 'image/webp', 'animated.webp');
       expect(result.returnDisplay).toContain('Read image file: animated.webp');
     });
 
-    it('omits non-canonical content behind a canonical extension (#9291)', async () => {
-      const gifBytes = Buffer.from(
-        '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
-        'hex',
-      );
-      const mismatchPath = path.join(tempRootDir, 'mismatch.png');
-      await fsPromises.writeFile(mismatchPath, gifBytes);
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const result = await processSingleFileContent(mismatchPath, mockConfig);
-
-      expect(result.llmContent).toContain(
-        'Cannot display content of binary file',
-      );
-      expect(result.returnDisplay).toContain(
-        'Skipped binary file: mismatch.png',
-      );
-      expect(result.error).toBeUndefined();
+    it.each<[string, string, string | Buffer]>([
+      [
+        'omits non-canonical content behind a canonical extension (#9291)',
+        'mismatch.png',
+        TWO_FRAME_GIF,
+      ],
+      [
+        'rejects unrecognized binary content behind an image extension',
+        'garbage.png',
+        Buffer.from([0x00, 0x01, 0x02, 0x03]),
+      ],
+      [
+        'rejects two-byte content behind an image extension as binary',
+        'tiny.png',
+        'hi',
+      ],
+    ])('%s', async (_title, name, data) => {
+      expectSkippedBinary(await readMedia(name, data, 'image/png'), name);
     });
 
     it('rejects ZIP containers behind an image extension', async () => {
-      const zipPath = path.join(tempRootDir, 'archive.png');
-      await fsPromises.writeFile(
-        zipPath,
-        Buffer.from([0x50, 0x4b, 0x03, 0x04]),
-      );
-      mockMimeGetType.mockReturnValue('image/png');
+      const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+      const result = await readMedia('archive.png', zip, 'image/png');
 
-      const result = await processSingleFileContent(zipPath, mockConfig);
-
-      expect(result.llmContent).toContain(
-        'Cannot display content of binary file',
-      );
-      expect(result.returnDisplay).toContain(
-        'Skipped binary file: archive.png',
-      );
-      expect(result.error).toBeUndefined();
+      expectSkippedBinary(result, 'archive.png');
       expect(typeof result.llmContent).toBe('string');
       expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
     });
 
-    it('rejects unrecognized binary content behind an image extension', async () => {
-      const binaryPath = path.join(tempRootDir, 'garbage.png');
-      await fsPromises.writeFile(
-        binaryPath,
-        Buffer.from([0x00, 0x01, 0x02, 0x03]),
-      );
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const result = await processSingleFileContent(binaryPath, mockConfig);
-
-      expect(result.llmContent).toContain(
-        'Cannot display content of binary file',
-      );
-      expect(result.returnDisplay).toContain(
-        'Skipped binary file: garbage.png',
-      );
-      expect(result.error).toBeUndefined();
-    });
-
-    it('rejects two-byte content behind an image extension as binary', async () => {
-      const tinyPath = path.join(tempRootDir, 'tiny.png');
-      await fsPromises.writeFile(tinyPath, Buffer.from('hi'));
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const result = await processSingleFileContent(tinyPath, mockConfig);
-
-      expect(result.llmContent).toContain(
-        'Cannot display content of binary file',
-      );
-      expect(result.returnDisplay).toContain('Skipped binary file: tiny.png');
-      expect(result.error).toBeUndefined();
-    });
-
-    it.each([
+    const imageExtensions = [
       { extension: 'png', mimeType: 'image/png' },
       { extension: 'jpg', mimeType: 'image/jpeg' },
       { extension: 'gif', mimeType: 'image/gif' },
       { extension: 'webp', mimeType: 'image/webp' },
-    ])(
+    ];
+
+    it.each(imageExtensions)(
       'reads text content behind a .$extension extension as text',
       async ({ extension, mimeType }) => {
-        const jsonBytes = Buffer.from(
-          '{"meta":{"format":"png"},"data":"not-a-real-image"}',
-        );
-        const screenshotPath = path.join(
-          tempRootDir,
-          `screenshot.${extension}`,
-        );
-        await fsPromises.writeFile(screenshotPath, jsonBytes);
-        mockMimeGetType.mockReturnValue(mimeType);
+        const json = '{"meta":{"format":"png"},"data":"not-a-real-image"}';
+        const name = `screenshot.${extension}`;
+        const result = await readMedia(name, json, mimeType);
 
-        const result = await processSingleFileContent(
-          screenshotPath,
-          mockConfig,
-        );
-
-        expect(result.llmContent).toBe(jsonBytes.toString());
+        expect(result.llmContent).toBe(json);
         expect(result.returnDisplay).toBe('');
         expect(result.error).toBeUndefined();
       },
     );
 
-    it.each([
-      { extension: 'png', mimeType: 'image/png' },
-      { extension: 'jpg', mimeType: 'image/jpeg' },
-      { extension: 'gif', mimeType: 'image/gif' },
-      { extension: 'webp', mimeType: 'image/webp' },
-    ])(
+    it.each(imageExtensions)(
       'reads BOM-prefixed UTF-16 text behind a .$extension extension as text',
       async ({ extension, mimeType }) => {
         const text = 'text saved with the wrong extension';
-        const imagePath = path.join(tempRootDir, `notes.${extension}`);
-        await fsPromises.writeFile(
-          imagePath,
+        const result = await readMedia(
+          `notes.${extension}`,
           Buffer.concat([
             Buffer.from([0xff, 0xfe]),
             Buffer.from(text, 'utf16le'),
           ]),
+          mimeType,
         );
-        mockMimeGetType.mockReturnValue(mimeType);
-
-        const result = await processSingleFileContent(imagePath, mockConfig);
 
         expect(result.llmContent).toBe(text);
         expect(result.returnDisplay).toBe('');
@@ -1729,19 +1403,14 @@ describe('fileUtils', () => {
     it('applies EXIF orientation before describing and rendering an overview', async () => {
       const orientedPath = path.join(tempRootDir, 'oriented.jpg');
       await sharp({
-        create: {
-          width: 60,
-          height: 40,
-          channels: 3,
-          background: '#306090',
-        },
+        create: { width: 60, height: 40, channels: 3, background: '#306090' },
       })
         .jpeg()
         .withMetadata({ orientation: 6 })
         .toFile(orientedPath);
       mockMimeGetType.mockReturnValue('image/jpeg');
 
-      const result = await processSingleFileContent(orientedPath, mockConfig);
+      const result = await read(orientedPath);
       const parts = result.llmContent as Part[];
       const metadata = await sharp(
         Buffer.from(parts[1]!.inlineData!.data!, 'base64'),
@@ -1765,10 +1434,7 @@ describe('fileUtils', () => {
         .toFile(transparentPath);
       mockMimeGetType.mockReturnValue('image/webp');
 
-      const result = await processSingleFileContent(
-        transparentPath,
-        mockConfig,
-      );
+      const result = await read(transparentPath);
       const parts = result.llmContent as Part[];
       const { data, info } = await sharp(
         Buffer.from(parts[1]!.inlineData!.data!, 'base64'),
@@ -1787,70 +1453,26 @@ describe('fileUtils', () => {
 
     it('keeps animated GIF image bytes unchanged', async () => {
       // A real, decodable GIF: forwarded verbatim (never re-encoded).
-      const gifBytes = Buffer.from(
-        '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
-        'hex',
+      const result = await readMedia(
+        'animation.gif',
+        TWO_FRAME_GIF,
+        'image/gif',
       );
-      const filePath = path.join(tempRootDir, 'animation.gif');
-      actualNodeFs.writeFileSync(filePath, gifBytes);
-      mockMimeGetType.mockReturnValue('image/gif');
-
-      const result = await processSingleFileContent(filePath, mockConfig);
-
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: gifBytes.toString('base64'),
-          mimeType: 'image/gif',
-          displayName: 'animation.gif',
-        },
-      });
+      expectInline(result, TWO_FRAME_GIF, 'image/gif', 'animation.gif');
     });
 
     it('omits a corrupt GIF instead of forwarding undecodable bytes (#9291)', async () => {
-      const filePath = path.join(tempRootDir, 'broken.gif');
-      actualNodeFs.writeFileSync(filePath, Buffer.from('not a real gif'));
-      mockMimeGetType.mockReturnValue('image/gif');
-
-      const result = await processSingleFileContent(filePath, mockConfig);
+      const gif = 'not a real gif';
+      const result = await readMedia('broken.gif', gif, 'image/gif');
 
       expect(result.error).toBeUndefined();
       expect(typeof result.llmContent).toBe('string');
       expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
     });
 
-    it('keeps corrupt GIF bytes inline for the vision bridge', async () => {
-      const filePath = path.join(tempRootDir, 'broken.gif');
-      const bytes = Buffer.from('not a real gif');
-      actualNodeFs.writeFileSync(filePath, bytes);
-      mockMimeGetType.mockReturnValue('image/gif');
-
-      const mockConfigNoImage = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        filePath,
-        mockConfigNoImage,
-        { preserveUnsupportedImage: true },
-      );
-
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: bytes.toString('base64'),
-          mimeType: 'image/gif',
-          displayName: 'broken.gif',
-        },
-      });
-    });
-
     it('omits BMP image bytes the provider cannot safely consume (#9291)', async () => {
-      const filePath = path.join(tempRootDir, 'bitmap.bmp');
-      const bytes = Buffer.from('unchanged image bytes');
-      actualNodeFs.writeFileSync(filePath, bytes);
-      mockMimeGetType.mockReturnValue('image/bmp');
-
-      const result = await processSingleFileContent(filePath, mockConfig);
+      const bytes = 'unchanged image bytes';
+      const result = await readMedia('bitmap.bmp', bytes, 'image/bmp');
 
       expect(result.error).toBeUndefined();
       expect(typeof result.llmContent).toBe('string');
@@ -1858,21 +1480,7 @@ describe('fileUtils', () => {
     });
 
     it('should reject image files when model does not support image', async () => {
-      const fakePngData = Buffer.from([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
-      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const mockConfigNoImage = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfigNoImage,
-      );
+      const result = await readFakePng(noModalities);
       expect(typeof result.llmContent).toBe('string');
       expect(result.llmContent).toContain('Unsupported image file');
       expect(result.llmContent).toContain('does not support image input');
@@ -1885,16 +1493,17 @@ describe('fileUtils', () => {
       // modality config. The pipeline itself is mocked (index.test.ts owns
       // it); what is pinned here is WHICH path a file takes.
       function omniConfig(overrides: Record<string, unknown> = {}): Config {
-        return {
-          ...mockConfig,
+        return withConfig({
           isOmniEnabled: () => true,
           loadOmniMediaReader: () => import('../omni/index.js'),
           getContentGeneratorConfig: () => ({
             modalities: { image: true, audio: true, video: true },
           }),
           ...overrides,
-        } as unknown as Config;
+        });
       }
+      const readClip = (bytes: string, config = omniConfig()) =>
+        readMedia('clip.mp4', bytes, 'video/mp4', config);
 
       beforeEach(() => {
         omniGateMocks.isOmniDeliveryActive.mockReturnValue(true);
@@ -1907,16 +1516,13 @@ describe('fileUtils', () => {
       });
 
       it('routes a sniff-confirmed video through readMediaViaOmniDelivery', async () => {
-        const videoPath = path.join(tempRootDir, 'clip.mp4');
-        actualNodeFs.writeFileSync(videoPath, Buffer.from('fake mp4'));
-        mockMimeGetType.mockReturnValue('video/mp4');
         omniGateMocks.sniffFileModality.mockResolvedValue('video');
 
-        const result = await processSingleFileContent(videoPath, omniConfig());
+        const result = await readClip('fake mp4');
 
         expect(omniGateMocks.readMediaViaOmniDelivery).toHaveBeenCalledWith(
           expect.objectContaining({
-            filePath: videoPath,
+            filePath: path.join(tempRootDir, 'clip.mp4'),
             expectedModality: 'video',
           }),
         );
@@ -1927,12 +1533,9 @@ describe('fileUtils', () => {
         // A file whose bytes sniff as a DIFFERENT modality than its
         // extension suggests must take the legacy path (inline under its
         // extension-derived type), not the fail-closed pipeline.
-        const videoPath = path.join(tempRootDir, 'clip.mp4');
-        actualNodeFs.writeFileSync(videoPath, Buffer.from('small bytes'));
-        mockMimeGetType.mockReturnValue('video/mp4');
         omniGateMocks.sniffFileModality.mockResolvedValue(null);
 
-        const result = await processSingleFileContent(videoPath, omniConfig());
+        const result = await readClip('small bytes');
 
         expect(omniGateMocks.readMediaViaOmniDelivery).not.toHaveBeenCalled();
         const content = result.llmContent as Part;
@@ -1940,12 +1543,8 @@ describe('fileUtils', () => {
       });
 
       it('never sniffs or delivers when the modality is disabled in config', async () => {
-        const videoPath = path.join(tempRootDir, 'clip.mp4');
-        actualNodeFs.writeFileSync(videoPath, Buffer.from('fake mp4'));
-        mockMimeGetType.mockReturnValue('video/mp4');
-
-        const result = await processSingleFileContent(
-          videoPath,
+        const result = await readClip(
+          'fake mp4',
           omniConfig({
             getContentGeneratorConfig: () => ({
               modalities: { video: false },
@@ -1959,12 +1558,9 @@ describe('fileUtils', () => {
       });
 
       it('takes the legacy path when omni delivery is not active for the endpoint', async () => {
-        const videoPath = path.join(tempRootDir, 'clip.mp4');
-        actualNodeFs.writeFileSync(videoPath, Buffer.from('small bytes'));
-        mockMimeGetType.mockReturnValue('video/mp4');
         omniGateMocks.isOmniDeliveryActive.mockReturnValue(false);
 
-        const result = await processSingleFileContent(videoPath, omniConfig());
+        const result = await readClip('small bytes');
 
         expect(omniGateMocks.readMediaViaOmniDelivery).not.toHaveBeenCalled();
         const content = result.llmContent as Part;
@@ -1977,9 +1573,8 @@ describe('fileUtils', () => {
         // an over-cap image must delegate to omni delivery instead of being
         // rejected. Sparse file: only the stat size matters — the mocked
         // pipeline never reads the bytes.
-        const imagePath = path.join(tempRootDir, 'huge.png');
-        actualNodeFs.writeFileSync(imagePath, Buffer.alloc(0));
-        actualNodeFs.truncateSync(imagePath, 101 * 1024 * 1024);
+        const imagePath = writeTemp('huge.png', Buffer.alloc(0));
+        actualNodeFs.truncateSync(imagePath, 101 * MB);
         mockMimeGetType.mockReturnValue('image/png');
         omniGateMocks.sniffFileModality.mockResolvedValue('image');
         omniGateMocks.readMediaViaOmniDelivery.mockResolvedValue({
@@ -1989,7 +1584,7 @@ describe('fileUtils', () => {
           returnDisplay: 'Delivered via omni upload.',
         });
 
-        const result = await processSingleFileContent(imagePath, omniConfig());
+        const result = await read(imagePath, omniConfig());
 
         expect(result.error).toBeUndefined();
         expect(result.returnDisplay).toBe('Delivered via omni upload.');
@@ -2003,28 +1598,12 @@ describe('fileUtils', () => {
     });
 
     it('keeps image inline when preserveUnsupportedImage is true', async () => {
-      await sharp({
-        create: {
-          width: 8,
-          height: 8,
-          channels: 3,
-          background: '#306090',
-        },
-      })
-        .png()
-        .toFile(testImageFilePath);
+      await writePng(testImageFilePath, 8, 8);
       mockMimeGetType.mockReturnValue('image/png');
 
-      const mockConfigNoImage = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfigNoImage,
-        { preserveUnsupportedImage: true },
-      );
+      const result = await read(testImageFilePath, noModalities, {
+        preserveUnsupportedImage: true,
+      });
       expect(typeof result.llmContent).toBe('object');
       const parts = result.llmContent as Part[];
       expect(parts[0]?.text).toContain('Image overview');
@@ -2037,40 +1616,18 @@ describe('fileUtils', () => {
     });
 
     it('still strips image for agent reads without the preserve flag', async () => {
-      const fakePngData = Buffer.from([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]);
-      actualNodeFs.writeFileSync(testImageFilePath, fakePngData);
-      mockMimeGetType.mockReturnValue('image/png');
-
-      const mockConfigNoImage = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-      } as unknown as Config;
-
       // No preserve flag (default false) — agent tool read / headless path.
-      const result = await processSingleFileContent(
-        testImageFilePath,
-        mockConfigNoImage,
-      );
+      const result = await readFakePng(noModalities);
       expect(typeof result.llmContent).toBe('string');
       expect(result.llmContent).toContain('does not support image input');
     });
 
     it('still strips audio when preserveUnsupportedImage is true', async () => {
-      const fakeAudio = Buffer.from('fake audio data');
-      const testAudioPath = path.join(tempRootDir, 'clip.mp3');
-      actualNodeFs.writeFileSync(testAudioPath, fakeAudio);
-      mockMimeGetType.mockReturnValue('audio/mpeg');
-
-      const mockConfigNoAudio = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testAudioPath,
-        mockConfigNoAudio,
+      const result = await readMedia(
+        'clip.mp3',
+        'fake audio data',
+        'audio/mpeg',
+        noModalities,
         { preserveUnsupportedImage: true },
       );
       expect(typeof result.llmContent).toBe('string');
@@ -2078,90 +1635,102 @@ describe('fileUtils', () => {
     });
 
     it('keeps supported audio bytes unchanged', async () => {
-      const audioPath = path.join(tempRootDir, 'clip.mp3');
-      const audioBytes = Buffer.from('fake audio data');
-      actualNodeFs.writeFileSync(audioPath, audioBytes);
-      mockMimeGetType.mockReturnValue('audio/mpeg');
-      const audioConfig = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({
-          modalities: { image: true, audio: true, video: true },
-        }),
-      } as unknown as Config;
+      const audioBytes = 'fake audio data';
+      const result = await readMedia(
+        'clip.mp3',
+        audioBytes,
+        'audio/mpeg',
+        withModalities({ image: true, audio: true, video: true }),
+      );
 
-      const result = await processSingleFileContent(audioPath, audioConfig);
+      expectInline(result, audioBytes, 'audio/mpeg', 'clip.mp3');
+    });
 
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: audioBytes.toString('base64'),
-          mimeType: 'audio/mpeg',
-          displayName: 'clip.mp3',
-        },
+    // Regression guards for the /learn local-video path: mime/lite has no
+    // .m4v / .mkv entry, so without the detectFileType override map these
+    // fell through to the content sampler (misclassified as binary: "Cannot
+    // display content of binary file" instead of an inlineData Part) or the
+    // binary/size-cap path instead of the media pipeline.
+    it.each([
+      [
+        'processes an .m4v video as inline data despite the mime/lite gap',
+        'tutorial.m4v',
+        'fake m4v data',
+        'video/x-m4v',
+      ],
+      [
+        'processes an .mkv video as inline data despite the mime/lite gap',
+        'movie.mkv',
+        'fake mkv data',
+        'video/x-matroska',
+      ],
+    ])('%s', async (_title, name, fakeVideo, mimeType) => {
+      const result = await readMedia(name, fakeVideo, null);
+      const inline = (
+        result.llmContent as { inlineData: { data: string; mimeType: string } }
+      ).inlineData;
+
+      expect(typeof result.llmContent).toBe('object');
+      expect(inline.data).toBe(Buffer.from(fakeVideo).toString('base64'));
+      expect(inline.mimeType).toBe(mimeType);
+      expect(result.returnDisplay).toContain('Read video file');
+    });
+
+    const PDF_BYTES = Buffer.from('%PDF-1.7');
+    const FAKE_PDF = Buffer.from('fake pdf data');
+    const LARGE_PDF = Buffer.alloc(2 * MB);
+    const REFERENCE = { largePdfBehavior: 'reference' } as const;
+    // The tiny FAKE_PDF behind a faked stat size.
+    const fakePdf = (statSize: number) => ({ data: FAKE_PDF, statSize });
+    const fakeStat = (size: number, isFile = true) =>
+      vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size,
+        isDirectory: () => false,
+        isFile: () => isFile,
+      } as fs.Stats);
+    type PdfRead = ProcessSingleFileContentOptions & {
+      config?: Config;
+      data?: Buffer;
+      statSize?: number;
+    };
+    // Writes the test PDF, queues the exec results in call order and reads it
+    // (by default as a vision model without native PDF input); `statSize`
+    // fakes the stat size for this read only.
+    async function readPdf(
+      {
+        config = imageOnly,
+        data = PDF_BYTES,
+        statSize,
+        ...options
+      }: PdfRead = {},
+      ...execs: ExecResult[]
+    ) {
+      actualNodeFs.writeFileSync(testPdfFilePath, data);
+      mockMimeGetType.mockReturnValue('application/pdf');
+      for (const exec of execs) mockExecResult(exec);
+      const statSpy = statSize === undefined ? undefined : fakeStat(statSize);
+      try {
+        return await read(testPdfFilePath, config, options);
+      } finally {
+        statSpy?.mockRestore();
+      }
+    }
+    const renderPages = (pages: string[], bytesTruncated = false) =>
+      mockRender.mockResolvedValue({
+        success: true,
+        images: pages.map((data) => ({ data, mimeType: 'image/jpeg' })),
+        bytesTruncated,
       });
-    });
-
-    it('processes an .m4v video as inline data despite the mime/lite gap', async () => {
-      // Regression guard for the /learn local-video path: mime/lite returns
-      // null for .m4v, so without the detectFileType override the file fell
-      // through to the content sampler and was misclassified as binary,
-      // yielding a "Cannot display content of binary file" string instead of
-      // an inlineData Part.
-      const fakeVideo = Buffer.from('fake m4v data');
-      const testVideoPath = path.join(tempRootDir, 'tutorial.m4v');
-      actualNodeFs.writeFileSync(testVideoPath, fakeVideo);
-      mockMimeGetType.mockReturnValue(null);
-
-      const result = await processSingleFileContent(testVideoPath, mockConfig);
-
-      expect(typeof result.llmContent).toBe('object');
-      expect(
-        (result.llmContent as { inlineData: { data: string } }).inlineData.data,
-      ).toBe(fakeVideo.toString('base64'));
-      expect(
-        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
-          .mimeType,
-      ).toBe('video/x-m4v');
-      expect(result.returnDisplay).toContain('Read video file');
-    });
-
-    it('processes an .mkv video as inline data despite the mime/lite gap', async () => {
-      // Same regression class as .m4v: mime/lite's standard database has no
-      // .mkv entry, so without the override map a Matroska movie fell into
-      // the binary/size-cap path instead of the media pipeline.
-      const fakeVideo = Buffer.from('fake mkv data');
-      const testVideoPath = path.join(tempRootDir, 'movie.mkv');
-      actualNodeFs.writeFileSync(testVideoPath, fakeVideo);
-      mockMimeGetType.mockReturnValue(null);
-
-      const result = await processSingleFileContent(testVideoPath, mockConfig);
-
-      expect(typeof result.llmContent).toBe('object');
-      expect(
-        (result.llmContent as { inlineData: { data: string } }).inlineData.data,
-      ).toBe(fakeVideo.toString('base64'));
-      expect(
-        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
-          .mimeType,
-      ).toBe('video/x-matroska');
-      expect(result.returnDisplay).toContain('Read video file');
-    });
+    const expectRendered = (firstPage: number, lastPage: number) =>
+      expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
+        firstPage,
+        lastPage,
+      });
+    const hasText = (parts: MediaPart[], pattern: RegExp) =>
+      parts.some((p) => typeof p.text === 'string' && pattern.test(p.text));
 
     it('should fall back to pdftotext when model does not support PDF', async () => {
-      const fakePdfData = Buffer.from('fake pdf data');
-      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
-      mockMimeGetType.mockReturnValue('application/pdf');
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({
-          modalities: { image: true },
-        }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-      );
+      const result = await readPdf({ data: FAKE_PDF });
       expect(typeof result.llmContent).toBe('string');
       // When pdftotext is not installed, should return a helpful error
       // rather than silently skipping
@@ -2169,86 +1738,30 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Failed to read pdf');
     });
 
-    it('rejects large full-PDF text fallback before extracting text', async () => {
-      actualNodeFs.writeFileSync(
-        testPdfFilePath,
-        Buffer.alloc(2 * 1024 * 1024),
-      );
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({
-        stdout: 'Pages:          42\n',
-        stderr: '',
-        code: 0,
-      });
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-      );
-
-      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(result.llmContent).toContain("Use the 'pages' parameter");
-      expect(result.returnDisplay).toContain('PDF requires page range');
-      expect(mockExecFile).toHaveBeenCalledTimes(2);
-      expect(mockExecFile.mock.calls[0]![0]).toBe('pdfinfo');
-      expect(mockExecFile.mock.calls[1]![0]).toBe('pdftotext');
-    });
-
-    it('rejects compact PDFs when pdfinfo reports too many pages', async () => {
-      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.alloc(64 * 1024));
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({
-        stdout: 'Pages:          42\n',
-        stderr: '',
-        code: 0,
-      });
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-      );
+    it.each<[string, Buffer, ExecResult, string]>([
+      [
+        'rejects large full-PDF text fallback before extracting text',
+        LARGE_PDF,
+        pdfinfo(42),
+        "Use the 'pages' parameter",
+      ],
+      [
+        'rejects compact PDFs when pdfinfo reports too many pages',
+        Buffer.alloc(64 * 1024),
+        pdfinfo(42),
+        'has 42 pages',
+      ],
+      [
+        'uses size-heuristic page guidance when pdfinfo is unavailable',
+        LARGE_PDF,
+        NO_PDFINFO,
+        'appears to have about 21 pages',
+      ],
+    ])('%s', async (_title, data, info, guidance) => {
+      const result = await readPdf({ data }, info, PDFTOTEXT);
 
       expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(result.llmContent).toContain('has 42 pages');
-      expect(result.returnDisplay).toContain('PDF requires page range');
-      expect(mockExecFile).toHaveBeenCalledTimes(2);
-      expect(mockExecFile.mock.calls[0]![0]).toBe('pdfinfo');
-      expect(mockExecFile.mock.calls[1]![0]).toBe('pdftotext');
-    });
-
-    it('uses size-heuristic page guidance when pdfinfo is unavailable', async () => {
-      actualNodeFs.writeFileSync(
-        testPdfFilePath,
-        Buffer.alloc(2 * 1024 * 1024),
-      );
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-      );
-
-      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(result.llmContent).toContain('appears to have about 21 pages');
+      expect(result.llmContent).toContain(guidance);
       expect(result.returnDisplay).toContain('PDF requires page range');
       expect(mockExecFile).toHaveBeenCalledTimes(2);
       expect(mockExecFile.mock.calls[0]![0]).toBe('pdfinfo');
@@ -2256,26 +1769,7 @@ describe('fileUtils', () => {
     });
 
     it('surfaces missing pdftotext before page-range guidance', async () => {
-      actualNodeFs.writeFileSync(
-        testPdfFilePath,
-        Buffer.alloc(2 * 1024 * 1024),
-      );
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({
-        stdout: 'Pages:          42\n',
-        stderr: '',
-        code: 0,
-      });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-      );
+      const result = await readPdf({ data: LARGE_PDF }, pdfinfo(42));
 
       expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
       expect(result.llmContent).toContain('pdftotext is not installed');
@@ -2285,27 +1779,10 @@ describe('fileUtils', () => {
     });
 
     it('returns a reference instead of an error for large @-attached PDFs', async () => {
-      actualNodeFs.writeFileSync(
-        testPdfFilePath,
-        Buffer.alloc(2 * 1024 * 1024),
-      );
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({
-        stdout: 'Pages:          42\n',
-        stderr: '',
-        code: 0,
-      });
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-        { largePdfBehavior: 'reference' },
+      const result = await readPdf(
+        { ...REFERENCE, data: LARGE_PDF },
+        pdfinfo(42),
+        PDFTOTEXT,
       );
 
       expect(result.error).toBeUndefined();
@@ -2315,26 +1792,9 @@ describe('fileUtils', () => {
     });
 
     it('returns a reference for large @-attached PDFs when pdftotext is unavailable', async () => {
-      actualNodeFs.writeFileSync(
-        testPdfFilePath,
-        Buffer.alloc(2 * 1024 * 1024),
-      );
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({
-        stdout: 'Pages:          42\n',
-        stderr: '',
-        code: 0,
-      });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-        { largePdfBehavior: 'reference' },
+      const result = await readPdf(
+        { ...REFERENCE, data: LARGE_PDF },
+        pdfinfo(42),
       );
 
       expect(result.error).toBeUndefined();
@@ -2346,23 +1806,10 @@ describe('fileUtils', () => {
     });
 
     it('keeps explicit pages reads on the pdftotext path', async () => {
-      actualNodeFs.writeFileSync(
-        testPdfFilePath,
-        Buffer.alloc(2 * 1024 * 1024),
-      );
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({ stdout: 'page one text', stderr: '', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-        { pages: '1' },
+      const result = await readPdf(
+        { pages: '1', data: LARGE_PDF },
+        PDFTOTEXT,
+        execOk('page one text'),
       );
 
       expect(result.error).toBeUndefined();
@@ -2379,19 +1826,7 @@ describe('fileUtils', () => {
     ])(
       'rejects unsafe internal pages value %s before extracting text',
       async (pages, expectedMessage) => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-
-        const mockConfigNoPdf = {
-          ...mockConfig,
-          getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          mockConfigNoPdf,
-          { pages },
-        );
+        const result = await readPdf({ pages });
 
         expect(result.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
         expect(result.llmContent).toContain(expectedMessage);
@@ -2400,21 +1835,7 @@ describe('fileUtils', () => {
     );
 
     it('rejects overly dense page-range extraction with a short error', async () => {
-      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-        { pages: '1' },
-      );
+      const result = await readPdf({ pages: '1' }, PDFTOTEXT, DENSE);
 
       expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
       expect(String(result.llmContent).length).toBeLessThan(1000);
@@ -2423,25 +1844,8 @@ describe('fileUtils', () => {
     });
 
     it('rejects dense non-ASCII PDF extraction with a short error', async () => {
-      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({
-        stdout: '\u4e00'.repeat(11_000),
-        stderr: '',
-        code: 0,
-      });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-        { pages: '1' },
-      );
+      const cjk = execOk('一'.repeat(11_000));
+      const result = await readPdf({ pages: '1' }, PDFTOTEXT, cjk);
 
       expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
       expect(String(result.llmContent).length).toBeLessThan(1000);
@@ -2449,25 +1853,7 @@ describe('fileUtils', () => {
     });
 
     it('rejects dense no-pages PDF extraction after exact page count allows full reads', async () => {
-      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({
-        stdout: 'Pages:          2\n',
-        stderr: '',
-        code: 0,
-      });
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-      );
+      const result = await readPdf({}, pdfinfo(2), PDFTOTEXT, DENSE);
 
       expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
       expect(result.returnDisplay).toContain('PDF text too large');
@@ -2478,26 +1864,7 @@ describe('fileUtils', () => {
     });
 
     it('references dense no-pages PDFs for @ attachments', async () => {
-      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({
-        stdout: 'Pages:          2\n',
-        stderr: '',
-        code: 0,
-      });
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-        { largePdfBehavior: 'reference' },
-      );
+      const result = await readPdf(REFERENCE, pdfinfo(2), PDFTOTEXT, DENSE);
 
       expect(result.error).toBeUndefined();
       expect(result.returnDisplay).toContain('Referenced large PDF');
@@ -2505,21 +1872,8 @@ describe('fileUtils', () => {
     });
 
     it('rejects dense page-range PDF extraction for @ attachments', async () => {
-      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-
-      const mockConfigNoPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigNoPdf,
-        { pages: '1-5', largePdfBehavior: 'reference' },
-      );
+      const options = { ...REFERENCE, pages: '1-5' };
+      const result = await readPdf(options, PDFTOTEXT, DENSE);
 
       expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
       expect(result.returnDisplay).toContain('PDF text too large');
@@ -2528,229 +1882,73 @@ describe('fileUtils', () => {
     });
 
     it('allows full PDF text extraction at the full-text size cap', async () => {
-      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({
-        stdout: 'Pages:          2\n',
-        stderr: '',
-        code: 0,
-      });
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({ stdout: 'full text at cap', stderr: '', code: 0 });
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 100 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
+      const result = await readPdf(
+        { statSize: 100 * MB },
+        pdfinfo(2),
+        PDFTOTEXT,
+        execOk('full text at cap'),
+      );
 
-      try {
-        const mockConfigNoPdf = {
-          ...mockConfig,
-          getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          mockConfigNoPdf,
-        );
-
-        expect(result.error).toBeUndefined();
-        expect(result.llmContent).toBe('full text at cap');
-        expect(mockExecFile).toHaveBeenCalledTimes(3);
-      } finally {
-        statSpy.mockRestore();
-      }
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBe('full text at cap');
+      expect(mockExecFile).toHaveBeenCalledTimes(3);
     });
 
     it('rejects huge no-pages PDFs before returning page guidance', async () => {
-      actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-      mockMimeGetType.mockReturnValue('application/pdf');
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 200 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
+      const result = await readPdf({ ...REFERENCE, statSize: 200 * MB });
 
-      try {
-        const mockConfigNoPdf = {
-          ...mockConfig,
-          getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          mockConfigNoPdf,
-          { largePdfBehavior: 'reference' },
-        );
-
-        expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
-        expect(result.returnDisplay).toContain('PDF file too large');
-        expect(result.llmContent).toContain("Use the 'pages' parameter");
-        expect(result.llmContent).toContain('split the document');
-        expect(result.stats).toBeDefined();
-        expect(mockExecFile).not.toHaveBeenCalled();
-      } finally {
-        statSpy.mockRestore();
-      }
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.returnDisplay).toContain('PDF file too large');
+      expect(result.llmContent).toContain("Use the 'pages' parameter");
+      expect(result.llmContent).toContain('split the document');
+      expect(result.stats).toBeDefined();
+      expect(mockExecFile).not.toHaveBeenCalled();
     });
 
     it('should skip the 10MB size gate when extracting PDF text by pages', async () => {
-      // Tiny file on disk — the fs.stat spy below reports a size >10MB so
-      // the upstream size gate would reject if it still ran. With the
-      // text-extraction path we want pdftotext to handle oversized PDFs,
-      // since it streams the file and the output is capped downstream.
-      const fakePdfData = Buffer.from('fake pdf data');
-      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
-      mockMimeGetType.mockReturnValue('application/pdf');
+      // The faked >10MB stat would trip the upstream size gate if it still ran;
+      // pdftotext streams oversized PDFs and its output is capped downstream.
+      const result = await readPdf({ ...fakePdf(15 * MB), pages: '1-5' });
 
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 15 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
-
-      try {
-        const mockConfigNoPdf = {
-          ...mockConfig,
-          getContentGeneratorConfig: () => ({
-            modalities: { image: true },
-          }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          mockConfigNoPdf,
-          { pages: '1-5' },
-        );
-
-        // Must not be rejected by the generic 10MB gate.
-        expect(result.error ?? '').not.toContain('10MB limit');
-        expect(result.llmContent).not.toMatch(/exceeds the 10MB limit/i);
-        // Routed into the pdftotext path — either success or the
-        // install-guidance error, never "File size exceeds the 10MB limit".
-        expect(result.returnDisplay ?? '').toMatch(/pdf/i);
-      } finally {
-        statSpy.mockRestore();
-      }
+      // Must not be rejected by the generic 10MB gate.
+      expect(result.error ?? '').not.toContain('10MB limit');
+      expect(result.llmContent).not.toMatch(/exceeds the 10MB limit/i);
+      // Routed into the pdftotext path — either success or the
+      // install-guidance error, never "File size exceeds the 10MB limit".
+      expect(result.returnDisplay ?? '').toMatch(/pdf/i);
     });
 
     it('allows explicit page ranges at the paged text-extraction size cap', async () => {
-      const fakePdfData = Buffer.from('fake pdf data');
-      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({ stdout: 'paged text at cap', stderr: '', code: 0 });
+      const result = await readPdf(
+        { ...fakePdf(512 * MB), pages: '1-5' },
+        PDFTOTEXT,
+        execOk('paged text at cap'),
+      );
 
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 512 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
-
-      try {
-        const mockConfigNoPdf = {
-          ...mockConfig,
-          getContentGeneratorConfig: () => ({
-            modalities: { image: true },
-          }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          mockConfigNoPdf,
-          { pages: '1-5' },
-        );
-
-        expect(result.error).toBeUndefined();
-        expect(result.llmContent).toBe('paged text at cap');
-        expect(mockExecFile).toHaveBeenCalledTimes(2);
-      } finally {
-        statSpy.mockRestore();
-      }
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBe('paged text at cap');
+      expect(mockExecFile).toHaveBeenCalledTimes(2);
     });
 
     it('rejects explicit page ranges above the paged text-extraction size cap', async () => {
-      const fakePdfData = Buffer.from('fake pdf data');
-      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
-      mockMimeGetType.mockReturnValue('application/pdf');
+      const result = await readPdf({ ...fakePdf(600 * MB), pages: '1-5' });
 
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 600 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
-
-      try {
-        const mockConfigNoPdf = {
-          ...mockConfig,
-          getContentGeneratorConfig: () => ({
-            modalities: { image: true },
-          }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          mockConfigNoPdf,
-          { pages: '1-5' },
-        );
-
-        expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
-        expect(result.llmContent).toContain('page-range text extraction');
-        expect(result.stats).toBeDefined();
-        expect(mockExecFile).not.toHaveBeenCalled();
-      } finally {
-        statSpy.mockRestore();
-      }
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('page-range text extraction');
+      expect(result.stats).toBeDefined();
+      expect(mockExecFile).not.toHaveBeenCalled();
     });
 
     it('should still reject oversized PDFs when routing to the native base64 path', async () => {
       // When the model supports PDF modality and no pages arg is provided,
       // the base64 path applies and the 10MB inline-data cap still matters.
-      const fakePdfData = Buffer.from('fake pdf data');
-      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
-      mockMimeGetType.mockReturnValue('application/pdf');
+      const result = await readPdf({ ...fakePdf(15 * MB), config: nativePdf });
 
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 15 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
-
-      try {
-        const mockConfigWithPdf = {
-          ...mockConfig,
-          getContentGeneratorConfig: () => ({
-            modalities: { image: true, pdf: true },
-          }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          mockConfigWithPdf,
-        );
-
-        expect(result.error).toContain('10MB limit');
-      } finally {
-        statSpy.mockRestore();
-      }
+      expect(result.error).toContain('10MB limit');
     });
 
     it('should accept PDF files when model supports PDF', async () => {
-      const fakePdfData = Buffer.from('fake pdf data');
-      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
-      mockMimeGetType.mockReturnValue('application/pdf');
-
-      const mockConfigWithPdf = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({
-          modalities: { image: true, pdf: true },
-        }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testPdfFilePath,
-        mockConfigWithPdf,
-      );
+      const result = await readPdf({ config: nativePdf, data: FAKE_PDF });
       expect(result.llmContent).toHaveProperty('inlineData');
       expect(
         (result.llmContent as { inlineData: { mimeType: string } }).inlineData
@@ -2760,29 +1958,10 @@ describe('fileUtils', () => {
     });
 
     describe('PDF image rendering (vision fallback)', () => {
-      const visionConfig = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
-      } as unknown as Config;
-      const fakeImage = (data: string) => ({ data, mimeType: 'image/jpeg' });
-      type MediaPart = { text?: string; inlineData?: { data: string } };
-
       it('renders the requested page range when text overflows', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('AAA'), fakeImage('BBB')],
-          bytesTruncated: false,
-        });
+        renderPages(['AAA', 'BBB']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          visionConfig,
-          { pages: '1-2' },
-        );
+        const result = await readPdf({ pages: '1-2' }, PDFTOTEXT, DENSE);
 
         expect(result.error).toBeUndefined();
         expect(Array.isArray(result.llmContent)).toBe(true);
@@ -2793,68 +1972,30 @@ describe('fileUtils', () => {
           mimeType: 'image/jpeg',
         });
         expect(result.returnDisplay).toContain('image');
-        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
-          firstPage: 1,
-          lastPage: 2,
-        });
+        expectRendered(1, 2);
       });
 
       it('renders the whole document (up to the ceiling) for a no-pages overflow', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: 'Pages:          3\n', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('P1'), fakeImage('P2'), fakeImage('P3')],
-          bytesTruncated: false,
-        });
+        renderPages(['P1', 'P2', 'P3']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          visionConfig,
-        );
+        const result = await readPdf({}, pdfinfo(3), PDFTOTEXT, DENSE);
 
         expect(Array.isArray(result.llmContent)).toBe(true);
         expect(result.llmContent).toHaveLength(3);
-        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
-          firstPage: 1,
-          lastPage: PDF_MAX_PAGES_PER_READ,
-        });
+        expectRendered(1, PDF_MAX_PAGES_PER_READ);
       });
 
       it('renders images when extraction fails on a scanned PDF', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: 'Pages:          2\n', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('S1'), fakeImage('S2')],
-          bytesTruncated: false,
-        });
+        renderPages(['S1', 'S2']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          visionConfig,
-        );
+        const result = await readPdf({}, pdfinfo(2), PDFTOTEXT, BLANK);
 
         expect(Array.isArray(result.llmContent)).toBe(true);
         expect(result.llmContent).toHaveLength(2);
       });
 
       it('still returns page guidance (no render) beyond the page ceiling', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: 'Pages:          42\n', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          visionConfig,
-        );
+        const result = await readPdf({}, pdfinfo(42), PDFTOTEXT);
 
         expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
         expect(result.llmContent).toContain("Use the 'pages' parameter");
@@ -2862,200 +2003,102 @@ describe('fileUtils', () => {
       });
 
       it('flags truncation (never drops pages silently)', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('ONLY')],
-          bytesTruncated: true,
-        });
+        renderPages(['ONLY'], true);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          visionConfig,
-          { pages: '1-5' },
-        );
+        const result = await readPdf({ pages: '1-5' }, PDFTOTEXT, DENSE);
 
-        const parts = result.llmContent as MediaPart[];
-        expect(
-          parts.some(
-            (p) => typeof p.text === 'string' && /omitted/.test(p.text),
-          ),
-        ).toBe(true);
+        expect(hasText(result.llmContent as MediaPart[], /omitted/)).toBe(true);
       });
 
       it('notes the page ceiling when a no-pages render fills it (page count unknown)', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
         // pdfinfo unavailable -> page count falls back to the size heuristic,
         // which underestimates; the render then fills the 20-page ceiling.
-        mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: Array.from({ length: PDF_MAX_PAGES_PER_READ }, (_, i) =>
-            fakeImage(`P${i + 1}`),
-          ),
-          bytesTruncated: false,
-        });
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          visionConfig,
+        renderPages(
+          Array.from({ length: PDF_MAX_PAGES_PER_READ }, (_, i) => `P${i + 1}`),
         );
+
+        const result = await readPdf({}, NO_PDFINFO, PDFTOTEXT, DENSE);
 
         const parts = result.llmContent as MediaPart[];
         expect(parts.filter((p) => p.inlineData).length).toBe(
           PDF_MAX_PAGES_PER_READ,
         );
-        expect(
-          parts.some(
-            (p) =>
-              typeof p.text === 'string' && /per-read maximum/.test(p.text),
-          ),
-        ).toBe(true);
+        expect(hasText(parts, /per-read maximum/)).toBe(true);
       });
 
       it('falls back to text guidance when the renderer is unavailable', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
         // mockRender default = failure (renderer unavailable).
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          visionConfig,
-          { pages: '1' },
-        );
+        const result = await readPdf({ pages: '1' }, PDFTOTEXT, DENSE);
 
         expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
         expect(result.llmContent).toContain('too large to return safely');
       });
 
       it('falls back to text guidance when rendering returns no page images', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [],
-          bytesTruncated: false,
-        });
+        renderPages([]);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          visionConfig,
-          { pages: '1' },
-        );
+        const result = await readPdf({ pages: '1' }, PDFTOTEXT, DENSE);
 
         expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
         expect(result.llmContent).toContain('too large to return safely');
         expect(Array.isArray(result.llmContent)).toBe(false);
-        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
-          firstPage: 1,
-          lastPage: 1,
-        });
+        expectRendered(1, 1);
       });
     });
 
     describe('PDF vision-bridge rendering (text-only model)', () => {
-      const bridgeConfig = {
-        ...mockConfig,
-        getContentGeneratorConfig: () => ({ modalities: {} }),
-      } as unknown as Config;
-      const fakeImage = (data: string) => ({ data, mimeType: 'image/jpeg' });
-      type MediaPart = { text?: string; inlineData?: { data: string } };
+      // An @-attachment read, and an explicit-range read preparing a bridge
+      // candidate, both on a text-only model.
+      const readAt = (...execs: ExecResult[]) =>
+        readPdf(
+          {
+            config: noModalities,
+            preserveUnsupportedImage: true,
+            ...REFERENCE,
+          },
+          ...execs,
+        );
+      const readBridge = (
+        pages: string,
+        config: Config,
+        ...execs: ExecResult[]
+      ) =>
+        readPdf({ config, pages, preparePdfForVisionBridge: true }, ...execs);
+      const bridge = (pages: string, ...execs: ExecResult[]) =>
+        readBridge(pages, noModalities, ...execs);
 
       it('renders up to VISION_BRIDGE_MAX_IMAGES pages for a scanned @ PDF', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: 'Pages:          2\n', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          2\n', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('B1'), fakeImage('B2')],
-          bytesTruncated: false,
-        });
+        renderPages(['B1', 'B2']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { preserveUnsupportedImage: true, largePdfBehavior: 'reference' },
-        );
+        const result = await readAt(pdfinfo(2), PDFTOTEXT, BLANK, pdfinfo(2));
 
         expect(Array.isArray(result.llmContent)).toBe(true);
-        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
-          firstPage: 1,
-          lastPage: 2,
-        });
+        expectRendered(1, 2);
         const parts = result.llmContent as MediaPart[];
         expect(parts.filter((p) => p.inlineData).length).toBe(2);
         expect(result.pdfVisionBridgeCandidate).toBeUndefined();
       });
 
       it('notes how many pages were rendered when more remain', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: 'Pages:          10\n', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          10\n', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [
-            fakeImage('1'),
-            fakeImage('2'),
-            fakeImage('3'),
-            fakeImage('4'),
-          ],
-          bytesTruncated: false,
-        });
+        renderPages(['1', '2', '3', '4']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { preserveUnsupportedImage: true, largePdfBehavior: 'reference' },
-        );
+        const result = await readAt(pdfinfo(10), PDFTOTEXT, BLANK, pdfinfo(10));
 
         const parts = result.llmContent as MediaPart[];
         expect(parts.filter((p) => p.inlineData).length).toBe(4);
-        expect(
-          parts.some(
-            (p) =>
-              typeof p.text === 'string' &&
-              /pages 5-10 were not included/.test(p.text),
-          ),
-        ).toBe(true);
+        expect(hasText(parts, /pages 5-10 were not included/)).toBe(true);
       });
 
       it('notes truncation when the render fills the cap and the page count is unknown', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        // pdfinfo unavailable on both the pre-gate probe and the note probe.
-        mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: Array.from({ length: VISION_BRIDGE_MAX_IMAGES }, (_, i) =>
-            fakeImage(`B${i + 1}`),
+        renderPages(
+          Array.from(
+            { length: VISION_BRIDGE_MAX_IMAGES },
+            (_, i) => `B${i + 1}`,
           ),
-          bytesTruncated: false,
-        });
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { preserveUnsupportedImage: true, largePdfBehavior: 'reference' },
         );
+
+        // pdfinfo unavailable on both the pre-gate probe and the note probe.
+        const result = await readAt(NO_PDFINFO, PDFTOTEXT, BLANK, NO_PDFINFO);
 
         const parts = result.llmContent as MediaPart[];
         expect(parts.filter((p) => p.inlineData).length).toBe(
@@ -3071,32 +2114,11 @@ describe('fileUtils', () => {
       });
 
       it('renders from the requested start page and records the remaining range', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          25\n', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [
-            fakeImage('20'),
-            fakeImage('21'),
-            fakeImage('22'),
-            fakeImage('23'),
-          ],
-          bytesTruncated: false,
-        });
+        renderPages(['20', '21', '22', '23']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '20-25', preparePdfForVisionBridge: true },
-        );
+        const result = await bridge('20-25', PDFTOTEXT, BLANK, pdfinfo(25));
 
-        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
-          firstPage: 20,
-          lastPage: 23,
-        });
+        expectRendered(20, 23);
         const parts = result.llmContent as Part[];
         expect(
           parts
@@ -3111,36 +2133,16 @@ describe('fileUtils', () => {
         expect(result.pdfVisionBridgeCandidate).toMatchObject({
           reason: 'text_extraction_failed',
           renderedRange: { firstPage: 20, lastPage: 23 },
-          continuation: {
-            certainty: 'known',
-            firstPage: 24,
-            lastPage: 25,
-          },
+          continuation: { certainty: 'known', firstPage: 24, lastPage: 25 },
         });
       });
 
       it('clips an explicit range to the actual PDF and does not invent remaining pages', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          6\n', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('4'), fakeImage('5'), fakeImage('6')],
-          bytesTruncated: false,
-        });
+        renderPages(['4', '5', '6']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '4-8', preparePdfForVisionBridge: true },
-        );
+        const result = await bridge('4-8', PDFTOTEXT, BLANK, pdfinfo(6));
 
-        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
-          firstPage: 4,
-          lastPage: 6,
-        });
+        expectRendered(4, 6);
         expect(result.pdfVisionBridgeCandidate).toMatchObject({
           renderedRange: { firstPage: 4, lastPage: 6 },
         });
@@ -3149,53 +2151,19 @@ describe('fileUtils', () => {
       });
 
       it('treats a short render as EOF when the PDF page count is unavailable', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('4'), fakeImage('5'), fakeImage('6')],
-          bytesTruncated: false,
-        });
+        renderPages(['4', '5', '6']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '4-8', preparePdfForVisionBridge: true },
-        );
+        const result = await bridge('4-8', PDFTOTEXT, BLANK, NO_PDFINFO);
 
-        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
-          firstPage: 4,
-          lastPage: 7,
-        });
+        expectRendered(4, 7);
         expect(result.pdfVisionBridgeCandidate?.continuation).toBeUndefined();
         expect(JSON.stringify(result.llmContent)).not.toContain('pages 7-8');
       });
 
       it('marks continuation as possible when an unknown PDF fills the render cap', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdfinfo missing', code: 1 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [
-            fakeImage('20'),
-            fakeImage('21'),
-            fakeImage('22'),
-            fakeImage('23'),
-          ],
-          bytesTruncated: false,
-        });
+        renderPages(['20', '21', '22', '23']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '20-25', preparePdfForVisionBridge: true },
-        );
+        const result = await bridge('20-25', PDFTOTEXT, BLANK, NO_PDFINFO);
 
         expect(result.pdfVisionBridgeCandidate?.continuation).toEqual({
           certainty: 'possible',
@@ -3208,17 +2176,7 @@ describe('fileUtils', () => {
       });
 
       it('does not render when an explicit range starts past the PDF end', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          6\n', stderr: '', code: 0 });
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '20-25', preparePdfForVisionBridge: true },
-        );
+        const result = await bridge('20-25', PDFTOTEXT, BLANK, pdfinfo(6));
 
         expect(mockRender).not.toHaveBeenCalled();
         expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
@@ -3226,27 +2184,11 @@ describe('fileUtils', () => {
       });
 
       it('prepares a candidate when an explicit single page still overflows', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          25\n', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('20')],
-          bytesTruncated: false,
-        });
+        renderPages(['20']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '20', preparePdfForVisionBridge: true },
-        );
+        const result = await bridge('20', PDFTOTEXT, DENSE, pdfinfo(25));
 
-        expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
-          firstPage: 20,
-          lastPage: 20,
-        });
+        expectRendered(20, 20);
         expect(result.pdfVisionBridgeCandidate).toMatchObject({
           reason: 'single_page_text_overflow',
           renderedRange: { firstPage: 20, lastPage: 20 },
@@ -3255,22 +2197,9 @@ describe('fileUtils', () => {
       });
 
       it('renders an actual one-page @ PDF when its text overflows', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: 'Pages:          1\n', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('1')],
-          bytesTruncated: false,
-        });
+        renderPages(['1']);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { preserveUnsupportedImage: true, largePdfBehavior: 'reference' },
-        );
+        const result = await readAt(pdfinfo(1), PDFTOTEXT, DENSE);
 
         expect(result.error).toBeUndefined();
         expect(
@@ -3280,113 +2209,55 @@ describe('fileUtils', () => {
       });
 
       it('records unrendered requested pages when the byte budget truncates images', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          25\n', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [fakeImage('20'), fakeImage('21')],
-          bytesTruncated: true,
-        });
+        renderPages(['20', '21'], true);
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '20-25', preparePdfForVisionBridge: true },
-        );
+        const result = await bridge('20-25', PDFTOTEXT, BLANK, pdfinfo(25));
 
         expect(result.pdfVisionBridgeCandidate).toMatchObject({
           renderedRange: { firstPage: 20, lastPage: 21 },
-          continuation: {
-            certainty: 'known',
-            firstPage: 22,
-            lastPage: 25,
-          },
+          continuation: { certainty: 'known', firstPage: 22, lastPage: 25 },
         });
         expect(JSON.stringify(result.llmContent)).toContain(
           'pages 22-25 were not included',
         );
       });
 
-      it('does not render when a multi-page text result overflows', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '20-25', preparePdfForVisionBridge: true },
-        );
-
-        expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
-        expect(result.pdfVisionBridgeCandidate).toBeUndefined();
-        expect(mockRender).not.toHaveBeenCalled();
-      });
-
-      it('does not bridge explicit page overflow for a native PDF model', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-        const nativePdfConfig = {
-          ...bridgeConfig,
-          getContentGeneratorConfig: () => ({ modalities: { pdf: true } }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          nativePdfConfig,
-          { pages: '20', preparePdfForVisionBridge: true },
-        );
+      it.each([
+        [
+          'does not render when a multi-page text result overflows',
+          '20-25',
+          noModalities,
+        ],
+        [
+          'does not bridge explicit page overflow for a native PDF model',
+          '20',
+          withModalities({ pdf: true }),
+        ],
+      ])('%s', async (_title, pages, config) => {
+        const result = await readBridge(pages, config, PDFTOTEXT, DENSE);
 
         expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
         expect(result.pdfVisionBridgeCandidate).toBeUndefined();
         expect(mockRender).not.toHaveBeenCalled();
       });
 
-      it('restores the extraction failure when bridge rendering fails', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          25\n', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: false,
-          error: 'renderer unavailable',
-        });
+      it.each([
+        [
+          'restores the extraction failure when bridge rendering fails',
+          () =>
+            mockRender.mockResolvedValue({
+              success: false,
+              error: 'renderer unavailable',
+            }),
+        ],
+        [
+          'restores the extraction failure when rendering returns no page images',
+          () => renderPages([]),
+        ],
+      ])('%s', async (_title, setupRender) => {
+        setupRender();
 
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '20-25', preparePdfForVisionBridge: true },
-        );
-
-        expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
-        expect(result.llmContent).toContain('Cannot extract text from PDF');
-        expect(result.pdfVisionBridgeCandidate).toBeUndefined();
-      });
-
-      it('restores the extraction failure when rendering returns no page images', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-        mockExecResult({ stdout: 'Pages:          25\n', stderr: '', code: 0 });
-        mockRender.mockResolvedValue({
-          success: true,
-          images: [],
-          bytesTruncated: false,
-        });
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { pages: '20-25', preparePdfForVisionBridge: true },
-        );
+        const result = await bridge('20-25', PDFTOTEXT, BLANK, pdfinfo(25));
 
         expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
         expect(result.llmContent).toContain('Cannot extract text from PDF');
@@ -3394,17 +2265,7 @@ describe('fileUtils', () => {
       });
 
       it('keeps text-heavy @ PDFs as reference (text-first, no render)', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: 'Pages:          2\n', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: 'x'.repeat(80_000), stderr: '', code: 0 });
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-          { preserveUnsupportedImage: true, largePdfBehavior: 'reference' },
-        );
+        const result = await readAt(pdfinfo(2), PDFTOTEXT, DENSE);
 
         expect(result.error).toBeUndefined();
         expect(result.returnDisplay).toContain('Referenced large PDF');
@@ -3413,16 +2274,8 @@ describe('fileUtils', () => {
       });
 
       it('does not render without the bridge flag (scanned stays an error)', async () => {
-        actualNodeFs.writeFileSync(testPdfFilePath, Buffer.from('%PDF-1.7'));
-        mockMimeGetType.mockReturnValue('application/pdf');
-        mockExecResult({ stdout: 'Pages:          2\n', stderr: '', code: 0 });
-        mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-        mockExecResult({ stdout: '   ', stderr: '', code: 0 });
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          bridgeConfig,
-        );
+        const options = { config: noModalities };
+        const result = await readPdf(options, pdfinfo(2), PDFTOTEXT, BLANK);
 
         expect(result.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
         expect(result.llmContent).toContain('Cannot extract text from PDF');
@@ -3430,17 +2283,9 @@ describe('fileUtils', () => {
       });
 
       it('does not preserve ordinary images with the PDF-only bridge flag', async () => {
-        actualNodeFs.writeFileSync(
-          testImageFilePath,
-          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        );
-        mockMimeGetType.mockReturnValue('image/png');
-
-        const result = await processSingleFileContent(
-          testImageFilePath,
-          bridgeConfig,
-          { preparePdfForVisionBridge: true },
-        );
+        const result = await readFakePng(noModalities, {
+          preparePdfForVisionBridge: true,
+        });
 
         expect(result.llmContent).toContain('Unsupported image file');
         expect(Array.isArray(result.llmContent)).toBe(false);
@@ -3453,15 +2298,7 @@ describe('fileUtils', () => {
       <rect width="100" height="100" fill="blue" />
     </svg>
   `;
-      const testSvgFilePath = path.join(tempRootDir, 'test.svg');
-      actualNodeFs.writeFileSync(testSvgFilePath, svgContent, 'utf-8');
-
-      mockMimeGetType.mockReturnValue('image/svg+xml');
-
-      const result = await processSingleFileContent(
-        testSvgFilePath,
-        mockConfig,
-      );
+      const result = await readMedia('test.svg', svgContent, 'image/svg+xml');
 
       expect(result.llmContent).toBe(svgContent);
       expect(result.returnDisplay).toContain('Read SVG as text');
@@ -3475,10 +2312,7 @@ describe('fileUtils', () => {
       mockMimeGetType.mockReturnValueOnce('application/octet-stream');
       // isBinaryFile will operate on the real file.
 
-      const result = await processSingleFileContent(
-        testBinaryFilePath,
-        mockConfig,
-      );
+      const result = await read(testBinaryFilePath);
       expect(result.llmContent).toContain(
         'Cannot display content of binary file',
       );
@@ -3486,12 +2320,11 @@ describe('fileUtils', () => {
     });
 
     it('should read text-looking .dat files as text', async () => {
-      const filePath = path.join(tempRootDir, 'legacy-controller.dat');
       const content = '<?php echo "ok";\n';
-      actualNodeFs.writeFileSync(filePath, content);
+      const filePath = writeTemp('legacy-controller.dat', content);
       mockMimeGetType.mockReturnValueOnce(null);
 
-      const result = await processSingleFileContent(filePath, mockConfig);
+      const result = await read(filePath);
 
       expect(result.llmContent).toBe(content);
       expect(result.returnDisplay).toBe('');
@@ -3499,23 +2332,29 @@ describe('fileUtils', () => {
     });
 
     it('should handle path being a directory', async () => {
-      const result = await processSingleFileContent(directoryPath, mockConfig);
+      const result = await read(directoryPath);
       expect(result.error).toContain('Path is a directory');
       expect(result.returnDisplay).toContain('Path is a directory');
     });
 
+    const fsRead = (
+      content: string,
+      request: { line?: number; maxOutputBytes?: number } = {},
+    ) => {
+      actualNodeFs.writeFileSync(testTextFilePath, content);
+      return fsService.readTextFile({ path: testTextFilePath, ...request });
+    };
+    const numberedLines = (count: number) =>
+      Array.from({ length: count }, (_, i) => `Line ${i + 1}`);
+
     it('should paginate text files correctly (offset and limit)', async () => {
-      const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
-      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
+      const lines = numberedLines(20);
+      const result = await readText(lines.join('\n'), mockConfig, {
+        offset: 5,
+        limit: 5,
+      }); // Read lines 6-10
 
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-        { offset: 5, limit: 5 },
-      ); // Read lines 6-10
-      const expectedContent = lines.slice(5, 10).join('\n');
-
-      expect(result.llmContent).toBe(expectedContent);
+      expect(result.llmContent).toBe(lines.slice(5, 10).join('\n'));
       expect(result.returnDisplay).toBe('Read lines 6-10 of 20 from test.txt');
       expect(result.isTruncated).toBe(true);
       expect(result.originalLineCount).toBe(20);
@@ -3523,7 +2362,7 @@ describe('fileUtils', () => {
     });
 
     it('should preserve legacy positional pagination arguments', async () => {
-      const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
+      const lines = numberedLines(20);
       actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
 
       const result = await processSingleFileContent(
@@ -3539,18 +2378,14 @@ describe('fileUtils', () => {
     });
 
     it('should identify truncation when reading the end of a file', async () => {
-      const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);
-      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
-
+      const lines = numberedLines(20);
       // Read from line 11 to 20. The start is not 0, so it's truncated.
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-        { offset: 10, limit: 10 },
-      );
-      const expectedContent = lines.slice(10, 20).join('\n');
+      const result = await readText(lines.join('\n'), mockConfig, {
+        offset: 10,
+        limit: 10,
+      });
 
-      expect(result.llmContent).toContain(expectedContent);
+      expect(result.llmContent).toContain(lines.slice(10, 20).join('\n'));
       expect(result.returnDisplay).toBe('Read lines 11-20 of 20 from test.txt');
       expect(result.isTruncated).toBe(true); // This is the key check for the bug
       expect(result.originalLineCount).toBe(20);
@@ -3558,17 +2393,13 @@ describe('fileUtils', () => {
     });
 
     it('should handle limit exceeding file length', async () => {
-      const lines = ['Line 1', 'Line 2'];
-      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
+      const content = ['Line 1', 'Line 2'].join('\n');
+      const result = await readText(content, mockConfig, {
+        offset: 0,
+        limit: 10,
+      });
 
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-        { offset: 0, limit: 10 },
-      );
-      const expectedContent = lines.join('\n');
-
-      expect(result.llmContent).toBe(expectedContent);
+      expect(result.llmContent).toBe(content);
       expect(result.returnDisplay).toBe('');
       expect(result.isTruncated).toBe(false);
       expect(result.originalLineCount).toBe(2);
@@ -3576,10 +2407,8 @@ describe('fileUtils', () => {
     });
 
     it('should preserve default full file-system reads for large text files', async () => {
-      const content = `head\n${'x'.repeat(11 * 1024 * 1024)}`;
-      actualNodeFs.writeFileSync(testTextFilePath, content);
-
-      const result = await fsService.readTextFile({ path: testTextFilePath });
+      const content = `head\n${'x'.repeat(11 * MB)}`;
+      const result = await fsRead(content);
 
       expect(result.content).toBe(content);
       expect(result._meta?.originalLineCount).toBe(2);
@@ -3588,15 +2417,8 @@ describe('fileUtils', () => {
     });
 
     it('should stream explicit offset reads for large text files', async () => {
-      actualNodeFs.writeFileSync(
-        testTextFilePath,
-        `skip\n${'line\n'.repeat(3 * 1024 * 1024)}`,
-      );
-
-      const result = await fsService.readTextFile({
-        path: testTextFilePath,
-        line: 1,
-      });
+      const content = `skip\n${'line\n'.repeat(3 * MB)}`;
+      const result = await fsRead(content, { line: 1 });
 
       expect(result.content.startsWith('line\n')).toBe(true);
       expect(result.content.startsWith('skip\n')).toBe(false);
@@ -3606,24 +2428,14 @@ describe('fileUtils', () => {
 
     it('should preserve unbounded explicit line-zero reads below the large-file threshold', async () => {
       const content = `head\n${'body\n'.repeat(6_000)}tail\n`;
-      actualNodeFs.writeFileSync(testTextFilePath, content);
-
-      const result = await fsService.readTextFile({
-        path: testTextFilePath,
-        line: 0,
-      });
+      const result = await fsRead(content, { line: 0 });
 
       expect(result.content).toBe(content);
       expect(result._meta?.truncatedByBytes).not.toBe(true);
     });
 
     it('should enforce maxOutputBytes for default file-system reads below the large-file threshold', async () => {
-      actualNodeFs.writeFileSync(testTextFilePath, 'x'.repeat(100));
-
-      const result = await fsService.readTextFile({
-        path: testTextFilePath,
-        maxOutputBytes: 10,
-      });
+      const result = await fsRead('x'.repeat(100), { maxOutputBytes: 10 });
 
       expect(result.content).toBe('x'.repeat(10));
       expect(result._meta?.originalLineCount).toBe(1);
@@ -3636,7 +2448,7 @@ describe('fileUtils', () => {
       const gbkChunk = Buffer.concat(
         Array.from({ length: 1024 }, () => gbkLine),
       );
-      const repeatCount = Math.ceil((11 * 1024 * 1024) / gbkChunk.length);
+      const repeatCount = Math.ceil((11 * MB) / gbkChunk.length);
       actualNodeFs.writeFileSync(
         testTextFilePath,
         Buffer.concat(Array.from({ length: repeatCount }, () => gbkChunk)),
@@ -3651,25 +2463,14 @@ describe('fileUtils', () => {
       ).rejects.toThrow(LargeNonUtf8TextError);
     });
 
-    it('should propagate aborts from unbounded full reads', async () => {
-      actualNodeFs.writeFileSync(testTextFilePath, 'hello\nworld');
-      const controller = new AbortController();
-      controller.abort();
-
-      await expect(
-        readFileWithLineAndLimit({
-          path: testTextFilePath,
-          limit: Number.POSITIVE_INFINITY,
-          signal: controller.signal,
-        }),
-      ).rejects.toThrow(/abort/i);
-    });
-
-    it('should propagate aborts before large unbounded full reads', async () => {
-      actualNodeFs.writeFileSync(
-        testTextFilePath,
-        'x'.repeat(11 * 1024 * 1024),
-      );
+    it.each([
+      ['should propagate aborts from unbounded full reads', 'hello\nworld'],
+      [
+        'should propagate aborts before large unbounded full reads',
+        'x'.repeat(11 * MB),
+      ],
+    ])('%s', async (_title, content) => {
+      actualNodeFs.writeFileSync(testTextFilePath, content);
       const controller = new AbortController();
       controller.abort();
 
@@ -3727,12 +2528,7 @@ describe('fileUtils', () => {
 
     it('should not byte-truncate multibyte text before the character limit', async () => {
       const content = '你'.repeat(1000);
-      actualNodeFs.writeFileSync(testTextFilePath, content, 'utf-8');
-
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-      );
+      const result = await readText(content);
 
       expect(result.llmContent).toBe(content);
       expect(result.returnDisplay).toBe('');
@@ -3741,14 +2537,8 @@ describe('fileUtils', () => {
 
     it('should truncate long lines in text files', async () => {
       const longLine = 'a'.repeat(2500);
-      actualNodeFs.writeFileSync(
-        testTextFilePath,
+      const result = await readText(
         `Short line\n${longLine}\nAnother short line`,
-      );
-
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
       );
 
       expect(result.llmContent).toContain('Short line');
@@ -3762,61 +2552,34 @@ describe('fileUtils', () => {
       expect(result.isTruncated).toBe(true);
     });
 
-    it('should truncate when line count exceeds the limit', async () => {
-      const lines = Array.from({ length: 11 }, (_, i) => `Line ${i + 1}`);
-      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
-
-      // Read 5 lines, but there are 11 total
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-        { offset: 0, limit: 5 },
-      );
-
-      expect(result.isTruncated).toBe(true);
-      expect(result.returnDisplay).toBe('Read lines 1-5 of 11 from test.txt');
-    });
-
-    it('should truncate when a line length exceeds the character limit', async () => {
-      const longLine = 'b'.repeat(2500);
-      const lines = Array.from({ length: 10 }, (_, i) => `Line ${i + 1}`);
-      lines.push(longLine); // Total 11 lines
-      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
-
-      // Read all 11 lines, including the long one
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-        { offset: 0, limit: 11 },
-      );
-
-      expect(result.isTruncated).toBe(true);
-      expect(result.returnDisplay).toBe(
+    it.each<[string, string[], number, string]>([
+      [
+        'should truncate when line count exceeds the limit',
+        numberedLines(11), // Read 5 lines, but there are 11 total
+        5,
+        'Read lines 1-5 of 11 from test.txt',
+      ],
+      [
+        'should truncate when a line length exceeds the character limit',
+        [...numberedLines(10), 'b'.repeat(2500)], // Read all 11, including the long one
+        11,
         'Read lines 1-11 of 11 from test.txt (truncated)',
-      );
-    });
-
-    it('should truncate both line count and line length when both exceed limits', async () => {
-      const linesWithLongInMiddle = Array.from(
-        { length: 20 },
-        (_, i) => `Line ${i + 1}`,
-      );
-      linesWithLongInMiddle[4] = 'c'.repeat(2500);
-      actualNodeFs.writeFileSync(
-        testTextFilePath,
-        linesWithLongInMiddle.join('\n'),
-      );
-
-      // Read 10 lines out of 20, including the long line
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-        { offset: 0, limit: 10 },
-      );
-      expect(result.isTruncated).toBe(true);
-      expect(result.returnDisplay).toBe(
+      ],
+      [
+        'should truncate both line count and line length when both exceed limits',
+        // Read 10 lines out of 20, including the long 5th line
+        numberedLines(20).map((line, i) => (i === 4 ? 'c'.repeat(2500) : line)),
+        10,
         'Read lines 1-5 of 20 from test.txt (truncated)',
-      );
+      ],
+    ])('%s', async (_title, lines, limit, display) => {
+      const result = await readText(lines.join('\n'), mockConfig, {
+        offset: 0,
+        limit,
+      });
+
+      expect(result.isTruncated).toBe(true);
+      expect(result.returnDisplay).toBe(display);
     });
 
     it('should read large text files through bounded truncation instead of the 10MB gate', async () => {
@@ -3824,12 +2587,7 @@ describe('fileUtils', () => {
         { length: 65_000 },
         (_, index) => `Line ${index + 1} ${'x'.repeat(180)}`,
       );
-      actualNodeFs.writeFileSync(testTextFilePath, lines.join('\n'));
-
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        mockConfig,
-      );
+      const result = await readText(lines.join('\n'));
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Line 1');
@@ -3844,18 +2602,11 @@ describe('fileUtils', () => {
     });
 
     it('should stream large text files when line truncation is disabled', async () => {
-      actualNodeFs.writeFileSync(
-        testTextFilePath,
-        'x'.repeat(11 * 1024 * 1024),
-      );
-      const noLineLimitConfig = {
-        ...mockConfig,
-        getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        noLineLimitConfig,
+      const result = await readText(
+        'x'.repeat(11 * MB),
+        withConfig({
+          getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
+        }),
       );
 
       expect(result.error).toBeUndefined();
@@ -3869,25 +2620,21 @@ describe('fileUtils', () => {
     });
 
     it('should mark byte truncation metadata without character truncation', async () => {
-      actualNodeFs.writeFileSync(testTextFilePath, 'visible');
-      const byteTruncatedConfig = {
-        ...mockConfig,
-        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
-        getFileSystemService: () => ({
-          readTextFile: vi.fn().mockResolvedValue({
-            content: 'visible',
-            _meta: {
-              originalLineCount: 1,
-              originalLineCountExact: false,
-              truncatedByBytes: true,
-            },
+      const result = await readText(
+        'visible',
+        withConfig({
+          getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+          getFileSystemService: () => ({
+            readTextFile: vi.fn().mockResolvedValue({
+              content: 'visible',
+              _meta: {
+                originalLineCount: 1,
+                originalLineCountExact: false,
+                truncatedByBytes: true,
+              },
+            }),
           }),
         }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        byteTruncatedConfig,
       );
 
       expect(typeof result.llmContent).toBe('string');
@@ -3901,22 +2648,15 @@ describe('fileUtils', () => {
     });
 
     it('should use selected range as a lower bound when large file metadata is missing', async () => {
-      actualNodeFs.writeFileSync(
-        testTextFilePath,
-        'x'.repeat(11 * 1024 * 1024),
-      );
-      const missingMetadataConfig = {
-        ...mockConfig,
-        getFileSystemService: () => ({
-          readTextFile: vi.fn().mockResolvedValue({
-            content: 'visible\nnext',
+      const result = await readText(
+        'x'.repeat(11 * MB),
+        withConfig({
+          getFileSystemService: () => ({
+            readTextFile: vi
+              .fn()
+              .mockResolvedValue({ content: 'visible\nnext' }),
           }),
         }),
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        missingMetadataConfig,
         { offset: 9, limit: 2 },
       );
 
@@ -3928,16 +2668,12 @@ describe('fileUtils', () => {
     });
 
     it('should preserve disabled output truncation for large text files', async () => {
-      const byteLength = 11 * 1024 * 1024;
-      actualNodeFs.writeFileSync(testTextFilePath, 'x'.repeat(byteLength));
-      const noCharacterLimitConfig = {
-        ...mockConfig,
-        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
-      } as unknown as Config;
-
-      const result = await processSingleFileContent(
-        testTextFilePath,
-        noCharacterLimitConfig,
+      const byteLength = 11 * MB;
+      const result = await readText(
+        'x'.repeat(byteLength),
+        withConfig({
+          getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+        }),
       );
 
       expect(typeof result.llmContent).toBe('string');
@@ -3949,11 +2685,8 @@ describe('fileUtils', () => {
     });
 
     it('should still return an error if an inline media file exceeds 10MB', async () => {
-      const largeGifPath = path.join(tempRootDir, 'large.gif');
-      mockMimeGetType.mockReturnValue('image/gif');
-      actualNodeFs.writeFileSync(largeGifPath, Buffer.alloc(11 * 1024 * 1024));
-
-      const result = await processSingleFileContent(largeGifPath, mockConfig);
+      const gif = Buffer.alloc(11 * MB);
+      const result = await readMedia('large.gif', gif, 'image/gif');
 
       expect(result.error).toContain('File size exceeds the 10MB limit');
       expect(result.returnDisplay).toContain(
@@ -3963,58 +2696,26 @@ describe('fileUtils', () => {
     });
 
     it('should allow explicit page ranges above the full-PDF text-extraction size cap', async () => {
-      const fakePdfData = Buffer.from('fake pdf data');
-      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
-      mockMimeGetType.mockReturnValue('application/pdf');
-      mockExecResult({ stdout: '', stderr: 'pdftotext version', code: 0 });
-      mockExecResult({ stdout: 'selected page text', stderr: '', code: 0 });
+      const result = await readPdf(
+        { ...fakePdf(200 * MB), pages: '1-5' },
+        PDFTOTEXT,
+        execOk('selected page text'),
+      );
 
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 200 * 1024 * 1024,
-        isDirectory: () => false,
-        isFile: () => true,
-      } as fs.Stats);
-
-      try {
-        const mockConfigNoPdf = {
-          ...mockConfig,
-          getContentGeneratorConfig: () => ({
-            modalities: { image: true },
-          }),
-        } as unknown as Config;
-
-        const result = await processSingleFileContent(
-          testPdfFilePath,
-          mockConfigNoPdf,
-          { pages: '1-5' },
-        );
-
-        expect(result.error).toBeUndefined();
-        expect(result.llmContent).toBe('selected page text');
-        expect(result.returnDisplay).toContain('Read pdf as text (pages 1-5)');
-      } finally {
-        statSpy.mockRestore();
-      }
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toBe('selected page text');
+      expect(result.returnDisplay).toContain('Read pdf as text (pages 1-5)');
     });
 
     it('should reject non-regular files (FIFOs, devices, sockets)', async () => {
-      actualNodeFs.writeFileSync(testTextFilePath, 'placeholder');
-
       // A FIFO / socket / /dev/zero shows up as a non-file, non-directory
       // stat entry. stats.size is typically 0 or meaningless, so without
       // this guard a caller could accidentally stream /dev/zero through
       // pdftotext until the timeout fires.
-      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
-        size: 0,
-        isDirectory: () => false,
-        isFile: () => false,
-      } as fs.Stats);
+      const statSpy = fakeStat(0, false);
 
       try {
-        const result = await processSingleFileContent(
-          testTextFilePath,
-          mockConfig,
-        );
+        const result = await readText('placeholder');
 
         expect(result.error).toMatch(/not a regular file/i);
         expect(result.returnDisplay).toMatch(/not a regular file/i);

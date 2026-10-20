@@ -3,8 +3,9 @@
 # nothing when none does.
 #
 # Shared by the failure reporters that own one long-lived issue apiece —
-# .github/scripts/image-build-failure-issue.sh and
-# .github/scripts/ecs-fleet-update-failure-issue.sh. Both file into the same
+# .github/scripts/image-build-failure-issue.sh,
+# .github/scripts/ecs-fleet-update-failure-issue.sh and
+# .github/scripts/codeql-failure-issue.sh. All file into the same
 # `scope/ci-cd` label space with the same marker contract, so the lookup lives
 # in one place: a guard fixed in one copy and missed in the other makes the
 # other start filing duplicate issues — the exact failure dedup exists to

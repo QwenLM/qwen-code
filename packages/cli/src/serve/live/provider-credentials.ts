@@ -10,6 +10,7 @@ import { deriveWebSocketBase } from '../../ui/voice/voice-stream-session.js';
 export const DEFAULT_LIVE_VOICE_MODEL = 'qwen3.5-omni-plus-realtime';
 export const DEFAULT_LIVE_ENDPOINT =
   'wss://dashscope.aliyuncs.com/api-ws/v1/realtime';
+const REALTIME_PATH = '/api-ws/v1/realtime';
 export const DEFAULT_LIVE_VOICE = 'Tina';
 export const DEFAULT_LIVE_SHORTCUT = 'Command+E';
 
@@ -126,6 +127,43 @@ function validateRealtimeEndpoint(value: string): string {
 }
 
 /**
+ * Accept what a user has at hand: the Realtime WebSocket URL itself, or the
+ * OpenAI-compatible HTTPS base URL (`https://…/compatible-mode/v1`), which is
+ * converted the same way a `realtimeOnly` route's `baseUrl` is. The result
+ * passes the same allow-list as a hand-written endpoint.
+ */
+export function normalizeLiveRealtimeEndpoint(value: string): string {
+  const trimmed = value.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new LiveProviderConfigError(
+      'experimental.liveVoice.endpoint is invalid.',
+    );
+  }
+  if (parsed.protocol !== 'https:') return validateRealtimeEndpoint(trimmed);
+  // The conversion drops the query and userinfo, so refuse them here rather
+  // than silently discard a credential pasted into the URL.
+  if (
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    hasCredentialQuery(parsed)
+  ) {
+    throw new LiveProviderConfigError(
+      'experimental.liveVoice.endpoint must be a supported secure DashScope WebSocket endpoint.',
+    );
+  }
+  if (parsed.pathname.replace(/\/+$/, '').endsWith(REALTIME_PATH)) {
+    parsed.protocol = 'wss:';
+    return validateRealtimeEndpoint(parsed.toString());
+  }
+  return validateRealtimeEndpoint(
+    `${deriveWebSocketBase(trimmed)}${REALTIME_PATH}`,
+  );
+}
+
+/**
  * `modelProviders` entries flagged `realtimeOnly`. Callers pass settings
  * loaded WITHOUT workspace scope: a repository must not be able to add a
  * route and redirect microphone audio.
@@ -230,6 +268,25 @@ function readRouteApiKey(
     : undefined;
 }
 
+/** The Realtime endpoint a `realtimeOnly` route derives from its `baseUrl`. */
+function resolveLiveRouteEndpoint(route: LiveRealtimeRoute): string {
+  if (!route.baseUrl) {
+    throw new LiveProviderConfigError(
+      `Live Voice model '${route.id}' must declare baseUrl and envKey in modelProviders.`,
+    );
+  }
+  let derived: string;
+  try {
+    derived = `${deriveWebSocketBase(route.baseUrl)}${REALTIME_PATH}`;
+  } catch {
+    throw new LiveProviderConfigError(
+      `Live Voice model '${route.id}' has an invalid baseUrl.`,
+    );
+  }
+  // Same allow-list as a hand-written endpoint: only DashScope over wss.
+  return validateRealtimeEndpoint(derived);
+}
+
 function resolveRouteCredential(
   settings: Settings,
   route: LiveRealtimeRoute,
@@ -240,16 +297,7 @@ function resolveRouteCredential(
       `Live Voice model '${route.id}' must declare baseUrl and envKey in modelProviders.`,
     );
   }
-  let derived: string;
-  try {
-    derived = `${deriveWebSocketBase(route.baseUrl)}/api-ws/v1/realtime`;
-  } catch {
-    throw new LiveProviderConfigError(
-      `Live Voice model '${route.id}' has an invalid baseUrl.`,
-    );
-  }
-  // Same allow-list as a hand-written endpoint: only DashScope over wss.
-  const endpoint = validateRealtimeEndpoint(derived);
+  const endpoint = resolveLiveRouteEndpoint(route);
   const apiKey = readRouteApiKey(settings, route.envKey, env);
   if (!apiKey) {
     throw new LiveProviderConfigError(
@@ -305,7 +353,8 @@ export function resolveLiveProviderCredential(
         `The DashScope Realtime API key is not configured. '${live.model}' matches no realtimeOnly route in modelProviders, so experimental.liveVoice.apiKey is required.`,
       );
     }
-    endpoint = validateRealtimeEndpoint(live.endpoint);
+    // Stored as entered: an OpenAI-compatible base URL or a Realtime URL.
+    endpoint = normalizeLiveRealtimeEndpoint(live.endpoint);
   }
   const credential = {
     endpoint,

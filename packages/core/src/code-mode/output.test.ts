@@ -107,9 +107,17 @@ describe('CodeMode output recovery', () => {
     expect(error.error?.message).toContain('BEFORE');
     expect(error.error?.message).toContain('LAST');
     const value = await exec("text('BEFORE'); return 'v'.repeat(100000);");
-    expect(String(value.returnDisplay).length).toBeLessThanOrEqual(
-      EXEC_MAX_OUTPUT_CHARS,
+    expect(value.returnDisplay).toBe('BEFORE');
+    expect((value.llmContent as Array<{ text: string }>)[0].text).toBe(
+      'BEFORE',
     );
+  });
+
+  it('does not expose implicit return values or success text', async () => {
+    const result = await exec("'hidden return value'");
+    expect(result.returnDisplay).toBe('');
+    expect((result.llmContent as Array<{ text: string }>)[0].text).toBe('');
+    expect(result.error).toBeUndefined();
   });
 
   it('respects small budgets at the marker boundary', () => {

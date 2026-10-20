@@ -25,7 +25,6 @@ import {
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
-// Mock OpenAI
 vi.mock('openai', () => ({
   default: vi.fn().mockImplementation((config) => ({
     config,
@@ -51,12 +50,40 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
+type ReasoningTurn = OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+  reasoning_content?: string;
+  reasoning?: string;
+};
+
+// `{ model, messages: [a 'Hello' user turn], ...extra }`.
+const hello = (model: string, extra: Record<string, unknown> = {}) =>
+  ({
+    model,
+    messages: [{ role: 'user', content: 'Hello' }],
+    ...extra,
+  }) as OpenAI.Chat.ChatCompletionCreateParams;
+
+const UA = `QwenCode/1.0.0 (${process.platform}; ${process.arch})`;
+
 describe('DefaultOpenAICompatibleProvider', () => {
   const MAX_OUTPUT_TOKENS_ENV = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
   let provider: DefaultOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
   let mockCliConfig: Config;
   let savedMaxOutputTokensEnv: string | undefined;
+
+  // A provider over the shared config plus `extra` fields.
+  const providerWith = (extra: Record<string, unknown>) =>
+    new DefaultOpenAICompatibleProvider(
+      { ...mockContentGeneratorConfig, ...extra } as ContentGeneratorConfig,
+      mockCliConfig,
+    );
+  // buildRequest(request, 'prompt-id'), with the result readable by key.
+  const build = (request: unknown, p = provider) =>
+    p.buildRequest(
+      request as OpenAI.Chat.ChatCompletionCreateParams,
+      'prompt-id',
+    ) as OpenAI.Chat.ChatCompletionCreateParams & Record<string, unknown>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -68,7 +95,6 @@ describe('DefaultOpenAICompatibleProvider', () => {
       >;
     mockedBuildRuntimeFetchOptions.mockReturnValue(undefined);
 
-    // Mock ContentGeneratorConfig
     mockContentGeneratorConfig = {
       apiKey: 'test-api-key',
       baseUrl: 'https://api.openai.com/v1',
@@ -77,7 +103,6 @@ describe('DefaultOpenAICompatibleProvider', () => {
       model: 'gpt-4',
     } as ContentGeneratorConfig;
 
-    // Mock Config
     mockCliConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getProxy: vi.fn().mockReturnValue(undefined),
@@ -135,24 +160,16 @@ describe('DefaultOpenAICompatibleProvider', () => {
     it('should build headers with User-Agent', () => {
       const headers = provider.buildHeaders();
 
-      expect(headers).toEqual({
-        'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-      });
+      expect(headers).toEqual({ 'User-Agent': UA });
     });
 
     it('should merge customHeaders with defaults (and allow overrides)', () => {
-      const providerWithCustomHeaders = new DefaultOpenAICompatibleProvider(
-        {
-          ...mockContentGeneratorConfig,
-          customHeaders: {
-            'X-Custom': '1',
-            'User-Agent': 'custom-agent',
-          },
-        } as ContentGeneratorConfig,
-        mockCliConfig,
-      );
-
-      const headers = providerWithCustomHeaders.buildHeaders();
+      const headers = providerWith({
+        customHeaders: {
+          'X-Custom': '1',
+          'User-Agent': 'custom-agent',
+        },
+      }).buildHeaders();
 
       expect(headers).toEqual({
         'User-Agent': 'custom-agent',
@@ -161,11 +178,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
 
     it('should handle unknown CLI version', () => {
-      (
-        mockCliConfig.getCliVersion as MockedFunction<
-          typeof mockCliConfig.getCliVersion
-        >
-      ).mockReturnValue(undefined);
+      vi.mocked(mockCliConfig.getCliVersion).mockReturnValue(undefined);
 
       const headers = provider.buildHeaders();
 
@@ -185,9 +198,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
           baseURL: 'https://api.openai.com/v1',
           timeout: 60000,
           maxRetries: 2,
-          defaultHeaders: {
-            'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-          },
+          defaultHeaders: { 'User-Agent': UA },
           fetch: expect.any(Function),
         }),
       );
@@ -231,9 +242,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
           baseURL: 'https://api.openai.com/v1',
           timeout: DEFAULT_TIMEOUT,
           maxRetries: DEFAULT_MAX_RETRIES,
-          defaultHeaders: {
-            'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-          },
+          defaultHeaders: { 'User-Agent': UA },
         }),
       );
     });
@@ -293,56 +302,60 @@ describe('DefaultOpenAICompatibleProvider', () => {
       // reject the empty-object shape. Assert on the serialized body because
       // a converter-shaped tool carries `parameters: undefined` present,
       // which JSON.stringify drops — matching what actually ships.
-      const result = provider.buildRequest(
-        {
-          model: 'some-model',
-          messages: [{ role: 'user', content: 'Hello' }],
-          tools: [
-            {
-              type: 'function',
-              function: { name: 'no_args', description: 'd' },
-            },
-          ],
-        },
-        'prompt-id',
-      );
+      const result = build({
+        model: 'some-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+        tools: [
+          {
+            type: 'function',
+            function: { name: 'no_args', description: 'd' },
+          },
+        ],
+      });
 
       expect(JSON.stringify(result.tools)).not.toContain('"parameters"');
     });
 
-    it('should set model max_tokens default when not configured', () => {
-      const requestWithoutMaxTokens: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-      };
-
-      const result = provider.buildRequest(
-        requestWithoutMaxTokens,
-        'prompt-id',
-      );
-
-      expect(result.max_tokens).toBe(16384);
-    });
-
-    it('should set the 128K output default for Claude Opus 4.8', () => {
-      const requestWithoutMaxTokens: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'vertex/claude-opus-4-8',
-        messages: [{ role: 'user', content: 'Hello' }],
-      };
-
-      const result = provider.buildRequest(
-        requestWithoutMaxTokens,
-        'prompt-id',
-      );
-
-      expect(result.max_tokens).toBe(128_000);
+    it.each([
+      [
+        'should set model max_tokens default when not configured',
+        hello('gpt-4'),
+        16384,
+      ],
+      [
+        'should set the 128K output default for Claude Opus 4.8',
+        hello('vertex/claude-opus-4-8'),
+        128_000,
+      ],
+      // Unknown models (deployment aliases, self-hosted): the user's 100K is
+      // kept, since the backend may support larger limits.
+      [
+        'should respect user max_tokens for unknown models (deployment aliases, self-hosted)',
+        hello('unknown-model', { max_tokens: 100000 }),
+        100000,
+      ],
+      [
+        'should use default output limit for unknown models when max_tokens not configured',
+        hello('custom-deployment-alias'),
+        32000,
+      ],
+      // Known models: 100K exceeds GPT-4's limit and is capped to its 16K.
+      [
+        'should cap max_tokens for known models to avoid API errors',
+        hello('gpt-4', { max_tokens: 100000 }),
+        16384,
+      ],
+      [
+        'should treat null max_tokens as not configured',
+        hello('gpt-4', { max_tokens: null }),
+        16384,
+      ],
+    ])('%s', (_title, request, expected) => {
+      expect(build(request).max_tokens).toBe(expected);
     });
 
     it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-      };
+      const request = hello('gpt-4');
 
       for (const envValue of ['1.5', '2k', 'abc']) {
         process.env[MAX_OUTPUT_TOKENS_ENV] = envValue;
@@ -355,65 +368,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
     it('should respect a valid QWEN_CODE_MAX_OUTPUT_TOKENS value', () => {
       process.env[MAX_OUTPUT_TOKENS_ENV] = '9000';
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-      };
 
-      const result = provider.buildRequest(request, 'prompt-id');
-
-      expect(result.max_tokens).toBe(9000);
-    });
-
-    it('should respect user max_tokens for unknown models (deployment aliases, self-hosted)', () => {
-      // Unknown models: user config is respected entirely (backend may support larger limits)
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'unknown-model',
-        messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 100000,
-      };
-
-      const result = provider.buildRequest(request, 'prompt-id');
-
-      // User's 100K setting is preserved for unknown models
-      expect(result.max_tokens).toBe(100000);
-    });
-
-    it('should use default output limit for unknown models when max_tokens not configured', () => {
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'custom-deployment-alias',
-        messages: [{ role: 'user', content: 'Hello' }],
-      };
-
-      const result = provider.buildRequest(request, 'prompt-id');
-
-      expect(result.max_tokens).toBe(32000);
-    });
-
-    it('should cap max_tokens for known models to avoid API errors', () => {
-      // Known models (GPT-4): user config is capped at model limit
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 100000, // Exceeds GPT-4's 16K limit
-      };
-
-      const result = provider.buildRequest(request, 'prompt-id');
-
-      // Capped to GPT-4's output limit (16K)
-      expect(result.max_tokens).toBe(16384);
-    });
-
-    it('should treat null max_tokens as not configured', () => {
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: null as unknown as undefined,
-      };
-
-      const result = provider.buildRequest(request, 'prompt-id');
-
-      expect(result.max_tokens).toBe(16384);
+      expect(build(hello('gpt-4')).max_tokens).toBe(9000);
     });
 
     it('should preserve all sampling parameters', () => {
@@ -446,12 +402,9 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
 
     it('should handle minimal request parameters', () => {
-      const minimalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-      };
+      const minimalRequest = hello('gpt-4');
 
-      const result = provider.buildRequest(minimalRequest, 'prompt-id');
+      const result = build(minimalRequest);
 
       expect(result.model).toBe('gpt-4');
       expect(result.messages).toEqual(minimalRequest.messages);
@@ -459,53 +412,29 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
 
     it('should not inject max_tokens when samplingParams is set without it (e.g. GPT-5 / o-series)', () => {
-      // GPT-5 / o-series on Azure reject max_tokens entirely.
-      // When the user sets samplingParams without max_tokens, honor the opt-out.
-      const cfg = {
-        ...mockContentGeneratorConfig,
+      // GPT-5 / o-series on Azure reject max_tokens entirely, so samplingParams
+      // without max_tokens is an opt-out to honor.
+      const p = providerWith({
         samplingParams: { max_completion_tokens: 4096 },
-      } as ContentGeneratorConfig;
-      const p = new DefaultOpenAICompatibleProvider(cfg, mockCliConfig);
+      });
 
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-      };
-
-      const result = p.buildRequest(request, 'prompt-id');
-
-      expect(result.max_tokens).toBeUndefined();
+      expect(build(hello('gpt-4'), p).max_tokens).toBeUndefined();
     });
 
     it('should pass samplingParams.max_tokens through verbatim, bypassing the model cap', () => {
-      // When samplingParams is the source of truth, even max_tokens values that
-      // exceed the known model output limit pass through unchanged —
-      // no automatic capping.
-      const cfg = {
-        ...mockContentGeneratorConfig,
-        samplingParams: { max_tokens: 100000 },
-      } as ContentGeneratorConfig;
-      const p = new DefaultOpenAICompatibleProvider(cfg, mockCliConfig);
+      // samplingParams is the source of truth: a max_tokens above the known
+      // model's output limit (gpt-4: 16K, normally capped) passes unchanged.
+      const p = providerWith({ samplingParams: { max_tokens: 100000 } });
 
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4', // known model, 16K output limit — would normally cap.
-        messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 100000,
-      };
-
-      const result = p.buildRequest(request, 'prompt-id');
+      const result = build(hello('gpt-4', { max_tokens: 100000 }), p);
 
       expect(result.max_tokens).toBe(100000);
     });
 
     it('should handle streaming requests', () => {
-      const streamingRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        stream: true,
-      };
+      const streamingRequest = hello('gpt-4', { stream: true });
 
-      const result = provider.buildRequest(streamingRequest, 'prompt-id');
+      const result = build(streamingRequest);
 
       expect(result.model).toBe('gpt-4');
       expect(result.messages).toEqual(streamingRequest.messages);
@@ -514,50 +443,31 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
 
     it('should not modify the original request object', () => {
-      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        temperature: 0.7,
-      };
+      const originalRequest = hello('gpt-4', { temperature: 0.7 });
 
       const originalRequestCopy = { ...originalRequest };
-      const result = provider.buildRequest(originalRequest, 'prompt-id');
+      const result = build(originalRequest);
 
-      // Original request should be unchanged
       expect(originalRequest).toEqual(originalRequestCopy);
-      // Result should be a different object
       expect(result).not.toBe(originalRequest);
     });
 
-    it('clamps a configured max effort to xhigh for a generic endpoint', () => {
-      const originalRequest = {
-        model: 'gpt-5.4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        reasoning: { effort: 'max' },
-      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    it.each([
+      [
+        'clamps a configured max effort to xhigh for a generic endpoint',
+        'max',
+        'xhigh',
+      ],
+      ['leaves an accepted effort tier untouched', 'xhigh', 'xhigh'],
+      [
+        'keeps an unrecognized effort string as-is rather than rewriting it',
+        'ludicrous',
+        'ludicrous',
+      ],
+    ])('%s', (_title, effort, expected) => {
+      const result = build(hello('gpt-5.4', { reasoning: { effort } }));
 
-      const result = provider.buildRequest(
-        originalRequest,
-        'prompt-id',
-      ) as unknown as Record<string, unknown>;
-
-      expect(result['reasoning_effort']).toBe('xhigh');
-      expect(result['reasoning']).toBeUndefined();
-    });
-
-    it('leaves an accepted effort tier untouched', () => {
-      const originalRequest = {
-        model: 'gpt-5.4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        reasoning: { effort: 'xhigh' },
-      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
-
-      const result = provider.buildRequest(
-        originalRequest,
-        'prompt-id',
-      ) as unknown as Record<string, unknown>;
-
-      expect(result['reasoning_effort']).toBe('xhigh');
+      expect(result['reasoning_effort']).toBe(expected);
       expect(result['reasoning']).toBeUndefined();
     });
 
@@ -584,33 +494,14 @@ describe('DefaultOpenAICompatibleProvider', () => {
       });
     });
 
-    it('keeps an unrecognized effort string as-is rather than rewriting it', () => {
-      const originalRequest = {
-        model: 'gpt-5.4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        reasoning: { effort: 'ludicrous' },
-      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
-
-      const result = provider.buildRequest(
-        originalRequest,
-        'prompt-id',
-      ) as unknown as Record<string, unknown>;
-
-      expect(result['reasoning_effort']).toBe('ludicrous');
-      expect(result['reasoning']).toBeUndefined();
-    });
-
     it.each(['', 42])(
       'does not translate an invalid configured effort %j',
       (effort) => {
-        const result = provider.buildRequest(
-          {
-            model: 'gpt-5.4',
-            messages: [],
-            reasoning: { effort },
-          } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
-          'prompt-id',
-        ) as unknown as Record<string, unknown>;
+        const result = build({
+          model: 'gpt-5.4',
+          messages: [],
+          reasoning: { effort },
+        });
         expect(result['reasoning_effort']).toBeUndefined();
         expect(result['reasoning']).toEqual({ effort });
       },
@@ -618,11 +509,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
     it('warns once however many requests the same provider clamps', () => {
       mockDebugLogger.warn.mockClear();
-      const req = {
-        model: 'gpt-5.4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        reasoning: { effort: 'max' },
-      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+      const req = hello('gpt-5.4', { reasoning: { effort: 'max' } });
 
       provider.buildRequest(req, 'first');
       provider.buildRequest(req, 'second');
@@ -647,10 +534,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
           messages: [{ role: 'user' as const, content: 'Hello' }],
           reasoning: { effort },
         };
-        const result = provider.buildRequest(
-          request,
-          'prompt-id',
-        ) as unknown as Record<string, unknown>;
+        const result = build(request);
         expect(result['reasoning_effort']).toBe(expected);
         expect(result['reasoning']).toBeUndefined();
         expect(request.reasoning).toEqual({ effort });
@@ -666,10 +550,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
           messages: [],
           reasoning: { effort: 'high', budget_tokens: 42000 },
         };
-        const result = provider.buildRequest(
-          request,
-          'prompt-id',
-        ) as unknown as Record<string, unknown>;
+        const result = build(request);
         expect(result['reasoning_effort']).toBe('high');
         expect(result['reasoning']).toEqual({ budget_tokens: 42000 });
         expect(request.reasoning).toEqual({
@@ -681,41 +562,30 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
     it('keeps the OpenRouter nested reasoning protocol', () => {
       mockContentGeneratorConfig.baseUrl = 'https://openrouter.ai/api/v1';
-      const result = provider.buildRequest(
-        {
-          model: 'openai/gpt-5.4',
-          messages: [],
-          reasoning: { effort: 'max' },
-        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
-        'prompt-id',
-      ) as unknown as Record<string, unknown>;
+      const result = build({
+        model: 'openai/gpt-5.4',
+        messages: [],
+        reasoning: { effort: 'max' },
+      });
       expect(result['reasoning']).toEqual({ effort: 'xhigh' });
       expect(result['reasoning_effort']).toBeUndefined();
     });
 
     it('preserves an explicit flat effort over the configured effort', () => {
       mockContentGeneratorConfig.extra_body = { reasoning_effort: 'low' };
-      const result = provider.buildRequest(
-        {
-          model: 'gpt-5.4',
-          messages: [],
-          reasoning: { effort: 'high' },
-        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
-        'prompt-id',
-      ) as unknown as Record<string, unknown>;
+      const result = build({
+        model: 'gpt-5.4',
+        messages: [],
+        reasoning: { effort: 'high' },
+      });
       expect(result['reasoning_effort']).toBe('low');
       expect(result['reasoning']).toBeUndefined();
     });
 
     it('answers the ceiling for the request model, not the configured one', () => {
-      const result = provider.buildRequest(
-        {
-          model: 'some-other-model',
-          messages: [{ role: 'user', content: 'Hello' }],
-          reasoning: { effort: 'max' },
-        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
-        'prompt-id',
-      ) as unknown as Record<string, unknown>;
+      const result = build(
+        hello('some-other-model', { reasoning: { effort: 'max' } }),
+      );
 
       expect(result['reasoning']).toEqual({ effort: 'xhigh' });
     });
@@ -723,69 +593,39 @@ describe('DefaultOpenAICompatibleProvider', () => {
     it('leaves a samplingParams reasoning object verbatim', () => {
       // Explicit nested reasoning bypasses injection and clamping, unlike
       // unrelated GPT sampling options that retain the configured effort.
-      const providerWithSampling = new DefaultOpenAICompatibleProvider(
-        {
-          ...mockContentGeneratorConfig,
-          samplingParams: { reasoning: { effort: 'max' } },
-        } as unknown as ContentGeneratorConfig,
-        mockCliConfig,
-      );
+      const p = providerWith({
+        samplingParams: { reasoning: { effort: 'max' } },
+      });
 
-      const result = providerWithSampling.buildRequest(
-        {
-          model: 'gpt-5.4',
-          messages: [{ role: 'user', content: 'Hello' }],
-          reasoning: { effort: 'max' },
-        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
-        'prompt-id',
-      ) as unknown as Record<string, unknown>;
+      const result = build(
+        hello('gpt-5.4', { reasoning: { effort: 'max' } }),
+        p,
+      );
 
       expect(result['reasoning']).toEqual({ effort: 'max' });
     });
 
     it('lets an extra_body reasoning override ship verbatim', () => {
-      const providerWithOverride = new DefaultOpenAICompatibleProvider(
-        {
-          ...mockContentGeneratorConfig,
-          extra_body: { reasoning: { effort: 'max' } },
-        } as ContentGeneratorConfig,
-        mockCliConfig,
-      );
+      const p = providerWith({ extra_body: { reasoning: { effort: 'max' } } });
 
-      const result = providerWithOverride.buildRequest(
-        {
-          model: 'gpt-5.4',
-          messages: [{ role: 'user', content: 'Hello' }],
-          reasoning: { effort: 'max' },
-        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
-        'prompt-id',
-      ) as unknown as Record<string, unknown>;
+      const result = build(
+        hello('gpt-5.4', { reasoning: { effort: 'max' } }),
+        p,
+      );
 
       expect(result['reasoning']).toEqual({ effort: 'max' });
     });
 
     it('should merge extra_body into the request', () => {
-      const providerWithExtraBody = new DefaultOpenAICompatibleProvider(
-        {
-          ...mockContentGeneratorConfig,
-          extra_body: {
-            custom_param: 'custom_value',
-            nested: { key: 'value' },
-          },
-        } as ContentGeneratorConfig,
-        mockCliConfig,
-      );
+      const p = providerWith({
+        extra_body: {
+          custom_param: 'custom_value',
+          nested: { key: 'value' },
+        },
+      });
+      const originalRequest = hello('gpt-4', { temperature: 0.7 });
 
-      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        temperature: 0.7,
-      };
-
-      const result = providerWithExtraBody.buildRequest(
-        originalRequest,
-        'prompt-id',
-      );
+      const result = build(originalRequest, p);
 
       expect(result).toEqual({
         ...originalRequest,
@@ -796,13 +636,9 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
 
     it('should not include extra_body when not configured', () => {
-      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        temperature: 0.7,
-      };
+      const originalRequest = hello('gpt-4', { temperature: 0.7 });
 
-      const result = provider.buildRequest(originalRequest, 'prompt-id');
+      const result = build(originalRequest);
 
       expect(result.model).toBe('gpt-4');
       expect(result.messages).toEqual(originalRequest.messages);
@@ -820,29 +656,23 @@ describe('DefaultOpenAICompatibleProvider', () => {
             role: 'assistant',
             content: 'Visible answer',
             reasoning_content: 'Preserved chain of thought',
-          } as OpenAI.Chat.ChatCompletionAssistantMessageParam & {
-            reasoning_content: string;
-            reasoning?: string;
-          },
+          } as ReasoningTurn,
           { role: 'user', content: 'Second turn' },
         ],
       };
 
-      const result = provider.buildRequest(originalRequest, 'prompt-id');
-      const assistant = result.messages?.[1] as {
-        reasoning_content?: string;
-        reasoning?: string;
-      };
+      const result = build(originalRequest);
+      const assistant = result.messages?.[1] as ReasoningTurn;
 
       expect(assistant.reasoning_content).toBe('Preserved chain of thought');
       expect(assistant.reasoning).toBe('Preserved chain of thought');
       expect(
-        (originalRequest.messages[1] as { reasoning?: string }).reasoning,
+        (originalRequest.messages[1] as ReasoningTurn).reasoning,
       ).toBeUndefined();
     });
 
     it('does not overwrite an explicit reasoning field on Qwen3 assistant history turns', () => {
-      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+      const result = build({
         model: 'Qwen3-32B',
         messages: [
           {
@@ -850,43 +680,27 @@ describe('DefaultOpenAICompatibleProvider', () => {
             content: 'Visible answer',
             reasoning_content: 'Legacy reasoning field',
             reasoning: 'Canonical reasoning field',
-          } as OpenAI.Chat.ChatCompletionAssistantMessageParam & {
-            reasoning_content: string;
-            reasoning: string;
           },
         ],
-      };
-
-      const result = provider.buildRequest(originalRequest, 'prompt-id');
-      const assistant = result.messages?.[0] as {
-        reasoning_content?: string;
-        reasoning?: string;
-      };
+      });
+      const assistant = result.messages?.[0] as ReasoningTurn;
 
       expect(assistant.reasoning).toBe('Canonical reasoning field');
       expect(assistant.reasoning_content).toBe('Legacy reasoning field');
     });
 
     it('does not mirror reasoning_content for non-Qwen3 OpenAI-compatible models', () => {
-      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+      const result = build({
         model: 'gpt-4o',
         messages: [
           {
             role: 'assistant',
             content: 'Visible answer',
             reasoning_content: 'Preserved chain of thought',
-          } as OpenAI.Chat.ChatCompletionAssistantMessageParam & {
-            reasoning_content: string;
-            reasoning?: string;
           },
         ],
-      };
-
-      const result = provider.buildRequest(originalRequest, 'prompt-id');
-      const assistant = result.messages?.[0] as {
-        reasoning_content?: string;
-        reasoning?: string;
-      };
+      });
+      const assistant = result.messages?.[0] as ReasoningTurn;
 
       expect(assistant.reasoning_content).toBe('Preserved chain of thought');
       expect(assistant.reasoning).toBeUndefined();

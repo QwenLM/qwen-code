@@ -16,22 +16,30 @@ vi.mock('../utils/sideQuery.js', () => ({
 
 const docs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'user',
     type: 'user',
     filePath: '/tmp/user.md',
     relativePath: 'user.md',
     filename: 'user.md',
     title: 'User Memory',
     description: 'User preferences',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     body: '- User prefers terse responses.',
     mtimeMs: 1,
   },
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/reference.md',
     relativePath: 'reference.md',
     filename: 'reference.md',
     title: 'Reference Memory',
     description: 'Operational references',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     body: '- Grafana dashboard: https://grafana.internal/d/api-latency',
     mtimeMs: 2,
   },
@@ -46,21 +54,13 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     vi.resetAllMocks();
   });
 
-  it('returns documents chosen by the side-query selector', async () => {
-    vi.mocked(runSideQuery).mockResolvedValue({
-      selected_memories: ['/tmp/user.md'],
-    });
-
-    const result = await selectRelevantAutoMemoryDocumentsByModel(
-      mockConfig,
-      'check preferences',
-      docs,
-      2,
-      [],
-    );
-
-    expect(result).toEqual([docs[0]]);
-
+  type SelectArgs = Parameters<typeof selectRelevantAutoMemoryDocumentsByModel>;
+  const select = (
+    ...args: SelectArgs extends [Config, ...infer R] ? R : never
+  ) => selectRelevantAutoMemoryDocumentsByModel(mockConfig, ...args);
+  const sideQueryOptions = () => vi.mocked(runSideQuery).mock.calls[0]![1];
+  const promptText = () => sideQueryOptions().contents[0]?.parts?.[0]?.text;
+  const expectRecallQuery = () =>
     expect(runSideQuery).toHaveBeenCalledWith(
       mockConfig,
       expect.objectContaining({
@@ -68,15 +68,27 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
         config: { temperature: 0 },
       }),
     );
+  // The selector's validate() runs on the chosen paths, as runSideQuery would.
+  const selectorReturnsValidated = (selected: string[]) =>
+    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+      const result = { selected_memories: selected };
+      const error = options.validate?.(result);
+      if (error) throw new Error(error);
+      return result;
+    });
+
+  it('returns documents chosen by the side-query selector', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: ['/tmp/user.md'],
+    });
+
+    expect(await select('check preferences', docs, 2, [])).toEqual([docs[0]]);
+    expectRecallQuery();
   });
 
   it('returns an empty list for empty query or no docs', async () => {
-    await expect(
-      selectRelevantAutoMemoryDocumentsByModel(mockConfig, '   ', docs, 2),
-    ).resolves.toEqual([]);
-    await expect(
-      selectRelevantAutoMemoryDocumentsByModel(mockConfig, 'hello', [], 2),
-    ).resolves.toEqual([]);
+    await expect(select('   ', docs, 2)).resolves.toEqual([]);
+    await expect(select('hello', [], 2)).resolves.toEqual([]);
     expect(runSideQuery).not.toHaveBeenCalled();
   });
 
@@ -89,14 +101,7 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       return { selected_memories: [] };
     });
 
-    await selectRelevantAutoMemoryDocumentsByModel(
-      mockConfig,
-      'check preferences',
-      docs,
-      2,
-      [],
-      callerController.signal,
-    );
+    await select('check preferences', docs, 2, [], callerController.signal);
 
     expect(runSideQuery).toHaveBeenCalledTimes(1);
     expect(capturedSignal).toBeDefined();
@@ -114,12 +119,7 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       selected_memories: [],
     });
 
-    await selectRelevantAutoMemoryDocumentsByModel(
-      mockConfig,
-      'check preferences',
-      docs,
-      2,
-    );
+    await select('check preferences', docs, 2);
 
     expect(runSideQuery).toHaveBeenCalledWith(
       mockConfig,
@@ -134,15 +134,11 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       selected_memories: [],
     });
 
-    await selectRelevantAutoMemoryDocumentsByModel(
-      mockConfig,
-      'read the ATA article',
-      docs,
-      2,
-      ['mcp__ata__article-list-query'],
-    );
+    await select('read the ATA article', docs, 2, [
+      'mcp__ata__article-list-query',
+    ]);
 
-    const options = vi.mocked(runSideQuery).mock.calls[0]![1];
+    const options = sideQueryOptions();
     expect(options.systemInstruction).toContain(
       'parameter schemas, field mappings, guessed call formats, or failed-call transcripts',
     );
@@ -154,99 +150,111 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     );
   });
 
-  it('lets runSideQuery choose the default side-query model when fast model is configured', async () => {
-    vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-flash-model');
-    vi.mocked(runSideQuery).mockResolvedValue({
-      selected_memories: ['reference.md'],
-    });
+  it('adds compact keywords while keeping scenarios and bodies out of the selector manifest', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({ selected_memories: [] });
+    const metadataDoc = {
+      ...docs[1]!,
+      keywords: ['latency dashboard'],
+      usageScenarios: ['Debugging latency'],
+      body: 'SECRET MEMORY BODY',
+    };
 
     await selectRelevantAutoMemoryDocumentsByModel(
       mockConfig,
-      'check the latency dashboard',
-      docs,
+      'latency',
+      [metadataDoc],
       2,
     );
 
-    expect(runSideQuery).toHaveBeenCalledWith(
-      mockConfig,
-      expect.objectContaining({
-        purpose: 'auto-memory-recall',
-        config: { temperature: 0 },
-      }),
-    );
-    expect(
-      'model' in (vi.mocked(runSideQuery).mock.calls[0]![1] as object),
-    ).toBe(false);
+    const text =
+      vi.mocked(runSideQuery).mock.calls[0]![1].contents[0]?.parts?.[0]?.text ??
+      '';
+    expect(text).toContain(metadataDoc.filePath);
+    expect(text).toContain(metadataDoc.description);
+    expect(text).toContain('keywords: latency dashboard');
+    expect(text).not.toContain('Debugging latency');
+    expect(text).not.toContain('SECRET MEMORY BODY');
   });
 
-  it('lets runSideQuery fall back to its default when no fast model is configured', async () => {
-    vi.mocked(mockConfig.getFastModel).mockReturnValue(undefined);
+  it('limits selector metadata to three sanitized keywords', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({ selected_memories: [] });
+    const metadataDoc = {
+      ...docs[1]!,
+      keywords: ['one', 'two\nlines', 'three', 'four'],
+    };
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'find details',
+      [metadataDoc],
+      2,
+    );
+
+    const text =
+      vi.mocked(runSideQuery).mock.calls[0]![1].contents[0]?.parts?.[0]?.text ??
+      '';
+    expect(text).toContain('keywords: one, two lines, three');
+    expect(text).not.toContain('four');
+  });
+
+  it.each([
+    [
+      'lets runSideQuery choose the default side-query model when fast model is configured',
+      'fast-flash-model',
+    ],
+    [
+      'lets runSideQuery fall back to its default when no fast model is configured',
+      undefined,
+    ],
+  ])('%s', async (_title, fastModel) => {
+    vi.mocked(mockConfig.getFastModel).mockReturnValue(fastModel);
     vi.mocked(runSideQuery).mockResolvedValue({
       selected_memories: ['reference.md'],
     });
 
-    await selectRelevantAutoMemoryDocumentsByModel(
-      mockConfig,
-      'check the latency dashboard',
-      docs,
-      2,
-    );
+    await select('check the latency dashboard', docs, 2);
 
-    expect(runSideQuery).toHaveBeenCalledWith(
-      mockConfig,
-      expect.objectContaining({
-        purpose: 'auto-memory-recall',
-        config: { temperature: 0 },
-      }),
-    );
-    expect(
-      'model' in (vi.mocked(runSideQuery).mock.calls[0]![1] as object),
-    ).toBe(false);
+    expectRecallQuery();
+    expect('model' in (sideQueryOptions() as object)).toBe(false);
   });
 
   it('throws when selector returns unknown file paths', async () => {
-    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
-      const error = options.validate?.({
-        selected_memories: ['/tmp/unknown.md'],
-      });
-      if (error) {
-        throw new Error(error);
-      }
-      return { selected_memories: [] };
-    });
+    selectorReturnsValidated(['/tmp/unknown.md']);
 
-    await expect(
-      selectRelevantAutoMemoryDocumentsByModel(
-        mockConfig,
-        'check memory',
-        docs,
-        2,
-      ),
-    ).rejects.toThrow('Recall selector returned unknown file path');
+    await expect(select('check memory', docs, 2)).rejects.toThrow(
+      'Recall selector returned unknown file path',
+    );
   });
 
   it('distinguishes docs with identical relativePath across scopes', async () => {
-    // Regression for the dual-scope dedupe bug — same `user/role.md` exists in
-    // both project-level and user-level memory dirs. Keying by relativePath
-    // collapsed them; keying by filePath (absolute, unique) must surface both.
+    // Dual-scope dedupe regression: `user/role.md` exists in both project and
+    // user memory dirs. Keying by relativePath collapsed them; filePath must not.
     const dualScopeDocs: ScannedAutoMemoryDocument[] = [
       {
+        scope: 'project',
         type: 'user',
         filePath: '/qwen/projects/proj/memory/user/role.md',
         relativePath: 'user/role.md',
         filename: 'role.md',
         title: 'Project User',
         description: 'Project-scoped user note',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
         body: '- Project-specific.',
         mtimeMs: 1,
       },
       {
+        scope: 'user',
         type: 'user',
         filePath: '/qwen/memories/user/role.md',
         relativePath: 'user/role.md',
         filename: 'role.md',
         title: 'Cross-Project User',
         description: 'User-scoped cross-project note',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
         body: '- Applies everywhere.',
         mtimeMs: 2,
       },
@@ -258,13 +266,7 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       ],
     });
 
-    const result = await selectRelevantAutoMemoryDocumentsByModel(
-      mockConfig,
-      'who is the user',
-      dualScopeDocs,
-      5,
-      [],
-    );
+    const result = await select('who is the user', dualScopeDocs, 5, []);
 
     expect(result).toHaveLength(2);
     expect(result.map((d) => d.filePath)).toEqual([
@@ -282,28 +284,14 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       description: `${'界'.repeat(511)}😀${'x'.repeat(2_000)}`,
       mtimeMs: index,
     }));
-    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
-      const error = options.validate?.({
-        selected_memories: ['/tmp/bounded-199.md'],
-      });
-      if (error) {
-        throw new Error(error);
-      }
-      return { selected_memories: [] };
-    });
+    selectorReturnsValidated(['/tmp/bounded-199.md']);
 
-    await expect(
-      selectRelevantAutoMemoryDocumentsByModel(
-        mockConfig,
-        'semantic-only request',
-        largeDocs,
-        5,
-      ),
-    ).rejects.toThrow('Recall selector returned unknown file path');
+    await expect(select('semantic-only request', largeDocs, 5)).rejects.toThrow(
+      'Recall selector returned unknown file path',
+    );
 
-    const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
-    const text = content?.parts?.[0]?.text ?? '';
-    const manifest = text.split('Available memories:\n')[1] ?? '';
+    const manifest =
+      (promptText() ?? '').split('Available memories:\n')[1] ?? '';
     expect(manifest).toContain('/tmp/bounded-0.md');
     expect(manifest).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     expect(manifest).not.toContain('x');
@@ -321,25 +309,14 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       filePath: '/tmp/short-after-overflow.md',
       description: 'short',
     };
-    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
-      const result = { selected_memories: [shortDoc.filePath] };
-      const error = options.validate?.(result);
-      if (error) throw new Error(error);
-      return result;
-    });
+    selectorReturnsValidated([shortDoc.filePath]);
 
     await expect(
-      selectRelevantAutoMemoryDocumentsByModel(
-        mockConfig,
-        'check memory',
-        [...largeDocs, shortDoc],
-        5,
-      ),
+      select('check memory', [...largeDocs, shortDoc], 5),
     ).resolves.toEqual([shortDoc]);
 
-    const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
-    expect(content?.parts?.[0]?.text).toContain(shortDoc.filePath);
-    expect(content?.parts?.[0]?.text).not.toContain('/tmp/large-15.md');
+    expect(promptText()).toContain(shortDoc.filePath);
+    expect(promptText()).not.toContain('/tmp/large-15.md');
   });
 
   it('keeps interleaved recent candidates inside a full manifest', async () => {
@@ -358,20 +335,10 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       .flatMap((doc, index) => [doc, recentDocs[index]!]);
     candidates.push(...lexicalDocs.slice(recentDocs.length));
     const recentTarget = recentDocs.at(-1)!;
-    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
-      const result = { selected_memories: [recentTarget.filePath] };
-      const error = options.validate?.(result);
-      if (error) throw new Error(error);
-      return result;
-    });
+    selectorReturnsValidated([recentTarget.filePath]);
 
     await expect(
-      selectRelevantAutoMemoryDocumentsByModel(
-        mockConfig,
-        'common project query',
-        candidates,
-        5,
-      ),
+      select('common project query', candidates, 5),
     ).resolves.toEqual([recentTarget]);
   });
 
@@ -390,15 +357,9 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     });
 
     await expect(
-      selectRelevantAutoMemoryDocumentsByModel(
-        mockConfig,
-        'find the lexical target',
-        [lexicalDoc, ...longDocs],
-        5,
-      ),
+      select('find the lexical target', [lexicalDoc, ...longDocs], 5),
     ).resolves.toEqual([lexicalDoc]);
 
-    const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
-    expect(content?.parts?.[0]?.text).toContain(lexicalDoc.filePath);
+    expect(promptText()).toContain(lexicalDoc.filePath);
   });
 });

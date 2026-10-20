@@ -1,13 +1,16 @@
 # Extension File Reload Design
 
+[English](extension-file-reload.md) | [简体中文](extension-file-reload.zh-CN.md)
+
 ## Background
 
 Extension changes currently enter the runtime from two different directions.
 User-initiated UI mutations, such as enable, disable, install, uninstall, and
 update, already go through `ExtensionManager` and can refresh runtime state
 directly. Out-of-band filesystem changes, such as editing an installed
-extension's `skills/`, `commands/`, `hooks/`, or `qwen-extension.json`, are not
-owned by a single UI action and therefore need a watcher-driven path.
+extension's `skills/`, `commands/`, `workflows/`, `hooks/`, or
+`qwen-extension.json`, are not owned by a single UI action and therefore need a
+watcher-driven path.
 
 This design adds that missing watcher path while preserving the direct mutation
 path. It follows the same layering used by the MCP and LSP hot-reload designs:
@@ -28,13 +31,14 @@ rebuilt from one coherent snapshot.
 
 - `ExtensionManager` already loads extension manifests, convention directories,
   install metadata, enablement state, marketplace source state, commands,
-  skills, agents, hooks, MCP declarations, and LSP declarations.
+  skills, agents, workflows, hooks, MCP declarations, and LSP declarations.
 - UI extension operations already call `ExtensionManager.refreshTools()` after
   changing runtime-relevant state. That path refreshes MCP, skills, subagents,
   hooks, and hierarchical memory through Core.
 - Slash command completion is built by `CommandService.create()` from loaders.
-  Extension commands and skill-backed slash commands do not automatically
-  appear unless `reloadCommands()` rebuilds that command service.
+  Extension commands, extension workflows, and skill-backed slash commands do
+  not automatically appear unless `reloadCommands()` rebuilds that command
+  service.
 - Skill and subagent managers have cache refresh APIs, but those caches are
   separate from slash command completion.
 - Hooks are owned by `HookSystem` and `HookRegistry`. Recreating the whole hook
@@ -55,10 +59,10 @@ full CLI restart:
   extension directory;
 - detect edits in linked extension source directories;
 - auto-refresh content-level capability files under `commands/`, `skills/`,
-  and `agents/`;
+  `agents/`, and `workflows/`;
 - prompt the user to run `/reload-plugins` for package-level changes;
 - refresh hooks as part of runtime reload without losing agent-scoped hooks;
-- keep slash command completion in sync with command and skill changes;
+- keep slash command completion in sync with command, skill, and workflow changes;
 - suppress watcher notifications for changes written by Qwen's own extension
   mutations;
 - surface MCP and hook reload failures instead of reporting a misleading
@@ -135,18 +139,19 @@ type RefreshAction = 'auto' | 'stale' | false;
 
 The classification is deliberately conservative.
 
-| Path class                       | Action  | Reason                                                                                           |
-| -------------------------------- | ------- | ------------------------------------------------------------------------------------------------ |
-| `commands/**`                    | `auto`  | Slash command loaders can rebuild from the existing extension cache.                             |
-| `skills/**`                      | `auto`  | Skill cache and slash command loaders can rebuild without changing package identity.             |
-| `agents/**`                      | `auto`  | Subagent cache can rebuild without changing package identity.                                    |
-| `hooks/**`                       | `stale` | Hook execution behavior should be reloaded from a coherent package snapshot.                     |
-| `qwen-extension.json`            | `stale` | Manifest can change commands, skills, agents, hooks, MCP, LSP, context file names, and metadata. |
-| `.qwen-extension-install.json`   | `stale` | Install metadata affects linked source roots and package identity.                               |
-| configured context files         | `stale` | Model context can change and should be reloaded explicitly.                                      |
-| extension directory add/remove   | `stale` | Installed extension topology changed.                                                            |
-| top-level extension config files | `stale` | Enablement, preferences, or marketplaces changed outside UI mutation path.                       |
-| unknown files                    | ignored | Avoid refreshing for build artifacts or unrelated data.                                          |
+| Path class                       | Action  | Reason                                                                                                      |
+| -------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `commands/**`                    | `auto`  | Slash command loaders can rebuild from the existing extension cache.                                        |
+| `skills/**`                      | `auto`  | Skill cache and slash command loaders can rebuild without changing package identity.                        |
+| `agents/**`                      | `auto`  | Subagent cache can rebuild without changing package identity.                                               |
+| `workflows/**`                   | `auto`  | The saved workflow command loader re-reads workflows when slash commands reload.                            |
+| `hooks/**`                       | `stale` | Hook execution behavior should be reloaded from a coherent package snapshot.                                |
+| `qwen-extension.json`            | `stale` | Manifest can change commands, skills, agents, workflows, hooks, MCP, LSP, context file names, and metadata. |
+| `.qwen-extension-install.json`   | `stale` | Install metadata affects linked source roots and package identity.                                          |
+| configured context files         | `stale` | Model context can change and should be reloaded explicitly.                                                 |
+| extension directory add/remove   | `stale` | Installed extension topology changed.                                                                       |
+| top-level extension config files | `stale` | Enablement, preferences, or marketplaces changed outside UI mutation path.                                  |
+| unknown files                    | ignored | Avoid refreshing for build artifacts or unrelated data.                                                     |
 
 The same classifier is used for user-installed extensions and linked extension
 source roots. For linked roots, the watcher first finds the owning linked
@@ -312,6 +317,7 @@ The summary counts active extension declarations for:
 - commands;
 - skills;
 - agents;
+- workflows;
 - hooks;
 - extension MCP servers;
 - extension LSP servers.
@@ -340,6 +346,9 @@ Flow:
 4. reload slash commands;
 5. aggregate errors and throw a single message if any leg failed.
 
+Extension workflows are refreshed through the existing slash command reload
+step.
+
 The slash command processor listens for `ExtensionContentChanged` and debounces
 the refresh by 250 ms. It serializes refreshes with:
 
@@ -355,8 +364,8 @@ same refresh task alive indefinitely.
 
 If `ExtensionRefreshState.needsExtensionRefresh()` is true, content
 auto-refresh exits early. The package-level reload must run first so command,
-skill, agent, hook, MCP, LSP, and context state are rebuilt from one extension
-cache snapshot.
+skill, agent, workflow, hook, MCP, LSP, and context state are rebuilt from one
+extension cache snapshot.
 
 ### 8. Reload Hooks Without Dropping Agent-Scoped Hooks
 
@@ -414,7 +423,7 @@ Cleanup unregisters the reload listener and stops the watcher.
 ### Content File Edit
 
 ```text
-edit extension commands/skills/agents file
+edit extension commands/skills/agents/workflows file
   -> ExtensionFileWatcher classifies as auto
   -> ExtensionRefreshState.markExtensionContentChanged()
   -> useSlashCommandProcessor schedules debounced refresh
@@ -529,7 +538,7 @@ user enables/disables/installs/uninstalls/updates extension
 
 `packages/cli/src/config/extension-file-watcher.test.ts`
 
-- classifies commands, skills, and agents as auto-refresh;
+- classifies commands, skills, agents, and workflows as auto-refresh;
 - classifies manifests, install metadata, hooks, context files, and extension
   topology changes as stale;
 - ignores unknown files and ignored directories;
@@ -561,8 +570,8 @@ user enables/disables/installs/uninstalls/updates extension
 
 Manual verification should cover:
 
-1. Enable an extension from the UI and confirm commands, skills, agents, MCP,
-   hooks, and context are refreshed without restarting.
+1. Enable an extension from the UI and confirm commands, skills, agents,
+   workflows, MCP, hooks, and context are refreshed without restarting.
 2. Disable the same extension and confirm runtime capabilities are removed or no
    longer offered.
 3. Edit a command file under `commands/` and confirm slash command completion
@@ -571,12 +580,16 @@ Manual verification should cover:
    completion updates automatically.
 5. Edit an agent file under `agents/` and confirm agent cache behavior reflects
    the change.
-6. Edit `hooks/hooks.json`, `qwen-extension.json`, install metadata, context
+6. With workflows enabled, edit the description in a workflow file under
+   `workflows/` and confirm its slash command description updates automatically
+   without restarting.
+7. Edit `hooks/hooks.json`, `qwen-extension.json`, install metadata, context
    files, or extension directory topology and confirm the UI asks for
    `/reload-plugins`.
-7. Run `/reload-plugins` and confirm the summary reports extensions, commands,
-   skills, agents, hooks, extension MCP servers, and extension LSP servers.
-8. Force a reload failure and confirm the UI reports the error, then a later
+8. Run `/reload-plugins` and confirm the summary reports extensions, commands,
+   skills, agents, workflows, hooks, extension MCP servers, and extension LSP
+   servers.
+9. Force a reload failure and confirm the UI reports the error, then a later
    filesystem change can still trigger another notification.
 
 ## Tradeoffs

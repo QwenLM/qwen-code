@@ -33,7 +33,7 @@ const playwrightMocks = vi.hoisted(() => ({
   connectOverCDP: vi.fn(),
 }));
 
-vi.mock('playwright-core', () => ({
+vi.mock('./playwright-core-loader.js', () => ({
   chromium: { connectOverCDP: playwrightMocks.connectOverCDP },
 }));
 

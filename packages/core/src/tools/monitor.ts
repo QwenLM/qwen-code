@@ -18,6 +18,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
+import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -35,7 +36,9 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
@@ -171,8 +174,20 @@ class MonitorToolInvocation extends BaseToolInvocation<
     return `Monitor: ${truncateDisplayDescription(desc)}`;
   }
 
+  private isDirectoryOutsideWorkspace(): boolean {
+    return (
+      !!this.params.directory &&
+      !this.config
+        .getWorkspaceContext()
+        .isPathWithinWorkspace(this.params.directory)
+    );
+  }
+
   override async getDefaultPermission(): Promise<PermissionDecision> {
     if (this.config.getShellExecutionSandbox?.()) return 'ask';
+    // Like read_file outside the workspace: ask rather than reject at build
+    // time, so an approval (or YOLO) can let it run.
+    if (this.isDirectoryOutsideWorkspace()) return 'ask';
     const normalized = normalizeMonitorShellCommand(this.params.command);
     const command = normalized.safetyCommand;
     const cwd =
@@ -274,10 +289,15 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Checked against both the normalized safety command and the
     // original params.command so wrappers like `bash -c "..."` still
     // trigger the warning.
-    const warnings = buildShellExecWarnings(
-      normalized.safetyCommand,
-      this.params.command,
-    );
+    const warnings = [
+      ...(buildShellExecWarnings(
+        normalized.safetyCommand,
+        this.params.command,
+      ) ?? []),
+      ...(this.params.directory && this.isDirectoryOutsideWorkspace()
+        ? [buildOutsideWorkspaceWarning(this.params.directory)]
+        : []),
+    ];
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
@@ -292,7 +312,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         _payload?: ToolConfirmationPayload,
       ) => {},
     };
-    if (warnings) {
+    if (warnings.length > 0) {
       confirmationDetails.warnings = warnings;
     }
     return confirmationDetails;
@@ -332,9 +352,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
     if (running.length >= MAX_CONCURRENT_MONITORS) {
+      const message = `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`;
       return {
-        llmContent: `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`,
+        llmContent: message,
         returnDisplay: `Monitor rejected: too many concurrent monitors.`,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -388,9 +410,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
           },
         });
     } catch (err) {
+      const message = `Monitor failed to start: ${getErrorMessage(err)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -530,9 +554,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
       )?.destroy?.();
       child?.removeListener('error', captureEarlySpawnError);
       child?.on('error', () => {});
+      const message = `Monitor failed to start: ${getErrorMessage(err)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -706,19 +732,22 @@ class MonitorToolInvocation extends BaseToolInvocation<
         );
       } catch (error) {
         onError(error instanceof Error ? error : new Error(String(error)));
+        const message = `Monitor failed to start: ${getErrorMessage(error)}`;
         return {
-          llmContent: `Monitor failed to start: ${getErrorMessage(error)}`,
+          llmContent: message,
           returnDisplay: `Monitor failed: ${getErrorMessage(error)}`,
-          error: { message: getErrorMessage(error) },
+          error: { message, type: ToolErrorType.EXECUTION_FAILED },
         };
       }
     }
 
     if (earlySpawnError) {
       onError(earlySpawnError);
+      const message = `Monitor failed to start: ${getErrorMessage(earlySpawnError)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(earlySpawnError)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(earlySpawnError)}`,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -748,7 +777,7 @@ export class MonitorTool extends BaseDeclarativeTool<
     super(
       MonitorTool.Name,
       ToolDisplayNames.MONITOR,
-      'Starts a long-running shell command and streams its stdout/stderr as event notifications back to you.\n\n' +
+      'Runs a command and pushes each output line to you as an event (logs, watch builds, polling loops); is_background notifies you only once, when it exits.\n\n' +
         'Use this tool for:\n' +
         '- Watching log files: `tail -f /var/log/app.log`\n' +
         '- Monitoring build output: `npm run build --watch`\n' +
@@ -789,7 +818,7 @@ export class MonitorTool extends BaseDeclarativeTool<
           directory: {
             type: 'string',
             description:
-              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be within the workspace.',
+              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. A directory outside the workspace requires approval.',
           },
         },
         required: ['command'],
@@ -850,13 +879,15 @@ export class MonitorTool extends BaseDeclarativeTool<
       if (isSubpaths(userSkillsDirs, resolvedDirectoryPath)) {
         return 'Explicitly running monitor commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.';
       }
-      // Use WorkspaceContext.isPathWithinWorkspace so the check canonicalises
-      // the path, resolves symlinks, and matches on path segments rather than
-      // raw string prefix (prevents e.g. '/tmp/project-evil' from slipping
-      // past a '/tmp/project' workspace).
-      const ws = this.config.getWorkspaceContext();
-      if (!ws.isPathWithinWorkspace(params.directory)) {
-        return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      // The sandbox refuses any other cwd at run time, so reject now rather
+      // than ask for approval of a command that cannot start.
+      const sandbox = this.config.getShellExecutionSandbox?.();
+      if (sandbox) {
+        try {
+          assertShellSandboxCwd(sandbox, params.directory);
+        } catch {
+          return `Directory '${params.directory}' must be an existing directory inside the execution sandbox workspace.`;
+        }
       }
     }
     return null;

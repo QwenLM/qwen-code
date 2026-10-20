@@ -123,6 +123,72 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('reduceDaemonEventToTuiUpdates', () => {
+  it('does not create orphan tool cards for lifecycle-only updates', () => {
+    const state = createDaemonTuiReducerState();
+    const updates = reduceDaemonEventToTuiUpdates(
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 's',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'orphan',
+            _meta: { toolLifecycle: { v: 1, phase: 'ended' } },
+          },
+        },
+      },
+      state,
+    );
+    expect(updates).toEqual([]);
+    expect(state.toolCallsById.size).toBe(0);
+  });
+
+  it('preserves a sanitized Advisor review as structured output', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-advisor',
+          kind: 'advisor',
+          title: 'Consult Advisor',
+          status: 'completed',
+          rawOutput: {
+            type: 'advisor_review',
+            verdict: 'Check\x1b]0;bad\x07 the edge case.',
+            risks: 'Retries may be missing.',
+            missingEvidence: 'No failing test output.',
+            recommendation: 'Add a regression test.',
+          },
+        },
+      },
+    });
+
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          tools: [
+            {
+              resultDisplay: {
+                type: 'advisor_review',
+                verdict: 'Check the edge case.',
+                risks: 'Retries may be missing.',
+                missingEvidence: 'No failing test output.',
+                recommendation: 'Add a regression test.',
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('renders structured shell results as sanitized display text', () => {
     const updates = reduceDaemonEventToTuiUpdates({
       id: 1,

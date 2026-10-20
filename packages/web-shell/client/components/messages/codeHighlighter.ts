@@ -163,3 +163,36 @@ export function __resetForTesting(): void {
   failedLanguages.clear();
   shikiCache.clear();
 }
+
+export interface CodeHighlightRequest {
+  code: string;
+  language: string;
+  theme: 'light' | 'dark';
+}
+
+/** Uses the same engine and cache as transcript code blocks. Null means plain text. */
+export async function highlightCode({
+  code,
+  language,
+  theme,
+}: CodeHighlightRequest): Promise<string | null> {
+  const lang = language.trim().toLowerCase();
+  if (
+    !lang ||
+    lang === 'text' ||
+    lang === 'plaintext' ||
+    isTooLargeToHighlight(code)
+  ) {
+    return null;
+  }
+  const shikiTheme =
+    theme === 'dark' ? 'github-dark-default' : 'github-light-default';
+  const cached = getCachedHtml(code, lang, shikiTheme);
+  if (cached !== null) return cached;
+  try {
+    await getCodeHighlighter(lang);
+    return highlightToHtmlSync(code, lang, shikiTheme);
+  } catch {
+    return null;
+  }
+}

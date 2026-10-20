@@ -511,6 +511,10 @@ impl ToolInput for ListAppsInput {
 pub struct LaunchAppInput {
     /// Application name or absolute installation path discovered by list_apps.
     pub name: String,
+    /// Windows launcher command returned by list_apps, including shortcut arguments.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_path: Option<String>,
 }
 
 impl ToolInput for LaunchAppInput {
@@ -954,6 +958,10 @@ impl ToolInput for ScrollInput {
 pub struct WindowScrollInput {
     #[schemars(schema_with = "positive_integer_schema")]
     pub pid: u32,
+    /// Use the app-bound target and focus policy independently of input delivery mode.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "positive_integer_schema")]
     pub window_id: Option<u64>,

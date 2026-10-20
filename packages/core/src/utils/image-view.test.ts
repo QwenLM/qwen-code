@@ -10,9 +10,11 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  boundImageBuffer,
   orientedSize,
   renderImageOverview,
   renderNormalizedImageCrop,
+  sniffBoundableImageMime,
 } from './image-view.js';
 
 describe('image views', () => {
@@ -110,6 +112,72 @@ describe('image views', () => {
     });
     expect(metadata).toMatchObject({ width: 80, height: 80, format: 'jpeg' });
     expect(view.bytes.length).toBeLessThanOrEqual(9 * 1024 * 1024);
+  });
+
+  it('leaves an in-budget image buffer untouched', async () => {
+    const bytes = await sharp({
+      create: { width: 200, height: 100, channels: 3, background: '#306090' },
+    })
+      .png()
+      .toBuffer();
+
+    await expect(boundImageBuffer(bytes, 'image/png', signal)).resolves.toBe(
+      null,
+    );
+  });
+
+  it('bounds an oversized image buffer to the shared budget', async () => {
+    const bytes = await sharp({
+      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
+    })
+      .png()
+      .toBuffer();
+
+    const view = await boundImageBuffer(bytes, 'image/png', signal);
+
+    expect(view).not.toBe(null);
+    expect(view!.mimeType).toBe('image/jpeg');
+    expect(Math.max(view!.outputWidth, view!.outputHeight)).toBeLessThanOrEqual(
+      1568,
+    );
+    expect(
+      Math.ceil(view!.outputWidth / 28) * Math.ceil(view!.outputHeight / 28),
+    ).toBeLessThanOrEqual(1568);
+    expect(view!.bytes.length).toBeLessThan(bytes.length);
+  });
+
+  it('bounds a buffer with the geometry read_file applies', async () => {
+    const bytes = await sharp({
+      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
+    })
+      .png()
+      .toBuffer();
+    const filePath = path.join(root, 'overview.png');
+    await fs.writeFile(filePath, bytes);
+
+    const overview = await renderImageOverview(filePath, signal);
+    const bounded = await boundImageBuffer(bytes, 'image/png', signal);
+
+    expect(bounded).not.toBe(null);
+    expect({
+      outputWidth: bounded!.outputWidth,
+      outputHeight: bounded!.outputHeight,
+    }).toEqual({
+      outputWidth: overview.outputWidth,
+      outputHeight: overview.outputHeight,
+    });
+  });
+
+  it('reports unsupported_image for a format the renderer cannot bound', async () => {
+    const bytes = await sharp({
+      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
+    })
+      .gif()
+      .toBuffer();
+
+    await expect(
+      boundImageBuffer(bytes, 'image/gif', signal),
+    ).rejects.toMatchObject({ code: 'unsupported_image' });
   });
 
   it('reports decode_failed for a corrupt canonical image', async () => {
@@ -230,5 +298,27 @@ describe('image views with EXIF orientation', () => {
     });
     const metadata = await sharp(view.bytes).metadata();
     expect(metadata).toMatchObject({ width: 240, height: 400 });
+  });
+});
+
+describe('sniffBoundableImageMime', () => {
+  it('reads the formats the renderer can output from their magic bytes', () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    const webp = Buffer.from('RIFF\0\0\0\0WEBP', 'latin1');
+    expect(sniffBoundableImageMime(png)).toBe('image/png');
+    expect(sniffBoundableImageMime(jpeg)).toBe('image/jpeg');
+    expect(sniffBoundableImageMime(webp)).toBe('image/webp');
+  });
+
+  it('rejects formats the renderer cannot output and non-images', () => {
+    expect(sniffBoundableImageMime(Buffer.from('GIF89a', 'latin1'))).toBe(null);
+    expect(sniffBoundableImageMime(Buffer.from('<svg xmlns=', 'latin1'))).toBe(
+      null,
+    );
+    expect(sniffBoundableImageMime(Buffer.from('%PDF-1.7', 'latin1'))).toBe(
+      null,
+    );
+    expect(sniffBoundableImageMime(Buffer.alloc(0))).toBe(null);
   });
 });

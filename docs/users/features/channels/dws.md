@@ -32,7 +32,7 @@ Add a channel to `~/.qwen/settings.json`:
     "dws-work": {
       "type": "dws",
       "profile": "profile-name-or-corp-id",
-      "senderPolicy": "pairing",
+      "privatePolicy": "pairing",
       "groupPolicy": "pairing",
       "watchTodos": true,
       "startReaction": "🤔",
@@ -55,7 +55,7 @@ without interactive confirmations:
   "channels": {
     "dws-answers": {
       "type": "dws",
-      "senderPolicy": "pairing",
+      "privatePolicy": "pairing",
       "groupPolicy": "pairing",
       "approvalMode": "yolo",
       "cwd": "/path/to/answer-bot"
@@ -67,15 +67,15 @@ without interactive confirmations:
 YOLO mode auto-approves every tool call. Use it only for a trusted bot account
 and workspace.
 
-`senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. `dmPolicy` defaults to `open`, including existing configurations that omit it. Approve a user or group with the code returned by the channel:
+New managed DWS channels default to `privatePolicy: "pairing"` and `groupPolicy: "pairing"`. Approve a user or group with the code returned by the channel:
 
 ```bash
 qwen channel pairing approve dws-work CODE
 ```
 
-`senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass the sender axis — `senderPolicy`, or `groupSenderPolicy` once you decouple it. To let every member of an admitted group talk to the bot while direct messages stay restricted, set `groupSenderPolicy: "open"` (or `"allowlist"` with `allowedGroupUsers`); see [Group Sender Policy](./overview.md#group-sender-policy).
+`privatePolicy` controls direct messages, document-notification authors, and native-todo creators. Document threads and native todos are personal requests; `groups.senders` never applies to them. `groupPolicy` controls group admission, and `groups["*"].senders` or a per-group override controls which members may start tasks. Group members default to `open`, independently of private access. Shared-session management requires explicit `operators`; see [Shared-Session Operators](./overview.md#shared-session-operators).
 
-Group and direct-message access can be configured independently. For a group-only channel, set `dmPolicy: "disabled"` and choose an enabled `groupPolicy`. For a direct-message-only channel, set `groupPolicy: "disabled"` and `dmPolicy: "open"`. Direct-message access also controls document notifications. Native todo polling remains controlled separately by `watchTodos`.
+For a group-only channel, set `privatePolicy: "disabled"` and enable `groupPolicy`. For a personal-only channel, set `groupPolicy: "disabled"` and enable `privatePolicy`. Disabled private access prevents direct messages, document notifications, and native todos from starting tasks; `watchTodos` separately enables todo polling. Deprecated `senderPolicy` and `dmPolicy` remain private-policy fallbacks only; see [Private Policy](./overview.md#private-policy).
 
 Disabled chat sources are not subscribed to or polled, and their messages cannot start new tasks through late callbacks or persisted replay. Pending work and history cursors are retained: after re-enabling a source, the existing recovery mechanism may process older messages, including messages from the disabled interval. Sender authorization, group pairing, and mention requirements still apply.
 
@@ -105,7 +105,7 @@ There is no document or knowledge-base watch list. To start a document task:
 
 The channel extracts the document ID, comment key, and request from that notification. It reads the referenced document for context, adds the configured start reaction while the task runs, and replies to the original document comment. The real-time DWS event stream is used when it contains the card; a five-second incremental history check covers cards omitted by the current event stream.
 
-Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `senderPolicy` and support `approvalMode` `default`, `plan`, or `yolo`; `default` is used when omitted.
+Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `privatePolicy` and support `approvalMode` `default`, `plan`, or `yolo`; `default` is used when omitted.
 
 ## Native Todo Changes
 
@@ -113,7 +113,7 @@ Set `watchTodos: true` to poll the selected DWS profile's pending native todos w
 
 The first successful scan establishes a baseline and does not start historical todos. Later scans run a task when a todo is newly assigned, reopened, or its actionable fields change, including its title, priority, deadline, or assignees. The final response is added as a comment on the originating todo. Comment-only metadata and modification timestamps are excluded from change detection so the channel's own response cannot trigger a loop. Completion or removal drops the todo from the pending set; reopening it creates a new trigger.
 
-Native todos follow `senderPolicy` using the todo creator identity. Under `pairing`, the channel adds one pairing-code comment and keeps the todo pending; after the creator is approved locally, a later poll can process the unchanged todo. Polling runs every 30 seconds and remains scoped to the pinned profile's current organization.
+Native todos follow `privatePolicy` using the todo creator identity. Under `pairing`, the channel adds one pairing-code comment and keeps the todo pending; after the creator is approved locally, a later poll can process the unchanged todo. Polling runs every 30 seconds and remains scoped to the pinned profile's current organization.
 
 ## Starting and Verifying
 

@@ -15,14 +15,18 @@
 // bypasses Shell model-output truncation) and run this.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-import { REVIEW_TMP_DIR } from './lib/paths.js';
+import {
+  commandPrefixed,
+  ensureReviewTmpDir,
+  writesIntoReviewTmp,
+} from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import { HOSTNAME_RE } from './lib/gh.js';
 import {
@@ -152,7 +156,13 @@ function runPlanDiff(args: PlanDiffArgs): void {
     ...planEffortField(args.effort),
   };
 
-  mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+  // A standalone plan-diff is a round's first writer into the scratch
+  // directory, so the guard runs — but only when `--out` actually lands
+  // there, like the sibling entry points. Guarding unconditionally refused
+  // a hand-run whose artifacts stay outside the tree entirely, for a
+  // directory it then never touched.
+  if (writesIntoReviewTmp(out)) ensureReviewTmpDir('plan-diff');
+  mkdirSync(dirname(resolve(out)), { recursive: true });
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
   writeStdoutLine(`Wrote diff plan to ${out}`);
   if (plan.diffLines === 0) {
@@ -225,7 +235,7 @@ export const planDiffCommand: CommandModule = {
       // writeStderrLineSafe, not writeStderrLine: a broken stderr (an
       // early-exited reader) must not let the throw escape the catch and
       // lose the exit-2/exit-1 classification this handler exists to give.
-      writeStderrLineSafe(`plan-diff: ${(err as Error).message}`);
+      writeStderrLineSafe(commandPrefixed('plan-diff', (err as Error).message));
       process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },

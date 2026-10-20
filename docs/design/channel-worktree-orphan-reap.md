@@ -1,5 +1,7 @@
 # Orphan-reap worktree cleanup (#11024 item 1)
 
+[English](channel-worktree-orphan-reap.md) | [简体中文](channel-worktree-orphan-reap.zh-CN.md)
+
 ## Status
 
 Implemented and verified (2026-09-07). Two real-daemon A/B rounds: the
@@ -126,18 +128,23 @@ Execution (after confirmed deletion, still under the worktree lock):
    create route's `if (removed)` gate.
 8. Re-verify the marker (unchanged, still naming the deleted session) —
    closes the out-of-band window classification can't see.
-9. Full `git status --porcelain` inside the checkout must be empty —
-   **untracked files included**, so an agent-written file that was
-   never committed counts as work and preserves the checkout. This is
+9. The shared `worktreeHasWork` predicate
+   (`packages/core/src/services/gitWorktreeService.ts`) must report no
+   work: a full `git status --porcelain` walk with **untracked files
+   included**, and git-ignored ones too, so an agent-written file that
+   was never committed counts as work and preserves the checkout. This is
    the deliberate choice behind the safety contract's "any doubt
    preserves": tracked and committed work was already protected, and
-   extending the gate to untracked files costs one `git status` walk
-   per delete while closing the "silently destroyed draft" hole the
-   tracked-only variant left open. The daemon's own marker file
-   (`.qwen-session`, git-excluded in production) is the one exemption.
-   Read errors fail closed to "has work". The bridge session was
-   closed before the record deletion, so no in-daemon writer can dirty
-   the checkout afterwards.
+   extending the gate to untracked files costs one `git status` walk per
+   delete while closing the "silently destroyed draft" hole the
+   tracked-only variant left open. That predicate is also the enumeration
+   of record for the exemptions (disposable build output, symlinks, and
+   the daemon's own `.qwen-session` marker when git lists it as untracked
+   or ignored), so this doc deliberately does not restate them: the CLI
+   startup sweep and this reaper both call it and cannot drift apart.
+   Read errors fail closed to "has work". The bridge session was closed
+   before the record deletion, so no in-daemon writer can dirty the
+   checkout afterwards.
 10. `removeUserWorktree(slug, { deleteBranch: true })` — never
     `forceDeleteBranch`. Log the `branchPreserved` outcome so "checkout
     removed, branch kept for unmerged commits" is distinguishable from

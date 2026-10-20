@@ -23,21 +23,49 @@
 
 import * as path from 'node:path';
 import {
+  createWorktreeSessionMarker,
+  ensureWorktreeSessionMarkerExcluded,
   GitWorktreeService,
   readWorktreeSessionMarker,
+  replaceWorktreeSessionMarker,
   worktreeBranchForSlug,
-  writeWorktreeSessionMarker,
+  WorktreeMarkerCommittedError,
+  WorktreeSessionMarkerOwnerChangedError,
 } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import {
+  clearWorktreeSessionDurable,
+  getSessionRuntimeLiveness,
   readWorktreeSession,
-  isSessionRuntimeActive,
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 
 const debugLogger = createDebugLogger('WORKTREE_STARTUP');
+
+export class WorktreeOwnershipConflictError extends Error {
+  constructor(
+    readonly ownerSessionId: string,
+    reason: 'active' | 'unverifiable' = 'active',
+  ) {
+    // ownerSessionId is raw `.qwen-session` marker content — the lenient
+    // reader only trims — so it can carry terminal escapes/control chars
+    // into a message that reaches stderr via handleCriticalError. Sanitize
+    // the interpolation only; the field keeps the raw value for the
+    // ownership comparisons and marker compare-and-swap.
+    const safeOwner = stripAnsiAndControl(
+      ownerSessionId.replace(/[\p{Cf}\s]+/gu, ' '),
+    );
+    super(
+      reason === 'active'
+        ? `Worktree is owned by active session ${safeOwner}`
+        : `Worktree ownership cannot be verified for session ${safeOwner}`,
+    );
+    this.name = 'WorktreeOwnershipConflictError';
+  }
+}
 
 /**
  * `git rev-parse --abbrev-ref HEAD` returns this literal when the
@@ -416,31 +444,82 @@ export async function persistStartupWorktreeSidecar(
     overriddenSlug = previous.slug;
   }
 
-  // Best-effort marker write. On re-attach, adopt only when the previous
-  // owner is not a live runtime anymore; otherwise keep the old marker so
-  // two active sessions cannot both remove the same worktree.
-  let shouldWriteMarker = !context.wasReattached;
-  if (context.wasReattached) {
-    const owner = await readWorktreeSessionMarker(context.worktreePath);
-    if (owner === null || owner === sessionId) {
-      shouldWriteMarker = true;
+  let observedOwner: string | null = null;
+  try {
+    if (!context.wasReattached) {
+      await createWorktreeSessionMarker(context.worktreePath, sessionId);
     } else {
-      const ownerActive = await isSessionRuntimeActive(owner, [
-        context.repoRoot,
-        context.worktreePath,
-      ]).catch((error) => {
-        debugLogger.warn(
-          `persistStartupWorktreeSidecar: failed to check owner runtime ${owner}: ${error}`,
-        );
-        return true;
-      });
-      shouldWriteMarker = !ownerActive;
+      observedOwner = await readWorktreeSessionMarker(context.worktreePath);
+      if (observedOwner === null) {
+        await createWorktreeSessionMarker(context.worktreePath, sessionId);
+      } else if (observedOwner === sessionId) {
+        await ensureWorktreeSessionMarkerExcluded(context.worktreePath);
+      } else {
+        const ownerLiveness = await getSessionRuntimeLiveness(observedOwner, [
+          context.repoRoot,
+          context.worktreePath,
+        ]).catch((error) => {
+          debugLogger.warn(
+            `persistStartupWorktreeSidecar: failed to check owner runtime ${observedOwner}: ${error}`,
+          );
+          return 'unknown' as const;
+        });
+        if (ownerLiveness === 'active') {
+          throw new WorktreeOwnershipConflictError(observedOwner);
+        }
+        if (ownerLiveness === 'unknown') {
+          debugLogger.warn(
+            `persistStartupWorktreeSidecar: cannot verify marker owner ${observedOwner} at ` +
+              `${path.join(context.worktreePath, '.qwen-session')}; preserving ownership`,
+          );
+          // No new binding is written on this path, so a pre-existing
+          // sidecar naming a DIFFERENT worktree would survive and direct a
+          // later --resume at a worktree this session is not running in.
+          if (previous && previous.slug !== context.slug) {
+            await clearWorktreeSessionDurable(sidecarPath).catch((error) =>
+              debugLogger.warn(
+                `persistStartupWorktreeSidecar: failed to clear the stale sidecar at ${sidecarPath}: ${error}`,
+              ),
+            );
+          }
+          return { overrodeResumedWorktree: false, sidecarPath };
+        } else {
+          await replaceWorktreeSessionMarker(
+            context.worktreePath,
+            observedOwner,
+            sessionId,
+          );
+        }
+      }
     }
-  }
-  if (shouldWriteMarker) {
-    await writeWorktreeSessionMarker(context.worktreePath, sessionId).catch(
-      () => {},
-    );
+  } catch (error) {
+    if (error instanceof WorktreeOwnershipConflictError) throw error;
+    if (error instanceof WorktreeSessionMarkerOwnerChangedError) {
+      throw new WorktreeOwnershipConflictError(observedOwner ?? '(unknown)');
+    }
+    if (error instanceof WorktreeMarkerCommittedError) {
+      if (
+        error.committedOwner !== sessionId ||
+        (await readWorktreeSessionMarker(context.worktreePath)) !== sessionId
+      ) {
+        throw error;
+      }
+    } else {
+      let markerAlreadyOwned = false;
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        const currentOwner = await readWorktreeSessionMarker(
+          context.worktreePath,
+        );
+        if (currentOwner !== null && currentOwner !== sessionId) {
+          throw new WorktreeOwnershipConflictError(currentOwner);
+        }
+        markerAlreadyOwned = currentOwner === sessionId;
+      }
+      if (context.wasReattached && !markerAlreadyOwned) throw error;
+      debugLogger.warn(
+        `persistStartupWorktreeSidecar: marker update failed; persisting the sidecar without changing ownership: ${error}`,
+      );
+    }
   }
 
   await writeWorktreeSession(sidecarPath, {

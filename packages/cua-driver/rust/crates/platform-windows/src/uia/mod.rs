@@ -113,6 +113,20 @@ pub struct UiaTreeResult {
     pub incomplete_notes: Vec<String>,
 }
 
+impl UiaTreeResult {
+    pub fn read_complete(&self) -> bool {
+        self.complete
+            || (self.truncated
+                && !self.incomplete_notes.is_empty()
+                && self.incomplete_notes.iter().all(|note| {
+                    matches!(
+                        note.as_str(),
+                        "uia_max_depth_reached" | "uia_max_elements_reached"
+                    )
+                }))
+    }
+}
+
 pub(crate) fn partial_tree_result(
     mut nodes: Vec<UiaNode>,
     _lines: Vec<(usize, String)>,
@@ -1327,6 +1341,43 @@ pub(crate) fn format_revision_body(node: &UiaNode) -> String {
     }
     if node.in_web_content {
         fields.push("in_web_content=true".into());
+    }
+    fields.join(" ")
+}
+
+pub(crate) fn format_app_revision_body(node: &UiaNode) -> String {
+    let label = node
+        .name
+        .as_deref()
+        .or(node.value.as_deref())
+        .or(node.automation_id.as_deref())
+        .or(node.help_text.as_deref())
+        .unwrap_or_default();
+    let mut fields = vec![
+        node.control_type.clone(),
+        serde_json::to_string(label).expect("string labels serialize"),
+    ];
+    if let Some(value) = node
+        .value
+        .as_deref()
+        .filter(|value| *value != label && !value.is_empty())
+    {
+        fields.push(format!(
+            "value={}",
+            serde_json::to_string(value).expect("string values serialize")
+        ));
+    }
+    if node.enabled == Some(false) {
+        fields.push("disabled".into());
+    }
+    if node.selected == Some(true) {
+        fields.push("selected".into());
+    }
+    if !node.actions.is_empty() {
+        fields.push(format!(
+            "actions={}",
+            serde_json::to_string(&node.actions).expect("string actions serialize")
+        ));
     }
     fields.join(" ")
 }

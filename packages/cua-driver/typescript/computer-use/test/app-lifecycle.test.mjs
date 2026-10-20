@@ -16,7 +16,7 @@ function session(name, { apps = [{ ...appRecord }], expireWindows = () => false,
     mutations,
     observations,
     launches,
-    async listToolsJson() { return JSON.stringify({ tools: [] }); },
+    async listToolsJson() { return JSON.stringify({ platform: "macos", tools: [] }); },
     async listApps() {
       return result({ apps });
     },

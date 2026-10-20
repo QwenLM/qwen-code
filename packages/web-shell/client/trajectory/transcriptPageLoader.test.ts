@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { createTrajectoryPageLoader } from './transcriptPageLoader';
+import {
+  createTrajectoryPageLoader,
+  trajectoryLoaderIdentity,
+} from './transcriptPageLoader';
 import type { TrajectoryTranscriptClient } from './transcriptPageLoader';
 
 function stubClient() {
@@ -20,12 +23,43 @@ function stubClient() {
 }
 
 describe('createTrajectoryPageLoader', () => {
+  it('isolates cached loader identity by workspace scope', () => {
+    const { client } = stubClient();
+    const first = createTrajectoryPageLoader(client, 's', 'workspace:a');
+    expect(createTrajectoryPageLoader(client, 's', 'workspace:a')).toBe(first);
+    expect(createTrajectoryPageLoader(client, 's', 'workspace:b')).not.toBe(
+      first,
+    );
+    expect(trajectoryLoaderIdentity(first)).toEqual({
+      sessionId: 's',
+      scope: 'workspace:a',
+    });
+    expect(
+      trajectoryLoaderIdentity(createTrajectoryPageLoader(client, 's'))?.scope,
+    ).toBeUndefined();
+  });
+
   it('reads the newest page first', async () => {
     const { client, calls } = stubClient();
 
     await createTrajectoryPageLoader(client, 's-1')({ limit: 100 });
 
     expect(calls).toEqual([['s-1', { direction: 'backward', limit: 100 }]]);
+  });
+
+  it('walks back by the cursor a previous page handed out', async () => {
+    const { client, calls } = stubClient();
+
+    await createTrajectoryPageLoader(
+      client,
+      's-1',
+    )({
+      limit: 100,
+      cursor: 'older-1',
+    });
+
+    // The cursor carries the direction; the daemon rejects both together.
+    expect(calls).toEqual([['s-1', { cursor: 'older-1', limit: 100 }]]);
   });
 
   it('never asks for the summary projection', async () => {

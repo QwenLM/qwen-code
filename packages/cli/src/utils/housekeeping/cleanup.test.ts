@@ -17,6 +17,7 @@ import {
   cleanupOldSubagentTranscripts,
   getCutoffDate,
 } from './cleanup.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 vi.mock('node:fs/promises', { spy: true });
 
@@ -187,11 +188,12 @@ describe('cleanupOldFileHistoryBackups', () => {
     expect(fs.existsSync(fileHistoryRoot)).toBe(false);
   });
 
-  // POSIX-only: Windows chmod doesn't have the same "no-write-bit prevents
-  // child unlink" semantics, so we can't reliably make a single dir's rm
-  // fail without unmount/permission shenanigans. The error-counting path is
-  // platform-independent; one OS verifying it is sufficient.
-  it.skipIf(process.platform === 'win32')(
+  // Only where permission bits bind: Windows chmod doesn't have the same
+  // "no-write-bit prevents child unlink" semantics, and root holding
+  // CAP_DAC_OVERRIDE ignores the bit, so we can't reliably make a single
+  // dir's rm fail without unmount/permission shenanigans. The error-counting
+  // path is platform-independent; one OS verifying it is sufficient.
+  it.skipIf(!arePermissionBitsEnforced())(
     'counts errors and continues sweep when one dir cannot be removed',
     async () => {
       const old = new Date(Date.now() - 60 * MS_PER_DAY);
@@ -488,7 +490,7 @@ describe('cleanupOldOpenAILogs', () => {
     expect(r).toEqual({ removed: 1, errors: 0, completed: false });
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(!arePermissionBitsEnforced())(
     'rejects when the log directory cannot be scanned',
     async () => {
       fs.chmodSync(logDir, 0o000);
@@ -652,7 +654,7 @@ describe('cleanupOldDebugLogs', () => {
     expect(fs.existsSync(alsoStray)).toBe(true);
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(!arePermissionBitsEnforced())(
     'counts errors and continues when a file cannot be unlinked',
     async () => {
       const good = mkSessionLog(UUID_A, new Date(Date.now() - 60 * MS_PER_DAY));

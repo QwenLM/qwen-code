@@ -226,12 +226,17 @@ describe('systemInfo', () => {
         .fn()
         .mockReturnValue({
           requestedBackend: 'bwrap',
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
           filesystem: 'read-only',
           network: 'closed',
         });
       const info = await getExtendedSystemInfo(mockContext);
       expect(info.sandboxEnv).toBe(
-        'tools / bwrap → bwrap / read-only / command network: closed',
+        'tools / bwrap → bwrap (full) / read-only / command network: closed',
+      );
+      expect(info.npmVersion).toBe(
+        'not probed (tool execution sandbox active)',
       );
       expect(mockedExecFile).not.toHaveBeenCalled();
     });
@@ -276,6 +281,43 @@ describe('systemInfo', () => {
   });
 
   describe('getExtendedSystemInfo', () => {
+    it('should redact userinfo from the persisted fast model selector', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 'openai:fast\0https://user:sk-secret@fast.example/v1';
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe(
+        'openai:fast (https://fast.example/v1)',
+      );
+      expect(JSON.stringify(extendedInfo)).not.toContain('sk-secret');
+    });
+
+    it('should resolve a non-string fast model setting instead of rejecting', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      // Settings get no type validation on load, so a workspace-scope
+      // settings.json can carry a number here. `getExtendedSystemInfo` has no
+      // enclosing try, so this used to reject the whole promise — taking out
+      // `/status`, `/about`, `/bug` and both `/settings` Status tabs.
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 42;
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe('42');
+    });
+
     it('should include memory usage and base URL', async () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue('test-ide'),
@@ -295,6 +337,27 @@ describe('systemInfo', () => {
       expect(extendedInfo.memoryUsage).toBeDefined();
       expect(extendedInfo.memoryUsage).toMatch(/\d+\.\d+ (KB|MB|GB)/);
       expect(extendedInfo.baseUrl).toBe('https://api.openai.com');
+    });
+
+    it('renders a pinned fast model without the raw endpoint disambiguator (#12760)', async () => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+
+      // The picker persists `authType:id\0<baseUrl>`; every display surface
+      // (/about, /status, /bug, settings) consumes ExtendedSystemInfo, so the
+      // scrub-aware rendering happens here at the producer.
+      (mockContext.services.settings.merged as Record<string, unknown>)[
+        'fastModel'
+      ] = 'openai:shared-fast\0https://free-quota.example.com/v1';
+
+      const extendedInfo = await getExtendedSystemInfo(mockContext);
+
+      expect(extendedInfo.fastModel).toBe(
+        'openai:shared-fast (https://free-quota.example.com/v1)',
+      );
+      expect(extendedInfo.fastModel).not.toContain('\0');
     });
 
     it('should include provider diagnostics for OpenAI Responses auth', async () => {

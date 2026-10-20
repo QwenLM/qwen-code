@@ -150,6 +150,15 @@ export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
+export type {
+  ManagedToolExecutionResult,
+  ManagedToolInvocationStatus,
+  ManagedToolV2Client,
+} from './tools/managed-tool-runtime.js';
+export {
+  managedToolDigest,
+  type ManagedToolInvocationReference,
+} from './tools/managed-tool-protocol.js';
 export * from './managed-runtime/managed-session-records.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
@@ -237,7 +246,7 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export {
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
-} from './tools/write-file.js';
+} from './tools/artifact/workspace-auto-record.js';
 export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
@@ -305,6 +314,7 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
 } from './tools/tool-call.js';
 export type {
@@ -390,8 +400,9 @@ export {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   GLOBAL_DUPLICATE_THRESHOLD,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
+  getTurnToolCallCapHalt,
 } from './services/loopDetectionService.js';
+export type { TurnToolCallCapHalt } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
@@ -405,6 +416,8 @@ export * from './ipc/peer-controllers.js';
 export * from './ipc/peer-directory.js';
 export * from './ipc/peer-drop-reports.js';
 export * from './ipc/peer-envelope.js';
+export * from './agents/session-agents/contract.js';
+export * from './agents/session-agents/envelope.js';
 export * from './ipc/peer-frames.js';
 export * from './ipc/peer-routing.js';
 export * from './ipc/peer-send.js';
@@ -655,6 +668,7 @@ export {
   IdeConnectionEvent,
   IdeConnectionType,
   LoopDetectedEvent,
+  LoopReason,
   LoopType,
   RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
@@ -664,6 +678,7 @@ export {
   WorkflowRunEvent,
   WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
+export type { LoopStopDetail } from './telemetry/types.js';
 
 // ============================================================================
 // Extensions, Skills, Subagents & Agents
@@ -710,6 +725,7 @@ export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
 export * from './utils/git-branches.js';
+export * from './utils/git-worktrees.js';
 export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/git-ignore.js';
@@ -899,6 +915,10 @@ export {
   type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+export {
+  appendToolHookContextToParts,
+  boundToolHookContext,
+} from './core/tool-hook-context.js';
 
 // ============================================================================
 // Startup profiler — cross-package event sink (first-screen perf observability)
@@ -955,3 +975,22 @@ export type {
 export * from './services/session-sources.js';
 export { RecordSourceTool } from './tools/record-source.js';
 export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';
+
+export {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from './hooks/hook-execution-context.js';
+export type { HookExecutionOwner } from './hooks/hook-execution-context.js';
+
+export type { RequestLifecycleEvent } from './telemetry/request-lifecycle.js';
+
+export {
+  createToolLifecycle,
+  TOOL_LIFECYCLE_DRAIN_MS,
+} from './telemetry/tool-lifecycle.js';
+export type {
+  ToolLifecycleEvent,
+  ToolLifecycleRecord,
+  ToolLifecycleOutcome,
+} from './telemetry/tool-lifecycle.js';

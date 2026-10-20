@@ -26,7 +26,7 @@ The managed runtime broker foundation defines Runtime Binding, Runtime Session, 
 
 ## Dependency boundary
 
-The JDBC repositories use `javax.sql.DataSource` for database access and fastjson2 (2.0.60) as the JSON codec for the `reference_json`/`result_json` columns. Opaque Tool payloads disable fastjson2 reference detection so `$ref` and `@type` members remain data, and finite `BigDecimal` values are written without exponent notation so the reader cannot narrow or overflow them as doubles. They do not choose a connection pool, require Spring, manage database migrations through a framework, or bundle a production database driver. The test profile supplies H2 for the default repository contract and MySQL Connector/J for the optional MySQL integration test.
+The JDBC repositories use `javax.sql.DataSource` for database access and fastjson2 (2.0.65) as the JSON codec for the `reference_json`/`result_json` columns. Opaque Tool payloads disable fastjson2 reference detection so `$ref` and `@type` members remain data, and finite `BigDecimal` values are written without exponent notation so the reader cannot narrow or overflow them as doubles. Decimal scales outside ±2048 are rejected before persistence because the same codec cannot read them back. The repositories do not choose a connection pool, require Spring, manage database migrations through a framework, or bundle a production database driver. The test profile supplies H2 for the default repository contract and MySQL Connector/J for the optional MySQL integration test.
 
 ## Schema
 
@@ -41,11 +41,11 @@ Scope identity is represented by a deterministic hash and is always checked toge
 
 ## Transaction and concurrency semantics
 
-Binding creation locks the scope slot, re-reads the binding inside the transaction, and inserts exactly one active record for that scope. Binding updates use the stored version and generation as fences. Operation leases use the database clock so competing JVMs do not depend on synchronized local clocks. The JDBC adapter converts the database clock to Unix epoch time in the query, preventing the connection's session time zone from shifting lease instants, and normalizes it to whole seconds so lease values round-trip consistently through MySQL-compatible drivers that discard fractional seconds.
+Binding creation locks the scope slot, re-reads the binding inside the transaction, and inserts exactly one active record for that scope. Binding updates use the stored version and generation as fences. Operation leases use the database clock so competing JVMs do not depend on synchronized local clocks. The JDBC adapter converts the database clock to precise Unix epoch time in the query, preventing the connection's session time zone from shifting lease instants. Lease decisions use that precise clock, while each persisted lease deadline is rounded up to a whole second so it remains live for at least its configured duration and round-trips consistently through MySQL-compatible drivers that discard fractional seconds.
 
-Session creation relies on the database uniqueness constraint and re-reads the winning record after a concurrent insert. Session compare-and-set updates lock the current row, validate the expected version and binding generation, and reject any attempt to reactivate a terminal session. SQL failures roll back the transaction and propagate to the caller; there is no silent fallback to process-local state.
+Session creation relies on the database uniqueness constraint and re-reads the winning record after a concurrent insert. Session compare-and-set updates lock the current row, validate the expected version and binding generation, and reject any attempt to reactivate a terminal session. SQL failures roll back the transaction and propagate to the caller; there is no silent fallback to process-local state. Session release is decided in one transaction: the transition to RELEASING locks the Session row — the same row lock admission takes — and re-checks active executions before committing, so a cross-process admission cannot interleave between the check and the transition (`JdbcRuntimeBindingRepository.beginSessionRelease`).
 
-Tool Execution creation uses a unique SHA-256 key for bounded database indexing while retaining and verifying the full idempotency key. Mutations lock the execution row. Compare-and-set and `UNKNOWN` reconciliation validate the supplied immutable identity and version; cancellation validates the expected version; dispatch claim and renewal validate the applicable owner, generation, and lease fences. Lease decisions use the database clock. An expired `DISPATCHING` claim can be reissued because physical execution has not started; an expired `EXECUTING` or `CANCEL_REQUESTED` claim becomes `UNKNOWN` and cannot be dispatched again until an explicit reconciliation result settles it.
+Tool Execution creation uses a unique SHA-256 key for bounded database indexing while retaining and verifying the full idempotency key. Mutations lock the execution row. Compare-and-set and `UNKNOWN` reconciliation validate the supplied immutable identity and version; cancellation validates the expected version; dispatch claim and renewal validate the applicable owner, generation, and lease fences. Dispatch leases use the same precise database-clock decisions and rounded whole-second persisted deadlines as operation leases. An expired `DISPATCHING` claim can be reissued because physical execution has not started; an expired `EXECUTING` or `CANCEL_REQUESTED` claim becomes `UNKNOWN` and cannot be dispatched again until an explicit reconciliation result settles it.
 
 ## Schema lifecycle
 
@@ -53,7 +53,7 @@ Schema initialization executes idempotent `CREATE TABLE IF NOT EXISTS` statement
 
 ## Recovery boundary
 
-A durable binding or session row proves only that broker state survived. It does not prove that the referenced runtime process is live. Likewise, an `UNKNOWN` Tool Execution records uncertainty rather than proving whether the side effect happened. Process reconciliation, transport health checks, and authoritative execution reconciliation remain responsibilities of the later runtime integration.
+A durable binding or session row proves only that broker state survived. It does not prove that the referenced runtime process is live. Likewise, an `UNKNOWN` Tool Execution records uncertainty rather than proving whether the side effect happened. Process reconciliation and transport health checks remain responsibilities of the later runtime integration. On-demand execution reconciliation asks the original Runtime and settles through `resolveUnknown` only on its terminal evidence; see the UNKNOWN reconciliation section of `managed-runtime-broker-service-core.md`.
 
 ## Security and tenancy
 
@@ -94,4 +94,4 @@ The default test suite runs the contract on H2 in MySQL compatibility mode. CI a
 
 ## Follow-up work
 
-Server wiring, process reconciliation, authoritative `UNKNOWN` resolution, schema migration deployment, and multi-process end-to-end validation remain follow-up work.
+Server wiring, process reconciliation, takeover scans of `UNKNOWN` executions, schema migration deployment, and multi-process end-to-end validation remain follow-up work.

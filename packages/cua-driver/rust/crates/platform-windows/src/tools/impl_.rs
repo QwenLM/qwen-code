@@ -773,20 +773,14 @@ impl Tool for ListAppsTool {
             let t3 = std::time::Instant::now();
             let installed = crate::win32::list_installed_apps();
             tracing::debug!(target: "list_apps", "step 4 list_installed_apps: {} installed ({}ms)", installed.len(), t3.elapsed().as_millis());
-            // Lowercase-exe-basename → installed-app indices. We match running
-            // processes by basename rather than full path because the process
-            // table's executable name is `notepad.exe` while the Start-Menu
-            // shortcut target is `C:\Windows\System32\notepad.exe` — both
-            // sides need to be normalised to compare. Multiple Start-Menu
-            // shortcuts often target the same basename (different `chrome.exe`
-            // launchers, multiple `code.exe` profiles, …), so we bucket as
-            // `Vec<usize>` and let `disambiguate_installed_match` pick a
-            // winner per running pid rather than letting the last write win.
+            // Process discovery supplies a basename. Retain ambiguous launchers
+            // separately rather than attributing a running pid to a profile by
+            // shortcut mtime or enumeration order.
             let mut by_exe: std::collections::HashMap<String, Vec<usize>> =
                 std::collections::HashMap::new();
             for (i, app) in installed.iter().enumerate() {
                 if app.kind == "desktop" {
-                    let basename = std::path::Path::new(&app.launch_path)
+                    let basename = std::path::Path::new(&app.bundle_id)
                         .file_name()
                         .and_then(|s| s.to_str())
                         .unwrap_or("")
@@ -805,7 +799,7 @@ impl Tool for ListAppsTool {
                 let name = pid_to_name.get(&pid).cloned().unwrap_or_else(|| "<unknown>".into());
                 let key = name.to_ascii_lowercase();
                 let candidates = by_exe.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
-                let merged = disambiguate_installed_match(candidates, &installed, &name);
+                let merged = disambiguate_installed_match(candidates, &installed);
                 if let Some(idx) = merged { consumed_installed.insert(idx); }
                 let (display_name, bundle_id, launch_path, kind, last_used) = match merged {
                     Some(idx) => {
@@ -879,37 +873,20 @@ impl Tool for ListAppsTool {
     }
 }
 
-/// Pick which of several Start-Menu / UWP-derived installed apps best matches
-/// a running pid whose exe basename collided. Precedence:
-///   1. exact case-insensitive equality between `proc_exe_basename` and the
-///      installed app's launch_path basename (always true here; left for
-///      future per-path matches if we ever bucket on something coarser)
-///   2. most recently modified launcher (`last_used` desc — RFC3339 strings
-///      are lexicographically ordered the same as chronologically)
-///   3. first candidate (deterministic by source order)
 fn disambiguate_installed_match(
     candidates: &[usize],
     installed: &[crate::win32::InstalledApp],
-    _proc_exe_basename: &str,
 ) -> Option<usize> {
-    if candidates.is_empty() {
-        return None;
-    }
-    if candidates.len() == 1 {
-        return Some(candidates[0]);
-    }
-
+    let first = *candidates.first()?;
     candidates
         .iter()
-        .copied()
-        .max_by(|&a, &b| {
-            installed[a]
-                .last_used
-                .as_deref()
-                .unwrap_or("")
-                .cmp(installed[b].last_used.as_deref().unwrap_or(""))
+        .all(|&index| {
+            installed[index]
+                .bundle_id
+                .eq_ignore_ascii_case(&installed[first].bundle_id)
+                && installed[index].launch_path == installed[first].launch_path
         })
-        .or_else(|| candidates.first().copied())
+        .then_some(first)
 }
 
 // ── list_windows ─────────────────────────────────────────────────────────────
@@ -942,6 +919,7 @@ impl Tool for ListWindowsTool {
                 omitted on Windows; current_space_id is null.\n\n\
                 Inputs: pid (optional pid filter), on_screen_only (bool, default false).".into(),
             input_schema: json!({"type":"object","properties":{
+                "app_context":{"type":"boolean","description":"Resolve the current app window and its last active owned popup. Requires pid."},
                 "pid":{"type":"integer","description":"Optional pid filter. When set, only this pid's windows are returned."},
                 "on_screen_only":{"type":"boolean","description":"When true, drop windows that aren't currently on-screen. Default false."}
             },"additionalProperties":false}),
@@ -952,9 +930,24 @@ impl Tool for ListWindowsTool {
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
         let filter_pid = args.opt_u64("pid").map(|v| v as u32);
+        let app_context = args.bool_or("app_context", false);
+        if app_context && filter_pid.is_none() {
+            return ToolResult::error("app_context requires pid");
+        }
         let on_screen_only = args.bool_or("on_screen_only", false);
         let (mut windows, pid_to_name) = tokio::task::spawn_blocking(move || {
-            let wins = crate::win32::list_windows(filter_pid);
+            let mut wins = if app_context {
+                crate::win32::list_windows_via_win32(filter_pid)
+            } else {
+                crate::win32::list_windows(filter_pid)
+            };
+            if app_context && wins.is_empty() {
+                if let Some(host) =
+                    crate::win32::resolve_uwp_host_window(filter_pid.expect("validated"))
+                {
+                    wins.push(host);
+                }
+            }
             let procs = crate::win32::list_processes();
             let map: std::collections::HashMap<u32, String> =
                 procs.into_iter().map(|p| (p.pid, p.name)).collect();
@@ -998,6 +991,9 @@ impl Tool for ListWindowsTool {
         // front. Swift convention: higher z_index = closer to front.
         // Invert via `(len - 1 - i)` so the front-most window gets the
         // largest z.
+        let app_target = app_context
+            .then(|| crate::win32::windows::resolve_app_window(&windows))
+            .flatten();
         let n = windows.len();
         let records: Vec<serde_json::Value> = windows
             .iter()
@@ -1005,7 +1001,7 @@ impl Tool for ListWindowsTool {
             .map(|(i, w)| {
                 let app_name = pid_to_name.get(&w.pid).cloned().unwrap_or_default();
                 let z_index = z_index_from_front_to_back(n, i) as i64;
-                json!({
+                let mut record = json!({
                     "window_id":  w.hwnd,
                     "pid":        w.pid,
                     "app_name":   app_name,
@@ -1015,7 +1011,11 @@ impl Tool for ListWindowsTool {
                     "z_index":    z_index,
                     "is_on_screen": w.is_on_screen,
                     "minimized":    w.minimized,
-                })
+                });
+                if app_context {
+                    record["is_app_target"] = json!(app_target == Some(w.hwnd));
+                }
+                record
             })
             .collect();
 
@@ -1184,6 +1184,7 @@ impl Tool for GetWindowStateTool {
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "pid":{"type":"integer","description":"Process ID from `list_apps`."},
                 "window_id":{"type":"integer","description":"HWND of the target window. Must belong to `pid`. Enumerate via `list_windows` or read from `launch_app`'s `windows` array."},
+                "app_context":{"type":"boolean","description":"Use the compact app observation projection."},
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_screenshot":{"type":"boolean","description":"Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action)."},
                 "screenshot_out_file":{"type":"string","description":"When set, write the PNG to this file path instead of embedding base64 in the response. The structured output will contain `screenshot_file_path` instead."},
@@ -1237,7 +1238,7 @@ impl Tool for GetWindowStateTool {
         .await
         .ok()
         .flatten();
-        let Some(target_window) = target_window else {
+        let Some(mut target_window) = target_window else {
             if let Some(owner_pid) = crate::win32::windows::window_owner_pid(hwnd) {
                 return ToolResult::error(format!(
                     "window_id {hwnd} belongs to pid {owner_pid}, not pid {pid}. Call \
@@ -1263,6 +1264,7 @@ impl Tool for GetWindowStateTool {
         // time: an element ax action (element_index) or an element px action (x,y).
         // We don't read the arg; it stays in the schema only so old callers don't
         // trip additionalProperties:false.
+        let app_context = args.bool_or("app_context", false);
         let query = args.opt_str("query");
         let screenshot_out_file = args.opt_str("screenshot_out_file");
         // `accessibility.observation_revision.v1` uses UIA RuntimeId only as a
@@ -1282,6 +1284,17 @@ impl Tool for GetWindowStateTool {
                     }))
                 }
             };
+        if observation_revision_request
+            .as_ref()
+            .is_some_and(|request| {
+                (request.projection_version
+                    == cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION)
+                    != app_context
+            })
+        {
+            return ToolResult::error("app_context and observation projection must agree")
+                .with_structured(json!({ "code": "unsupported_observation_projection" }));
+        }
         if observation_revision_request.is_some() && query.is_some() {
             return ToolResult::error(
                 "observation_revision v1 does not support the legacy query projection",
@@ -1341,6 +1354,21 @@ impl Tool for GetWindowStateTool {
             None
         };
         let do_shot = include_screenshot != Some(false) || screenshot_out_file.is_some();
+
+        if app_context && do_shot {
+            match tokio::task::spawn_blocking(move || {
+                crate::win32::windows::restore_minimized_app_window(pid, hwnd)?;
+                crate::win32::windows::find_window_by_pid_and_handle(pid, hwnd).ok_or_else(|| {
+                    anyhow::anyhow!("app_window_unavailable: target identity changed")
+                })
+            })
+            .await
+            {
+                Ok(Ok(restored)) => target_window = restored,
+                Ok(Err(error)) => return ToolResult::error(error.to_string()),
+                Err(error) => return ToolResult::error(format!("Task error: {error}")),
+            }
+        }
 
         let state = self.state.clone();
         let observation_revisions = state.observation_revisions.clone();
@@ -1518,7 +1546,8 @@ impl Tool for GetWindowStateTool {
                     // node whose msaa_role is Some came from the MSAA
                     // walker, so the entire snapshot must Drop via
                     // IAccessible and click must dispatch through MSAA.
-                    let bindings_transferred = !observation_only && tr.complete;
+                    let bindings_transferred =
+                        !observation_only && (tr.complete || (!is_msaa && tr.read_complete()));
                     if bindings_transferred {
                         if is_msaa {
                             state.element_cache.update_msaa(pid, hwnd, &tr.nodes);
@@ -1540,7 +1569,7 @@ impl Tool for GetWindowStateTool {
                     // stores u32 — truncate (HWND fits in 32-bit on
                     // every supported edition; the upper 32 bits are
                     // zero in user-space).
-                    let snapshot_id = (!observation_only && tr.complete).then(|| {
+                    let snapshot_id = bindings_transferred.then(|| {
                         cua_driver_core::element_token::global().register_snapshot(
                             pid as i32,
                             hwnd as u32,
@@ -1553,7 +1582,7 @@ impl Tool for GetWindowStateTool {
                     let revision_capture_complete = observation_revision
                         .as_ref()
                         .is_some_and(|revision| revision.stable_element_ids)
-                        && tr.complete
+                        && tr.read_complete()
                         && !is_msaa;
                     if let (Some(revision), Some(snapshot_id)) = (
                         observation_revision
@@ -1708,6 +1737,7 @@ impl Tool for GetWindowStateTool {
                     structured["returned_element_count"] = json!(elements.len());
                     structured["elements"] = json!(elements);
                     structured["capture_complete"] = json!(tr.complete);
+                    structured["capture_read_complete"] = json!(tr.read_complete());
                     structured["capture_truncated"] = json!(tr.truncated);
                     if !tr.incomplete_notes.is_empty() {
                         structured["capture_incomplete_details"] = json!(tr.incomplete_notes);
@@ -1811,7 +1841,7 @@ impl Tool for GetWindowStateTool {
                         "version":
                             cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
                         "serializer_version": cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION,
-                        "projection_version": cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION,
+                        "projection_version": if app_context { cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION } else { cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION },
                         "mode": revision.mode.as_str(),
                         "lineage_id": revision.lineage_id,
                         "revision_id": revision.revision_id,
@@ -2045,6 +2075,21 @@ fn should_restore_foreground_after_launch(shape: LaunchTargetShape) -> bool {
         return false;
     }
     has_app_identifier
+}
+
+async fn restore_after_input(
+    prior: usize,
+    target: Option<crate::win32::ForegroundTarget>,
+) -> Result<(), String> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    tokio::task::spawn_blocking(move || {
+        crate::win32::restore_input_foreground(prior as u64, target)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
 /// Async polling restore of the prior foreground window, used by
@@ -3210,6 +3255,7 @@ impl Tool for ClickTool {
                 fields aren't supported yet.".into(),
             input_schema: json!({
                 "type":"object","properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                     "session": cua_driver_core::tool_schema::session_schema(),
                     "pid":{"type":"integer","description":"Target process ID for window scope. Omit with scope=desktop for screen-absolute coordinates from get_desktop_state."},
                     "window_id":{"type":"integer","description":"HWND for the window whose get_window_state produced the element_index. Required when element_index is used. Optional when element_token is supplied (the token carries it)."},
@@ -3523,6 +3569,7 @@ impl Tool for ClickTool {
                     },
                 );
                 let btn_fg = button.clone();
+                let foreground_target = crate::win32::capture_foreground_target(hwnd);
                 let prev_fg_addr = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
                 };
@@ -3541,7 +3588,9 @@ impl Tool for ClickTool {
                     }
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+                    return ToolResult::error(error);
+                }
                 let half = if want_expand { "dropdown" } else { "press" };
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
@@ -3678,6 +3727,7 @@ impl Tool for ClickTool {
                 };
                 let btn_fg = btn.clone();
                 let mods_owned = modifiers.clone();
+                let foreground_target = crate::win32::capture_foreground_target(hwnd);
                 let prev_fg_addr = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
                 };
@@ -3688,7 +3738,9 @@ impl Tool for ClickTool {
                     )
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+                    return ToolResult::error(error);
+                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Performed SendInput click on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -3997,6 +4049,7 @@ impl Tool for ClickTool {
             // background-safe and would deliver the click without the
             // foreground swap the caller asked for).
             if delivery == DeliveryMode::Foreground {
+                let foreground_target = crate::win32::capture_foreground_target(hwnd);
                 let prev_fg_addr = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
                 };
@@ -4008,7 +4061,9 @@ impl Tool for ClickTool {
                     )
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+                    return ToolResult::error(error);
+                }
                 return match send_result {
                     Ok(Ok(())) => {
                         let click_word = match count {
@@ -4369,6 +4424,7 @@ impl Tool for TypeTextTool {
                 UIA path (SetValue is atomic).".into(),
             input_schema: json!({
                 "type":"object","required":["text"],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                     "session": cua_driver_core::tool_schema::session_schema(),
                     "scope":{"type":"string","enum":["window","desktop"],"description":"Use desktop with no pid/window_id to type into the current foreground application."},
                     "pid":{"type":"integer","description":"Target process ID."},
@@ -6419,6 +6475,7 @@ impl Tool for ScrollTool {
                     "element_token": cua_driver_core::tool_schema::element_token_schema(),
                     "snapshot_id": cua_driver_core::tool_schema::snapshot_id_schema(),
                     "scope":{"type":"string","enum":["window","desktop"],"default":"window"},
+                    "app_context":{"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                     "delivery_mode": crate::input::delivery::delivery_mode_schema()
                 },"additionalProperties":false
             }),
@@ -6710,7 +6767,12 @@ impl Tool for ScrollTool {
             let dir_disp = direction.clone();
             let tick_disp = ticks.abs();
             let result = tokio::task::spawn_blocking(move || {
-                crate::input::send_wheel_synthesized(cx, cy, ticks, horizontal)
+                crate::input::keyboard::with_confirmed_foreground(
+                    windows::Win32::Foundation::HWND(hwnd as *mut _),
+                    "scroll delivery",
+                    || Ok(()),
+                    || crate::input::send_wheel_synthesized(cx, cy, ticks, horizontal),
+                )
             })
             .await;
             return match result {
@@ -6794,7 +6856,7 @@ impl Tool for ScrollTool {
 /// (Obsidian, VS Code, Slack, …) reached `post_click_screen` and no-op'd
 /// silently. This mirrors that short-circuit for those tools (#1984): when
 /// `hwnd` is a Chromium window, deliver `count` clicks of `button` at screen
-/// `(sx, sy)` via SendInput with async foreground restore and return
+/// `(sx, sy)` via SendInput with foreground restoration before returning and return
 /// `Some(result)`. Returns `None` for non-Chromium targets so the caller
 /// proceeds to its normal PostMessage path.
 async fn chromium_click_short_circuit(
@@ -6816,6 +6878,7 @@ async fn chromium_click_short_circuit(
     // Capture the pre-click foreground so the poller can restore it even if
     // Chromium re-activates itself from a renderer-side handler (same pattern
     // and rationale as the ClickTool Chromium branch).
+    let foreground_target = crate::win32::capture_foreground_target(hwnd);
     let prev_fg_addr =
         unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize };
     let button_owned = button.to_string();
@@ -6823,7 +6886,9 @@ async fn chromium_click_short_circuit(
         crate::input::send_click_synthesized(hwnd, sx, sy, count, &button_owned)
     })
     .await;
-    tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+    if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+        return Some(ToolResult::error(error));
+    }
     Some(match send_result {
         Ok(Ok(())) => ToolResult::text(format!(
             "✅ Sent {gesture} via SendInput to pid {pid} at screen ({sx},{sy}) (Chromium target)."
@@ -6982,6 +7047,7 @@ impl Tool for DoubleClickTool {
                 `element_index` is used. The macOS-only `modifier` field is accepted for \
                 parity (no-op on Windows — PostMessage doesn't propagate modifier-key state).".into(),
             input_schema: json!({"type":"object","required":["pid"],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "pid":{"type":"integer","description":"Target process ID."},
                 "window_id":{"type":"integer","description":"HWND for the target window. Required when element_index is used. Optional when element_token is supplied (the token carries it)."},
@@ -7151,6 +7217,7 @@ impl Tool for DoubleClickTool {
             }
             // delivery_mode:"foreground" — route through SendInput at the cached coords.
             if delivery == DeliveryMode::Foreground {
+                let foreground_target = crate::win32::capture_foreground_target(hwnd);
                 let prev_fg_addr = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
                 };
@@ -7158,7 +7225,9 @@ impl Tool for DoubleClickTool {
                     crate::input::send_click_synthesized_active_mods(hwnd, cx, cy, 2, "left", &[])
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+                    return ToolResult::error(error);
+                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent double-click via SendInput on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -7253,6 +7322,7 @@ impl Tool for DoubleClickTool {
             }
             // delivery_mode:"foreground" — SendInput at screen coords with FG swap.
             if delivery == DeliveryMode::Foreground {
+                let foreground_target = crate::win32::capture_foreground_target(hwnd);
                 let prev_fg_addr = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
                 };
@@ -7267,7 +7337,9 @@ impl Tool for DoubleClickTool {
                     )
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+                    return ToolResult::error(error);
+                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent double-click via SendInput to pid {pid} at screen ({sx_i},{sy_i}) (delivery_mode:foreground)."
@@ -7334,6 +7406,7 @@ impl Tool for RightClickTool {
                 `modifier` is accepted for parity (no-op on Windows — PostMessage doesn't \
                 propagate modifier-key state).".into(),
             input_schema: json!({"type":"object","required":["pid"],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "pid":{"type":"integer","description":"Target process ID."},
                 "window_id":{"type":"integer","description":"HWND for the target window. Required when element_index is used. Optional when element_token is supplied (the token carries it)."},
@@ -7496,6 +7569,7 @@ impl Tool for RightClickTool {
                 };
             }
             if delivery == DeliveryMode::Foreground {
+                let foreground_target = crate::win32::capture_foreground_target(hwnd);
                 let prev_fg_addr = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
                 };
@@ -7503,7 +7577,9 @@ impl Tool for RightClickTool {
                     crate::input::send_click_synthesized_active_mods(hwnd, cx, cy, 1, "right", &[])
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+                    return ToolResult::error(error);
+                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent right-click via SendInput on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
@@ -7595,6 +7671,7 @@ impl Tool for RightClickTool {
                 };
             }
             if delivery == DeliveryMode::Foreground {
+                let foreground_target = crate::win32::capture_foreground_target(hwnd);
                 let prev_fg_addr = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
                 };
@@ -7609,7 +7686,9 @@ impl Tool for RightClickTool {
                     )
                 })
                 .await;
-                tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+                if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+                    return ToolResult::error(error);
+                }
                 return match send_result {
                     Ok(Ok(())) => ToolResult::text(format!(
                         "✅ Sent right-click via SendInput to pid {pid} at screen ({sx_i},{sy_i}) (delivery_mode:foreground)."
@@ -7665,6 +7744,7 @@ impl Tool for DragTool {
                           window itself) cannot be delivered in the background — the OS move/resize loop needs real pointer \
                           input — so they return background_unavailable; re-issue those with delivery_mode:\"foreground\".".into(),
             input_schema: json!({"type":"object","required":["from_x","from_y","to_x","to_y"],"properties":{
+                "app_context": {"type":"boolean","description":"Use app-bound input with runtime-managed targeting."},
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "scope":{"type":"string","enum":["window","desktop"],"description":"Use desktop with no pid/window_id for screen-absolute coordinates."},
                 "pid":{"type":"integer","description":"Target process ID."},
@@ -7900,6 +7980,7 @@ impl Tool for DragTool {
         if delivery == DeliveryMode::Foreground {
             let btn_fg = button.clone();
             pin_overlay_above(&cursor_key, hwnd);
+            let foreground_target = crate::win32::capture_foreground_target(hwnd);
             let prev_fg_addr = unsafe {
                 windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize
             };
@@ -7923,7 +8004,9 @@ impl Tool for DragTool {
                 steps,
             );
             let (send_result, ()) = tokio::join!(send_result, visual_drag);
-            tokio::spawn(restore_foreground_polling_best_effort(prev_fg_addr, pid));
+            if let Err(error) = restore_after_input(prev_fg_addr, foreground_target).await {
+                return ToolResult::error(error);
+            }
             let button_suffix = if button == "left" {
                 String::new()
             } else {
@@ -10954,5 +11037,151 @@ mod value_write_readback_tests {
             classify_value_write_readback(Some("unchanged"), "unchanged", "unchanged"),
             "pending"
         );
+    }
+}
+
+#[cfg(test)]
+mod app_observation_tests {
+    use super::*;
+    use std::process::{Child, Command};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn installed_launcher_merge_does_not_guess_between_profiles() {
+        let app = |command: &str| crate::win32::InstalledApp {
+            name: "Fixture".into(),
+            bundle_id: r"C:\Fixture\fixture.exe".into(),
+            kind: "desktop".into(),
+            launch_path: command.into(),
+            last_used: None,
+        };
+        let installed = vec![
+            app("fixture.exe --profile=A"),
+            app("fixture.exe --profile=B"),
+            app("fixture.exe --profile=A"),
+        ];
+        assert_eq!(disambiguate_installed_match(&[], &installed), None);
+        assert_eq!(disambiguate_installed_match(&[0], &installed), Some(0));
+        assert_eq!(disambiguate_installed_match(&[0, 1], &installed), None);
+        assert_eq!(disambiguate_installed_match(&[0, 2], &installed), Some(0));
+    }
+
+    struct Fixture {
+        child: Child,
+        directory: std::path::PathBuf,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires an isolated interactive Windows desktop and Windows Forms"]
+    async fn live_app_bounded_uia_ids_remain_actionable() {
+        use cua_driver_core::observation_revision::{
+            ACCESSIBILITY_SERIALIZER_VERSION, APP_ACCESSIBILITY_PROJECTION_VERSION,
+        };
+        let directory = std::env::temp_dir().join(format!("cua-review-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let script = directory.join("fixture.ps1");
+        std::fs::write(&script, r#"
+Add-Type -AssemblyName System.Windows.Forms
+$f=New-Object System.Windows.Forms.Form
+$f.Text='CUA review bounded UIA';$f.Width=400;$f.Height=400
+$e=New-Object System.Windows.Forms.TextBox;$e.Text='before';$e.Top=5;$e.TabIndex=0;$f.Controls.Add($e)
+for($i=0;$i -lt 30;$i++) { $b=New-Object System.Windows.Forms.Button;$b.Text="Button $i";$b.Top=40+25*$i;$b.TabIndex=$i+1;$f.Controls.Add($b) }
+$e.Add_TextChanged({[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'value.txt'),$e.Text)})
+$f.Add_Shown({@{pid=$PID;hwnd=$f.Handle.ToInt64()} | ConvertTo-Json -Compress | Set-Content (Join-Path $PSScriptRoot 'ready.json')})
+[System.Windows.Forms.Application]::Run($f)
+"#).unwrap();
+        let child_log = std::fs::File::create(directory.join("fixture.log")).unwrap();
+        let child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Sta", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .stdout(child_log.try_clone().unwrap())
+            .stderr(child_log)
+            .spawn()
+            .unwrap();
+        let mut fixture = Fixture { child, directory };
+        let ready = fixture.directory.join("ready.json");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready.exists() {
+            let exited = fixture.child.try_wait().unwrap();
+            assert!(
+                exited.is_none() && Instant::now() < deadline,
+                "Windows Forms startup {exited:?}: {}",
+                std::fs::read_to_string(fixture.directory.join("fixture.log")).unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let target: Value = serde_json::from_slice(&std::fs::read(ready).unwrap()).unwrap();
+        let registry = build_registry(false);
+        let observed = registry.invoke_from_trusted_adapter("get_window_state", json!({
+            "pid":target["pid"],"window_id":target["hwnd"],"max_elements":10,
+            "app_context":true,"include_screenshot":false,
+            "_transport_session_id":"bounded-uia-fixture",
+            "observation_revision":{"version":1,"serializer_version":ACCESSIBILITY_SERIALIZER_VERSION,
+                "projection_version":APP_ACCESSIBILITY_PROJECTION_VERSION}
+        })).await;
+        assert_ne!(observed.is_error, Some(true), "{observed:?}");
+        let state = observed.structured_content.unwrap();
+        assert_eq!(state["capture_truncated"], true, "{state}");
+        assert_eq!(state["element_bindings_retained"], true, "{state}");
+        let entry = state["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|element| {
+                element["role"]
+                    .as_str()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("edit"))
+            })
+            .unwrap_or_else(|| panic!("bounded capture must include the Edit: {state}"));
+        assert!(entry["element_id"].is_number(), "{entry}");
+        assert!(entry["element_token"].as_str().unwrap().starts_with("rv1:"));
+        let action = registry.invoke_from_trusted_adapter("set_value", json!({
+            "pid":target["pid"],"window_id":target["hwnd"],"element_token":entry["element_token"],
+            "value":"after","_transport_session_id":"bounded-uia-fixture"
+        })).await;
+        assert_ne!(action.is_error, Some(true), "{action:?}");
+        assert_eq!(
+            std::fs::read_to_string(fixture.directory.join("value.txt")).unwrap(),
+            "after"
+        );
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, IsIconic, ShowWindowAsync, SW_MINIMIZE,
+        };
+        let hwnd = windows::Win32::Foundation::HWND(target["hwnd"].as_u64().unwrap() as *mut _);
+        let _ = unsafe { ShowWindowAsync(hwnd, SW_MINIMIZE) };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !unsafe { IsIconic(hwnd) }.as_bool() {
+            assert!(Instant::now() < deadline, "fixture must minimize");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let prior = unsafe { GetForegroundWindow() };
+        let restored = registry
+            .invoke_from_trusted_adapter(
+                "get_window_state",
+                json!({
+                    "pid":target["pid"],"window_id":target["hwnd"],"max_elements":30,
+                    "app_context":true,"include_screenshot":true,
+                    "_transport_session_id":"bounded-uia-fixture"
+                }),
+            )
+            .await;
+        assert_ne!(restored.is_error, Some(true), "{restored:?}");
+        assert!(restored
+            .content
+            .iter()
+            .any(|item| matches!(item, cua_driver_core::protocol::Content::Image { .. })));
+        assert!(!unsafe { IsIconic(hwnd) }.as_bool());
+        let surface = &restored.structured_content.as_ref().unwrap()["window_surface"];
+        assert_eq!(surface["minimized"], false, "{surface}");
+        assert_eq!(surface["is_on_screen"], true, "{surface}");
+        assert_eq!(unsafe { GetForegroundWindow() }, prior);
+        println!("bounded UIA token changed a real edit; minimized observation returned a screenshot and preserved focus");
     }
 }

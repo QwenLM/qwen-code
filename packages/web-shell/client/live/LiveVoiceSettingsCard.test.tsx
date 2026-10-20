@@ -91,6 +91,14 @@ function click(element: HTMLElement): void {
   element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
+function setInputValue(input: HTMLInputElement, value: string): void {
+  Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  )!.set!.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
@@ -100,6 +108,31 @@ afterEach(() => {
 });
 
 describe('LiveVoiceSettingsCard', () => {
+  it('keeps a loaded draft editable and saveable during background refresh', async () => {
+    const setup = setupResult({ nativeHost: false, enabled: false });
+    const container = mount(setup);
+    act(() =>
+      container.querySelector<HTMLButtonElement>('[role="switch"]')!.click(),
+    );
+    const save = container.querySelector<HTMLButtonElement>(
+      '[data-live-settings-save]',
+    )!;
+    expect(save.disabled).toBe(false);
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceSettingsCard setup={{ ...setup, loading: true }} />,
+        ),
+    );
+    expect(save.disabled).toBe(false);
+    expect(
+      container.querySelector<HTMLButtonElement>('[role="switch"]')!.disabled,
+    ).toBe(false);
+    await act(async () => save.click());
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({ enabled: true });
+  });
+
   it('drops everything about the native Host where none can attach', () => {
     const container = mount(setupResult({ nativeHost: false }));
     const text = container.textContent ?? '';
@@ -115,7 +148,7 @@ describe('LiveVoiceSettingsCard', () => {
     );
   });
 
-  it('enables without the install confirmation where there is nothing to install', () => {
+  it('enables without the install confirmation where there is nothing to install', async () => {
     const setup = setupResult({ nativeHost: false, enabled: false });
     const container = mount(setup);
     const toggle = container.querySelector('[role="switch"]');
@@ -125,6 +158,12 @@ describe('LiveVoiceSettingsCard', () => {
       toggle.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
+    expect(setup.update).not.toHaveBeenCalled();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .click(),
+    );
     expect(setup.update).toHaveBeenCalledWith({ enabled: true });
     expect(document.body.textContent).not.toContain(
       'settings.liveSetup.confirmTitle',
@@ -133,7 +172,7 @@ describe('LiveVoiceSettingsCard', () => {
 
   it.each([true, undefined])(
     'keeps the native card when nativeHost is %s (older daemons omit it)',
-    (nativeHost) => {
+    async (nativeHost) => {
       const setup = setupResult({ nativeHost, enabled: false });
       const container = mount(setup);
       expect(container.textContent).toContain('settings.liveSetup.description');
@@ -143,6 +182,11 @@ describe('LiveVoiceSettingsCard', () => {
       act(() => {
         toggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .click(),
+      );
       // Still asks before downloading and installing the Host.
       expect(setup.update).not.toHaveBeenCalled();
       expect(document.body.textContent).toContain(
@@ -150,6 +194,570 @@ describe('LiveVoiceSettingsCard', () => {
       );
     },
   );
+
+  it('submits enabled, endpoint, key, model and voice together only on Save', async () => {
+    const setup = setupResult({
+      nativeHost: false,
+      enabled: false,
+      keyConfigured: false,
+      endpoint: '',
+      models: [],
+      voice: 'Tina',
+    });
+    const container = mount(setup);
+    act(() => {
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-endpoint')!,
+        ' https://dashscope-intl.aliyuncs.com/compatible-mode/v1 ',
+      );
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-key')!,
+        ' new-key ',
+      );
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-voice')!,
+        ' Ethan ',
+      );
+      container.querySelector<HTMLButtonElement>('[role="switch"]')!.click();
+    });
+    await act(async () =>
+      click(container.querySelector<HTMLElement>('#live-realtime-model')!),
+    );
+    await act(async () =>
+      click(
+        Array.from(
+          document.querySelectorAll<HTMLElement>('[role="option"]'),
+        ).find((el) =>
+          el.textContent?.includes('settings.liveSetup.modelCustom'),
+        )!,
+      ),
+    );
+    act(() =>
+      setInputValue(
+        container.querySelector<HTMLInputElement>('[data-live-model-input]')!,
+        ' new-model ',
+      ),
+    );
+    expect(setup.update).not.toHaveBeenCalled();
+    expect(
+      container.querySelectorAll('[data-live-settings-save]'),
+    ).toHaveLength(1);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .click(),
+    );
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+      enabled: true,
+      endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      apiKey: { operation: 'replace', value: 'new-key' },
+      model: 'new-model',
+      voice: 'Ethan',
+    });
+    expect(
+      container.querySelector<HTMLInputElement>('#live-realtime-key')!.value,
+    ).toBe('');
+  });
+
+  it('retains all edits when native enable confirmation is cancelled and submits them on confirmation', async () => {
+    const setup = setupResult({ enabled: false, endpoint: '', voice: 'Tina' });
+    const container = mount(setup);
+    act(() => {
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-voice')!,
+        'Ethan',
+      );
+      container.querySelector<HTMLButtonElement>('[role="switch"]')!.click();
+    });
+    const save = container.querySelector<HTMLButtonElement>(
+      '[data-live-settings-save]',
+    )!;
+    act(() => save.click());
+    expect(setup.update).not.toHaveBeenCalled();
+    await act(async () =>
+      Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          '[role="alertdialog"] button',
+        ),
+      )
+        .find((el) => el.textContent === 'settings.liveSetup.cancel')!
+        .click(),
+    );
+    expect(
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!.value,
+    ).toBe('Ethan');
+    expect(
+      container.querySelector('[role="switch"]')!.getAttribute('aria-checked'),
+    ).toBe('true');
+    act(() => save.click());
+    await act(async () =>
+      Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          '[role="alertdialog"] button',
+        ),
+      )
+        .find((el) => el.textContent === 'settings.liveSetup.confirm')!
+        .click(),
+    );
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+      enabled: true,
+      voice: 'Ethan',
+    });
+  });
+
+  it('omits typed endpoint and key when the draft switches to a provider route', async () => {
+    const setup = setupResult({
+      endpoint: '',
+      models: [{ id: 'route-model', provider: 'openai' }],
+    });
+    const container = mount(setup);
+    act(() => {
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-endpoint')!,
+        'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      );
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-key')!,
+        'ignored-key',
+      );
+    });
+    await act(async () =>
+      click(container.querySelector<HTMLElement>('#live-realtime-model')!),
+    );
+    await act(async () =>
+      click(
+        Array.from(
+          document.querySelectorAll<HTMLElement>('[role="option"]'),
+        ).find((el) => el.textContent === 'route-model')!,
+      ),
+    );
+    expect(container.querySelector('#live-realtime-key')).toBeNull();
+    expect(setup.update).not.toHaveBeenCalled();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .click(),
+    );
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+      model: 'route-model',
+    });
+  });
+
+  it.each([
+    undefined,
+    '',
+    'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+  ])(
+    'only submits an explicitly edited endpoint (%s) when leaving a route',
+    async (endpointDraft) => {
+      const setup = setupResult({
+        endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        keySource: 'route',
+        model: 'route-model',
+        models: [{ id: 'route-model', provider: 'openai' }],
+      });
+      const container = mount(setup);
+      await act(async () =>
+        click(container.querySelector<HTMLElement>('#live-realtime-model')!),
+      );
+      await act(async () =>
+        click(
+          Array.from(
+            document.querySelectorAll<HTMLElement>('[role="option"]'),
+          ).find((el) =>
+            el.textContent?.includes('settings.liveSetup.modelCustom'),
+          )!,
+        ),
+      );
+      act(() =>
+        setInputValue(
+          container.querySelector<HTMLInputElement>('[data-live-model-input]')!,
+          'custom-model',
+        ),
+      );
+      expect(
+        container.querySelector<HTMLInputElement>('#live-realtime-endpoint')!
+          .value,
+      ).toBe('');
+      expect(
+        container.querySelector<HTMLInputElement>('#live-realtime-endpoint')!
+          .placeholder,
+      ).toBe('settings.liveSetup.endpointUnchanged');
+      if (endpointDraft !== undefined) {
+        act(() =>
+          setInputValue(
+            container.querySelector<HTMLInputElement>(
+              '#live-realtime-endpoint',
+            )!,
+            'https://temporary.example/v1',
+          ),
+        );
+        act(() =>
+          setInputValue(
+            container.querySelector<HTMLInputElement>(
+              '#live-realtime-endpoint',
+            )!,
+            endpointDraft,
+          ),
+        );
+      }
+      const key =
+        container.querySelector<HTMLInputElement>('#live-realtime-key')!;
+      expect(key.getAttribute('aria-required')).toBe('true');
+      expect(
+        container.querySelector(
+          'label[for="live-realtime-key"] .text-destructive',
+        )?.textContent,
+      ).toBe('*');
+      expect(container.textContent).not.toContain(
+        'settings.liveSetup.notConfigured',
+      );
+      act(() => setInputValue(key, 'custom-key'));
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .click(),
+      );
+      expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+        model: 'custom-model',
+        ...(endpointDraft !== undefined ? { endpoint: endpointDraft } : {}),
+        apiKey: { operation: 'replace', value: 'custom-key' },
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'refreshes reverted edits and blocks conflicting dirty edits (dirty=%s)',
+    async (dirty) => {
+      const setup = setupResult({ voice: 'Tina', nativeHost: false });
+      const container = mount(setup);
+      const voice = () =>
+        container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+      const save = () =>
+        container.querySelector<HTMLButtonElement>(
+          '[data-live-settings-save]',
+        )!;
+      act(() => setInputValue(voice(), 'Ethan'));
+      if (!dirty) act(() => setInputValue(voice(), 'Tina'));
+      const refreshed = {
+        ...setup,
+        status: { ...setup.status!, voice: 'Alice' },
+      };
+      act(() =>
+        mounted
+          .at(-1)!
+          .root.render(<LiveVoiceSettingsCard setup={refreshed} />),
+      );
+      expect(voice().value).toBe(dirty ? 'Ethan' : 'Alice');
+      expect(save().disabled).toBe(true);
+      await act(async () => save().click());
+      expect(setup.update).not.toHaveBeenCalled();
+      if (dirty) {
+        expect(container.textContent).toContain('settings.liveSetup.conflict');
+        act(() =>
+          Array.from(container.querySelectorAll('button'))
+            .find((button) =>
+              button.textContent?.includes('settings.liveSetup.reloadSettings'),
+            )!
+            .click(),
+        );
+        expect(voice().value).toBe('Alice');
+        expect(save().disabled).toBe(true);
+        act(() => setInputValue(voice(), 'Ethan'));
+        await act(async () => save().click());
+        expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+          voice: 'Ethan',
+        });
+      }
+    },
+  );
+
+  it('does not block an edit made after the saved value converges onto the draft', async () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+    act(() => setInputValue(voice(), 'Ethan'));
+
+    // The refresh converges onto the staged value: the edit is settled, so the
+    // draft field and its conflict baseline must be forgotten.
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceSettingsCard
+            setup={{ ...setup, status: { ...setup.status!, voice: 'Ethan' } }}
+          />,
+        ),
+    );
+    expect(save().disabled).toBe(true);
+
+    // The next edit compares against the converged value — never against the
+    // stale baseline from before the refresh.
+    act(() => setInputValue(voice(), 'Carol'));
+    expect(container.textContent).not.toContain('settings.liveSetup.conflict');
+    expect(save().disabled).toBe(false);
+    await act(async () => save().click());
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Carol' });
+  });
+
+  it('settles a padded draft when the refresh converges on its trimmed form', async () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+    act(() => setInputValue(voice(), ' Ethan '));
+
+    // Submit paths trim, so a refresh converging on the trimmed form of a
+    // padded draft has still converged: the draft and its conflict baseline
+    // must be forgotten.
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceSettingsCard
+            setup={{ ...setup, status: { ...setup.status!, voice: 'Ethan' } }}
+          />,
+        ),
+    );
+    expect(voice().value).toBe('Ethan');
+    expect(save().disabled).toBe(true);
+
+    act(() => setInputValue(voice(), 'Carol'));
+    expect(container.textContent).not.toContain('settings.liveSetup.conflict');
+    expect(save().disabled).toBe(false);
+    await act(async () => save().click());
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Carol' });
+  });
+
+  it('does not settle a draft while the user is typing into it', async () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+
+    // No status refresh happens while typing, so the padded draft keeps its
+    // in-progress characters even when its trimmed form matches the saved
+    // value.
+    act(() => setInputValue(voice(), ''));
+    for (const character of 'Tina Smith') {
+      act(() => {
+        const input = voice();
+        setInputValue(input, input.value + character);
+      });
+    }
+    expect(voice().value).toBe('Tina Smith');
+
+    await act(async () => save().click());
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+      voice: 'Tina Smith',
+    });
+  });
+
+  it('keeps a padded draft that trims onto the saved value until a refresh converges it', () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+
+    act(() => setInputValue(voice(), 'Tina '));
+    expect(voice().value).toBe('Tina ');
+
+    // A trimmed draft is excluded from the update payload, so Save stays
+    // disabled until the value diverges from the saved one.
+    expect(save().disabled).toBe(true);
+  });
+
+  it('does not settle a padded draft when a poll returns unchanged values', () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+
+    act(() => setInputValue(voice(), 'Tina '));
+
+    // The daemon SDK hands out a fresh status object per fetch. An install
+    // poll or focus refresh that returns unchanged saved values therefore
+    // arrives with a new identity but nothing converged, and must leave the
+    // in-progress draft alone.
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceSettingsCard
+            setup={{ ...setup, status: { ...setup.status! } }}
+          />,
+        ),
+    );
+    expect(voice().value).toBe('Tina ');
+
+    act(() => setInputValue(voice(), 'Tina Smith'));
+    expect(save().disabled).toBe(false);
+  });
+
+  it('re-baselines the request keys after a partially landed save', async () => {
+    const setup = setupResult({
+      enabled: false,
+      keyConfigured: false,
+      nativeHost: false,
+    });
+    setup.update.mockRejectedValueOnce(new Error('setEnabled failed'));
+    const container = mount(setup);
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+
+    act(() =>
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-key')!,
+        'K',
+      ),
+    );
+    act(() =>
+      container.querySelector<HTMLButtonElement>('[role="switch"]')!.click(),
+    );
+    expect(save().disabled).toBe(false);
+
+    // The daemon persisted the key and only failed setEnabled after that,
+    // so the request rejects while the write stands.
+    await act(async () => save().click());
+
+    // The refresh comes back with keyConfigured/storedKey flipped by the
+    // card's own write. The re-baseline must run against this new status —
+    // asserting here, before the refresh promise chain rewinds, would race
+    // the effect.
+    act(() =>
+      mounted.at(-1)!.root.render(
+        <LiveVoiceSettingsCard
+          setup={{
+            ...setup,
+            status: {
+              ...setup.status!,
+              keyConfigured: true,
+              storedKey: true,
+            },
+          }}
+        />,
+      ),
+    );
+
+    // The card's own write must never be the elsewhere a conflict is
+    // reported against: no conflict message, Save stays usable for the
+    // enable retry, and the retry carries the same staged fields.
+    expect(container.textContent).not.toContain('settings.liveSetup.conflict');
+    expect(save().disabled).toBe(false);
+    expect(setup.refresh).toHaveBeenCalled();
+
+    await act(async () => save().click());
+    expect(setup.update).toHaveBeenLastCalledWith({
+      enabled: true,
+      apiKey: { operation: 'replace', value: 'K' },
+    });
+  });
+
+  it('keeps the shortcut capture disabled until the status loads', () => {
+    const setup = { ...setupResult({}), status: undefined };
+    const container = mount(setup);
+    const capture = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="settings.liveShortcut.capture"]',
+    )!;
+    expect(capture.disabled).toBe(true);
+  });
+
+  it('does not block a dirty voice when an unrelated field refreshes', async () => {
+    const setup = setupResult({
+      voice: 'Tina',
+      endpoint: 'https://old.example/v1',
+      nativeHost: false,
+    });
+    const container = mount(setup);
+    act(() =>
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-voice')!,
+        'Ethan',
+      ),
+    );
+    act(() =>
+      mounted.at(-1)!.root.render(
+        <LiveVoiceSettingsCard
+          setup={{
+            ...setup,
+            status: { ...setup.status!, endpoint: 'https://new.example/v1' },
+          }}
+        />,
+      ),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .click(),
+    );
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Ethan' });
+  });
+
+  it('keeps staged key removal visible and undoable after re-enabling', async () => {
+    const setup = setupResult({
+      nativeHost: false,
+      enabled: true,
+      storedKey: true,
+    });
+    const container = mount(setup);
+    const toggle =
+      container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    act(() => toggle.click());
+    act(() => removeKeyButton(container)!.click());
+    act(() => toggle.click());
+    expect(container.textContent).toContain(
+      'settings.liveSetup.keyRemovalPending',
+    );
+    act(() =>
+      Array.from(container.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('settings.liveSetup.undoRemoveKey'),
+        )!
+        .click(),
+    );
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .disabled,
+    ).toBe(true);
+    expect(setup.update).not.toHaveBeenCalled();
+  });
+
+  it('stages shortcut clearing with other edits', async () => {
+    const setup = setupResult({ voice: 'Tina' });
+    const container = mount(setup);
+    act(() =>
+      setInputValue(
+        container.querySelector<HTMLInputElement>('#live-realtime-voice')!,
+        'Ethan',
+      ),
+    );
+    await act(async () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+        .find((el) => el.textContent === 'settings.liveShortcut.clear')!
+        .click(),
+    );
+    expect(setup.update).not.toHaveBeenCalled();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .click(),
+    );
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({
+      voice: 'Ethan',
+      shortcut: '',
+    });
+  });
 
   describe('key, model and voice', () => {
     function type(input: HTMLInputElement, value: string): void {
@@ -163,7 +771,7 @@ describe('LiveVoiceSettingsCard', () => {
       });
     }
 
-    it('names the variable instead of asking for a key the route would ignore', () => {
+    it('names the variable instead of asking for a key the route would ignore', async () => {
       const setup = setupResult({
         keySource: 'route',
         keyEnv: 'DASHSCOPE_API_KEY',
@@ -185,6 +793,12 @@ describe('LiveVoiceSettingsCard', () => {
       act(() => {
         remove?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
+      expect(setup.update).not.toHaveBeenCalled();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .click(),
+      );
       expect(setup.update).toHaveBeenCalledWith({
         apiKey: { operation: 'clear' },
       });
@@ -203,7 +817,85 @@ describe('LiveVoiceSettingsCard', () => {
       expect(removeKeyButton(container)).toBeUndefined();
     });
 
-    it('keeps a stored key revocable while the model does not resolve', () => {
+    it('still offers no key removal after a model edit leaves the route', async () => {
+      const container = mount(
+        setupResult({
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+          keyConfigured: true,
+          storedKey: false,
+          enabled: false,
+          model: 'route-model',
+          models: [{ id: 'route-model', provider: 'openai' }],
+        }),
+      );
+      // Editing the model onto a non-route id moves the key off the route for
+      // the candidate, but nothing is stored, so there is still nothing to
+      // remove.
+      await act(async () =>
+        click(container.querySelector<HTMLElement>('#live-realtime-model')!),
+      );
+      await act(async () =>
+        click(
+          Array.from(
+            document.querySelectorAll<HTMLElement>('[role="option"]'),
+          ).find((el) =>
+            el.textContent?.includes('settings.liveSetup.modelCustom'),
+          )!,
+        ),
+      );
+      act(() =>
+        setInputValue(
+          container.querySelector<HTMLInputElement>('[data-live-model-input]')!,
+          'custom-model',
+        ),
+      );
+      expect(removeKeyButton(container)).toBeUndefined();
+    });
+
+    it('does not mark the key required for a stored key when a model edit leaves the route', async () => {
+      const container = mount(
+        setupResult({
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+          keyConfigured: true,
+          storedKey: true,
+          enabled: false,
+          model: 'route-model',
+          models: [{ id: 'route-model', provider: 'openai' }],
+        }),
+      );
+      await act(async () =>
+        click(container.querySelector<HTMLElement>('#live-realtime-model')!),
+      );
+      await act(async () =>
+        click(
+          Array.from(
+            document.querySelectorAll<HTMLElement>('[role="option"]'),
+          ).find((el) =>
+            el.textContent?.includes('settings.liveSetup.modelCustom'),
+          )!,
+        ),
+      );
+      act(() =>
+        setInputValue(
+          container.querySelector<HTMLInputElement>('[data-live-model-input]')!,
+          'custom-model',
+        ),
+      );
+      // The stored key still applies to the candidate model, so the field is
+      // optional: a new key is required only when nothing usable is stored.
+      const key =
+        container.querySelector<HTMLInputElement>('#live-realtime-key')!;
+      expect(key.getAttribute('aria-required')).not.toBe('true');
+      expect(
+        container.querySelector(
+          'label[for="live-realtime-key"] .text-destructive',
+        ),
+      ).toBeNull();
+    });
+
+    it('keeps a stored key revocable while the model does not resolve', async () => {
       const setup = setupResult({
         enabled: false,
         keySource: 'settings',
@@ -226,6 +918,12 @@ describe('LiveVoiceSettingsCard', () => {
       act(() => {
         remove?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
+      expect(setup.update).not.toHaveBeenCalled();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .click(),
+      );
       expect(setup.update).toHaveBeenCalledWith({
         apiKey: { operation: 'clear' },
       });
@@ -316,27 +1014,27 @@ describe('LiveVoiceSettingsCard', () => {
       );
     });
 
-    it('saves a changed voice and nothing else', () => {
+    it('saves a changed voice and nothing else', async () => {
       const setup = setupResult({ voice: 'Tina' });
       const container = mount(setup);
       const input = container.querySelector<HTMLInputElement>(
         '#live-realtime-voice',
       )!;
       const save = container.querySelector<HTMLButtonElement>(
-        '[data-live-voice-save]',
+        '[data-live-settings-save]',
       )!;
       expect(input.value).toBe('Tina');
       expect(save.disabled).toBe(true);
 
       type(input, '  Ethan ');
       expect(save.disabled).toBe(false);
-      act(() => {
+      await act(async () => {
         save.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
       expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Ethan' });
     });
 
-    it('puts the saved voice back when the provider rejects the new one', async () => {
+    it('retains the draft voice when the provider rejects the configuration', async () => {
       const setup = setupResult({ voice: 'Tina' });
       vi.mocked(setup.update).mockRejectedValueOnce(new Error('unknown voice'));
       const container = mount(setup);
@@ -346,10 +1044,10 @@ describe('LiveVoiceSettingsCard', () => {
       type(input, 'Nope');
       await act(async () => {
         container
-          .querySelector('[data-live-voice-save]')!
+          .querySelector('[data-live-settings-save]')!
           .dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
-      expect(input.value).toBe('Tina');
+      expect(input.value).toBe('Nope');
     });
 
     it('makes the voice control read-only while the model does not resolve', () => {
@@ -367,7 +1065,10 @@ describe('LiveVoiceSettingsCard', () => {
       // Every voice change is refused invalid_live_model here; offering the
       // control would only discard what the user typed.
       expect(input?.disabled).toBe(true);
-      expect(container.querySelector('[data-live-voice-save]')).toBeNull();
+      expect(
+        container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .disabled,
+      ).toBe(true);
     });
 
     it('offers no voice control when the daemon predates selectable voices', () => {
@@ -379,7 +1080,10 @@ describe('LiveVoiceSettingsCard', () => {
       // refused with empty_live_setup_update, so the control must not invite
       // one.
       expect(input?.disabled).toBe(true);
-      expect(container.querySelector('[data-live-voice-save]')).toBeNull();
+      expect(
+        container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .disabled,
+      ).toBe(true);
     });
 
     it('notes that model and voice changes apply to the next call', () => {
@@ -389,18 +1093,26 @@ describe('LiveVoiceSettingsCard', () => {
       );
     });
 
-    it('offers a picker once there is more than one model to pick from', () => {
-      const single = mount(
-        setupResult({
-          model: 'omni-realtime',
-          models: [{ id: 'omni-realtime', provider: 'openai' }],
-        }),
-      );
-      expect(single.querySelector('[role="combobox"]')).toBeNull();
-      expect(single.querySelector('#live-realtime-model')?.textContent).toBe(
-        'omni-realtime',
-      );
+    it('offers the configured model and another id even without routes', async () => {
+      const single = mount(setupResult({ model: 'omni-realtime', models: [] }));
+      const trigger = single.querySelector<HTMLElement>('#live-realtime-model');
+      expect(trigger?.getAttribute('role')).toBe('combobox');
+      expect(trigger?.textContent).toContain('omni-realtime');
 
+      await act(async () => {
+        click(trigger!);
+        await Promise.resolve();
+      });
+      const labels = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).map((option) => option.textContent);
+      expect(labels).toEqual([
+        'omni-realtime',
+        'settings.liveSetup.modelCustom',
+      ]);
+    });
+
+    it('lists routes by name in the picker', () => {
       const several = mount(
         setupResult({
           model: 'omni-realtime',
@@ -410,9 +1122,41 @@ describe('LiveVoiceSettingsCard', () => {
           ],
         }),
       );
-      const picker = several.querySelector('[role="combobox"]');
-      expect(picker).not.toBeNull();
+      const picker = several.querySelector('#live-realtime-model');
       expect(picker?.textContent).toContain('Omni Realtime');
+    });
+
+    it('saves a typed model id picked through "other model id"', async () => {
+      const setup = setupResult({ models: [] });
+      const container = mount(setup);
+      await act(async () => {
+        click(container.querySelector<HTMLElement>('#live-realtime-model')!);
+        await Promise.resolve();
+      });
+      const other = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((option) =>
+        option.textContent?.includes('settings.liveSetup.modelCustom'),
+      );
+      await act(async () => {
+        click(other!);
+        await Promise.resolve();
+      });
+      const input = container.querySelector<HTMLInputElement>(
+        '[data-live-model-input]',
+      );
+      if (!input) throw new Error('custom model input was not rendered');
+      act(() => setInputValue(input, ' qwen3-omni-flash-realtime '));
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .click();
+        await Promise.resolve();
+      });
+
+      expect(setup.update).toHaveBeenCalledWith({
+        model: 'qwen3-omni-flash-realtime',
+      });
     });
 
     it('saves the qualified model picked from the picker', async () => {
@@ -442,6 +1186,12 @@ describe('LiveVoiceSettingsCard', () => {
         await Promise.resolve();
       });
 
+      expect(setup.update).not.toHaveBeenCalled();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .click(),
+      );
       expect(setup.update).toHaveBeenCalledWith({
         model: 'dashscope-intl:omni-realtime',
       });
@@ -496,6 +1246,119 @@ describe('LiveVoiceSettingsCard', () => {
       );
       expect(container.querySelector('[role="alert"]')?.textContent).toContain(
         'matches more than one realtimeOnly route',
+      );
+    });
+  });
+
+  describe('endpoint', () => {
+    const dedicated =
+      'https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+
+    function endpointInput(container: HTMLElement): HTMLInputElement {
+      const input = container.querySelector<HTMLInputElement>(
+        '#live-realtime-endpoint',
+      );
+      if (!input) throw new Error('endpoint input was not rendered');
+      return input;
+    }
+
+    async function save(container: HTMLElement): Promise<void> {
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+          .click();
+        await Promise.resolve();
+      });
+    }
+
+    it('hides the control on daemons that do not report an endpoint', () => {
+      const container = mount(setupResult({}));
+      expect(container.querySelector('[data-live-endpoint]')).toBeNull();
+    });
+
+    it('comes first, next to the key, and starts empty with the default as a hint', () => {
+      const container = mount(setupResult({ endpoint: '' }));
+      const input = endpointInput(container);
+      expect(input.value).toBe('');
+      expect(input.placeholder).toBe(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+      const fields = Array.from(
+        container.querySelectorAll(
+          '#live-realtime-endpoint, #live-realtime-key, #live-realtime-model, #live-realtime-voice',
+        ),
+      ).map((element) => element.id);
+      expect(fields).toEqual([
+        'live-realtime-endpoint',
+        'live-realtime-key',
+        'live-realtime-model',
+        'live-realtime-voice',
+      ]);
+    });
+
+    it('saves a base URL together with a key typed next to it', async () => {
+      const setup = setupResult({ endpoint: '' });
+      const container = mount(setup);
+      act(() =>
+        setInputValue(
+          container.querySelector<HTMLInputElement>('#live-realtime-key')!,
+          'dedicated-secret',
+        ),
+      );
+      act(() => setInputValue(endpointInput(container), ` ${dedicated} `));
+      await save(container);
+
+      expect(setup.update).toHaveBeenCalledWith({
+        endpoint: dedicated,
+        apiKey: { operation: 'replace', value: 'dedicated-secret' },
+      });
+    });
+
+    it('clears a stored base URL back to the default', async () => {
+      const setup = setupResult({ endpoint: dedicated });
+      const container = mount(setup);
+      const input = endpointInput(container);
+      expect(input.value).toBe(dedicated);
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-live-settings-save]',
+      )!;
+      expect(button.disabled).toBe(true);
+
+      act(() => setInputValue(input, ''));
+      expect(button.disabled).toBe(false);
+      await save(container);
+
+      expect(setup.update).toHaveBeenCalledWith({ endpoint: '' });
+    });
+
+    it('names a stored endpoint a call would refuse', () => {
+      const container = mount(
+        setupResult({
+          endpoint: 'https://example.com/compatible-mode/v1',
+          endpointError:
+            'The endpoint must be a DashScope or Model Studio (*.maas.aliyuncs.com) base URL, such as https://dashscope.aliyuncs.com/compatible-mode/v1.',
+        }),
+      );
+      expect(
+        container.querySelector('[data-live-endpoint-error]')?.textContent,
+      ).toContain('DashScope or Model Studio');
+    });
+
+    it('shows a route base URL read-only', () => {
+      const container = mount(
+        setupResult({
+          endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+        }),
+      );
+      const section = container.querySelector('[data-live-endpoint]')!;
+      expect(section.querySelector('input')).toBeNull();
+      expect(section.textContent).toContain(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+      expect(section.textContent).toContain(
+        'settings.liveSetup.endpointFromRoute',
       );
     });
   });
