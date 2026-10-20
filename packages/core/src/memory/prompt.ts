@@ -12,7 +12,7 @@ import {
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
-  trimIndexToBudget,
+  trimIndexToBudgetDetailed,
 } from './index-budget.js';
 
 const DIR_EXISTS_GUIDANCE =
@@ -161,6 +161,34 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
   'A memory that summarizes repo state (activity logs, architecture snapshots) is frozen in time. If the user asks about *recent* or *current* state, prefer `git log` or reading the code over recalling the snapshot.',
 ];
 
+const MAX_NAMED_DROPPED_ENTRIES = 3;
+const MAX_DROPPED_ENTRY_NAME_CHARS = 60;
+
+const INDEX_ENTRY_TITLE = /^\s*-\s*\[([^\]]+)\]/;
+
+function droppedEntryName(line: string): string {
+  const title = INDEX_ENTRY_TITLE.exec(line)?.[1]?.trim();
+  const text = title || line.trim();
+  return text.length > MAX_DROPPED_ENTRY_NAME_CHARS
+    ? `${text.slice(0, MAX_DROPPED_ENTRY_NAME_CHARS - 1)}…`
+    : text;
+}
+
+function describeDroppedEntries(dropped: readonly string[]): string {
+  const entries = dropped.filter((line) => line.trim().length > 0);
+  if (entries.length === 0) {
+    return '';
+  }
+  const names = entries
+    .slice(0, MAX_NAMED_DROPPED_ENTRIES)
+    .map((line) => `"${droppedEntryName(line)}"`)
+    .join(', ');
+  const rest = entries.length - MAX_NAMED_DROPPED_ENTRIES;
+  return ` Dropped ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'}: ${names}${
+    rest > 0 ? `, +${rest} more` : ''
+  }.`;
+}
+
 function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const trimmed = normalizeContent(indexContent).trim();
   const lines = trimmed.split('\n');
@@ -177,16 +205,33 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const entries = trimmed.endsWith(INDEX_TRUNCATION_NOTICE)
     ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length).split('\n')
     : lines;
-  const truncated = trimIndexToBudget(entries);
+  const { content, dropped } = trimIndexToBudgetDetailed(entries);
+  const overlongCount = entries.filter(
+    (line) => line.length > MAX_INDEX_LINE_CHARS,
+  ).length;
 
   const reason =
     wasCharTruncated && !wasLineTruncated
-      ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — index entries are too long`
+      ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
+          overlongCount > 0
+            ? 'index entries are too long'
+            : `too many index entries (${entries.length})`
+        }`
       : wasLineTruncated && !wasCharTruncated
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files.`;
+  // Name a lever that can actually move the number. Shortening entries only
+  // helps when one is over the per-line limit; with every entry legal the
+  // overflow is the entry COUNT, and no amount of rewording clears it.
+  const lever =
+    overlongCount > 0
+      ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
+      : ` No entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries, or raise the budget.`;
+
+  return `${content}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedEntries(
+    dropped,
+  )}${lever}`;
 }
 
 /**
