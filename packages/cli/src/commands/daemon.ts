@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
@@ -18,6 +18,8 @@ import {
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
+import { isFullyQualifiedPath } from '../config/storage-paths-lite.js';
+import { isLoopbackBind } from '../serve/loopback-binds.js';
 import {
   ignoreBrokenPipe,
   writeStderrLine,
@@ -26,11 +28,14 @@ import {
 import { sanitizeTerminalText } from '../ui/utils/textUtils.js';
 
 const HEALTH_TIMEOUT_MS = 1_000;
+const DETAIL_TIMEOUT_MS = 1_500;
 const STOP_TIMEOUT_MS = 10_000;
 const STOP_POLL_MS = 100;
 const FOLLOW_POLL_MS = 250;
 const PROCESS_START_TOLERANCE_MS = 5_000;
 const PROCESS_START_LEAD_MS = 10 * 60_000;
+const START_TIMEOUT_MS = 30_000;
+const START_POLL_MS = 100;
 
 type DaemonHealth = 'running' | 'unreachable' | 'stale';
 
@@ -42,6 +47,15 @@ interface DaemonStatusRow {
 interface StatusArgs {
   json?: boolean;
   prune?: boolean;
+  detail?: boolean;
+}
+
+interface DaemonDetailSummary {
+  status: string;
+  version?: string;
+  uptimeMs?: number;
+  sessions?: { active: number; admissionInFlight?: number };
+  issues: string[];
 }
 
 interface LogsArgs {
@@ -54,6 +68,16 @@ interface StopArgs {
   port?: number;
   all?: boolean;
   force?: boolean;
+}
+
+interface StartArgs {
+  port?: number;
+  hostname: string;
+  workspace?: string | string[];
+  web: boolean;
+  'require-auth': boolean;
+  token?: string;
+  json?: boolean;
 }
 
 function age(iso: string, now = Date.now()): number {
@@ -189,6 +213,27 @@ export function pidResolvableHere(
   return record.pidNamespace === currentNamespace;
 }
 
+/**
+ * A discovery record and an answering /health prove that a listener exists,
+ * not that it is the daemon that wrote the record: a foreign namespace cannot
+ * address the pid, and a recycled pid can answer for an unrelated listener.
+ * Only call this when the recorded process is addressable here, alive, and
+ * started when the record says it did.
+ */
+export function listenerIdentityVerified(
+  record: DaemonDiscoveryRecord,
+  currentNamespace: string | undefined = currentPidNamespace(),
+  alive: (pid: number) => boolean = isProcessAlive,
+  startedAt: (pid: number) => number | undefined = processStartTime,
+): boolean {
+  if (!pidResolvableHere(record, currentNamespace)) return false;
+  if (!alive(record.pid)) return false;
+  if (!Number.isFinite(Date.parse(record.startedAt))) return false;
+  const started = startedAt(record.pid);
+  if (started === undefined) return false;
+  return processStartMatchesRecord(record.startedAt, started);
+}
+
 export async function probeHealth(
   record: DaemonDiscoveryRecord,
 ): Promise<DaemonHealth> {
@@ -210,6 +255,116 @@ export async function probeHealth(
       ? 'stale'
       : 'unreachable';
   }
+}
+
+export function summarizeDaemonStatus(
+  value: unknown,
+): DaemonDetailSummary | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  const response = value as Record<string, unknown>;
+  if (response['v'] !== 1 || typeof response['status'] !== 'string') {
+    return undefined;
+  }
+  const daemon =
+    response['daemon'] !== null && typeof response['daemon'] === 'object'
+      ? (response['daemon'] as Record<string, unknown>)
+      : undefined;
+  const runtime =
+    response['runtime'] !== null && typeof response['runtime'] === 'object'
+      ? (response['runtime'] as Record<string, unknown>)
+      : undefined;
+  const rawSessions = runtime?.['sessions'];
+  const sessions =
+    rawSessions !== null && typeof rawSessions === 'object'
+      ? (rawSessions as Record<string, unknown>)
+      : undefined;
+  const issues = Array.isArray(response['issues'])
+    ? response['issues']
+        .map((issue) =>
+          issue !== null && typeof issue === 'object'
+            ? (issue as Record<string, unknown>)['message']
+            : undefined,
+        )
+        .filter((message): message is string => typeof message === 'string')
+    : [];
+  const version = daemon?.['qwenCodeVersion'];
+  const uptimeMs = daemon?.['uptimeMs'];
+  const active = sessions?.['active'];
+  const admissionInFlight = sessions?.['admissionInFlight'];
+  return {
+    status: response['status'],
+    ...(typeof version === 'string' ? { version } : {}),
+    ...(typeof uptimeMs === 'number' ? { uptimeMs } : {}),
+    ...(typeof active === 'number'
+      ? {
+          sessions: {
+            active,
+            ...(typeof admissionInFlight === 'number'
+              ? { admissionInFlight }
+              : {}),
+          },
+        }
+      : {}),
+    issues,
+  };
+}
+
+export async function fetchDaemonDetail(
+  record: DaemonDiscoveryRecord,
+  allowToken: boolean,
+): Promise<DaemonDetailSummary | string> {
+  const token =
+    record.auth === 'bearer'
+      ? process.env['QWEN_SERVER_TOKEN']?.trim()
+      : undefined;
+  if (token && !allowToken) {
+    return 'listener identity unverified; not sending QWEN_SERVER_TOKEN';
+  }
+  try {
+    const response = await fetch(
+      new URL('/daemon/status?detail=summary', record.url),
+      {
+        signal: AbortSignal.timeout(DETAIL_TIMEOUT_MS),
+        redirect: 'manual',
+        ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+      },
+    );
+    if (response.status === 401 || response.status === 403) {
+      return 'auth required; set QWEN_SERVER_TOKEN';
+    }
+    if (!response.ok) {
+      return `status endpoint returned HTTP ${response.status}`;
+    }
+    const summary = summarizeDaemonStatus(await response.json());
+    return summary ?? 'invalid status response';
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+export function formatDaemonDetail(
+  record: DaemonDiscoveryRecord,
+  detail: DaemonDetailSummary | string,
+): string {
+  if (typeof detail === 'string') {
+    return `qwen daemon: port ${record.port}: detail unavailable: ${sanitize(detail)}`;
+  }
+  const uptime =
+    detail.uptimeMs === undefined
+      ? 'unknown'
+      : formatDaemonAge(detail.uptimeMs);
+  const sessions =
+    detail.sessions === undefined
+      ? ''
+      : ` sessions=${detail.sessions.active}` +
+        (detail.sessions.admissionInFlight === undefined
+          ? ''
+          : `(+${detail.sessions.admissionInFlight} admitting)`);
+  return (
+    `qwen daemon: port ${record.port}: status=${sanitize(detail.status)}` +
+    ` version=${sanitize(detail.version ?? 'unknown')} uptime=${uptime}` +
+    `${sessions} issues=${detail.issues.length}`
+  );
 }
 
 export function selectDaemonEntries(
@@ -277,6 +432,338 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
   return !isProcessAlive(pid);
 }
 
+function resolveCliEntry(): string | undefined {
+  const configured = process.env['QWEN_CLI_ENTRY'];
+  if (configured) return path.resolve(configured);
+  const entry = process.argv[1];
+  return entry ? path.resolve(entry) : undefined;
+}
+
+function isJavaScriptEntry(entry: string): boolean {
+  return /\.(?:c|m)?js$|\.tsx?$/i.test(entry);
+}
+
+export function buildDaemonStartArgs(options: {
+  entry: string;
+  port: number;
+  hostname: string;
+  workspaces: readonly string[];
+  web: boolean;
+  requireAuth: boolean;
+}): { command: string; args: string[] } {
+  const childArgs = [
+    'serve',
+    '--port',
+    String(options.port),
+    '--hostname',
+    options.hostname,
+    '--no-token-qr',
+  ];
+  if (!options.web) childArgs.push('--no-web');
+  if (options.requireAuth) childArgs.push('--require-auth');
+  for (const workspace of options.workspaces) {
+    childArgs.push('--workspace', workspace);
+  }
+  return isJavaScriptEntry(options.entry)
+    ? {
+        command: process.execPath,
+        args: [...process.execArgv, options.entry, ...childArgs],
+      }
+    : { command: options.entry, args: childArgs };
+}
+
+export function formatDaemonStartSummary(
+  record: DaemonDiscoveryRecord,
+): string {
+  return [
+    `qwen daemon: started pid ${record.pid} on ${record.url}`,
+    `qwen daemon: workspace ${record.primaryWorkspace}`,
+    `qwen daemon: logs ${logPathFor(record)}`,
+    `qwen daemon: stop with \`qwen daemon stop --port ${record.port}\``,
+  ].join('\n');
+}
+
+const START_ENV_DROP = [
+  'QWEN_CODE_CLI',
+  'QWEN_CODE_NO_RELAUNCH',
+  'QWEN_CODE_SESSION_ID',
+  'QWEN_CODE_PROMPT_ID',
+  'QWEN_CODE_PROJECT_DIR',
+  'QWEN_CODE_SERVE',
+  'QWEN_CODE_AGENT_ID',
+  'QWEN_DAEMON_TOKEN',
+  'QWEN_CODE_MESSAGING_TOKEN',
+  'QWEN_CODE_MESSAGING_SOCKET',
+] as const;
+
+const START_LOG_MAX_AGE_MS = 24 * 60 * 60_000;
+
+/**
+ * Resolve a runtime/config directory against the launching directory unless
+ * it is already fully qualified. On Windows, `\runtime` and `/runtime` are
+ * absolute but depend on the current drive, so only drive-letter and UNC
+ * forms are fixed.
+ */
+export function resolveStartEnvPath(
+  value: string | undefined,
+  cwd: string,
+  pathApi: Pick<typeof path, 'isAbsolute' | 'resolve'> = path,
+  fullyQualified: (candidate: string) => boolean = isFullyQualifiedPath,
+): string | undefined {
+  if (value === undefined) return undefined;
+  // An explicit empty value is meaningful: the environment bootstrap uses
+  // Object.hasOwn to distinguish it from an unset variable.
+  if (value === '') return '';
+  if (value === '~' || value.startsWith('~/') || value.startsWith('~\\')) {
+    return value;
+  }
+  return fullyQualified(value) ? value : pathApi.resolve(cwd, value);
+}
+
+/**
+ * The child is a new daemon, not a worker of the session that launched it.
+ * Drop the parent's session/worker bindings and every private marker, then
+ * pin relative runtime directories to the launching directory so the parent
+ * and child keep using the same discovery/config namespace after the child
+ * changes its cwd to the workspace. The operator's model/auth environment is
+ * kept.
+ */
+export function buildDaemonStartEnv(
+  env: NodeJS.ProcessEnv,
+  token: string | undefined,
+  cwd: string = process.cwd(),
+): NodeJS.ProcessEnv {
+  const child = { ...env };
+  for (const key of START_ENV_DROP) {
+    delete child[key];
+  }
+  for (const key of Object.keys(child)) {
+    if (key.startsWith('QWEN_CODE_PRIVATE_')) {
+      delete child[key];
+    }
+  }
+  for (const key of ['QWEN_RUNTIME_DIR', 'QWEN_HOME'] as const) {
+    const resolved = resolveStartEnvPath(child[key], cwd);
+    if (resolved === undefined) {
+      delete child[key];
+    } else {
+      child[key] = resolved;
+    }
+  }
+  if (token) child['QWEN_SERVER_TOKEN'] = token;
+  return child;
+}
+
+/**
+ * Remove startup logs left by failed starts after a retention window.
+ */
+export function sweepStaleStartLogs(dir: string, now = Date.now()): void {
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith('start-') || !name.endsWith('.log')) continue;
+      const file = path.join(dir, name);
+      try {
+        if (now - fs.statSync(file).mtimeMs > START_LOG_MAX_AGE_MS) {
+          fs.rmSync(file, { force: true });
+        }
+      } catch {
+        // Best-effort sweep.
+      }
+    }
+  } catch {
+    // The discovery directory may not exist yet.
+  }
+}
+
+export async function canonicalizeStartWorkspaces(
+  rawWorkspaces: readonly string[],
+): Promise<string[]> {
+  const { validateAndCanonicalizeWorkspaceInput } = await import(
+    '../serve/run-qwen-serve.js'
+  );
+  return rawWorkspaces.map((workspace) =>
+    validateAndCanonicalizeWorkspaceInput(path.resolve(workspace)),
+  );
+}
+
+async function printStartLogTail(file: string): Promise<void> {
+  try {
+    const text = await fsp.readFile(file, 'utf8');
+    for (const line of tailLines(text, 40)) {
+      writeStderrLine(line);
+    }
+  } catch {
+    // The spawn may fail before the log has any content.
+  }
+}
+
+async function handleStart(argv: StartArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const entry = resolveCliEntry();
+  if (!entry) {
+    writeStderrLine(
+      'qwen daemon: cannot determine the CLI entry; run `qwen serve` directly.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const rawWorkspaces = Array.isArray(argv.workspace)
+    ? argv.workspace
+    : argv.workspace
+      ? [argv.workspace]
+      : [process.cwd()];
+  let workspaces: string[];
+  try {
+    workspaces = await canonicalizeStartWorkspaces(rawWorkspaces);
+  } catch (error) {
+    writeStderrLine(
+      `qwen daemon: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const hostname = argv.hostname;
+  const port = argv.port ?? 4170;
+  const token =
+    argv.token?.trim() || process.env['QWEN_SERVER_TOKEN']?.trim() || undefined;
+  if (argv['require-auth'] && !token) {
+    writeStderrLine(
+      'qwen daemon: --require-auth requires --token or QWEN_SERVER_TOKEN.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!isLoopbackBind(hostname) && !token) {
+    writeStderrLine(
+      'qwen daemon: a non-loopback bind requires QWEN_SERVER_TOKEN; ' +
+        'run `qwen serve` directly if you want an ephemeral token.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (argv.token) {
+    writeStderrLine(
+      'qwen daemon: --token is visible in this shell process list; prefer QWEN_SERVER_TOKEN.',
+    );
+  }
+
+  const primary = workspaces[0]!;
+  const existing = readDaemonDiscoveries().entries.find(
+    (candidate) =>
+      candidate.record.primaryWorkspace === primary &&
+      isProcessAlive(candidate.record.pid) &&
+      processStartMatchesRecord(
+        candidate.record.startedAt,
+        processStartTime(candidate.record.pid),
+      ),
+  );
+  if (existing && argv.port === undefined) {
+    writeStderrLine(
+      `qwen daemon: a daemon is already running for ${primary} on port ${existing.record.port}; pass --port to start another.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const logDir = resolveDaemonDiscoveryDir();
+  fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
+  sweepStaleStartLogs(logDir);
+  const startLog = path.join(logDir, `start-${process.pid}-${Date.now()}.log`);
+  const logFd = fs.openSync(startLog, 'a', 0o600);
+  const { command, args } = buildDaemonStartArgs({
+    entry,
+    port,
+    hostname,
+    workspaces,
+    web: argv.web,
+    requireAuth: argv['require-auth'],
+  });
+  const env = buildDaemonStartEnv(process.env, token);
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(command, args, {
+      cwd: primary,
+      env,
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      windowsHide: true,
+    });
+  } catch (error) {
+    fs.closeSync(logFd);
+    writeStderrLine(
+      `qwen daemon: could not spawn the daemon: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  fs.closeSync(logFd);
+
+  if (child.pid === undefined) {
+    writeStderrLine('qwen daemon: the daemon process did not start.');
+    process.exitCode = 1;
+    return;
+  }
+  child.unref();
+
+  let spawnError: Error | undefined;
+  child.once('error', (error) => {
+    spawnError = error;
+  });
+
+  // The record pid is the spawned child: serve blocks in blockForever() after
+  // its listener is ready, so the CLI relaunch path cannot replace it.
+  const deadline = Date.now() + START_TIMEOUT_MS;
+  let record: DaemonDiscoveryRecord | undefined;
+  while (Date.now() < deadline) {
+    if (spawnError) break;
+    record = readDaemonDiscoveries().entries.find(
+      (candidate) => candidate.record.pid === child.pid,
+    )?.record;
+    if (record) break;
+    if (child.exitCode !== null || child.signalCode !== null) break;
+    await new Promise((resolve) => setTimeout(resolve, START_POLL_MS));
+  }
+
+  if (record) {
+    if (argv.json === true) {
+      writeStdoutLine(
+        JSON.stringify({
+          pid: record.pid,
+          port: record.port,
+          url: record.url,
+          workspaces: record.workspaces,
+          primaryWorkspace: record.primaryWorkspace,
+          logPath: logPathFor(record),
+        }),
+      );
+    } else {
+      writeStdoutLine(formatDaemonStartSummary(record));
+    }
+    try {
+      fs.rmSync(startLog, { force: true });
+    } catch {
+      // Startup output is no longer needed after the record is published.
+    }
+    return;
+  }
+
+  writeStderrLine(
+    `qwen daemon: daemon pid ${child.pid} did not publish a discovery record within ${
+      START_TIMEOUT_MS / 1000
+    }s. The detached child may still start; run \`qwen daemon status\` to check.`,
+  );
+  if (spawnError) {
+    writeStderrLine(`qwen daemon: spawn failed: ${spawnError.message}`);
+  }
+  writeStderrLine(`qwen daemon: startup log: ${startLog}`);
+  await printStartLogTail(startLog);
+  process.exitCode = 1;
+}
+
 async function handleStatus(argv: StatusArgs): Promise<void> {
   ignoreBrokenPipe();
   const { entries, invalid } = readDaemonDiscoveries();
@@ -311,6 +798,20 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
     );
   }
 
+  const details = new Map<number, DaemonDetailSummary | string>();
+  if (argv.detail === true) {
+    await Promise.all(
+      rows
+        .filter((row) => row.health === 'running')
+        .map(async (row) => {
+          const record = row.entry.record;
+          const allowToken =
+            record.auth === 'bearer' && listenerIdentityVerified(record);
+          details.set(record.port, await fetchDaemonDetail(record, allowToken));
+        }),
+    );
+  }
+
   if (argv.json === true) {
     for (const row of rows) {
       writeStdoutLine(
@@ -324,6 +825,9 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
           auth: row.entry.record.auth,
           startedAt: row.entry.record.startedAt,
           ageMs: age(row.entry.record.startedAt),
+          ...(argv.detail === true
+            ? { detail: details.get(row.entry.record.port) ?? null }
+            : {}),
           logPath: logPathFor(row.entry.record),
         }),
       );
@@ -350,6 +854,18 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
         `${formatDaemonAge(age(record.startedAt)).padEnd(6)}` +
         `${workspaces}  ${sanitize(record.url)}`,
     );
+  }
+  if (argv.detail === true) {
+    for (const row of rows) {
+      const detail = details.get(row.entry.record.port);
+      if (detail !== undefined) {
+        writeStdoutLine(formatDaemonDetail(row.entry.record, detail));
+      } else {
+        writeStdoutLine(
+          `qwen daemon: port ${row.entry.record.port}: detail unavailable (${row.health})`,
+        );
+      }
+    }
   }
   writeStdoutLine('');
   writeStdoutLine('Use `qwen daemon logs --port <port> --follow` to tail one.');
@@ -597,6 +1113,51 @@ async function handleStop(argv: StopArgs): Promise<void> {
   if (failed) process.exitCode = 1;
 }
 
+const startCommand: CommandModule<unknown, StartArgs> = {
+  command: 'start',
+  describe: 'Start a local qwen serve daemon in the background',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        describe: 'TCP port (default 4170; 0 picks an ephemeral port)',
+      })
+      .option('hostname', {
+        type: 'string',
+        default: '127.0.0.1',
+        describe: 'Interface to bind',
+      })
+      .option('workspace', {
+        type: 'string',
+        array: true,
+        requiresArg: true,
+        describe:
+          'Workspace path; repeat for multiple; defaults to the current directory',
+      })
+      .option('web', {
+        type: 'boolean',
+        default: true,
+        describe: 'Serve the Web Shell; use --no-web for API-only',
+      })
+      .option('require-auth', {
+        type: 'boolean',
+        default: false,
+        describe: 'Require the bearer token even on loopback',
+      })
+      .option('token', {
+        type: 'string',
+        describe: 'Bearer token for the child; prefer QWEN_SERVER_TOKEN',
+      })
+      .option('json', {
+        type: 'boolean',
+        default: false,
+        describe: 'Output a JSON summary',
+      }),
+  handler: async (argv) => {
+    await handleStart(argv);
+  },
+};
+
 const statusCommand: CommandModule<unknown, StatusArgs> = {
   command: 'status',
   describe: 'List local qwen serve daemons and their health',
@@ -611,6 +1172,12 @@ const statusCommand: CommandModule<unknown, StatusArgs> = {
         type: 'boolean',
         default: false,
         describe: 'Remove records whose process is gone',
+      })
+      .option('detail', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Fetch /daemon/status for version, uptime, active sessions, and issue count',
       }),
   handler: async (argv) => {
     await handleStatus(argv);
@@ -672,6 +1239,7 @@ export const daemonCommand: CommandModule = {
   describe: 'Inspect and control local qwen serve daemons',
   builder: (yargs: Argv) =>
     yargs
+      .command(startCommand)
       .command(statusCommand)
       .command(logsCommand)
       .command(stopCommand)
