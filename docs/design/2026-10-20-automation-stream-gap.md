@@ -47,9 +47,13 @@ The tracker's FG11e row names three scenarios; the first two are not covered by
 the journal shapes above, so they are scoped here rather than dropped:
 
 - **Task stream resume.** Disconnect the run's task event stream between `fire`
-  and `settle`, then resume it, and assert the terminal task state is delivered
-  exactly once. The task stream carries its own cursor and expiry
-  (`ManagedTaskService`), so a SESSION snapshot watermark cannot stand in for it.
+  and `settle`, then resume it, and assert the delivered sequence: the prefix
+  received before the disconnect followed by the suffix received after it must
+  equal the task's persisted state-event sequence item by item, in order, with
+  no duplicate and no gap. `ManagedTaskEventStore.read` resumes strictly from
+  the task's own sequence, which is what makes the concatenation checkable.
+  Terminal state exactly once is an additional check, not the contract: a replay
+  that repeats a `running` transition still delivers one terminal state.
 - **List cursor stability.** Page the Session's runs list while a new run is
   inserted, and assert no entry is skipped or duplicated across the boundary.
 - **Session SSE resume.** Resume a Session stream with `Last-Event-ID`; this

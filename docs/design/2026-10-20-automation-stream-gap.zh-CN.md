@@ -38,8 +38,10 @@ tracker 的 FG11e 行点名三个场景；前两个不被上面的 journal 形�
 定界而不是丢弃：
 
 - **task 流续传。** 在 `fire` 与 `settle` 之间断开该 run 的 task 事件流，再续传，
-  断言终态恰好投递一次。task 流有自己的游标与过期判定（`ManagedTaskService`），
-  SESSION 的快照水位不能代替它。
+  断言投递序列：断开前收到的前缀与续传后收到的后缀拼接起来，必须与 task 持久化
+  的状态事件序列逐项、按序一致，无重复、无缺失。`ManagedTaskEventStore.read`
+  按 task 自身的 sequence 严格续读，这正是该拼接可核对的前提。终态恰好一次是
+  附加检查，而非契约：重放重复一条 running 迁移时，终态仍只交付一次。
 - **列表游标稳定。** 在插入新 run 的同时翻页 Session 的 runs 列表，断言跨页边界
   没有条目被跳过或重复。
 - **Session SSE 续传。** 用 `Last-Event-ID` 续传 Session 流；这首先需要确认
