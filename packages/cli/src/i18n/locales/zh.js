@@ -755,6 +755,9 @@ export default {
   // Settings Labels
   // ============================================================================
   'Code Mode Only (Experimental)': '仅代码模式（实验性）',
+  'Mods (Experimental)': 'Mods（实验性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本地交互终端和无界面会话中加载已启用扩展的实验性 Mods。修改后需重启。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',

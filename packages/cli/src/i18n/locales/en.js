@@ -759,6 +759,9 @@ export default {
   // Settings Labels
   // ============================================================================
   'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
+  'Mods (Experimental)': 'Mods (Experimental)',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',
