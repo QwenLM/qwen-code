@@ -7289,6 +7289,40 @@ describe('Session', () => {
       expect(sendOptions).toBeUndefined();
     });
 
+    it('re-lends the newest stripped id when a retry strips two orphans', async () => {
+      // Two turns cancelled before their send leave an orphan run that the
+      // strip hands back in history order, so the first dead id belongs to an
+      // older turn. The recorder keys the retried turn by its newest id;
+      // lending the older one would mark the re-send P1 while the recorder
+      // files it under P2, and cutPoint('P2') would then refuse the turn
+      // the user just retried (R11-1 arm 2).
+      const settled: Content = { role: 'user', parts: [{ text: 'settled' }] };
+      markApiHistoryPrompt(settled, 'test-session-id########5');
+      const older: Content = { role: 'user', parts: [{ text: 'first' }] };
+      markApiHistoryPrompt(older, 'test-session-id########6');
+      const newer: Content = { role: 'user', parts: [{ text: 'second' }] };
+      markApiHistoryPrompt(newer, 'test-session-id########7');
+      mockChat.getHistory = vi.fn().mockReturnValue([settled]);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([settled]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([older, newer]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [{ type: 'text', text: 'second' }],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.retry': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[0][4];
+      expect(sendOptions).toEqual({ promptId: 'test-session-id########7' });
+    });
+
     it('associates a recording-disabled fresh prompt with its admitted daemon identity', async () => {
       vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
       const snapshots: core.FileHistorySnapshot[] = [];

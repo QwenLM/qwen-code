@@ -6884,16 +6884,19 @@ export class Session implements SessionContext {
             // history. A turn cancelled between tool laps leaves a
             // continuation stamped with the same id as its surviving prompt
             // entry; lending it again would mark a second entry and the
-            // unique-match resolver would then refuse the turn.
+            // unique-match resolver would then refuse the turn. The strip
+            // comes back in history order and the recorder keys the retried
+            // turn by its newest id, so only the last dead id is this turn's.
             const survivingHistory = this.#getCurrentChat().getHistoryShallow();
+            const lastStrippedId = strippedPromptIds.at(-1);
             const historyPromptId = isFreshUserTurn
               ? promptId
-              : strippedPromptIds.find(
-                  (id) =>
-                    !survivingHistory.some(
-                      (entry) => getApiHistoryPromptId(entry) === id,
-                    ),
-                );
+              : lastStrippedId !== undefined &&
+                  !survivingHistory.some(
+                    (entry) => getApiHistoryPromptId(entry) === lastStrippedId,
+                  )
+                ? lastStrippedId
+                : undefined;
             // Channel markers cover both automated and human messages. Keep
             // that class excluded until its producers distinguish them; see
             // docs/design/daemon-user-prompt-submit-provenance.md.
