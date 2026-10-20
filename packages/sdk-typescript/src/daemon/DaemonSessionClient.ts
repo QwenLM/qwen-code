@@ -24,6 +24,8 @@ import type {
   DaemonBackgroundTurn,
   DaemonForkSessionResult,
   DaemonEvent,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
@@ -978,6 +980,22 @@ export class DaemonSessionClient {
       clientId: this.clientId,
       persist: opts?.persist,
     });
+  }
+
+  getMessageGroups(): Promise<DaemonMessageGroupsSnapshot> {
+    return this.client.getMessageGroups(this.sessionId);
+  }
+
+  deleteMessageGroups(
+    snapshot: string,
+    groupIds: string[],
+  ): Promise<DaemonDeleteMessageGroupsResult> {
+    return this.client.deleteMessageGroups(
+      this.sessionId,
+      snapshot,
+      groupIds,
+      this.clientId,
+    );
   }
 
   getRewindSnapshots(): Promise<{

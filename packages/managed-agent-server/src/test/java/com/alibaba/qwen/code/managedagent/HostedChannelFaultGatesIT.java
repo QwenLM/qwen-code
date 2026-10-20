@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.channel.ManagedChannelService;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.ManagedChannelService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

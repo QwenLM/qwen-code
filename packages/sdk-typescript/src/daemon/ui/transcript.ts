@@ -1765,7 +1765,10 @@ function appendStatusBlock(
   event?: DaemonUiEvent,
   opts: { clearActiveText?: boolean } = {},
 ): void {
-  const blockId = allocateBlockId(state, kind);
+  const allocated = allocateBlockId(state, kind);
+  const blockId = event?.promptId?.startsWith('local-command:')
+    ? `${event.promptId}:${allocated}`
+    : allocated;
   const block: DaemonStatusTranscriptBlock = {
     id: blockId,
     kind,
@@ -1785,9 +1788,7 @@ function appendStatusBlock(
       : {}),
     ...(event?.segmentId ? { segmentId: event.segmentId } : {}),
     ...(event?.type === 'error' && event.code ? { code: event.code } : {}),
-    ...(event?.type === 'error' && event.promptId
-      ? { promptId: event.promptId }
-      : {}),
+    ...(event?.promptId ? { promptId: event.promptId } : {}),
     ...(event?.type === 'error' && event.errorKind
       ? { errorKind: event.errorKind }
       : {}),
@@ -1891,7 +1892,14 @@ function createTextBlock(
   promptId?: string,
   segmentId?: string,
 ): DaemonTextTranscriptBlock {
-  const blockId = allocateBlockId(state, kind);
+  const allocated = allocateBlockId(state, kind);
+  const localCommandId =
+    typeof meta?.['localCommandId'] === 'string'
+      ? meta['localCommandId']
+      : promptId?.startsWith('local-command:')
+        ? promptId
+        : undefined;
+  const blockId = localCommandId ? `${localCommandId}:${allocated}` : allocated;
   return {
     id: blockId,
     kind,
