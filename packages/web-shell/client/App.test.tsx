@@ -1985,7 +1985,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           },
           'split view',
         ),
-        ...['s1', 's2', 's7'].map((sessionId) =>
+        ...['s1', 's2', 's3', 's4', 's5', 's6', 's7'].map((sessionId) =>
           React.createElement(
             'button',
             {
@@ -35909,6 +35909,96 @@ describe('App session callbacks', () => {
     },
   );
 
+  it.each([
+    { selected: ['s1', 's2'], expected: 'session-1,s1,s2' },
+    { selected: ['s1', 's1', 's2'], expected: 'session-1,s1,s2' },
+    {
+      selected: ['s1', 's2', 's3', 's4', 's5', 's6', 's7'],
+      expected: 'session-1,s1,s2,s3,s4,s5',
+    },
+  ])(
+    'keeps sidebar additions while the first split is opening: $selected',
+    async ({ selected, expected }) => {
+      const classification = deferred<never>();
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        features: ['standalone_sessions_v1'],
+      };
+      mockWorkspace.client.getStandaloneSession.mockReturnValue(
+        classification.promise,
+      );
+      const { container } = renderApp();
+      await flush();
+      for (const id of selected) {
+        await act(async () => {
+          container
+            .querySelector<HTMLButtonElement>(
+              `[data-testid="add-split-${id}"]`,
+            )!
+            .click();
+        });
+      }
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+      await act(async () => {
+        classification.reject(
+          new DaemonHttpError(
+            404,
+            { code: 'standalone_session_not_found' },
+            'not found',
+          ),
+        );
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe(expected);
+    },
+  );
+
+  it('discards pending sidebar additions after navigation cancels opening', async () => {
+    const classification = deferred<never>();
+    const notStandalone = new DaemonHttpError(
+      404,
+      { code: 'standalone_session_not_found' },
+      'not found',
+    );
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['standalone_sessions_v1'],
+    };
+    mockWorkspace.client.getStandaloneSession.mockReturnValue(
+      classification.promise,
+    );
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="add-split-s1"]')!
+        .click();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')!
+        .click();
+    });
+    mockWorkspace.client.getStandaloneSession.mockRejectedValue(notStandalone);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="add-split-s2"]')!
+        .click();
+    });
+    await flush();
+    const split = container.querySelector('[data-testid="split-initial"]');
+    expect(split?.textContent).toBe('session-1,s2');
+    await act(async () => classification.reject(notStandalone));
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-initial"]')?.textContent,
+    ).toBe('session-1,s2');
+  });
+
   it('keeps all six panes when the sidebar requests another session', async () => {
     saveSplitSessions(['s1', 's2', 's3', 's4', 's5', 's6']);
     const { container } = renderApp();
@@ -35964,6 +36054,67 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="split-initial"]')?.textContent,
     ).toBe('session-1,s1');
   });
+
+  it.each([
+    { initial: [], selected: 's1', next: 's2' },
+    { initial: ['session-1', 's1'], selected: 's2', next: 's7' },
+  ])(
+    'includes host-accepted panes while controlled split classification is pending: $initial',
+    async ({ initial, selected, next }) => {
+      const classification = deferred<never>();
+      const notStandalone = new DaemonHttpError(
+        404,
+        { code: 'standalone_session_not_found' },
+        'not found',
+      );
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        features: ['standalone_sessions_v1'],
+      };
+      mockWorkspace.client.getStandaloneSession.mockRejectedValue(
+        notStandalone,
+      );
+      const onSplitSessionIdsChange = vi.fn();
+      const { container, rerender } = renderApp({
+        splitSessionIds: initial,
+        onSplitSessionIdsChange,
+      });
+      await flush();
+      mockWorkspace.client.getStandaloneSession.mockReturnValue(
+        classification.promise,
+      );
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            `[data-testid="add-split-${selected}"]`,
+          )!
+          .click();
+      });
+      const accepted = [
+        ...(initial.length ? initial : ['session-1']),
+        selected,
+      ];
+      expect(onSplitSessionIdsChange).toHaveBeenLastCalledWith(accepted);
+      rerender({ splitSessionIds: accepted, onSplitSessionIdsChange });
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            `[data-testid="add-split-${next}"]`,
+          )!
+          .click();
+      });
+      expect(onSplitSessionIdsChange).toHaveBeenLastCalledWith([
+        ...accepted,
+        next,
+      ]);
+      await act(async () => classification.reject(notStandalone));
+      await flush();
+      expect(
+        container.querySelector('[data-testid="split-initial"]')?.textContent,
+      ).toBe(accepted.join(','));
+    },
+  );
 
   it('starts a closed split with current and selected sessions even after a full split', async () => {
     saveSplitSessions(['s1', 's2', 's3', 's4', 's5', 's6']);

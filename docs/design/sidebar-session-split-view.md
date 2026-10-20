@@ -14,18 +14,23 @@ sessions, deduplication, and a six-pane limit.
 - Sidebar adds a dropdown-only `split` action to its default action list,
   with English and Simplified Chinese labels. It follows the existing action
   allowlist, screen-size capability, busy state, and workspace eligibility
-  checks. Archived, standalone, Live, unknown, and untrusted sessions do not
+  checks. Only default workspace sessions (including legacy sessions without
+  source metadata) offer the action, matching the split session directory.
+  Archived, channel, standalone, Live, unknown, and untrusted sessions do not
   offer this action.
 - App appends the selected session when Split View is open. When it is
   closed, the menu opens the selected session alongside the current workspace
   session when available, without restoring the old pane list. The footer
   retains its existing behavior of restoring that list.
-  Opening reuses the existing split opener and classification. Appending
+  Opening reuses the existing split opener and classification. Additions made
+  while opening is pending are combined within the current classification
+  generation; navigation cancels that pending selection. Appending
   uses the same synchronous pane update as the existing picker: Sidebar
   already limits targets to eligible active workspace sessions. This
   preserves existing panes and unsent attachments. Embedded hosts
   controlling the pane list receive the existing change callback and retain
-  ownership of applying the change.
+  ownership of applying the change. Pending additions include only IDs the host
+  has already accepted through its controlled props.
 - Repeated sessions are not duplicated. At six panes, adding another session
   is disabled with the existing limit explanation; existing panes are kept.
 - SplitView reveals a newly added external pane by clearing maximization
@@ -54,7 +59,8 @@ Verify the real menu opens current + selected sessions, appends without
 replacing panes, ignores duplicates, and respects the six-pane limit.
 After leaving a full split, the menu must still open current + selected.
 Verify the new pane is visible after another pane was maximized. Check
-delayed standalone classification, pane identity, and consecutive additions.
+delayed standalone classification, pane identity, and consecutive additions,
+including the first opening, deduplication, capacity, and navigation cancellation.
 Check English/Chinese labels, action allowlists, archived and ineligible sessions,
 trusted secondary workspaces, small screens, controlled embedding, and the
 existing footer/picker behavior.

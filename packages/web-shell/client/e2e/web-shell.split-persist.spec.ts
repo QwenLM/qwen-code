@@ -142,6 +142,52 @@ test('adds sidebar sessions to split without losing existing panes or drafts @sm
     .toBe(JSON.stringify([MAIN_SESSION, SESSION_A, SESSION_B]));
 });
 
+test('keeps consecutive sidebar additions while the first split is opening', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  const scenario = createSplitScenario();
+  scenario.capabilities.features.push('standalone_sessions_v1');
+  await installScenario(page, scenario, testInfo);
+  let releaseClassification!: () => void;
+  const classification = new Promise<void>((resolve) => {
+    releaseClassification = resolve;
+  });
+  const classifiedSessions: string[] = [];
+  await page.route(/\/standalone\/sessions\/[^/?]+$/, async (route) => {
+    classifiedSessions.push(new URL(route.request().url()).pathname);
+    await classification;
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ code: 'standalone_session_not_found' }),
+    });
+  });
+  try {
+    await page.goto(`/session/${MAIN_SESSION}`);
+    for (const [name, id] of [
+      ['Session A', SESSION_A],
+      ['Session B', SESSION_B],
+    ]) {
+      await openSessionMenu(page, name);
+      await page
+        .getByRole('menuitem', { name: 'Add to Split View', exact: true })
+        .click();
+      await expect
+        .poll(() => classifiedSessions.some((path) => path.endsWith(`/${id}`)))
+        .toBe(true);
+    }
+    await expect(page.getByTestId('split-view')).toHaveCount(0);
+  } finally {
+    releaseClassification();
+  }
+  const split = page.getByTestId('split-view');
+  await expect(split.getByTestId('chat-pane')).toHaveCount(3);
+  for (const id of [MAIN_SESSION, SESSION_A, SESSION_B]) {
+    await expect(split.locator(`[data-pane-session-id="${id}"]`)).toBeVisible();
+  }
+});
+
 test('disables the sidebar split action when six panes are open', async ({
   page,
 }, testInfo) => {

@@ -9757,6 +9757,10 @@ export function App({
   // Generation recorded when the latest classification started; differs from
   // the live generation only while a superseded classification is in flight.
   const splitClassificationStartGenerationRef = useRef(0);
+  const pendingSplitOpenRef = useRef<{
+    generation: number;
+    sessionIds: string[];
+  } | null>(null);
   splitSessionIdsRef.current = splitSessionIds;
   const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
   useEffect(() => {
@@ -10333,6 +10337,8 @@ export function App({
       const generation = splitClassificationGenerationRef.current + 1;
       splitClassificationGenerationRef.current = generation;
       splitClassificationStartGenerationRef.current = generation;
+      pendingSplitOpenRef.current =
+        requested.length > 0 ? { generation, sessionIds: requested } : null;
       // A new decision is pending: un-settle so reclaim waits for it. The
       // empty-request branch below settles without classifying.
       if (requested.length > 0) setSplitViewSettled(false);
@@ -10356,6 +10362,9 @@ export function App({
         return;
       }
       void sanitizeSplitSessionIds(requested).then((sanitized) => {
+        if (pendingSplitOpenRef.current?.generation === generation) {
+          pendingSplitOpenRef.current = null;
+        }
         if (splitClassificationGenerationRef.current !== generation) {
           // Superseded: settle only when no newer classification started,
           // otherwise the newer one owns the decision.
@@ -10423,6 +10432,8 @@ export function App({
     const generation = splitClassificationGenerationRef.current + 1;
     splitClassificationGenerationRef.current = generation;
     splitClassificationStartGenerationRef.current = generation;
+    pendingSplitOpenRef.current =
+      requested.length > 0 ? { generation, sessionIds: requested } : null;
     // A new decision is pending: un-settle so reclaim waits for it. The
     // empty-request branch below settles without classifying.
     if (requested.length > 0) setSplitViewSettled(false);
@@ -10450,6 +10461,9 @@ export function App({
       return;
     }
     void sanitizeSplitSessionIds(requested).then((sanitized) => {
+      if (pendingSplitOpenRef.current?.generation === generation) {
+        pendingSplitOpenRef.current = null;
+      }
       if (splitClassificationGenerationRef.current !== generation) {
         if (
           splitClassificationStartGenerationRef.current !==
@@ -10499,24 +10513,33 @@ export function App({
   const addSessionToSplitView = useCallback(
     (sessionId: string) => {
       if (!isLargeScreen || !projectFeaturesAvailable) return;
+      const pending = pendingSplitOpenRef.current;
+      // Only merge an opening request that navigation has not superseded.
+      const previous =
+        pending?.generation === splitClassificationGenerationRef.current
+          ? pending.sessionIds
+          : mainView === 'split'
+            ? splitSessionIds
+            : undefined;
       if (
-        mainView === 'split' &&
-        (splitSessionIds.includes(sessionId) ||
-          splitSessionIds.length >= MAX_SPLIT_PANES)
+        previous &&
+        (previous.includes(sessionId) || previous.length >= MAX_SPLIT_PANES)
       ) {
         return;
       }
       closeMobileDrawer();
-      if (mainView === 'split') {
-        handleSplitPanesChange([...splitSessionIds, sessionId]);
+      if (mainView === 'split' && previous) {
+        handleSplitPanesChange([...previous, sessionId]);
         return;
       }
       const requested = Array.from(
-        new Set(
-          workspaceContextActive && connection.sessionId
-            ? [connection.sessionId, sessionId]
-            : [sessionId],
-        ),
+        new Set([
+          ...(previous ??
+            (workspaceContextActive && connection.sessionId
+              ? [connection.sessionId]
+              : [])),
+          sessionId,
+        ]),
       );
       if (externalSplitControlled) {
         onSplitSessionIdsChangeRef.current?.(requested);

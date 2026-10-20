@@ -987,6 +987,31 @@ describe('WebShellSidebar session split action', () => {
     );
   });
 
+  it('does not offer secondary workspace channel sessions for split', async () => {
+    enableChannelOrganization();
+    useWorkspaceSessionCatalog(async (cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState === 'active'
+        ? [
+            {
+              sessionId: 'secondary-channel',
+              workspaceCwd: cwd,
+              displayName: 'Secondary channel',
+              sourceType: 'channel',
+            },
+          ]
+        : [],
+    );
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView: vi.fn(),
+    });
+    await switchSessionSource('Channels');
+    await expandWorkspace('other');
+    const items = await openSessionMenuItems('Secondary channel');
+    expect(items).toContain('Rename');
+    expect(items).not.toContain('Add to Split View');
+  });
+
   it('does not offer archived sessions for split', async () => {
     archived.sessions.push({
       sessionId: 'archived',

@@ -152,6 +152,7 @@ import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 import { UpdateControl } from './UpdateControl';
@@ -4923,7 +4924,8 @@ export function WebShellSidebar({
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       const showSplit =
         !standalone &&
-        session.sourceType !== 'qwen-live' &&
+        (session.sourceType === undefined ||
+          session.sourceType === WEB_SHELL_SESSION_SOURCE_TYPE) &&
         canOpenSplitView &&
         Boolean(onAddSessionToSplitView) &&
         sessionActionItems.has('split') &&
