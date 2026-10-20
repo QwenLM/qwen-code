@@ -29140,6 +29140,10 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
       skipMcpDiscovery: true,
       skipSkillManager: true,
       skipFileCheckpointing: true,
+      // SkillTool's constructor requires the SkillManager this Config
+      // deliberately skips; warm the registry leniently so it is logged and
+      // skipped instead of aborting initialize().
+      lenientToolWarmup: true,
     });
 
     const { agent, agentPromise } = await bootAgent(
