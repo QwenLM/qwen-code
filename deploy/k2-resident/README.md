@@ -131,6 +131,13 @@ saved result without resending; a new version needs an explicit new invocation,
 with at most eight attempts in total. HTTP replies and Pod absence never release
 the storage or reopen the Workspace. Physical release and reuse are deferred.
 
+A lost reply can leave `UNKNOWN` even when Kubernetes accepted the deletion.
+Once the original Pod has a `deletionTimestamp` or is missing, a different
+`resourceVersion` cannot authorize another DELETE. Same-version replay still
+returns the retained attempt without contacting Kubernetes; use `inspect` to
+read that receipt. The eight-attempt cap only permits explicit attempts while
+the original Pod still passes every verification check.
+
 See the complete retirement design in [English](../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
 and [简体中文](../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md).
 Native ACK retirement qualification remains pending.

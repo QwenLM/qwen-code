@@ -99,6 +99,11 @@ reply. Restart and same-version retry read the retained attempt without resendin
 even when Kubernetes is unavailable. Another explicit attempt requires a freshly
 verified different version. The counter and fence survive restart.
 
+If Kubernetes accepted a DELETE but its reply was lost, the Pod may already have
+a `deletionTimestamp` or be absent. No different version can authorize a new
+DELETE in either state. Same-version replay and `inspect` still read the durable
+receipt; the eight-attempt cap does not override the original-Pod checks.
+
 Retain actual HTTP status and at most 64 KiB of response bytes. A complete response
 is `RETURNED`, including 200/202/404/409/503; incomplete/oversized replies and
 transport failure remain `UNKNOWN`. Do not manufacture a response. `inspect`

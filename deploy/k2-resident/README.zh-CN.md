@@ -110,6 +110,11 @@ Kubernetes API 核验原资源，再记录带原 UID/resourceVersion 前置条�
 显式再次调用，总计最多八次。HTTP 回复和 Pod 缺失不会释放存储或重新开放 Workspace。
 物理释放和复用延后。
 
+即使 Kubernetes 已接受删除，回复丢失仍可能留下 `UNKNOWN`。原 Pod 一旦具有
+`deletionTimestamp` 或已缺失，不同 `resourceVersion` 也不能授权再次 DELETE。
+同版本重放仍只返回保留尝试，不访问 Kubernetes；使用 `inspect` 读取该回执。
+最多八次的上限只允许在原 Pod 仍通过全部核验时显式发起尝试。
+
 完整退役设计见[English](../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
 与[简体中文](../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md)。
 原生 ACK 退役资格验证继续待完成。
