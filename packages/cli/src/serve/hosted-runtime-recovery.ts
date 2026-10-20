@@ -49,6 +49,7 @@ import {
   type HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import {
+  HOSTED_TOOL_INPUT_ORDER,
   hostedHookOccurrenceId,
   HostedHookRecoveryRequiredError,
   semanticInputDigest,
@@ -1052,7 +1053,14 @@ async function hostedSkillResponse(
       new TextDecoder('utf-8', { fatal: true }).decode(
         await session.resources.read(record.planRef),
       ),
-    ) as { refusedInputDigest?: unknown };
+    ) as { refusedInputDigest?: unknown; toolInputOrder?: unknown };
+    // A Skill's PreToolUse runs on the model's input in either order, but a
+    // plan from an unknown order is no evidence of what it decided.
+    if (
+      plan.toolInputOrder !== undefined &&
+      plan.toolInputOrder !== HOSTED_TOOL_INPUT_ORDER
+    )
+      throw new HostedHookRecoveryRequiredError();
     if (plan.refusedInputDigest !== undefined) {
       const definition = JSON.parse(
         new TextDecoder('utf-8', { fatal: true }).decode(

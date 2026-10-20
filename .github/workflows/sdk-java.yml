@@ -718,16 +718,19 @@ jobs:
     # 150 s, moving the fork to 9261 s and Verify to 165 minutes; the FG13b
     # Hook dispatch store-rejection cell adds 150 s, moving the fork to
     # 9411 s and Verify to 167 minutes; the FG11f publication cell adds 82 s, so
-    # the fork moves to 9493 s and Verify to 169 minutes; the FG13b Hook result
-    # store-rejection cell adds 150 s, moving the fork to 9643 s and Verify to
-    # 171 minutes; the FG13b Hook plan-result store-rejection cell adds 150 s,
-    # moving the fork to 9793 s and Verify to 174 minutes, wrapping
+    # the fork moves to 9493 s and Verify to 169 minutes; the FG12f delivery
+    # cell adds 30 s, moving the fork to 9523 s and Verify to 169 minutes; the
+    # FG11f refusing-arms cells add 242 s, moving the fork to 9765 s and
+    # Verify to 173 minutes; the FG13b Hook result store-rejection cell adds
+    # 150 s, moving the fork to 9915 s and Verify to 176 minutes; the FG13b
+    # Hook plan-result store-rejection cell adds 150 s, moving the fork to
+    # 10065 s and Verify to 178 minutes, wrapping
     # fork + 600 s plus margin;
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 264 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 277
+    # checks): 268 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 281
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -816,8 +819,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 9793 s, so the step wraps to fork + 600 s plus margin (174 min).
-        timeout-minutes: 174
+        # 10065 s, so the step wraps to fork + 600 s plus margin (178 min).
+        timeout-minutes: 178
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
