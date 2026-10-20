@@ -2,9 +2,9 @@
 
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
-Status: `disable-span` and the per-run cancel cell are implemented and green;
-`retire-at-intent`, `close-queued-input` and the rest of the cancellation matrix
-are scoped but not implemented.
+Status: `disable-span`, the per-run cancel cell and `retire-at-intent` are
+implemented and green; `close-queued-input` and the rest of the cancellation
+matrix are scoped but not implemented.
 
 Issue: #14446, the FG11 tracker. The `d` row records per-run task
 cancellation as implemented by #14526, and states that retire, disable,
@@ -39,16 +39,17 @@ faults: `held(...)` parks an operation before the Harness sees it,
 `relayed(...)` drops one answer, and the scanner's own scheduler is held while
 a case arms.
 
-Only `disable-span` runs on that stock fixture. `retire-at-intent` needs a hold
-between the run commit and the wake turn, and `close-*` needs a Session close
-the fixture can currently accept; Limits records both instead of claiming they
-are ready.
+`disable-span` and `retire-at-intent` run on that stock fixture: parking
+`fire_run` in the relay is the intent hold this slice needed, because the
+occurrence is committed and the run has not reached the Harness. `close-*`
+still needs a Session close the fixture cannot accept, which Limits records
+instead of claiming it is ready.
 
 ## Slice 1: retire, disable, close
 
 | Cell                 | Setup                                                                                  | Expected                                                                                                                                                                                   |
 | -------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `retire-at-intent`   | Retire while the claim sits at the Harness as `intent` (the relay parks the operation) | The claim settles `cancelled` with `not_started_proven`; the occurrence is not `unknown`.                                                                                                  |
+| `retire-at-intent`   | Retire while the claim sits at the Harness as `intent` (the relay parks the operation) | The occurrence settles `skipped` for `definition_retired` with no attempt; no run commits and no model Turn starts, and the claim is never `unknown`.                                      |
 | `disable-span`       | Create the definition disabled, let two due slots pass, then enable it                 | The disabled span records no `fired` occurrence and no run; the first slot after re-enabling fires once.                                                                                   |
 | `close-queued-input` | Close the Session while an automation input is queued behind a held turn               | The queued input settles without a model Turn; a live definition on the closed Session records `skipped(session_not_active)` for each slot, which is today's behaviour and is pinned here. |
 
@@ -79,11 +80,14 @@ around it.
 - These cells do not exercise Workspace tools or publication; FG11f owns
   those, and is blocked on the execution-authority gap recorded in its
   design.
-- `retire-at-intent` needs a claim to exist. With the relay holding
-  `fire_run` before the Harness, Spring never commits an `automation_run`, so
-  the first construction observed an empty run list and nothing to settle
-  `cancelled`. Staging it needs a hold between the run commit and the wake
-  turn, which this fixture does not expose yet.
+- `retire-at-intent` pins what the code does, not what this record first
+  proposed. Parking `fire_run` at the relay leaves the occurrence committed and
+  unstarted, and retiring there settles it `skipped` with `definition_retired`
+  and zero attempts. No `automation_run` commits, so `cancelled` — the state a
+  cancel gives a run that exists — never arises, and `not_started_proven` stays
+  a property of the Harness's own execution line, which this lane could only
+  read through a run it does not create. The cell asserts the skip, the spent
+  attempt count, the absent run and the absent Turn.
 - `close-*` needs a workspace-backed Session: the automation API refuses a
   Session without one (`session_not_found`), while closing a workspace
   Session in this fixture answers `409 workspace_unavailable` with
