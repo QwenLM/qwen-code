@@ -17608,6 +17608,71 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('reads capped shell-task runtime output from the owning session registry', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const dir = await realFsPromises.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runtime-detail-'),
+    );
+    const outputFile = path.join(dir, 'task.output');
+    const output = 'x'.repeat(9000) + '\nfinal output';
+    await realFsPromises.writeFile(outputFile, output);
+    const get = vi.fn((id: string) =>
+      id === 'bg_test' ? { status: 'completed', outputFile } : undefined,
+    );
+    Object.assign(innerConfig, {
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({ get }),
+    });
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const detail = await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.sessionTaskRuntime,
+        { sessionId, taskId: 'bg_test' },
+      );
+      expect(detail).toMatchObject({
+        v: 1,
+        sessionId,
+        taskId: 'bg_test',
+        runtime: {
+          outputBytes: Buffer.byteLength(output),
+          outputModifiedAt: expect.any(Number),
+          outputTail: expect.stringContaining('final output'),
+          outputTailTruncated: true,
+        },
+      });
+      expect(detail['runtime']).not.toHaveProperty('memoryBytes');
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTaskRuntime, {
+          sessionId,
+          taskId: 'other',
+        }),
+      ).resolves.toMatchObject({ runtime: null });
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTaskRuntime, {
+          sessionId,
+          taskId: '',
+        }),
+      ).rejects.toThrow('Invalid or missing sessionId/taskId');
+      expect(get).toHaveBeenCalledWith('bg_test');
+      expect(get).toHaveBeenCalledWith('other');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await realFsPromises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('cancels running shell tasks', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

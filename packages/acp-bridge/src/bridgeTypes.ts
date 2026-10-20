@@ -63,6 +63,7 @@ import type {
   ServeSessionResourcesStatus,
   ServeSessionSavedWorkflowStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeSessionTaskRuntimeStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
   ServeWorkflowActionInput,
@@ -2565,6 +2566,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     opts?: { includeWorkflows?: boolean },
   ): Promise<ServeSessionTasksStatus>;
+
+  /**
+   * Read on-demand runtime detail for one shell task: the process-tree RSS,
+   * the captured-output size/mtime, and the output tail. Read-only; returns
+   * `runtime: null` for an unknown/evicted task or a non-shell task.
+   */
+  getSessionTaskRuntime(
+    sessionId: string,
+    taskId: string,
+  ): Promise<ServeSessionTaskRuntimeStatus>;
 
   /** Read persisted and live subagents for a live session. */
   getSessionAgentsStatus(sessionId: string): Promise<ServeSessionAgentsStatus>;
