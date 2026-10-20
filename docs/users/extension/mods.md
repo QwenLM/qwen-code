@@ -85,11 +85,29 @@ the current Mod command; the next command waits for worker cancellation to
 settle. Clear, resume and branch retain the loaded modules and their variables,
 send `session.end` for the replaced session, and do not repeat `session.start`.
 
-Interactive support currently covers commands, lifecycle and logs. Explicit
-`tool.call`, `tool.check` and `tool.*` registrations reject initialization before
-a model request. Broad wildcard or negated patterns that also match tool events
-receive a visible diagnostic and apply only to supported events. Tool
-interception below is available only in headless sessions.
+Interactive tool middleware runs for model-initiated tools in the local Ink and
+OpenTUI main session. Explicit tool subscriptions and matching wildcard patterns
+use the same tool protocol as headless sessions. Client-initiated slash-command
+tools keep their native path and do not trigger a model continuation.
+
+A synthetic result or denial completes the logical call without inventing a
+native invocation. Every real attempt retains its execution facts and write
+observations, even when a Mod selects an earlier result or withholds a later
+result. The model and recording receive one final result after Mod unwind.
+Native permission denials and required approvals remain authoritative.
+
+The 60-second root wall-clock limit still includes native execution and human
+approval waiting. Expiry cancels outstanding work and drains it before releasing
+the queue; old approvals cannot start a new execution. Esc and accepted session
+switches also revoke the old session's queued tools and approval callbacks.
+
+Tool middleware uses one native scheduler batch per attempt, so classic
+PostToolBatch hooks run for each real attempt, never for synthetic results or
+logical aggregation. Each attempt validates independently; the native scheduler's
+three-identical-validation-failures diagnostic does not accumulate across Mod
+attempts. Invalid inputs remain rejected and the 64-attempt limit remains.
+Sessions without tool middleware retain their existing scheduler, parallelism
+and validation diagnostic behavior.
 
 If Mod initialization fails in an interactive terminal, the error remains visible
 and the input stays available for the built-in `/help` and `/quit` commands.
@@ -105,7 +123,7 @@ this recovery exception.
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
-| Tools      | In headless sessions only, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                   |
+| Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                                       |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
@@ -172,8 +190,8 @@ export function register(on) {
 
 Every ordinary `tool.call` next starts a fresh native tool attempt: validation,
 classic hooks, permissions, approvals and invocation guards all still apply.
-Additional attempts count against `--max-tool-calls`; catch replay adds no
-attempt. Sessions with tool middleware serialize tool calls, including parallel
+In headless runs, additional attempts count against `--max-tool-calls`; catch replay adds no
+attempt. Interactive terminals retain their existing usage counters and do not add a run-budget setting. Sessions with tool middleware serialize tool calls, including parallel
 next calls, because rewritten arguments may introduce side effects. One root
 call permits at most 64 native attempts and 32 outstanding host operations.
 The 60-second root limit includes native execution and time spent waiting for
@@ -309,24 +327,24 @@ fails explicitly; it is not sent to the model.
 
 `next` exposes `event`, `is(pattern)`, frozen `origin`, `signal`, and a fresh frozen
 `budget` snapshot with `ms` and `remainingMs`. Catch additionally receives `called`
-and `error.kind` (`throw`, `timeout` or `re-entry`). Engine events use origin
+and `error.kind` (`throw` or `timeout`). Engine events use origin
 `{ plugin: 'engine', tier: 'core' }`; Mod API events identify the calling plugin
 with tier `user`. Managed-tier `next.to`, tracing and custom namespace `lent`
 recovery are not available.
 
 API events begin at the chain head. Their input is the command specification or
 `{text, to}` log payload. Return `next(e)`, `{value}` to answer, or `{deny: reason}`
-to reject the API call. Immediate self-reentry skips that registration; active
-ancestor registrations can use their catch. Re-entry catch cannot call `$` APIs,
-and its `next` reuses the original event once. `ui.log` remains a void notification:
+to reject the API call. Registrations already in the event's call chain are
+skipped, including their catches. Other registrations in the same plugin remain
+eligible. This re-entry behavior follows Claude Code 2.1.301.
+`ui.log` remains a void notification:
 `await $.ui.log(...)` does not wait for interceptors. The headless boundary drains
 queued notifications before returning output.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
 cross-plugin `next` or API calls. Pending void `ui.log` notifications do not pause
-the caller's budget. Catch and re-entry recovery use a one-second budget.
-Re-entry dispatch shares this shorter budget with other registrations in
-that plugin. Qwen additionally caps each root dispatch at 60 seconds and each
+the caller's budget. Catch recovery uses a one-second budget.
+Qwen additionally caps each root dispatch at 60 seconds and each
 uninterrupted guest execution slice at 10 seconds. All `session.end` work shares
 1.5 seconds. An outer handler that finishes early abandons pending downstream
 work; cancellation never starts a fallback operation. Retained next/API functions

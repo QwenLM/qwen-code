@@ -209,6 +209,22 @@ The driver keeps its three existing arming primitives and adds:
   the captured identity and `protocolVersion: 1`; answers are returned to
   the case as `{status, code}` for the flag assertions.
 
+FG8d Sessions run a 10 s writer lease (`CANCEL_DRAIN_LEASE_MS`), the
+same length as FG8c's crash Sessions (`CRASH_LEASE_MS`, landed in
+#14407). The six FG8d cases share one tenant, and the fixture admits
+four active captures (`active-captures=4`). A capture a case leaves
+OPEN keeps the expiry its last grant renewal set (the writer lease or the
+activation, whichever ends first), and grant renewals stop once the tool
+call that launched the run returns, so under the default 60 s lease the
+capture holds its slot for up to a minute after the case moves on. On a
+fast host `drain-release` found all four slots held: its reservation was
+refused (the store's "Publication capacity exhausted", which the Harness
+logged as "The request is invalid."), and the run never started. Under a
+10 s lease a capture stops counting within ten seconds of its last
+renewal. FG8d's one store arm, `dropNextStopRevision`, matches a single
+stop-revision commit, so the extra writer and activation renewals never
+trip it.
+
 The step/diagnose/FIFO discipline is unchanged; every new wait is a
 state, never a sleep; the producers provide `bg-started.txt`,
 `progress.txt` and the gate FIFOs; per-case directories stay the

@@ -24,18 +24,41 @@ import {
   resolveHostedAction,
 } from './hosted-tool-approval.js';
 import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
+import { hostedPublicPlanActive } from './hosted-plan-mode.js';
 
 afterEach(() => vi.restoreAllMocks());
 
 it.each(
-  ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
-    [randomUUID(), 'mon_1:notify:3', `arun_${'a'.repeat(32)}:input`].map(
-      (promptId) => ({ decision, promptId }),
+  ['allow', 'deny', 'cancelled', 'expired']
+    .flatMap((decision) =>
+      [0, 16].flatMap((round) =>
+        [randomUUID(), 'mon_1:notify:3', `arun_${'a'.repeat(32)}:input`].map(
+          (promptId) => ({
+            decision,
+            promptId,
+            round,
+            planMode: false,
+            profile: 'hosted-workspace-files/1',
+          }),
+        ),
+      ),
+    )
+    .concat(
+      ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
+        ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].map(
+          (profile) => ({
+            decision,
+            promptId: randomUUID(),
+            round: 1,
+            planMode: true,
+            profile,
+          }),
+        ),
+      ),
     ),
-  ),
 )(
-  'restores the original native batch and final Action under a replacement owner ($decision, $promptId)',
-  async ({ decision, promptId }) => {
+  'restores the original native batch and final Action under a replacement owner ($decision, $promptId, round=$round)',
+  async ({ decision, promptId, round, planMode, profile }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-step3-baseline-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -64,7 +87,7 @@ it.each(
           Buffer.from(
             JSON.stringify({
               engine: 'managed',
-              toolProfile: 'hosted-workspace-files/1',
+              toolProfile: profile,
             }),
           ),
         ),
@@ -93,11 +116,24 @@ it.each(
         {
           inputId: promptId,
           turnId: promptId,
-          source: 'baseline-probe',
+          source: planMode ? 'hosted-harness' : 'baseline-probe',
           contentRef: await resources.publish('managed-input', content),
           admissionRef: await resources.publish(
             'managed-admission',
-            Buffer.from('{}'),
+            Buffer.from(
+              JSON.stringify(
+                planMode
+                  ? {
+                      promptId,
+                      approvalSelection: {
+                        mode: 'yolo',
+                        revision: 1,
+                        planMode: true,
+                      },
+                    }
+                  : {},
+              ),
+            ),
           ),
           deadline: null,
           wakeReason: 'input',
@@ -149,17 +185,21 @@ it.each(
         undefined,
         undefined,
         {
-          settings: { mode: 'default', timeoutMs: 60_000 },
+          settings: { mode: planMode ? 'yolo' : 'default', timeoutMs: 60_000 },
           waiters: new HostedApprovalWaiters(),
         },
+        { profile, publicPlanMode: planMode },
       );
       const call = {
-        name: 'write_file',
+        name: planMode ? 'exit_plan_mode' : 'write_file',
         callId: 'original-call',
-        args: { file_path: 'original.txt', content: 'one original batch' },
+        args: planMode
+          ? { plan: '# Plan\nRead the files, then update original.txt.' }
+          : { file_path: 'original.txt', content: 'one original batch' },
         isClientInitiated: false,
         prompt_id: promptId,
       };
+      turn.setModelRound(round);
       running = turn
         .execute(
           [call],
@@ -232,6 +272,7 @@ it.each(
         );
         expect(saved?.plan).toMatchObject({
           promptId,
+          round,
           batchId: first.authority
             .eventsInSequenceRange(1, first.authority.committedSequence)
             .find(
@@ -256,6 +297,10 @@ it.each(
           promptId,
         });
         expect(saved!.inputs[0].input).toEqual(call.args);
+        if (planMode)
+          expect(await hostedPublicPlanActive(replacement, promptId)).toBe(
+            decision !== 'allow',
+          );
         expect(descriptor.v).toBe(3);
         expect(prepare).not.toHaveBeenCalled();
         expect(execute).not.toHaveBeenCalled();

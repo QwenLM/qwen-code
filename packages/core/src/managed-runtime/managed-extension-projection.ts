@@ -99,6 +99,7 @@ export const MANAGED_TASK_KINDS = [
   'background_shell',
   'monitor',
   'automation_run',
+  'channel_delivery',
 ] as const;
 export const MANAGED_TASK_STATES = [
   'pending',
@@ -240,7 +241,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isChannelRouteSuccessor,
   }),
   channel_delivery: Object.freeze({
-    taskKindOf: () => null,
+    taskKindOf: () => 'channel_delivery',
     parse: (value: unknown) => {
       const record = parseChannelDelivery(value);
       return { record, recordId: record.deliveryId, run: record.run };

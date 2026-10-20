@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-h3-task-cancel.md) | [简体中文](2026-10-17-managed-h3-task-cancel.zh-CN.md)
 
-状态：已在本变更中实现。`background_shell` 与 `monitor` 两类任务加入公开任务取消路径，契约在 `1.54.0` 中点名它们（暂定：在飞 PR 已占用 `1.53.0`）。已落地：两类加入唯一的可取消类型规则；投递经内嵌 Runtime Broker 停止任务的进程；verdict 把 Monitor 的 `stop_requested` 结算读作其已记录的停止；以及一个真实栈门禁（FG8g），分别取消一个运行中的后台 Shell 与一个运行中的 Monitor watch。没有 TypeScript 改动。
+状态：已在本变更中实现。`background_shell` 与 `monitor` 两类任务加入公开任务取消路径，契约在 `1.54.0` 中点名它们。已落地：两类加入唯一的可取消类型规则；投递经内嵌 Runtime Broker 停止任务的进程；verdict 把 Monitor 的 `stop_requested` 结算读作其已记录的停止；以及一个真实栈门禁（FG8g），分别取消一个运行中的后台 Shell 与一个运行中的 Monitor watch。没有 TypeScript 改动。
 
 这是 [#13746](https://github.com/QwenLM/qwen-code/issues/13746) F1 的 H3 部分，即 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H4f-c 切片，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的阶段 H。H4f 切片（#13823，[设计](2026-10-10-managed-task-cancel.zh-CN.md)）取消 `child_agent` 任务，H4f-b 切片（#14076，[设计](2026-10-13-managed-workflow-task-cancel.zh-CN.md)）加入了 `workflow`。两者都把这两类推迟到其门禁解除之后，而 #13889（[H3 启用](2026-10-11-managed-h3-enablement.zh-CN.md)）已解除门禁。
 
@@ -112,10 +112,10 @@
 
 ## 后续工作
 
-| 项               | 范围                                                                                                                        |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `automation_run` | 没有停止请求；归 H6 的 per_run 目标。                                                                                       |
-| channel 投递取消 | #13746 F3：投递不是任务；复用操作模型（[H4f 决策 10](2026-10-10-managed-task-cancel.zh-CN.md)）。                           |
-| child 输出       | #13746 F2：把 child 任务链接到其 child Session。                                                                            |
-| WebShell 面板    | 显示 `workflow`、`background_shell` 与 `monitor` 任务并接受其取消（`ManagedTaskPanel.tsx`、`use-managed-task-cancel.ts`）。 |
-| F 阶段故障分支   | FG8g 在真实栈上覆盖取消应答丢失、finalize 时 Harness 宕机、Java 重启后取消。                                                |
+| 项               | 范围                                                                                                                                                                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `automation_run` | 没有停止请求；归 H6 的 per_run 目标。                                                                                                                                                                     |
+| channel 投递取消 | **已在 [#13746 F3](2026-10-17-managed-delivery-task-cancel.zh-CN.md) 交付：** 投递投影为其路由 Session 的任务（`channel_delivery`），在尚无适配器认领时走同一条任务取消；不再需要决策 10 所说的独立路由。 |
+| child 输出       | #13746 F2：把 child 任务链接到其 child Session。                                                                                                                                                          |
+| WebShell 面板    | 显示 `workflow`、`background_shell` 与 `monitor` 任务并接受其取消（`ManagedTaskPanel.tsx`、`use-managed-task-cancel.ts`）。                                                                               |
+| F 阶段故障分支   | FG8g 在真实栈上覆盖取消应答丢失、finalize 时 Harness 宕机、Java 重启后取消。                                                                                                                              |

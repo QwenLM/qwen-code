@@ -1,9 +1,10 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicChannel;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicChannelDelivery;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
-import com.alibaba.qwen.code.managedagent.service.ManagedChannelService;
+import com.alibaba.qwen.code.managedagent.channel.ManagedChannelService;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDelivery;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;

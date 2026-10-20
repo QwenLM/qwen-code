@@ -1,20 +1,20 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelChangeResult;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellModelSelection;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionLineage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -130,7 +130,7 @@ class ManagedModelSelectionTest {
         assertThat(store.findModelSelections(tenant, List.of(session)).get(session))
                 .isEqualTo(new WebShellModelSelection("model-b", 2));
         assertThatThrownBy(() -> change("actor", "first", "model-b", 0))
-                .isInstanceOfSatisfying(ApiException.class,
+                .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
     }
 
@@ -224,7 +224,7 @@ class ManagedModelSelectionTest {
                 start.await();
                 try {
                     return Long.toString(change("actor", UUID.randomUUID().toString(), "model-a", 0).modelSelection().revision());
-                } catch (ApiException conflict) {
+                } catch (ManagedAgentException conflict) {
                     return conflict.getCode();
                 }
             };
@@ -238,7 +238,7 @@ class ManagedModelSelectionTest {
     @Test
     void aSelectionCommittedDuringSummaryReadCannotReviveThePreviousContext() {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String record = com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(session,
+        String record = com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection.recordKey(session,
                 "hosted_context_usage", "latest");
         byte[] bytes = "{\"version\":1,\"model\":\"model-a\",\"attempts\":[{\"promptTokenCount\":12,\"contextWindowSize\":100}]}"
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -264,7 +264,7 @@ class ManagedModelSelectionTest {
     @Test
     void switchingClearsOnlyTheLatestUsageProjectionAndNeverReplaysTheClear() {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        String record = com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.recordKey(session,
+        String record = com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection.recordKey(session,
                 "hosted_context_usage", "latest");
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,workspace_id,"
                 + "session_id,domain,record_id,revision,record_resource_id,gmt_create,settled_at)"
@@ -316,7 +316,7 @@ class ManagedModelSelectionTest {
     private TransactionTemplate transaction() { return new TransactionTemplate(manager); }
 
     private void assertCode(Runnable action, String code) {
-        assertThatThrownBy(action::run).isInstanceOfSatisfying(ApiException.class,
+        assertThatThrownBy(action::run).isInstanceOfSatisfying(ManagedAgentException.class,
                 error -> assertThat(error.getCode()).isEqualTo(code));
     }
 }

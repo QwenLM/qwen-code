@@ -28,6 +28,17 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return new RuntimeProvisionRequest(scope, isolationKey, kind());
     }
 
+    /**
+     * Creates placement identity for a Harness Session: the Session id resolves
+     * and authorizes the placement while the isolation key may stay empty on a
+     * shared (Workspace-isolated) request. The default keeps the isolation-key
+     * contract.
+     */
+    default RuntimeProvisionRequest createRequest(RuntimeScope scope,
+            String isolationKey, String harnessSessionId) {
+        return createRequest(scope, isolationKey);
+    }
+
     /** Short, bounded pre-create admission only; never creates a resource or calls a worker. */
     default void reserveResource(RuntimeBindingRecord binding) {
     }

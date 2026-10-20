@@ -22,6 +22,8 @@ import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { SseObserver, projectEvents } from './hosted-sse-observer.js';
+import { quotePosix } from './hosted-shell-quote.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -38,138 +40,6 @@ const config = JSON.parse(await readFile(configPath, 'utf8')) as {
   }>;
   resultFile: string;
 };
-
-type Frame = { id: number; event: string; data: Record<string, unknown> };
-
-class Observer {
-  frames: Frame[] = [];
-  controller = new AbortController();
-  task?: Promise<void>;
-  failure?: unknown;
-
-  constructor(
-    private readonly surface: 'public' | 'web',
-    private readonly sessionId: string,
-  ) {}
-
-  async start(after?: number) {
-    const response = await fetch(
-      new URL(
-        this.surface === 'public'
-          ? `/v1/agents/sessions/${this.sessionId}/events?stream=true&after=0`
-          : '/api/agent/web-shell/v1/events/stream',
-        config.storeUrl,
-      ),
-      {
-        method: this.surface === 'public' ? 'GET' : 'POST',
-        headers: {
-          'X-Qwen-Tenant-Id': config.tenantId,
-          Accept: 'text/event-stream',
-          ...(this.surface === 'web'
-            ? { 'Content-Type': 'application/json' }
-            : {}),
-          ...(this.surface === 'public' && after !== undefined
-            ? { 'Last-Event-ID': String(after) }
-            : {}),
-        },
-        ...(this.surface === 'web'
-          ? {
-              body: JSON.stringify({
-                sessionId: this.sessionId,
-                afterSequence: after ?? 0,
-              }),
-            }
-          : {}),
-        signal: AbortSignal.any([
-          this.controller.signal,
-          AbortSignal.timeout(300_000),
-        ]),
-      },
-    );
-    assert.equal(response.status, 200);
-    assert.match(
-      response.headers.get('content-type') ?? '',
-      /text\/event-stream/,
-    );
-    const reader = response
-      .body!.pipeThrough(new TextDecoderStream())
-      .getReader();
-    this.task = (async () => {
-      let pending = '';
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          pending += value;
-          let end: number;
-          while ((end = pending.indexOf('\n\n')) >= 0) {
-            const block = pending.slice(0, end);
-            pending = pending.slice(end + 2);
-            const lines = block.split('\n');
-            const data = lines
-              .filter((line) => line.startsWith('data:'))
-              .map((line) => line.slice(5).trimStart())
-              .join('\n');
-            if (!data) continue;
-            const frame = {
-              id: Number(
-                lines
-                  .find((line) => line.startsWith('id:'))
-                  ?.slice(3)
-                  .trim(),
-              ),
-              event:
-                lines
-                  .find((line) => line.startsWith('event:'))
-                  ?.slice(6)
-                  .trim() ?? '',
-              data: JSON.parse(data) as Record<string, unknown>,
-            };
-            assert.match(String(frame.id), /^\d+$/);
-            assert.equal(
-              frame.id,
-              frame.data['sequence'],
-              'SSE id must equal payload sequence',
-            );
-            assert.equal(frame.event, frame.data['type']);
-            this.frames.push(frame);
-          }
-        }
-      } catch (cause) {
-        if (!this.controller.signal.aborted) this.failure = cause;
-      } finally {
-        reader.releaseLock();
-      }
-    })();
-  }
-
-  /** The turn a frame belongs to, read in the surface's own key style. */
-  turnIdOf(frame: Frame): string | undefined {
-    const value = frame.data[this.surface === 'web' ? 'turnId' : 'turn_id'];
-    return typeof value === 'string' ? value : undefined;
-  }
-
-  /** Wait until a terminal frame of a turn other than {@code exclude} arrived. */
-  async terminalOfOtherTurn(exclude: string) {
-    await waitUntil(() => {
-      if (this.failure) throw this.failure;
-      return this.frames.some((frame) => {
-        const turnId = this.turnIdOf(frame);
-        return (
-          frame.data['terminal'] === true &&
-          turnId !== undefined &&
-          turnId !== exclude
-        );
-      });
-    }, 120_000);
-  }
-
-  async close() {
-    this.controller.abort();
-    await this.task;
-    if (this.failure) throw this.failure;
-  }
-}
 
 async function probe<T>(
   sessionId: string,
@@ -321,8 +191,6 @@ type ProbeState = {
     sha256: string;
   }>;
 };
-
-const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 
 // The background producer: announce, hold on a FIFO the driver owns, then
 // finish. The gate makes "mid-run" a deterministic state, never a sleep.
@@ -960,7 +828,7 @@ const model = await startFakeOpenAIServer(() => {
           ? fakeToolCall(
               'monitor',
               {
-                command: `${quote(process.execPath)} -e ${quote(producer.script)}`,
+                command: `${quotePosix(process.execPath)} -e ${quotePosix(producer.script)}`,
                 max_events: 2,
                 // The fixture's 60 s events poll/heartbeat can hold a
                 // WebShell resume for a full poll cycle; the watch's idle
@@ -980,7 +848,7 @@ const model = await startFakeOpenAIServer(() => {
           : fakeToolCall(
               'run_shell_command',
               {
-                command: `${quote(process.execPath)} -e ${quote(producer.script)}`,
+                command: `${quotePosix(process.execPath)} -e ${quotePosix(producer.script)}`,
                 is_background: true,
                 timeout: 120_000,
                 description: `fg8 ${current.name}`,
@@ -997,47 +865,17 @@ function checkProxy() {
   if (proxyFailure) throw proxyFailure;
 }
 
-// The events one case's Session committed, projected exactly the way the
-// public/WebShell surfaces shape them (FG6e's field mapping).
-function projection(rows: Array<Record<string, unknown>>, surface: string) {
-  return rows.map((row) => {
-    const fields: Record<string, unknown> = {
-      schema_version: row['schema_version'],
-      projection_version: row['projection_version'],
-      sequence: row['sequence_id'],
-      event_id: row['event_id'],
-      session_id: row['session_id'],
-      turn_id: row['turn_id'],
-      item_id: row['item_id'],
-      content_part_id: row['content_part_id'],
-      type: row['event_type'],
-      created_at:
-        surface === 'public'
-          ? Math.floor(Number(row['gmt_create']) / 1000)
-          : row['gmt_create'],
-      data: JSON.parse(String(row['data_json'])),
-      terminal: Boolean(row['terminal']),
-    };
-    return Object.fromEntries(
-      Object.entries(fields)
-        .filter(([, value]) => value !== null)
-        .map(([key, value]) => [
-          surface === 'web'
-            ? key.replace(/_([a-z])/g, (_, letter: string) =>
-                letter.toUpperCase(),
-              )
-            : key,
-          value,
-        ]),
-    );
-  });
-}
-
 async function runStreamCase(surface: 'public' | 'web') {
   const monitor = current.name.includes('monitor');
-  const observer = new Observer(surface, current.sessionId);
+  const observer = new SseObserver({
+    surface,
+    sessionId: current.sessionId,
+    storeUrl: config.storeUrl,
+    tenantId: config.tenantId,
+    timeoutMs: 300_000,
+  });
   // Hoisted so the DIAG catch can dump both halves of the stream.
-  let resumed: Observer | undefined;
+  let resumed: SseObserver | undefined;
   const cli = new HostedHarnessProcess();
   step('harness boot');
   await cli.start(model.baseUrl, {
@@ -1133,7 +971,13 @@ async function runStreamCase(surface: 'public' | 'web') {
       return ledger.length > cursor;
     }, 120_000);
     step(`backlog committed beyond ${cursor}`);
-    resumed = new Observer(surface, current.sessionId);
+    resumed = new SseObserver({
+      surface,
+      sessionId: current.sessionId,
+      storeUrl: config.storeUrl,
+      tenantId: config.tenantId,
+      timeoutMs: 300_000,
+    });
     await resumed.start(cursor);
     step('stream resumed');
     await resumed.terminalOfOtherTurn(promptId);
@@ -1173,7 +1017,7 @@ async function runStreamCase(surface: 'public' | 'web') {
     );
     assert.deepEqual(
       frames.map((frame) => frame.data),
-      projection(ledger, surface),
+      projectEvents(ledger, surface),
       `${surface} frames are the exact SQL projection`,
     );
     return {
@@ -1671,13 +1515,32 @@ async function runStoreFailureCase() {
   }
 }
 
+// FG8d's six cases share one tenant, and the fixture admits four active
+// captures (`active-captures=4`). A capture a case leaves OPEN keeps the
+// expiry its last grant renewal set (the writer lease or the activation,
+// whichever ends first), and grant renewals stop once the tool call that
+// launched the run returns, so under the default 60 s lease the capture
+// holds its slot for up to a minute after its case moves on. On a fast
+// host drain-release found all four slots held and its reservation was
+// refused (the store's "Publication capacity exhausted", which the Harness
+// logged as "The request is invalid."), so the run never started. Under a
+// 10 s lease a capture stops counting within ten seconds of its last
+// renewal. FG8d's one store arm matches a single stop-revision commit, so
+// the extra writer and activation renewals a shorter lease brings never
+// trip it.
+const CANCEL_DRAIN_LEASE_MS = 10_000;
+
 async function runCancelDrainCase() {
   const cli = await bootHarness();
   try {
     const name = current.name;
     if (name === 'cancel-before-start') holdNextStart = true;
     execFileSync('mkfifo', [path.join(current.directory, 'run-gate')]);
-    const { clientId } = await createSession(cli, storeProxyUrl);
+    const { clientId } = await createSession(
+      cli,
+      storeProxyUrl,
+      CANCEL_DRAIN_LEASE_MS,
+    );
     const promptId = await submitPrompt(cli, clientId, `fg8d ${name} launch`);
     step('prompt admitted');
     if (name === 'cancel-before-start') {

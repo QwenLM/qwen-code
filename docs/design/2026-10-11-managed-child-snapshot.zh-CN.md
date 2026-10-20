@@ -61,8 +61,9 @@ Issue #13753 对 I3 提出两点：
    - **为什么要单独的开关。** 本变更之前的副本把 `snapshot` 当作 `shared`：它会以父的 Shell profile 在父的目录里创建 child，也就是一个写入者。
      - 本变更逐台副本滚动上线时，child Workspace 可能已经开启。滚动期间，新副本可能宣告支持快照，而老副本认领了这个 run。
      - 这个开关给运维一个开启快照的时机：所有控制面副本都运行本变更之后。
+     - 本变更之前的副本在新副本迁移数据库后仍会继续运行，但一旦 #14316 及之后的服务端迁移过数据库，它就无法再启动：它的启动 schema 检查会拒绝这些迁移新增的列。因此开关防护的窗口，持续到升级前启动的最后一台副本被替换为止。
      - 之后关闭它只会停止新的准入。已提交的 snapshot run 仍按快照运行。
-     - 回滚同理：把任何副本退回到本变更之前的版本前，先关闭开关，等所有未结算的 snapshot run 结算完（或其父关闭），包括仍在创建 child、还没有 child Workspace 行的 run。开关关闭前已开始的 Turn 仍保有它开始时的能力，所以要等正在运行的 Turn 结束后再做这项检查。较旧的 relay 会把尚未创建的 snapshot run 创建为共享的写入者，并且直到父关闭才会丢弃它的副本。较旧的 `qwen serve` 会拒绝只读 profile，因此对仍存有 snapshot child Session 的 storage，它的 Workspace 恢复会中止：回滚 CLI 之前，先让这些 Session 关闭。
+     - 回滚同理：把任何副本退回到本变更之前的版本前，先关闭开关，等所有未结算的 snapshot run 结算完（或其父关闭），包括仍在创建 child、还没有 child Workspace 行的 run。开关关闭前已开始的 Turn 仍保有它开始时的能力，所以要等正在运行的 Turn 结束后再做这项检查。较旧的 relay 会把尚未创建的 snapshot run 创建为共享的写入者，并且直到父关闭才会丢弃它的副本。只有在 #14316 及之后的服务端从未迁移过的数据库上，控制面副本才能退回到本变更之前；在其他数据库上，较旧的服务端会拒绝启动。较旧的 `qwen serve` 会拒绝只读 profile，而 Workspace 恢复会检查 storage 中的每个 Session，包括已关闭的，所以对存有 snapshot child Session 的 storage，即使该 Session 已关闭，它的恢复也会中止。把 CLI 回滚到本变更之前，就放弃了对这些 storage 的 Workspace 恢复。
 
 3. **冻结视图是一个 child Workspace。** relay 准备 snapshot run 的 child Workspace，方式与准备 worktree run 的完全相同（I2 决策 3）。
    - **包含什么。** 基线是 I1 对父工作树的快照提交：已跟踪与未跟踪的文件，不含被忽略的文件。
@@ -74,7 +75,14 @@ Issue #13753 对 I3 提出两点：
 4. **“不能写”就是 profile，并由存储层设置。**
    - **Profile。** 新的 hosted profile `hosted-workspace-read/1` 只声明 `read_file` 与 `glob`，无论 Session 有什么 lane、child 编排或 MCP：不声明 `write_file`、`edit`、`run_shell_command` 或 `monitor`，不声明 Agent 或团队工具，不声明 `send_message`、MCP 工具或 `skill` 工具。只读 profile 的 Session 也不从 agent definition 获取 skill 目录：目录的说明会提到一个该 profile 拒绝的工具，而未声明的调用会让 Turn 失败。
    - **由谁设置。** 只要 child 绑定的 child Workspace 行记录的是 `snapshot`，`insertChildSession` 就给 child 只读 profile。它在检查该行就绪的同一个事务中读取该行，所以任何调用方都无法把快照副本绑定到可写的 profile 上。只有 profile 不同；审批模式仍是父的。
-   - **审批。** `read_file` 与 `glob` 在 `default` 与 `auto-edit` 下都预先批准，所以 snapshot child 自身不发起审批询问。自 #14319 起，它像任何 child 一样继承 agent definition 的 hook 目录：`PreToolUse` hook 仍可能发起询问，hook 命令作用于副本，而副本最终会被丢弃。
+   - **审批。** `read_file` 与 `glob` 在 `default` 与 `auto-edit` 下都预先批准，所以 snapshot child 自身不发起审批询问。
+   - **保留 hooks（#13905 第 37 项）。** child Session 沿用父的 agent definition，所以自 #14319 起，snapshot child 像任何 child 一样运行父的 hook 目录。
+     - **为什么。** hook 目录是运维的策略，不由模型选择。`PreToolUse` hook 可以拒绝 `read_file` 或 `glob` 调用，或改写其输入，例如阻止读取密钥。如果去掉 hooks，只要模型选择 `isolation: "snapshot"`，snapshot child 就能读到同一个 agent 在其他任何地方都被拒绝读取的内容。skill 目录被去掉另有原因：它的说明会提到该 profile 拒绝的工具，而 hook 不向模型提供任何工具。
+     - **代价。** 下面这些都不是 snapshot 特有的：
+       - `PreToolUse` hook 可能发起询问，所以 child 可能像任何 child 一样等待审批；
+       - hook 命令以副本为工作目录运行，所以它在副本内写入的内容随副本一起丢弃。但它没有隔离：写到副本之外的内容（例如写到绝对路径的日志）以及其他任何副作用，都不会随丢弃消失；
+       - Runtime 被替换后恢复的 turn 通过 Session 的 Hook owner 重新 acquire，而不走决策 8 的第 3 步路径；该路径只服务既没有 hooks 也没有 MCP 的 Session，`hosted-workspace-files/1` 也是如此；
+       - command、http 或 function 类 hook 一旦运行，child 的 Hook owner 就会一直占用 storage，直到 child Session 关闭，任何 Session 的 Hook owner 都是如此，所以父的工具回合以及其他 child 的工具回合都要等到那时。因恢复而阻塞的 turn 可以更早释放：一旦确认其 hook 工作已结束或从未派发，owner 就会归还 mount，而 Session 仍保持打开。
    - **凭什么成立。** 每一环本来就对所有 hosted Session 成立：
      - 声明集合中没有任何会写入的工具；
      - tool turn 在获取 Broker 之前拒绝任何其他名称，并结束该 Turn；
@@ -84,7 +92,7 @@ Issue #13753 对 I3 提出两点：
 5. **快照从不合并。** 快照的 child Workspace 把模式记录在其 child Workspace 操作的请求中（`ma_operation.request_json` 里的 `workspaceMode`），该请求在行被准入时写入一次，之后从不改写。没有指名模式的请求属于 worktree，所以 worktree 行（包括本变更之前准入的所有行）都读作 `worktree`，其请求保持原样。这不需要 schema 变更。`snapshot` 行的每次收尾都是丢弃。
    - **relay** 从不请求快照的合并，也从不为合并扣住结算。完成的 snapshot run 提交结果时回执不带 `workspace` 成员，也没有 workspace 行到达父的模型：child 什么也没改。
    - **丢弃** 随结果提交一起请求，在 child 关闭后执行（I2 决策 4）。失败、停止与放弃分支以及关闭级联对它的丢弃与 `worktree` 相同。
-   - **存储层** 把对快照行请求的合并记录为它本来就是的丢弃。relay 从不请求合并；这条规则防止一次误发的请求停放一个永远无法执行的合并。
+   - **存储层** 把对快照行请求的合并记录为它本来就是的丢弃。relay 从不请求合并；这条规则防止一次误发的请求停放一个永远无法执行的合并。本变更之前的存储层会照录较旧 relay 对任何就绪行请求的合并，所以扫描也把记录在快照行上的合并按丢弃执行。
    - **行的模式是固定的。** 对已有行指名另一种模式的请求是冲突。
    - **未知模式按关闭处理。** relay 遇到它不支持的 `workspaceMode` 时，把 run 以 `creation_failed`（从未启动）结算，而不是按 shared 创建。记录契约只接受三个取值，所以这是为将来的模式防备较旧的 relay。
 
@@ -99,7 +107,7 @@ Issue #13753 对 I3 提出两点：
 8. **恢复能读取新的 profile。** `hosted-workspace-read/1` 加入已保存 profile 的词汇，所以创建、加载与 Workspace 恢复都接受它。
    - 恢复不认识的 profile 会中止整个共享 storage 的恢复。W1b 把 hosted 文件与 Shell profile 放在那个捕获闭包之内。
    - 存储迁移仍只接受 `files/1` Session，所以带有存活 snapshot child 的父会被拒绝，与带有任何 Shell child 的父一样。
-   - 已提交的读取结果在 Runtime 被替换后仍可恢复。G3 第 3 步的路径（#14059）不重新 acquire 已退役的 owner，直接恢复 `results_ready` checkpoint；它在 `hosted-workspace-files/1` 之外也接受只读 profile。只读 profile 的批次永远只有 `read_file` 与 `glob`，正是该路径本就允许没有文件历史而恢复的批次。
+   - 既没有 hooks 也没有 MCP 的 Session，其已提交的读取结果在 Runtime 被替换后仍可恢复（决策 4）。G3 第 3 步的路径（#14059）不重新 acquire 已退役的 owner，直接恢复 `results_ready` checkpoint；它在 `hosted-workspace-files/1` 之外也接受只读 profile。只读 profile 的批次永远只有 `read_file` 与 `glob`，正是该路径本就允许没有文件历史而恢复的批次。
 
 9. **串行共享不需要单独的取值（最终）。** 这确认了 I1 决策 15。
    - **保证。** storage lease 一次只接纳一个 holder，storage 的每个写入方在写入前都获取它：父、`shared` 与 `worktree` child，以及 child Workspace 维护。snapshot child 的读取也获取它。所以同一父的任何两个 child 都不能同时持有 storage。
@@ -161,10 +169,11 @@ Issue #13753 对 I3 提出两点：
   - 消息仍在运行时，它已完成的任务不请求合并；
   - 超出上限、停止与放弃分支都立即结算它，请求丢弃，从不请求合并；
   - relay 不支持的模式以从未启动结算，不创建任何东西；而写明 `shared` 的 run 以共享方式创建 child。
-- **Child Workspace 状态机**（`ChildWorkspaceServiceTest`，新增 3 个用例，H2 加真实仓库）：
+- **Child Workspace 状态机**（`ChildWorkspaceServiceTest`，新增 4 个用例，H2 加真实仓库）：
   - 快照副本包含父未提交与未跟踪的文件，不含被忽略的文件；
   - 它的 child Session 获得的正是 `hosted-workspace-read/1` 与父的审批模式；
   - 对它请求的合并被记录为丢弃，写进副本的文件永远不会到达父，行以 `discarded` 结束且不留 pin；
+  - 按原样记录在它上面的合并（较旧 relay 的存储层就是这样记录的）仍按丢弃执行，写进副本的文件不会到达父；
   - worktree 的请求不指名模式，其行读作 worktree，会合并，并保留父的 profile；
   - run 的模式是固定的。
 - **控制面接线**（`ManagedAgentPropertiesTest`、`QwenHostedHarnessConnectorTest`、`HostedHarnessClientTest`）：开关默认关闭，没有 child Workspace 时拒绝开启，在有效的 child Workspace 配置旁可以正常启动；只有开关开启时，`childSnapshots` 才随创建、加载、恢复、生命周期结算与消息停止加载发送，经过每一次请求复制都保留，且从不在没有 `childWorkspaces` 时出现。

@@ -24,6 +24,7 @@ import {
 } from './hosted-tool-approval.js';
 
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
+import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
 
 const NATIVE_TOOLS = new Set(['read_file', 'write_file', 'edit', 'glob']);
 
@@ -103,7 +104,6 @@ export async function readHostedApprovalContinuation(
     !isDeepStrictEqual(plan.rootSnapshotRef, header.rootSnapshotRef) ||
     !Number.isSafeInteger(plan.round) ||
     plan.round < 0 ||
-    plan.round >= 16 ||
     !Array.isArray(plan.calls) ||
     plan.calls.length < 1 ||
     !Number.isSafeInteger(plan.approvalOrdinal) ||
@@ -160,11 +160,16 @@ export async function readHostedApprovalContinuation(
   const runtimeIds = new Set<string>();
   const partIndexes = new Set<number>();
   const inputs = [];
+  const publicPlanExit =
+    plan.calls.length === 1 &&
+    plan.calls[0].call?.name === 'exit_plan_mode' &&
+    (await readHostedTurnApprovalSelection(session, promptId))?.planMode ===
+      true;
   for (const [ordinal, item] of plan.calls.entries()) {
     if (
       Object.keys(item).length !== 11 ||
       !item.call ||
-      !NATIVE_TOOLS.has(item.call.name) ||
+      !(NATIVE_TOOLS.has(item.call.name) || publicPlanExit) ||
       item.call.prompt_id !== promptId ||
       item.call.wasOutputTruncated ||
       item.call.hadIncompleteArguments ||
@@ -229,6 +234,15 @@ export async function readHostedApprovalContinuation(
       item.argsDigest !== `sha256:${managedToolDigest(payload.input)}`
     )
       throw new Error('Saved native request is invalid.');
+    if (
+      publicPlanExit &&
+      (Object.keys(payload.input).length !== 1 ||
+        typeof payload.input['plan'] !== 'string' ||
+        !payload.input['plan'].trim() ||
+        payload.input['plan'].length > 24000 ||
+        !isDeepStrictEqual(item.call.args, payload.input))
+    )
+      throw new Error('Saved public plan is invalid.');
     const definition = JSON.parse(
       (await session.resources.read(item.definitionRef)).toString('utf8'),
     ) as { name?: string };

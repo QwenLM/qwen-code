@@ -1,10 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -226,6 +227,10 @@ class HostedWorkspaceToolTurnIT {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + worker));
+        if (operatorRecovery) {
+            arguments.add("--qwen.managed-agent.runtime-broker.previous-credential-keys["
+                    + HostedOperatorRecoveryProbe.RECOVERY_KEY_ID + "]=" + HostedOperatorRecoveryProbe.RECOVERY_KEY);
+        }
         for (int index = 0; index < workspaces.size(); index++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + index + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -243,7 +248,7 @@ class HostedWorkspaceToolTurnIT {
             arguments.add("--qwen.managed-agent.events.poll-interval=60s");
             arguments.add("--qwen.managed-agent.events.heartbeat-interval=60s");
             application.initializers(context -> context.getBeanFactory().registerSingleton(
-                    "fg6eAuthentication", HostedSseGapProbe.authentication(tenant)));
+                    "fg6eAuthentication", HostedGateTestSupport.authentication(tenant, "fg6e-fixture")));
         }
         try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
@@ -593,8 +598,10 @@ class HostedWorkspaceToolTurnIT {
                     .isEqualTo(target.path("lastSequence").asLong()).isEqualTo(receipt.path("committedSequence").asLong());
         }
         for (JsonNode resource : target.path("resources")) {
-            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
-                    tenant, sessionId, resource.path("resourceId").asText());
+            // Led by the indexed session scope key, as in HostedGateTestSupport:
+            // the raw tenant+session form scans the lane's accumulated ma_resource rows.
+            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                    ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
             if (!applied) {
                 if (resource.has("bytesBase64")) {
                     assertThat(stored).as(fault + " rolled-back resource").isEmpty();
@@ -676,8 +683,8 @@ class HostedWorkspaceToolTurnIT {
         assertThat(head.get("last_commit_digest")).isEqualTo(digest);
         assertThat(head.get("latest_checkpoint_resource_id")).isEqualTo(checkpointId);
         byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class,
-                tenant, sessionId, checkpointId);
+                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
         String phase = mapper.readTree(checkpoint).path("continuation").path("phase").asText();
         if (fault.startsWith("result-")) {
             assertThat(phase).isEqualTo("await_runtime");

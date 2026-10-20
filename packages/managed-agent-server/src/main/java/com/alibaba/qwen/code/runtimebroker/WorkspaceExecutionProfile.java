@@ -17,4 +17,13 @@ public final class WorkspaceExecutionProfile {
     public static boolean admitsIsolationClass(String isolationClass) {
         return "session".equals(isolationClass);
     }
+
+    /**
+     * Whether the scope is a bound-Session Workspace placement (the local shared
+     * profile), which participates in Harness Session admission fencing.
+     */
+    public static boolean isBoundWorkspaceScope(RuntimeScope scope) {
+        return CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())
+                && "workspace".equals(scope.getIsolationClass());
+    }
 }

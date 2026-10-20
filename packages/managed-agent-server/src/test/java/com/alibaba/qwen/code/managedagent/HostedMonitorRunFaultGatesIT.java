@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -171,24 +171,10 @@ class HostedMonitorRunFaultGatesIT {
                         + System.getProperty("mysql.user"),
                 "--spring.datasource.password="
                         + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.enabled=true",
-                "--qwen.managed-agent.tool-publication.enabled=true",
-                "--qwen.managed-agent.tool-publication.oss-endpoint=https://oss-cn-hangzhou.aliyuncs.com",
-                "--qwen.managed-agent.tool-publication.oss-region=cn-hangzhou",
-                "--qwen.managed-agent.tool-publication.oss-bucket=fg8-fixture",
-                "--qwen.managed-agent.tool-publication.service-base-url=http://127.0.0.1:"
-                        + port,
-                "--qwen.managed-agent.tool-publication.execution-bytes=1073741824",
-                "--qwen.managed-agent.tool-publication.session-bytes=1073741824",
-                "--qwen.managed-agent.tool-publication.tenant-bytes=1073741824",
-                "--qwen.managed-agent.tool-publication.active-captures=4",
-                "--qwen.managed-agent.tool-publication.entry-concurrency=4",
-                "--qwen.managed-agent.tool-publication.operation-timeout=10s",
-                "--qwen.managed-agent.tool-publication.claim-timeout=5s",
-                "--qwen.managed-agent.tool-publication.verification-bytes-per-second=1048576",
-                "--qwen.managed-agent.tool-publication.max-verification-timeout=20m",
-                "--qwen.managed-agent.tool-publication.gc-enabled=true",
-                "--qwen.managed-agent.tool-publication.deletion-grace=0s",
+                "--qwen.managed-agent.session-store.enabled=true"));
+        arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
+                "fg8-fixture", 1073741824));
+        arguments.addAll(List.of(
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:"
                         + "a".repeat(64),
@@ -233,26 +219,14 @@ class HostedMonitorRunFaultGatesIT {
                 ManagedAgentServerApplication.class);
         application.initializers(context -> {
             context.getBeanFactory().registerSingleton("fg8Authentication",
-                    HostedMonitorRunProbe.authentication(tenant));
+                    HostedGateTestSupport.authentication(tenant,
+                            "fg8-fixture"));
             // The publication object store is gated on a real OSS client;
             // the inline-capture fixture proves access control and never
             // touches the network (the HostedPublicWorkspaceIT pattern).
-            var acl = new com.aliyun.oss.model.AccessControlList();
-            acl.setCannedACL(
-                    com.aliyun.oss.model.CannedAccessControlList.Private);
-            var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class,
-                    invocation -> switch (invocation.getMethod().getName()) {
-                        case "getBucketVersioning" ->
-                            new com.aliyun.oss.model.BucketVersioningConfiguration();
-                        case "getBucketAcl" -> acl;
-                        case "shutdown" -> null;
-                        case "toString" -> "fg8-oss-fixture";
-                        default -> throw new AssertionError(
-                                "Unexpected OSS access in the FG8 fixture: "
-                                        + invocation.getMethod().getName());
-                    });
-            context.addBeanFactoryPostProcessor(beanFactory -> beanFactory
-                    .registerSingleton("toolPublicationOss", oss));
+            HostedGateTestSupport.stubPublicationOss(context,
+                    new java.util.concurrent.ConcurrentHashMap<>(),
+                    "fg8-oss-fixture");
         });
         spring = (ServletWebServerApplicationContext) application.run(
                 arguments.toArray(String[]::new));
@@ -262,7 +236,7 @@ class HostedMonitorRunFaultGatesIT {
                 EmbeddedRuntimeBroker.class);
         if ("Linux".equals(System.getProperty("os.name"))) {
             var guard = spring.getBean(
-                    com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class);
+                    com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < cases.size(); index++) {
                 guard.register(tenant, "storage-" + index,
                         UUID.randomUUID().toString());
@@ -532,7 +506,7 @@ class HostedMonitorRunFaultGatesIT {
                         + " runtime_session_id = ?", String.class, tenant,
                 sessionId, promptId);
         boolean monitor = name.equals("monitor-worker-kill");
-        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+        JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                 monitor ? "monitor_run" : "child_run");
         JsonNode close = report.path("close");
         switch (name) {
@@ -826,7 +800,7 @@ class HostedMonitorRunFaultGatesIT {
                 assertThat(report.path("brokerStartedForwards").asInt())
                         .as(name + ": the original identity admitted once")
                         .isEqualTo(1);
-                JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                         "child_run");
                 // A lost :start reply must not mint a second identity: the
                 // run is settled either from real exit evidence (a cgroup
@@ -858,7 +832,7 @@ class HostedMonitorRunFaultGatesIT {
                 assertThat(report.path("brokerMonitorStopForwards")
                         .asInt()).as(name + ": exactly one physical stop")
                         .isEqualTo(1);
-                JsonNode watch = extensionRecord(jdbc, tenant, sessionId,
+                JsonNode watch = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                         "monitor_run");
                 assertThat(watch.path("stopReason").asText())
                         .as(name + " settled from real exit evidence")
@@ -872,7 +846,7 @@ class HostedMonitorRunFaultGatesIT {
                 assertThat(report.path("droppedPagePublishes").asInt())
                         .as(name + " dropped exactly one page publish reply")
                         .isEqualTo(1);
-                JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+                JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                         "child_run");
                 assertThat(record.path("run").path("state").asText())
                         .as(name + " settled from real exit evidence")
@@ -891,7 +865,7 @@ class HostedMonitorRunFaultGatesIT {
                 assertThat(droppedOps)
                         .as(name + " dropped exactly one observation commit")
                         .containsExactly("commitMonitorRun");
-                JsonNode watch = extensionRecord(jdbc, tenant, sessionId,
+                JsonNode watch = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                         "monitor_run");
                 assertThat(watch.path("observationSequence").asInt())
                         .as(name + " stayed behind, then landed")
@@ -964,7 +938,7 @@ class HostedMonitorRunFaultGatesIT {
         // refused advance commits, then silence — including through a
         // drain release) — never cancelled, never re-executed.
         assertProcessRows(jdbc, sessionId, name, 1);
-        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+        JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                 "child_run");
         assertThat(report.path("recovered").asBoolean())
                 .as(name + ": a refused settle commit never recovers")
@@ -1023,7 +997,7 @@ class HostedMonitorRunFaultGatesIT {
             Map<String, Object> session, JsonNode report) throws Exception {
         String sessionId = session.get("sessionId").toString();
         String name = session.get("name").toString();
-        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+        JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                 "child_run");
         switch (name) {
             case "cancel-before-start" -> {
@@ -1139,7 +1113,7 @@ class HostedMonitorRunFaultGatesIT {
                 .as(name + " stream frames == ledger rows")
                 .isEqualTo(events.intValue());
         if (monitor) {
-            JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+            JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                     "monitor_run");
             assertThat(record.path("stopReason").asText())
                     .as(name + " watch settled at its quota")
@@ -1152,7 +1126,7 @@ class HostedMonitorRunFaultGatesIT {
         } else {
             // The background run settled from real exit evidence: the record
             // carries the physical exit, the process is provably gone.
-            JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+            JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                     "child_run");
             JsonNode run = record.path("run");
             assertThat(run.path("state").asText())
@@ -1180,7 +1154,7 @@ class HostedMonitorRunFaultGatesIT {
         assertThat(cancels).as(name + " cancel operations").hasSize(1);
         assertThat(cancels.getFirst().get("state")).isEqualTo("COMPLETED");
         assertThat(cancels.getFirst().get("receipt_id")).isNotNull();
-        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+        JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                 monitor ? "monitor_run" : "child_run");
         assertThat(record.path("run").path("state").asText())
                 .as(name + " record").isEqualTo("cancelled");
@@ -1199,7 +1173,7 @@ class HostedMonitorRunFaultGatesIT {
             String sessionId, String name, JsonNode report)
             throws Exception {
         if (name.equals("publisher-kill-mid-capture")) {
-            JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+            JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                     "child_run");
             // Nothing may fabricate a settle for a run whose publisher
             // died: the record stays running, and the manifest the record
@@ -1217,7 +1191,7 @@ class HostedMonitorRunFaultGatesIT {
             verifyOutputChain(jdbc, tenant, sessionId, false);
             return;
         }
-        JsonNode record = extensionRecord(jdbc, tenant, sessionId,
+        JsonNode record = HostedGateTestSupport.extensionRecord(jdbc, tenant, sessionId,
                 "child_run");
         JsonNode run = record.path("run");
         assertThat(run.path("state").asText())
@@ -1524,30 +1498,6 @@ class HostedMonitorRunFaultGatesIT {
         }
     }
 
-    // ma_resource keys on the Session's scope key and holds the inline
-    // capture bytes: filtered by the unindexed tenant and session columns
-    // alone, every read scans all the bytes the lane has written so far.
-    // The record read leads with the same key.
-    private JsonNode extensionRecord(JdbcTemplate jdbc, String tenant,
-            String sessionId, String domain) throws Exception {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
-        var rows = jdbc.queryForList(
-                "SELECT record_resource_id FROM"
-                        + " ma_session_record WHERE session_scope_key = ? AND"
-                        + " tenant_id = ? AND session_id = ? AND domain = ?",
-                scope, tenant, sessionId, domain);
-        assertThat(rows).as(domain + " records").hasSize(1);
-        var resources = jdbc.queryForList(
-                "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
-                        + " ma_resource WHERE session_scope_key = ? AND"
-                        + " resource_id = ? AND tenant_id = ? AND session_id"
-                        + " = ?", scope,
-                rows.getFirst().get("record_resource_id"), tenant,
-                sessionId);
-        assertThat(resources).hasSize(1);
-        return json.readTree(resources.getFirst().get("body").toString());
-    }
-
     private static void deleteRecursively(Path root) throws java.io.IOException {
         if (!Files.exists(root)) {
             return;
@@ -1568,11 +1518,28 @@ class HostedMonitorRunFaultGatesIT {
         return cli;
     }
 
+    // A port from the ephemeral range can be stolen by any outgoing
+    // connection between this probe and Spring's bind. Stay below Linux's
+    // 32768-60999 and macOS's 49152-65535 ephemeral ranges.
+    private static final java.util.concurrent.atomic.AtomicInteger NEXT_PORT =
+            new java.util.concurrent.atomic.AtomicInteger(20_000
+                    + java.util.concurrent.ThreadLocalRandom.current()
+                            .nextInt(8_000));
+
     private static int freePort() throws java.io.IOException {
-        try (java.net.ServerSocket socket = new java.net.ServerSocket(0, 0,
-                java.net.InetAddress.getLoopbackAddress())) {
-            return socket.getLocalPort();
+        for (int attempt = 0; attempt < 1000; attempt++) {
+            int candidate = NEXT_PORT.getAndUpdate(
+                    port -> port >= 28_000 ? 20_000 : port + 1);
+            try (java.net.ServerSocket socket = new java.net.ServerSocket(
+                    candidate, 0,
+                    java.net.InetAddress.getLoopbackAddress())) {
+                return candidate;
+            } catch (java.io.IOException ignored) {
+                // Occupied; try the next candidate.
+            }
         }
+        throw new java.io.IOException(
+                "No free port below the ephemeral range");
     }
 
     private static Path repoRoot() {

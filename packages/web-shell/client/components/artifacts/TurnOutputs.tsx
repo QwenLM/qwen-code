@@ -502,6 +502,7 @@ function ArtifactCard({
                 ? t('webPreview.saved')
                 : getArtifactTypeLabel(artifact),
               size,
+              artifact.status === 'changed' && t('turnOutputs.artifactChanged'),
             ]
               .filter(Boolean)
               .join(' · ')}

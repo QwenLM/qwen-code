@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
+
 import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
@@ -15,7 +17,7 @@ public final class ToolExecutionRecord {
      * its dispatch answer was lost: tool v3 and provider references can be
      * observed and cancelled there, a tool v2 reference cannot.
      */
-    boolean observableAfterLoss() {
+    public boolean observableAfterLoss() {
         return Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
                 || ProviderRuntimeProtocol.isReference(reference);
     }

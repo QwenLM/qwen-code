@@ -168,12 +168,14 @@ export function RemoteWorkspaceRegistration({
             return;
           }
           updatePending();
+          setBlocked(false);
           current.current.onRegistered(workspace);
           current.current.onOpenChange(false);
           return;
         }
         if (operation.status === 'failed' || operation.status === 'cancelled') {
           updatePending();
+          setBlocked(false);
           setChecked(undefined);
           setError(t('managed.remoteWorkspaceFailed'));
           return;
@@ -223,6 +225,15 @@ export function RemoteWorkspaceRegistration({
     // The parent keys this component by the provider's tenant/actor storage scope.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
+
+  // The server settles a blocked registration on its own once it reads the
+  // machine again, so a saved registration is queried each time the dialog
+  // opens; a confirmation already running absorbs the mount's own opening.
+  useEffect(() => {
+    if (open && pendingRef.current?.operationId)
+      void confirm(pendingRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -392,10 +403,19 @@ export function RemoteWorkspaceRegistration({
           >
             {t('managed.remoteWorkspaceClose')}
           </Button>
-          {blocked ? (
-            <Button disabled={busy} onClick={discardBlocked}>
-              {t('managed.remoteWorkspaceStartAnother')}
-            </Button>
+          {blocked && pending ? (
+            <>
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={discardBlocked}
+              >
+                {t('managed.remoteWorkspaceStartAnother')}
+              </Button>
+              <Button disabled={busy} onClick={() => void confirm(pending)}>
+                {t('managed.remoteWorkspaceConfirm')}
+              </Button>
+            </>
           ) : pending ? (
             <Button disabled={busy} onClick={() => void confirm(pending)}>
               {t('managed.remoteWorkspaceConfirm')}

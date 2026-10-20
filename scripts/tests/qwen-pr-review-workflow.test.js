@@ -3735,8 +3735,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   it('opens the gate on any upstream failure but never on skip or resolve', () => {
     // Every job whose failure marks review-pr 'skipped' is enumerated: the
     // incident's trigger can kill the chain's self-hosted jobs first
-    // (authorize / review-config), and a transient API failure can kill the
-    // hosted ones (precheck-pr / delay-automatic-review).
+    // (authorize / review-config / delay-automatic-review), and a transient
+    // API failure can kill the hosted one (precheck-pr).
     expect(job.needs).toEqual([
       'precheck-pr',
       'review-config',

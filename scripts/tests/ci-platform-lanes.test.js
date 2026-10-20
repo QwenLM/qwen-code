@@ -40,10 +40,10 @@ const LANES = ['test_macos', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
-// The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
-// ubuntu-latest for fork PRs from untrusted authors and when
-// MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths keep the
-// pre-contention ceiling. Evaluate the real timeout expression for both
+// The extended ceilings below, except the test lane's, are scoped to the ECS
+// pool: `runs-on` falls back to ubuntu-latest for fork PRs from untrusted
+// authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths
+// keep the pre-contention ceiling. Evaluate the real timeout expression for both
 // routings instead of pinning a bare number -- the same
 // substitute-then-evaluate technique
 // `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on` -- so a
@@ -71,13 +71,12 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
   return Number(new Function(`return (${expr});`)());
 };
 
-it('keeps the shared Linux test lane above its contention budget on ECS', () => {
+it('gives the shared Linux test lane one ceiling on both pools', () => {
+  // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
+  // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
   expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
-});
-
-it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
-  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('test', '')).toBe(60);
+  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(120);
+  expect(timeoutMinutesOn('test', '')).toBe(120);
 });
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
@@ -102,8 +101,12 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
-it('keeps browser gates hosted independently of the shared Linux runner', () => {
-  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
+it('routes browser gates like the shared Linux test lane, at the hosted worker count', () => {
+  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe(ci.jobs.test['runs-on']);
+  const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Run web-shell browser smoke',
+  );
+  expect(smoke.run).toMatch(/ -- --workers=2$/);
   // Slow hosted browser installs took over 23 min, so reserve time in the
   // 60-minute job for transcript/smoke tests and artifact upload, while the
   // install step itself stays bounded.
