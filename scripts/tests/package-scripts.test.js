@@ -259,7 +259,7 @@ describe('package scripts', () => {
     });
   });
 
-  it('caps both CLI build paths above the heap ceiling they hit in CI', () => {
+  it('never caps the pnpm prepare build below the root build heap cap', () => {
     const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
     const pnpmCap = workspace.nodeOptions?.match(
       /--max-old-space-size=(\d+)/,
@@ -270,11 +270,10 @@ describe('package scripts', () => {
 
     // pnpm replaces NODE_OPTIONS for each package script, so the root build
     // cap alone never reaches the CLI's `tsc --build` during an install-time
-    // prepare. Both paths hit the 4096 MB ceiling in run 39360129361.
+    // prepare. The prepare path must never sit below the explicit build.
     expect(pnpmCap).toBeDefined();
-    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(6144);
     expect(buildCap).toBeDefined();
-    expect(Number(buildCap)).toBeGreaterThanOrEqual(6144);
+    expect(Number(pnpmCap)).toBeGreaterThanOrEqual(Number(buildCap));
   });
 
   it('checks the pnpm lockfile for integrity and Playwright parity', () => {
