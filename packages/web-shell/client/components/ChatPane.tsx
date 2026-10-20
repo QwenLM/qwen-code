@@ -7,6 +7,10 @@
 import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
 import {
+  beginLocalCommand,
+  finishLocalCommand,
+} from '../utils/message-deletion';
+import {
   useCallback,
   useEffect,
   useMemo,
@@ -1057,7 +1061,9 @@ export function ChatPane({
           operation.kind === 'set' || operation.kind === 'edit'
             ? operation.objective
             : undefined;
-        store.appendLocalUserMessage(text);
+        store.appendLocalUserMessage(text, undefined, {
+          localCommandId: `local-command:${crypto.randomUUID()}`,
+        });
         void controlGoal(action, objective).catch((error: unknown) => {
           reportError(error, `Failed to ${operation.kind} /goal`);
         });
@@ -1453,16 +1459,20 @@ export function ChatPane({
       return;
     }
     const owner = sessionOwnerGuard.capture();
+    const localCommandId = `local-command:${crypto.randomUUID()}`;
+    beginLocalCommand(store, localCommandId);
     if (streamingStateRef.current === 'idle') {
-      store.appendLocalUserMessage('/context');
+      store.appendLocalUserMessage('/context', undefined, { localCommandId });
     }
     actions
       .getContextUsage({ detail: false })
+      .finally(() => finishLocalCommand(store, localCommandId))
       .then((result) => {
         if (!owner.isCurrent()) return;
         store.dispatch([
           {
             type: 'status',
+            promptId: localCommandId,
             text: t('contextUsage.title'),
             data: createContextUsageMessageData(result),
             clearActiveText: false,
