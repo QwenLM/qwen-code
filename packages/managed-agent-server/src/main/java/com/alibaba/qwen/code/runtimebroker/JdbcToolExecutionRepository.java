@@ -1,10 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
+
+import javax.sql.DataSource;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -16,8 +18,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import javax.sql.DataSource;
 
 /** JDBC ledger for idempotent Tool executions. */
 public final class JdbcToolExecutionRepository
@@ -643,7 +643,7 @@ public final class JdbcToolExecutionRepository
 
     private record CsiContinuation(
             JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiReadyAdmission.Admission progress,
+            JdbcCsiApplicationProgress.Continuation progress,
             JdbcCsiActivationAdmission.NativeHead head,
             RuntimeSessionRecord runtime) {
         void require(ToolExecutionRecord execution) {

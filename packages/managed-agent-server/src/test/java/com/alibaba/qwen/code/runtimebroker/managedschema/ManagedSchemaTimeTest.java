@@ -1,16 +1,15 @@
 package com.alibaba.qwen.code.runtimebroker.managedschema;
 
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+
+import java.sql.SQLException;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import java.sql.SQLException;
-import java.util.UUID;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.Test;
 
 class ManagedSchemaTimeTest {
     @Test

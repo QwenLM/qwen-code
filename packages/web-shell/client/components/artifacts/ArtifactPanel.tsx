@@ -105,6 +105,7 @@ import {
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
   isExcelFile,
+  isPdfArtifact,
   normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
@@ -1567,9 +1568,10 @@ export function ArtifactPanel({
               activeTab.workspacePath,
               activeTab.previewMimeType || activeTab.previewData.type,
             ) &&
-            normalizeArtifactMimeType(
-              activeTab.previewMimeType || activeTab.previewData.type,
-            ) !== 'application/pdf' &&
+            !isPdfArtifact({
+              workspacePath: activeTab.workspacePath,
+              mimeType: activeTab.previewMimeType || activeTab.previewData.type,
+            }) &&
             !normalizeTextMediaType(
               activeTab.previewMimeType || activeTab.previewData.type,
               activeTab.workspacePath,
@@ -3348,7 +3350,8 @@ function ArtifactDetail({
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
     if (
       isDownloadOnlyWorkspaceArtifact(artifact) ||
-      (isExcelFile(artifact.workspacePath, artifact.mimeType) &&
+      ((isExcelFile(artifact.workspacePath, artifact.mimeType) ||
+        isPdfArtifact(artifact)) &&
         artifact.status !== 'available' &&
         artifact.status !== 'changed')
     ) {
@@ -3366,7 +3369,9 @@ function ArtifactDetail({
         workspaceActions={workspaceActions}
         previewContent={previewContent}
         previewSizeBytes={artifact.sizeBytes}
-        previewMimeType={artifact.mimeType}
+        previewMimeType={
+          isPdfArtifact(artifact) ? 'application/pdf' : artifact.mimeType
+        }
         imageMimeType={imageMimeType}
         previewKind={
           isHtmlArtifact(artifact)
@@ -3611,7 +3616,7 @@ function SourceDetail({
       : locator.type === 'attachment'
         ? locator.attachmentId
         : '';
-  const isPdf = /\.pdf$/i.test(path);
+  const isPdf = isPdfArtifact({ workspacePath: path });
   useEffect(() => {
     let cancelled = false;
     setData(undefined);
@@ -3745,7 +3750,7 @@ function SourceDetail({
         </div>
       ) : data &&
         !isExcelFile(path, data.type) &&
-        data.type !== 'application/pdf' &&
+        !isPdfArtifact({ workspacePath: path, mimeType: data.type }) &&
         !normalizeTextMediaType(data.type, path) ? (
         <SourceBlobPreview
           data={data}
@@ -3912,6 +3917,16 @@ function WorkspaceFilePreview({
       />
     );
   }
+  if (isPdfArtifact({ workspacePath, mimeType: previewMimeType })) {
+    return (
+      <WorkspacePdfPreview
+        workspacePath={workspacePath}
+        artifactVersion={artifactVersion}
+        workspaceActions={workspaceActions}
+        onLoadError={onLoadError}
+      />
+    );
+  }
   const path = workspacePath.toLowerCase();
   const resolvedImageMimeType =
     imageMimeType ?? getImageMimeTypeFromPath(workspacePath);
@@ -3993,11 +4008,11 @@ function AttachmentBlobPreview({
     .split(';', 1)[0]!
     .trim()
     .toLowerCase();
-  if (resolvedMimeType === 'application/pdf') {
+  if (isPdfArtifact({ workspacePath, mimeType: resolvedMimeType })) {
     return (
       <PdfAttachmentPreview
         data={data}
-        mimeType={resolvedMimeType}
+        mimeType="application/pdf"
         title={workspacePath}
       />
     );
@@ -4069,6 +4084,70 @@ function TextAttachmentPreview({
   );
 }
 
+function WorkspacePdfPreview({
+  workspacePath,
+  artifactVersion,
+  workspaceActions,
+  onLoadError,
+}: {
+  workspacePath: string;
+  artifactVersion?: string;
+  workspaceActions: ArtifactWorkspaceActions;
+  onLoadError?: (error: string) => void;
+}) {
+  const { t } = useI18n();
+  const [data, setData] = useState<Blob>();
+  const [error, setError] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setData(undefined);
+    setError(undefined);
+    void readWorkspaceFileAsBlob(
+      workspaceActions.readFileBytes,
+      workspacePath,
+      'application/pdf',
+      { statFile: workspaceActions.stat, isCancelled: () => cancelled },
+    ).then(
+      (blob) => {
+        if (!cancelled) setData(blob);
+      },
+      (err: unknown) => {
+        if (cancelled) return;
+        const message = extractErrorDetail(err);
+        setError(message);
+        onLoadError?.(message);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [workspacePath, workspaceActions, artifactVersion, attempt, onLoadError]);
+  if (error) {
+    return (
+      <div className={styles.empty}>
+        <div role="alert" className={styles.previewError}>
+          {error}
+        </div>
+        <Button onClick={() => setAttempt((value) => value + 1)}>
+          {t('common.retry')}
+        </Button>
+      </div>
+    );
+  }
+  return data ? (
+    <PdfAttachmentPreview
+      data={data}
+      mimeType="application/pdf"
+      title={workspacePath}
+    />
+  ) : (
+    <div className={styles.empty} role="status">
+      {t('attachment.loadingPreview')}
+    </div>
+  );
+}
+
 function PdfAttachmentPreview({
   data,
   mimeType,
@@ -4088,11 +4167,29 @@ function PdfAttachmentPreview({
     return () => URL.revokeObjectURL(objectUrl);
   }, [data, mimeType]);
   return src ? (
-    <iframe
-      className={styles.pdfAttachmentPreview}
-      src={src}
-      title={`Preview ${title}`}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex justify-end border-b border-border p-1">
+        <Button variant="ghost" size="sm" asChild>
+          <a
+            href={src}
+            download={fileName(title)}
+            aria-label={`Download ${fileName(title)}`}
+          >
+            <DownloadIcon aria-hidden="true" />
+            {t('common.download')}
+          </a>
+        </Button>
+      </div>
+      {navigator.pdfViewerEnabled === false ? (
+        <div className={styles.empty}>{t('attachment.previewUnsupported')}</div>
+      ) : (
+        <iframe
+          className={`${styles.pdfAttachmentPreview} min-h-0 flex-1`}
+          src={src}
+          title={`Preview ${title}`}
+        />
+      )}
+    </div>
   ) : (
     <div className={styles.empty}>{t('attachment.loadingPreview')}</div>
   );
