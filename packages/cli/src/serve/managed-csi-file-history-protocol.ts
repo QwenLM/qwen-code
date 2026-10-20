@@ -260,7 +260,7 @@ export function readCsiFileHistoryEnvelope(
     'operation',
   ]);
   ensure(
-    boot.version === 5 &&
+    (boot.version === 5 || boot.version === 6) &&
       body['protocolVersion'] === 2 &&
       body['managedCsi'] === MANAGED_CSI_FILE_PROTOCOL,
   );

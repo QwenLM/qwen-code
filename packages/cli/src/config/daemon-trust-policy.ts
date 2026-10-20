@@ -24,6 +24,7 @@ import {
 } from './trustedFolders.js';
 import { arePathsEquivalent } from './path-comparison.js';
 import { v1ToV2Migration } from './migration/versions/v1-to-v2.js';
+import { isWorkflowAncestorDirectorySafe } from './workflow-ancestor-directory-safety.js';
 
 const MAX_TRUSTED_FOLDERS_BYTES = 1024 * 1024;
 const MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
@@ -53,6 +54,42 @@ export interface DaemonWorkspaceTrustDecision {
   readonly source: WorkspaceTrustSource;
   readonly explicitTrustLevel: TrustLevel | null;
   readonly error?: DaemonTrustPolicyError;
+}
+
+interface DaemonWorkflowAncestorTrustQuery {
+  readonly workspaceCwd: string;
+  readonly canonicalTargetDir: string;
+  readonly ancestorDirs: readonly string[];
+  readonly ideScopeCwd: string;
+}
+
+export function evaluateDaemonWorkflowAncestorTrust(
+  snapshot: DaemonTrustPolicySnapshot,
+  query: DaemonWorkflowAncestorTrustQuery,
+): readonly boolean[] {
+  const denied = () => query.ancestorDirs.map(() => false);
+  if (snapshot.settingsError) return denied();
+  if (!snapshot.folderTrustEnabled) {
+    return query.ancestorDirs.map(isWorkflowAncestorDirectorySafe);
+  }
+  if (
+    snapshot.trustedFoldersError ||
+    (snapshot.ideTrust === false &&
+      (arePathsEquivalent(query.workspaceCwd, query.ideScopeCwd) ||
+        arePathsEquivalent(query.canonicalTargetDir, query.ideScopeCwd)))
+  ) {
+    return denied();
+  }
+  const folders = new LoadedTrustedFolders(
+    { path: getTrustedFoldersPath(), config: { ...snapshot.trustedFolders } },
+    [],
+  );
+  if (folders.isPathTrusted(query.canonicalTargetDir) !== true) {
+    return denied();
+  }
+  return query.ancestorDirs.map(
+    (directory) => folders.isPathTrusted(directory) === true,
+  );
 }
 
 interface ReadJsonResult {

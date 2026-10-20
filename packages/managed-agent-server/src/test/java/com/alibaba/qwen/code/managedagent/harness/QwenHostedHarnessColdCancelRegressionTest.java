@@ -5,17 +5,17 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.service.RequestDigests;
-import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -180,7 +180,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
                     coordinator, connector, registry);
             clearInvocations(client);
             assertThatThrownBy(() -> service.cancelTurn(tenant, "actor-a", "cancel-fresh", session, turn))
-                    .isInstanceOfSatisfying(ApiException.class,
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo("session_not_found"));
             assertThat(store.findCommand(tenant, "CANCEL", "cancel-fresh")).isEmpty();
         } finally {
@@ -317,7 +317,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
             String requestOwner = owner;
             assertThatThrownBy(() -> fixture.connector().recoverManagedFailureCancellation(
                     requestTenant, requestSession, requestTurn, requestOwner))
-                    .isInstanceOfAny(RuntimeBrokerException.class, ApiException.class);
+                    .isInstanceOfAny(RuntimeBrokerException.class, ManagedAgentException.class);
             verifyNoInteractions(fixture.client());
             assertThat(failedEvents(fixture)).isZero();
         }

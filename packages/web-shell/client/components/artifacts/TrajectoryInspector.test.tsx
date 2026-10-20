@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
@@ -521,5 +521,94 @@ it.each(['en', 'zh-CN'] as const)(
           : { success: '成功', error: '失败' };
       expect(value?.textContent).toBe(labels[status]);
     }
+  },
+);
+
+it.each([false, true])(
+  'restores only after actual removal, using the latest callback (shadow=%s)',
+  async (shadow) => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const container = document.createElement('div');
+    (shadow ? host.attachShadow({ mode: 'open' }) : host).append(container);
+    const root = createRoot(container);
+    const first = vi.fn();
+    const latest = vi.fn();
+    mounts.push(() => {
+      act(() => root.unmount());
+      host.remove();
+    });
+    const render = async (callback: () => void) => {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <TrajectoryInspector
+                row={tool({}, 'output')}
+                hiddenByCollapse={false}
+                hiddenByRange={false}
+                onReveal={() => {}}
+                onClearRange={() => {}}
+                onClose={() => {}}
+                onFocusedUnmount={callback}
+              />
+            </I18nProvider>
+          </StrictMode>,
+        );
+      });
+    };
+    await render(first);
+    expect(first).not.toHaveBeenCalled();
+    const button = container.querySelector<HTMLButtonElement>('button')!;
+    button.focus();
+    await render(latest);
+    expect(first).not.toHaveBeenCalled();
+    expect(latest).not.toHaveBeenCalled();
+    expect(
+      (container.getRootNode() as Document | ShadowRoot).activeElement,
+    ).toBe(button);
+    await act(async () => root.render(null));
+    expect(first).not.toHaveBeenCalled();
+    expect(latest).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each([false, true])(
+  'does not restore if another control gains focus before recovery (shadow=%s)',
+  async (shadow) => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const container = document.createElement('div');
+    (shadow ? host.attachShadow({ mode: 'open' }) : host).append(container);
+    const root = createRoot(container);
+    const fallback = vi.fn();
+    mounts.push(() => {
+      act(() => root.unmount());
+      host.remove();
+    });
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <TrajectoryInspector
+            row={tool({}, 'output')}
+            hiddenByCollapse={false}
+            hiddenByRange={false}
+            onReveal={() => {}}
+            onClearRange={() => {}}
+            onClose={() => {}}
+            onFocusedUnmount={fallback}
+          />
+        </I18nProvider>,
+      ),
+    );
+    const other = document.createElement('button');
+    container.after(other);
+    act(() => root.render(null));
+    other.focus();
+    await act(async () => {});
+    expect(fallback).not.toHaveBeenCalled();
+    expect(
+      (container.getRootNode() as Document | ShadowRoot).activeElement,
+    ).toBe(other);
   },
 );

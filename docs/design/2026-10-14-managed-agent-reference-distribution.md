@@ -30,7 +30,15 @@ The release asset is `qwen-managed-agent-reference-<version>.tar.gz`. It contain
 ```text
 bin/qwen-managed-agent-server
 bin/qwen-managed-agent-operator-recovery
+bin/qwen-managed-agent-bootstrap
+bin/qwen-managed-agent-bootstrap.mjs
 config/application.example.yml
+systemd/qwen-hosted-harness.service
+systemd/qwen-managed-agent-server.service
+systemd/harness.env.example
+systemd/server.env.example
+systemd/README.md
+systemd/README.zh-CN.md
 lib/qwen-managed-agent-server-<component-version>.jar
 lib/qwen-managed-agent-server-<component-version>-operator-recovery.jar
 docs/deployment.md
@@ -43,9 +51,13 @@ SHA256SUMS
 LICENSE
 ```
 
-The launchers use bundle-relative JAR paths. When the operator creates `config/application.yml` at the bundle root, they export `SPRING_CONFIG_ADDITIONAL_LOCATION` for it unless the variable is already set, so positional arguments reach Java unchanged. The template carries no active settings, so copying it changes nothing until it is edited. The server JAR includes Broker classes and resources; no separate Broker artifact or process is introduced.
+The launchers use bundle-relative JAR paths. When the operator creates `config/application.yml` at the bundle root, they export `SPRING_CONFIG_ADDITIONAL_LOCATION` for it unless the variable is already set, so positional arguments reach Java unchanged. The template carries no active settings, so copying it changes nothing until it is edited. The server JAR includes Broker classes and resources; no separate Broker artifact or process is introduced. The `systemd/` templates encode the documented kill modes: `process` for the control plane so Runtime workers survive a Broker restart, and `mixed` for the Harness so its tool processes terminate with it.
 
 The release also publishes a detached copy of `manifest.json` and `SHA256SUMS.txt`. The detached checksum file covers the archive and detached manifest. The in-bundle checksum file covers every payload file and `manifest.json`.
+
+## Credential bootstrap
+
+`bin/qwen-managed-agent-bootstrap` generates the shared Harness token and capability digest, the broker token and the Runtime credential key, and writes `harness.env`, `server.env` and `application.yml` with mode 0600. It refuses to overwrite without `--force` and prints paths only. The digest is an arbitrary shared identifier: the Harness echoes the configured value instead of deriving one from its capability set. The generator does not invent datasource credentials.
 
 ## Manifest contract
 

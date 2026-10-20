@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.store.WorkspaceFileStore;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceFileStore;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;

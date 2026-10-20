@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.EventIdentity;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.persistence.EventIdentity;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -110,6 +110,7 @@ class HarnessEventProjectorTest {
         assertThat(event.type()).isEqualTo("item.tool_call.updated");
         assertThat(event.data()).containsEntry("toolCallId", "tool-1")
                 .containsEntry("name", "read_file")
+                .containsEntry("sourceSequence", 7L)
                 .containsEntry("title", "Read file")
                 .containsEntry("status", "completed");
         // The same allowlist guards the tool path: the raw update map must

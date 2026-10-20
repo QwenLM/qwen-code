@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.JavaDurableAdmission;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.session.JavaDurableAdmission;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 

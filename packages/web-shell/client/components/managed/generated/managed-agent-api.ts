@@ -658,6 +658,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/tool-details/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["getWebShellToolDetails"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1083,7 +1099,7 @@ export interface components {
             allowText: boolean;
             options: components["schemas"]["WebShellActionOption"][];
         };
-        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input completion means a Harness admitted its Turn, not that the Turn completed; an input whose Turn failed after a submission no Harness answered is recovery_blocked until the Session journal proves whether a Harness admitted it. For submit_input and task cancel, recovery_blocked means acceptance is unknown: the operation is never delivered again and settles only from its own durable evidence. For close and delete it is a published wait that delivery re-drives. Cancel completion means its Turn reached cancelled; a cancel fails with turn_already_settled when its Turn ended otherwise. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance. A completed task cancel carries admission stage harness_confirmed and delivery state confirmed with the authority's receipt; failed and recovery_blocked carry java_durable and blocked, so they are never delivered again without reconciliation. */
+        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input completion means a Harness admitted its Turn, not that the Turn completed; an input whose Turn failed after a submission no Harness answered is recovery_blocked until the Session journal proves whether a Harness admitted it. For submit_input and task cancel, recovery_blocked means acceptance is unknown: the operation is never delivered again and settles only from its own durable evidence. For close and delete it is a published wait that delivery re-drives. Cancel completion means its Turn reached cancelled; a cancel fails with turn_already_settled when its Turn ended otherwise, except one that already existed when its Turn failed with managed_runtime_recovery_blocked after a Harness admitted it or a submission was attempted, which parks recovery_blocked with cancel_unconfirmed. A cancel submitted after the Turn ended still fails turn_already_settled. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance. A completed task cancel carries admission stage harness_confirmed and delivery state confirmed with the authority's receipt; failed and recovery_blocked carry java_durable and blocked, so they are never delivered again without reconciliation. A cancel parked as recovery_blocked/cancel_unconfirmed by unobserved-Turn recovery reconciles only from the original prompt's retained durable terminal event: cancelled completes it, completed or error fails it with turn_already_settled, and missing or unreadable evidence stays parked. A recorded stop request alone does not prove cancellation completed. */
         WebShellCommandOperation: {
             operationId: string;
             /** Format: uuid */
@@ -1100,7 +1116,7 @@ export interface components {
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
             actionResolution?: components["schemas"]["WebShellActionResolution"];
-            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. A lifecycle operation that exhausted its retry budget fails with the settle's failure: session_lifecycle_delivery_failed, managed_capability_mismatch or hosted_harness_protocol_error when the Hosted Harness refused to negotiate, a workspace close or lifecycle refusal (a workspace_close_* or workspace_lifecycle_* code, or runtime_admission_closed; a Runtime Broker runtime_broker_recovery_blocked refusal is reported as workspace_close_identity_unverified), or another Runtime Broker refusal code; one whose settle reached the Harness but stayed unsettled past the larger settled budget fails with session_close_completion_unsettled. A lifecycle recovery_blocked operation reports the refusal it waits on, original resource identity or unsettled execution for a Workspace close, session_close_writer_live while a Harness holds the journal writer or while that check itself fails, or hosted_harness_generation_mismatch while this replica's view of the Harness boot is stale; the Session remains closing. A submit_input failure carries its Turn's error code, and a recovery_blocked submit_input reports submit_input_unconfirmed; a cancel fails with turn_already_settled when its Turn completed or failed without being cancelled. */
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Task cancel failures are task_already_settled (the run ended before the stop request was recorded), task_action_unavailable and task_not_found; a recovery_blocked task cancel reports task_cancel_unconfirmed. A lifecycle operation that exhausted its retry budget fails with the settle's failure: session_lifecycle_delivery_failed, managed_capability_mismatch or hosted_harness_protocol_error when the Hosted Harness refused to negotiate, a workspace close or lifecycle refusal (a workspace_close_* or workspace_lifecycle_* code, or runtime_admission_closed; a Runtime Broker runtime_broker_recovery_blocked refusal is reported as workspace_close_identity_unverified), or another Runtime Broker refusal code; one whose settle reached the Harness but stayed unsettled past the larger settled budget fails with session_close_completion_unsettled. A lifecycle recovery_blocked operation reports the refusal it waits on, original resource identity or unsettled execution for a Workspace close, session_close_writer_live while a Harness holds the journal writer or while that check itself fails, or hosted_harness_generation_mismatch while this replica's view of the Harness boot is stale, or hosted_lifecycle_recovery_required while the daemon settles a previous prompt, or hosted_turn_active while a turn, MCP call or hook is still draining; the Session remains closing. A submit_input failure carries its Turn's error code, and a recovery_blocked submit_input reports submit_input_unconfirmed; a cancel fails with turn_already_settled when its Turn completed or failed without being cancelled, except one that already existed when its Turn failed with managed_runtime_recovery_blocked after a Harness admitted it or a submission was attempted: it parks recovery_blocked with cancel_unconfirmed. A cancel submitted after the Turn ended still fails turn_already_settled. A cancel parked as recovery_blocked/cancel_unconfirmed by unobserved-Turn recovery reconciles only from the original prompt's retained durable terminal event: cancelled completes it, completed or error fails it with turn_already_settled, and missing or unreadable evidence stays parked. A recorded stop request alone does not prove cancellation completed. */
             failureCode?: string;
             replayed: boolean;
         } & (unknown & unknown & unknown & unknown & unknown);
@@ -1575,12 +1591,12 @@ export interface components {
             mime_type: string;
             text: string;
         };
-        /** @description Canonical base64 image with a matching signature. The complete canonical input containing attachments is limited to 8 MiB. */
+        /** @description Canonical base64 PNG, JPEG, GIF or WebP image with a matching signature. The image/jpg alias is normalized to image/jpeg. The complete canonical input containing attachments is limited to 8 MiB. */
         InputImageBlock: {
             /** @enum {string} */
             type: "input_image";
             /** @enum {string} */
-            mime_type: "image/png" | "image/jpeg" | "image/webp";
+            mime_type: "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp";
             data: string;
         };
         WebShellSkill: {
@@ -1624,6 +1640,35 @@ export interface components {
             text: string;
             byteLength: number;
             sha256: string;
+        };
+        WebShellToolDetails: {
+            /** @description Allowlisted display arguments, or null when unavailable or larger than 4 KiB. */
+            input: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Recorded text or error, bounded to 8 KiB and 200 lines; null means unavailable, an empty string means recorded empty output. */
+            output: string | null;
+            truncated: boolean;
+            /** @description Validated saved Shell display, when available. Text fields share an 8 KiB/200-line budget; directory and output-file paths share an 8 KiB UTF-8 budget. Legacy text remains in output. */
+            shellResult?: components["schemas"]["WebShellShellResult"];
+        };
+        WebShellShellResult: {
+            /** @constant */
+            type: "shell_result";
+            /** @constant */
+            version: 1;
+            text: string;
+            output: string;
+            directory: string;
+            exitCode: number | null;
+            signal: number | null;
+            pid: number | null;
+            error: string | null;
+            /** @enum {string} */
+            outcome: "completed" | "failed" | "cancelled" | "timed_out";
+            notices: string[];
+            truncated: boolean;
+            outputFiles: string[];
         };
     };
     responses: {
@@ -2990,6 +3035,70 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             503: components["responses"]["Unavailable"];
+        };
+    };
+    getWebShellToolDetails: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellToolResultRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded saved ReadFile/Shell input and text output, read on demand; requires a trusted actor and current Session/Workspace read access. Available to authorized readers without a feature switch. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "private, no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellToolDetails"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
 }
