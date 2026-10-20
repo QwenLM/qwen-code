@@ -126,6 +126,15 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
+  it('runs the fast tier on hosted runners so it never queues on the pool lock', () => {
+    // The fast tier runs on every PR; on the pool it only queued behind
+    // full-tier holds and could burn its whole wait budget before Maven
+    // started (#14743). Hosted keeps it out of the per-host lock entirely.
+    expect(String(parse(workflow).jobs.test['runs-on'])).toContain(
+      "inputs.tier != 'fast'",
+    );
+  });
+
   it('runs Broker tests from the combined Server after installing the SDK on self-hosted Java 21', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
