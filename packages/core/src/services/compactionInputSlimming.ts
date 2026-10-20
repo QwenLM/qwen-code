@@ -8,6 +8,7 @@ import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { stripSystemReminderBlocks } from '../core/environmentContext.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -215,7 +216,7 @@ export function estimatePartChars(
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
-    return part.text.length;
+    return part.text.length + (part.thoughtSignature?.length ?? 0);
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
   // (an extension to the @google/genai schema; see
@@ -290,6 +291,13 @@ export interface SlimOptions {
    * nothing and keep text intact.
    */
   maxTextChars?: number;
+  /**
+   * Leaves the user's own text parts out of `maxTextChars`, so a compaction
+   * side-query reduced to fit its window still shows the summarizer what the
+   * user asked for. Tool results ride user turns as `functionResponse` parts
+   * and are still truncated.
+   */
+  preserveUserText?: boolean;
 }
 
 interface SlimStats {
@@ -317,9 +325,12 @@ export function slimCompactionInput(
 
   const slimmed = history.map((content) => {
     if (!content.parts || content.parts.length === 0) return content;
+    const keepUserText =
+      options?.preserveUserText === true && content.role === 'user';
 
     let touched = false;
     const newParts: Part[] = content.parts.map((part) => {
+      if (keepUserText && isUserTextPart(part)) return part;
       const replacement = transformPart(
         part,
         stats,
@@ -494,6 +505,158 @@ function truncateTextForSlimming(value: string, maxTextChars: number): string {
     end--;
   }
   return value.slice(0, end) + SLIM_TEXT_TRUNCATION_MARKER;
+}
+
+/** Longest quote of a single user message in a condensed side-query. */
+export const CONDENSED_USER_MESSAGE_MAX_CHARS = 8_000;
+/**
+ * Longest quote of the oldest user message. After an earlier compaction it
+ * holds that compaction's summary, the densest record of everything before.
+ */
+export const CONDENSED_FIRST_MESSAGE_MAX_CHARS = 32_000;
+/** Longest quote of all user messages together in a condensed side-query. */
+export const CONDENSED_USER_MESSAGES_MAX_CHARS = 64_000;
+/** Room kept for the condensed block's leading note and separators. */
+const CONDENSED_NOTE_RESERVE_CHARS = 512;
+
+/**
+ * Shrinks a compaction side-query that cannot fit its window to about
+ * `maxChars`: the newest turns stay as they are, and everything older becomes
+ * one user message quoting what the user said there. Assistant replies and
+ * tool traffic are dropped first because the user's words are the only record
+ * of what was asked; the oldest message is always quoted. The kept turns start
+ * on a model turn, so no function call is separated from its response and the
+ * roles keep alternating after the quote block. The newest model turn is kept
+ * even when it alone exceeds the budget; the caller re-checks the result.
+ * Undefined when no model turn can start the kept turns.
+ */
+export function condenseToUserMessages(
+  history: Content[],
+  maxChars: number,
+  imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+): Content[] | undefined {
+  const allTexts = userMessageTexts(history);
+  const quoteBudget = Math.min(
+    CONDENSED_USER_MESSAGES_MAX_CHARS,
+    Math.floor(maxChars / 4),
+    totalLength(
+      allTexts.map((text, index) =>
+        quoteUserMessage(
+          text,
+          index === 0
+            ? CONDENSED_FIRST_MESSAGE_MAX_CHARS
+            : CONDENSED_USER_MESSAGE_MAX_CHARS,
+        ),
+      ),
+    ),
+  );
+  const cut = keptTurnsStart(
+    history,
+    maxChars - quoteBudget - CONDENSED_NOTE_RESERVE_CHARS,
+    imageTokenEstimate,
+  );
+  if (cut < 1) return undefined;
+
+  const head = history.slice(0, cut);
+  const [oldest, ...rest] = userMessageTexts(head);
+  const newer = rest.map((text) =>
+    quoteUserMessage(text, CONDENSED_USER_MESSAGE_MAX_CHARS),
+  );
+  // The oldest message may use whatever the newer ones leave, and at least
+  // half the budget when they need more.
+  const first =
+    oldest === undefined
+      ? []
+      : [
+          quoteUserMessage(
+            oldest,
+            Math.max(
+              0,
+              Math.min(
+                CONDENSED_FIRST_MESSAGE_MAX_CHARS,
+                Math.max(
+                  Math.floor(quoteBudget / 2),
+                  quoteBudget - totalLength(newer),
+                ),
+              ),
+            ),
+          ),
+        ];
+  const kept: string[] = [];
+  let used = totalLength(first);
+  for (let i = newer.length - 1; i >= 0; i--) {
+    used += newer[i]!.length;
+    if (used > quoteBudget) break;
+    kept.unshift(newer[i]!);
+  }
+  const omittedQuotes = newer.length - kept.length;
+  const note =
+    `[Earlier conversation condensed for compaction: ` +
+    `${head.length - first.length - newer.length} assistant and tool ` +
+    `messages were omitted to fit the context window; the user's messages ` +
+    `from that part are quoted verbatim below` +
+    (omittedQuotes
+      ? `, except ${omittedQuotes} from the middle, omitted for length`
+      : '') +
+    `.]`;
+  return [
+    {
+      role: 'user',
+      parts: [{ text: [note, ...first, ...kept].join('\n\n') }],
+    },
+    ...history.slice(cut),
+  ];
+}
+
+function keptTurnsStart(
+  history: Content[],
+  budgetChars: number,
+  imageTokenEstimate: number,
+): number {
+  let used = 0;
+  let start = -1;
+  for (let i = history.length - 1; i >= 1; i--) {
+    used += estimateContentChars(history[i]!, imageTokenEstimate);
+    if (used > budgetChars) break;
+    if (history[i]!.role === 'model') start = i;
+  }
+  if (start !== -1) return start;
+  return history.findLastIndex(
+    (content, index) => index >= 1 && content.role === 'model',
+  );
+}
+
+// Tool results are `functionResponse` parts, not text, so a user turn that
+// carries both (input steered in while tools ran) still contributes its text.
+// Injected `<system-reminder>` blocks ride user turns too but are not the
+// user's words; left in, they can fill a capped quote ahead of the prompt.
+function userMessageTexts(history: Content[]): string[] {
+  const texts: string[] = [];
+  for (const content of history) {
+    if (content.role !== 'user') continue;
+    const text = stripSystemReminderBlocks(
+      (content.parts ?? [])
+        .filter(isUserTextPart)
+        .map((part) => part.text)
+        .join('\n'),
+    ).trim();
+    if (text) texts.push(text);
+  }
+  return texts;
+}
+
+function quoteUserMessage(text: string, maxChars: number): string {
+  const quoted =
+    text.length > maxChars ? truncateTextForSlimming(text, maxChars) : text;
+  return `<user_message>\n${quoted}\n</user_message>`;
+}
+
+function totalLength(values: string[]): number {
+  return values.reduce((sum, value) => sum + value.length, 0);
+}
+
+function isUserTextPart(part: Part): boolean {
+  return typeof part.text === 'string' && !part.thought;
 }
 
 function supportsMimeType(

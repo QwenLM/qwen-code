@@ -24,7 +24,9 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
+  condenseToUserMessages,
   estimateContentChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
@@ -67,6 +69,19 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
  * rejects the request with a 400 that propagates to the caller.
  */
 export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
+
+/**
+ * Smallest output budget a cold compression request is sent with. Below it a
+ * `<state_snapshot>` is almost always cut off, so a request that cannot leave
+ * this much room is reduced first and not sent if it still cannot (#9455).
+ */
+export const MIN_COMPACTION_OUTPUT_TOKENS = 4_096;
+
+/**
+ * Size, relative to a request just rejected for context length, that the one
+ * retry aims for when the rejection names no token counts to size it by.
+ */
+const OVERFLOW_RETRY_SHRINK = 0.6;
 
 /**
  * Output budget for the compression side-query: the fixed ceiling clamped to
@@ -802,35 +817,77 @@ export class ChatCompressionService {
     // Hoisted because the truncation guard below compares the reported
     // output count against it.
     let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
-    const runColdCompression = () => {
-      const slim = getColdInput();
-      if (
-        slim.stats.imagesStripped > 0 ||
-        slim.stats.documentsStripped > 0 ||
-        slim.stats.textPartsTruncated > 0
-      ) {
-        config
-          .getDebugLogger()
-          .debug(
-            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s), ` +
-              `${slim.stats.documentsStripped} document(s), and truncated ` +
-              `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
-          );
-      }
-      // Clamp the output budget to the receiving model's remaining window so
-      // `prompt + max_tokens <= window` holds even on small-window
-      // deployments (issue #7960).
-      coldOutputBudget = computeCompactionOutputBudget(
-        getColdInputEstimate() +
-          Math.ceil(COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN),
-        budgetWindow,
+    // Set once the cold request is reduced to fit: its usage then no longer
+    // describes the history it replaces.
+    let coldInputReduced = false;
+    const fixedColdTokens =
+      Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
+      Math.ceil(COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN);
+    const estimateColdRequest = (history: Content[]) =>
+      estimateContentTokens(history, slimmingConfig.imageTokenEstimate) +
+      fixedColdTokens;
+    // Clamp the output budget to the receiving model's remaining window so
+    // `prompt + max_tokens <= window` holds even on small-window
+    // deployments (issue #7960).
+    const coldBudgetFor = (history: Content[]) =>
+      computeCompactionOutputBudget(estimateColdRequest(history), budgetWindow);
+    // Tool output is truncated first, then older turns are condensed to the
+    // user's own messages: those are the one part of the history the summary
+    // cannot recover from anywhere else (#9455).
+    const reduceColdInput = (targetTokens: number): Content[] => {
+      const truncated = opts.requestPayloadTooLarge
+        ? getColdInput().slimmedHistory
+        : slimCompactionInput(sideQueryHistory, undefined, {
+            maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+            preserveUserText: true,
+          }).slimmedHistory;
+      if (estimateColdRequest(truncated) <= targetTokens) return truncated;
+      return (
+        condenseToUserMessages(
+          truncated,
+          (targetTokens - fixedColdTokens) * CHARS_PER_TOKEN,
+          slimmingConfig.imageTokenEstimate,
+        ) ?? truncated
       );
+    };
+    // A context-length rejection means the estimate ran low for this request.
+    // The size the provider reported for it, or a fixed step when it names
+    // none, sizes one smaller retry that still leaves the full output budget.
+    const shrinkAfterOverflow = (
+      error: unknown,
+      rejected: Content[],
+    ): Content[] | undefined => {
+      const overflow = getContextLengthExceededInfo(error);
+      if (!overflow.isExceeded) return undefined;
+      const rejectedTokens = estimateColdRequest(rejected);
+      const measuredTarget = overflow.actualTokens
+        ? Math.floor(
+            ((budgetWindow -
+              COMPACT_MAX_OUTPUT_TOKENS -
+              COMPACTION_BUDGET_SAFETY_MARGIN) *
+              rejectedTokens) /
+              overflow.actualTokens,
+          )
+        : Infinity;
+      const retry = reduceColdInput(
+        Math.min(
+          measuredTarget,
+          Math.floor(rejectedTokens * OVERFLOW_RETRY_SHRINK),
+        ),
+      );
+      return estimateColdRequest(retry) < rejectedTokens &&
+        coldBudgetFor(retry) >= MIN_COMPACTION_OUTPUT_TOKENS
+        ? retry
+        : undefined;
+    };
+    const runColdCompression = (history: Content[]) => {
+      coldOutputBudget = coldBudgetFor(history);
       if (coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS) {
         config
           .getDebugLogger()
           .debug(
             `[chat-compression] output budget clamped to ${coldOutputBudget} ` +
-              `(estimated input ${getColdInputEstimate()}, ` +
+              `(estimated input ${estimateColdRequest(history)}, ` +
               `effectiveWindow ${budgetWindow}, ` +
               `ceiling ${opts.observedServerCeiling ?? 'none'})`,
           );
@@ -854,7 +911,7 @@ export class ChatCompressionService {
         maxAttempts: 1,
         systemInstruction,
         contents: [
-          ...slim.slimmedHistory,
+          ...history,
           {
             role: 'user',
             parts: [
@@ -1025,23 +1082,85 @@ export class ChatCompressionService {
 
     if (!summaryResult) {
       abortSignal.throwIfAborted();
-      try {
-        summaryResult = await runColdCompression();
-      } catch (error) {
-        if (abortSignal.aborted) throw error;
+      const slim = getColdInput();
+      if (
+        slim.stats.imagesStripped > 0 ||
+        slim.stats.documentsStripped > 0 ||
+        slim.stats.textPartsTruncated > 0
+      ) {
         config
           .getDebugLogger()
-          .warn(
-            `[chat-compression] compression side-query failed: ${String(error)}`,
+          .debug(
+            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s), ` +
+              `${slim.stats.documentsStripped} document(s), and truncated ` +
+              `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
           );
-        return {
-          newHistory: null,
-          info: {
-            originalTokenCount,
-            newTokenCount: originalTokenCount,
-            compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
-          },
-        };
+      }
+      let coldHistory = slim.slimmedHistory;
+      if (coldBudgetFor(coldHistory) < MIN_COMPACTION_OUTPUT_TOKENS) {
+        coldInputReduced = true;
+        // Leave the summary a quarter of the window, between the minimum and
+        // the full output budget.
+        const outputReserve = Math.max(
+          MIN_COMPACTION_OUTPUT_TOKENS,
+          Math.min(COMPACT_MAX_OUTPUT_TOKENS, Math.floor(budgetWindow / 4)),
+        );
+        coldHistory = reduceColdInput(
+          budgetWindow - outputReserve - COMPACTION_BUDGET_SAFETY_MARGIN,
+        );
+        if (coldBudgetFor(coldHistory) < MIN_COMPACTION_OUTPUT_TOKENS) {
+          config
+            .getDebugLogger()
+            .warn(
+              `[chat-compression] compression request does not fit the ` +
+                `context window even after reduction (estimated input ` +
+                `${estimateColdRequest(coldHistory)}, effectiveWindow ` +
+                `${budgetWindow}); not sending it.`,
+            );
+          return {
+            newHistory: null,
+            info: {
+              originalTokenCount,
+              newTokenCount: originalTokenCount,
+              compressionStatus:
+                CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+            },
+          };
+        }
+      }
+      for (let attempt = 0; summaryResult === undefined; attempt++) {
+        try {
+          summaryResult = await runColdCompression(coldHistory);
+        } catch (error) {
+          if (abortSignal.aborted) throw error;
+          const retryHistory =
+            attempt === 0 ? shrinkAfterOverflow(error, coldHistory) : undefined;
+          if (!retryHistory) {
+            config
+              .getDebugLogger()
+              .warn(
+                `[chat-compression] compression side-query failed: ${String(error)}`,
+              );
+            return {
+              newHistory: null,
+              info: {
+                originalTokenCount,
+                newTokenCount: originalTokenCount,
+                compressionStatus:
+                  CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+              },
+            };
+          }
+          config
+            .getDebugLogger()
+            .warn(
+              `[chat-compression] compression side-query exceeded the ` +
+                `context window; retrying once with a smaller request: ` +
+                `${String(error)}`,
+            );
+          coldInputReduced = true;
+          coldHistory = retryHistory;
+        }
       }
     }
     const summary = summaryResult.text;
@@ -1306,6 +1425,7 @@ export class ChatCompressionService {
       if (
         !usedCacheSharing &&
         !opts.requestPayloadTooLarge &&
+        !coldInputReduced &&
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
         typeof compressionOutputTokenCount === 'number' &&

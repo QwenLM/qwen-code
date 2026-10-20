@@ -16,6 +16,7 @@ import {
   computeThresholds,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
+  MIN_COMPACTION_OUTPUT_TOKENS,
   PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
 } from './chatCompressionService.js';
 import type { CompressOptions } from './chatCompressionService.js';
@@ -890,7 +891,7 @@ describe('ChatCompressionService', () => {
 
   it('should use estimated token count if usage metadata is missing', async () => {
     const largeMessage = 'x'.repeat(4_000);
-    arrange(turns(...Array<string>(4).fill(largeMessage)), 5_000, 6_000);
+    arrange(turns(...Array<string>(4).fill(largeMessage)), 5_000, 12_000);
     const { debug } = stubLogger();
     // Well-formed snapshot: the clamped budget + local-estimate path gates
     // acceptance on snapshot well-formedness, so the summary must carry the
@@ -3204,39 +3205,19 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expect(capturedMaxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
   });
 
-  it('rejects any output at a floored budget of 1 instead of persisting a degenerate summary', async () => {
-    // When the slimmed estimate already fills the window the budget floors
-    // at 1. A 1-token cap cannot hold a usable summary, so the single token
-    // the model emits is definitionally truncated and must be dropped —
-    // persisting it would replace the entire history with a 1-token fragment
-    // while resetting the failure breaker.
-    // 257,900 chars (~64.5K tokens) puts the estimate inside the narrow
-    // floor band where estimate >= window - margin (budget floors at 1) yet
-    // estimate + 1 still fits the window, so the backend accepts the request
-    // instead of 400-ing preflight.
-    mockVllmBackend(WINDOW, true);
+  it('condenses a window-filling turn instead of sending a floored budget of 1 (#9455)', async () => {
+    // 257,900 chars (~64.5K tokens) fills the window, which used to floor the
+    // budget at 1 and send a request that could only return a fragment.
+    mockVllmBackend();
 
     const result = await compressChars(257_900, 65_000);
-    expect(capturedMaxOutputTokens).toBe(1);
-    expectNoNewHistory(
-      result,
-      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    expect(capturedMaxOutputTokens).toBeGreaterThanOrEqual(
+      MIN_COMPACTION_OUTPUT_TOKENS,
     );
-  });
-
-  it('rejects a floored-budget fragment even when usage metadata is missing', async () => {
-    // Same floor band as above, but the provider omits usage so the output
-    // count is a local estimate. The floor regime must drop estimates too:
-    // no complete summary can exist at a 1-token cap, so the estimator
-    // false-positive rationale for the 20K threshold cannot apply here.
-    mockVllmBackend(WINDOW, true, { omitUsage: true });
-
-    const result = await compressChars(257_900, 65_000);
-    expect(capturedMaxOutputTokens).toBe(1);
-    expectNoNewHistory(
-      result,
-      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
-    );
+    expect(
+      capturedPromptTokens! + capturedMaxOutputTokens!,
+    ).toBeLessThanOrEqual(WINDOW);
+    expectCompressed(result);
   });
 
   it('accepts a complete summary whose local estimate exceeds a clamped budget when usage is missing', async () => {
@@ -3293,5 +3274,343 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     it('floors at 1 when the estimate already exceeds the window', () => {
       expect(computeCompactionOutputBudget(70_000, 65_536)).toBe(1);
     });
+  });
+});
+
+describe('issue #9455: compression requests fit the receiving window', () => {
+  interface SentRequest {
+    contents: Content[];
+    promptTokens: number;
+    maxOutputTokens: number;
+  }
+  let mockConfig: Config;
+  let sent: SentRequest[];
+
+  beforeEach(() => {
+    sent = [];
+    mockConfig = fakeConfig({
+      contextWindowSize: WINDOW,
+      extra: { getCompactionModel: vi.fn(), getFastModel: vi.fn() },
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Counts each request at `ratio` times the local char/4 estimate (a real
+   * tokenizer bills dense CJK text well above it) and rejects
+   * `prompt + max_tokens > window` with `rejection(prompt)`.
+   */
+  function mockBackend(
+    o: {
+      ratio?: number;
+      rejection?: (promptTokens: number) => Error;
+      alwaysReject?: boolean;
+    } = {},
+  ) {
+    const generateText = vi.fn(async (opts: GenerateTextOptions) => {
+      const contents = opts.contents as Content[];
+      const systemText =
+        typeof opts.systemInstruction === 'string'
+          ? opts.systemInstruction
+          : '';
+      const promptTokens = Math.ceil(
+        (estimateContentTokens(contents) + Math.ceil(systemText.length / 4)) *
+          (o.ratio ?? 1),
+      );
+      const maxOutputTokens =
+        (opts.config as { maxOutputTokens?: number } | undefined)
+          ?.maxOutputTokens ?? 0;
+      sent.push({ contents, promptTokens, maxOutputTokens });
+      if (o.alwaysReject || promptTokens + maxOutputTokens > WINDOW) {
+        throw (
+          o.rejection?.(promptTokens) ??
+          new Error(
+            `prompt is too long: ${promptTokens} tokens > ${WINDOW} maximum`,
+          )
+        );
+      }
+      return {
+        text: '<state_snapshot>summary</state_snapshot>',
+        usage: { promptTokenCount: promptTokens, candidatesTokenCount: 2_000 },
+      };
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+    return generateText;
+  }
+
+  /** The user's request, then `rounds` read_file calls of `outputChars`. */
+  function toolSession(
+    rounds: number,
+    outputChars: number,
+    extra: Content[] = [],
+  ): Content[] {
+    const history: Content[] = [userText('original request: port the parser')];
+    for (let i = 0; i < rounds; i++) {
+      history.push(content('model', fnCall('read_file', { i }, `c${i}`)));
+      history.push(
+        content(
+          'user',
+          fnResponse('read_file', { output: 'r'.repeat(outputChars) }, `c${i}`),
+        ),
+      );
+      if (i === 0) history.push(...extra);
+    }
+    history.push(modelText('done'));
+    return history;
+  }
+
+  function compressHistory(
+    history: Content[],
+    originalTokenCount: number,
+    extra: Partial<CompressOptions> = {},
+  ) {
+    return new ChatCompressionService().compress(fakeChat(history), {
+      promptId: 'p',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount,
+      ...extra,
+    });
+  }
+
+  /** Every response follows its call, and roles alternate. */
+  function expectWellFormed(contents: Content[]) {
+    const calls = new Set<string>();
+    contents.forEach((entry, index) => {
+      if (index > 0) expect(entry.role).not.toBe(contents[index - 1]!.role);
+      for (const part of entry.parts ?? []) {
+        if (part.functionCall?.id) calls.add(part.functionCall.id);
+        if (part.functionResponse?.id) {
+          expect(calls.has(part.functionResponse.id)).toBe(true);
+        }
+      }
+    });
+  }
+
+  const textOf = (contents: Content[]) =>
+    contents
+      .flatMap((entry) => entry.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('\n');
+
+  it('sends a request that already fits unchanged', async () => {
+    mockBackend();
+    const history = toolSession(4, 2_000);
+
+    const result = await compressHistory(history, 3_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.contents.slice(0, -1)).toEqual(history);
+    expect(sent[0]!.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+  });
+
+  it('truncates tool output but keeps user messages verbatim when that is enough', async () => {
+    mockBackend();
+    const longRequest = 'keep every word of this: ' + 'w'.repeat(10_000);
+    const history = toolSession(30, 12_000, [
+      modelText('noted'),
+      userText(longRequest),
+    ]);
+
+    const result = await compressHistory(history, 95_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    const request = sent[0]!.contents;
+    expect(request[0]).toEqual(history[0]);
+    expect(textOf(request)).toContain(longRequest);
+    expect(JSON.stringify(request)).toContain(
+      slimmingModule.SLIM_TEXT_TRUNCATION_MARKER.trim(),
+    );
+    expect(sent[0]!.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(
+      sent[0]!.promptTokens + sent[0]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(WINDOW);
+  });
+
+  it('condenses older turns to the user messages instead of sending a floored budget', async () => {
+    mockBackend();
+    const history = toolSession(60, 12_000, [
+      modelText('noted'),
+      userText('also handle CRLF line endings'),
+    ]);
+
+    const result = await compressHistory(history, 185_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    const request = sent[0]!.contents;
+    expect(request[0]!.role).toBe('user');
+    expect(textOf(request.slice(0, 1))).toContain(
+      'original request: port the parser',
+    );
+    expect(textOf(request.slice(0, 1))).toContain(
+      'also handle CRLF line endings',
+    );
+    expectWellFormed(request);
+    // A reduced request leaves the summary a quarter of the window.
+    expect(sent[0]!.maxOutputTokens).toBeGreaterThanOrEqual(
+      Math.floor(WINDOW / 4),
+    );
+    expect(
+      sent[0]!.promptTokens + sent[0]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(WINDOW);
+  });
+
+  it('does not derive the post-compression count from a reduced request', async () => {
+    mockBackend();
+    const history = toolSession(60, 12_000);
+    const originalTokenCount = estimateContentTokens(history) + 1_000;
+
+    const result = await compressHistory(history, originalTokenCount);
+
+    expectCompressed(result);
+    expect(result.info.newTokenCount).toBeLessThan(10_000);
+  });
+
+  it('fails locally with INPUT_TOO_LARGE when nothing fits the window', async () => {
+    const generateText = mockBackend();
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'test-model',
+      contextWindowSize: 4_000,
+    });
+
+    const result = await compressHistory(toolSession(10, 12_000), 40_000);
+
+    expect(generateText).not.toHaveBeenCalled();
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
+  });
+
+  it('admits a CJK-dense session the provider accepts (#9541 regression)', async () => {
+    mockBackend({ ratio: 2.4 });
+    const history = turns(
+      '请把解析器移植到新的接口上。'.repeat(2_000),
+      '好的，开始处理。'.repeat(2_000),
+    );
+
+    const result = await compressHistory(history, 40_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.contents.slice(0, -1)).toEqual(history);
+  });
+
+  it('retries once, sized by the counts in the rejection, when the estimate ran low', async () => {
+    mockBackend({ ratio: 2.5 });
+    const history = toolSession(20, 6_000);
+
+    const result = await compressHistory(history, 75_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(WINDOW);
+    expect(textOf(sent[1]!.contents)).toContain(
+      'original request: port the parser',
+    );
+    expectWellFormed(sent[1]!.contents);
+  });
+
+  it('shrinks by a fixed step when the rejection carries no counts', async () => {
+    mockBackend({
+      ratio: 2,
+      rejection: () => new Error('400 context_length_exceeded'),
+    });
+
+    const result = await compressHistory(toolSession(20, 6_000), 60_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.promptTokens).toBeLessThan(sent[0]!.promptTokens * 0.65);
+  });
+
+  it('gives up after one retry', async () => {
+    mockBackend({ alwaysReject: true });
+
+    const result = await compressHistory(toolSession(20, 6_000), 30_000);
+
+    expect(sent).toHaveLength(2);
+    expectNoNewHistory(result, CompressionStatus.COMPRESSION_FAILED_API_ERROR);
+  });
+
+  it('does not retry errors other than a context overflow', async () => {
+    mockBackend({
+      alwaysReject: true,
+      rejection: () => new Error('500 Internal Server Error'),
+    });
+
+    const result = await compressHistory(toolSession(20, 6_000), 30_000);
+
+    expect(sent).toHaveLength(1);
+    expectNoNewHistory(result, CompressionStatus.COMPRESSION_FAILED_API_ERROR);
+  });
+
+  it('does not retry when no smaller request can be built', async () => {
+    mockBackend({ alwaysReject: true });
+
+    const result = await compressHistory(turns('q', 'ok'), 2_000);
+
+    expect(sent).toHaveLength(1);
+    expectNoNewHistory(result, CompressionStatus.COMPRESSION_FAILED_API_ERROR);
+  });
+
+  it('rethrows an abort that lands on a rejected request instead of retrying', async () => {
+    const controller = new AbortController();
+    mockBackend({
+      alwaysReject: true,
+      rejection: (promptTokens) => {
+        controller.abort();
+        return new Error(
+          `prompt is too long: ${promptTokens} tokens > ${WINDOW} maximum`,
+        );
+      },
+    });
+
+    await expect(
+      compressHistory(toolSession(20, 6_000), 30_000, {
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('prompt is too long');
+    expect(sent).toHaveLength(1);
+  });
+
+  it('condenses a payload-overflow (413) compaction from its already-capped input', async () => {
+    mockBackend();
+    const history = toolSession(60, 12_000, [
+      modelText('noted'),
+      userText('u'.repeat(50_000)),
+    ]);
+
+    const result = await compressHistory(history, 200_000, {
+      requestPayloadTooLarge: true,
+    });
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    expect(textOf(sent[0]!.contents)).toContain(
+      '[Earlier conversation condensed for compaction',
+    );
+    // The gateway byte limit applies to the user's text too.
+    expect(JSON.stringify(sent[0]!.contents)).not.toContain(
+      'u'.repeat(PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP + 1),
+    );
+    expect(sent[0]!.maxOutputTokens).toBeGreaterThanOrEqual(
+      MIN_COMPACTION_OUTPUT_TOKENS,
+    );
+    expect(
+      sent[0]!.promptTokens + sent[0]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(WINDOW);
   });
 });

@@ -8,6 +8,10 @@ import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  condenseToUserMessages,
+  CONDENSED_FIRST_MESSAGE_MAX_CHARS,
+  CONDENSED_USER_MESSAGE_MAX_CHARS,
+  CONDENSED_USER_MESSAGES_MAX_CHARS,
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   DEFAULT_MAX_RECENT_FILES,
   DEFAULT_MAX_RECENT_IMAGES,
@@ -222,6 +226,16 @@ describe('compactionInputSlimming', () => {
   describe('estimatePartChars', () => {
     it('uses text length for text parts', () => {
       expect(estimatePartChars({ text: 'hello' }, 1600)).toBe(5);
+    });
+
+    it('counts a thoughtSignature carried next to thought text (#9455)', () => {
+      const thoughtSignature = 's'.repeat(4_096);
+      expect(
+        estimatePartChars(
+          { text: 'reasoning', thought: true, thoughtSignature },
+          1600,
+        ),
+      ).toBe('reasoning'.length + thoughtSignature.length);
     });
 
     it('uses fixed budget for inlineData regardless of size', () => {
@@ -717,6 +731,49 @@ describe('compactionInputSlimming', () => {
       expect(stats.textPartsTruncated).toBe(0);
     });
 
+    it('keeps user text verbatim with preserveUserText while truncating tool payloads and model text (#9455)', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: bigText }] },
+        {
+          role: 'model',
+          parts: [
+            { text: bigText },
+            {
+              functionCall: { name: 'write_file', args: { content: bigText } },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'write_file',
+                response: { output: bigText },
+              },
+            },
+          ],
+        },
+      ];
+      const truncated = 'T'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER;
+
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        { maxTextChars: 500, preserveUserText: true },
+      );
+
+      expect(slimmedHistory[0]).toBe(history[0]);
+      expect(slimmedHistory[1]!.parts![0]!.text).toBe(truncated);
+      expect(slimmedHistory[1]!.parts![1]!.functionCall!.args!['content']).toBe(
+        truncated,
+      );
+      expect(
+        slimmedHistory[2]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe(truncated);
+      expect(stats.textPartsTruncated).toBe(3);
+    });
+
     it('preserves sibling properties (thought) on truncated text parts', () => {
       // Reasoning histories carry `{ text, thought: true }` parts; the
       // converter pipeline keys off the flag, so truncation must not
@@ -859,6 +916,242 @@ describe('compactionInputSlimming', () => {
         expect(output.charCodeAt(499)).not.toBeGreaterThanOrEqual(0xd800);
         expect(output.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
       }
+    });
+  });
+
+  describe('condenseToUserMessages (#9455)', () => {
+    const toolRound = (i: number, outputChars: number): Content[] => [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { id: `c${i}`, name: 'read_file', args: { i } },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: `c${i}`,
+              name: 'read_file',
+              response: { output: 'r'.repeat(outputChars) },
+            },
+          },
+        ],
+      },
+    ];
+    const blockText = (content: Content) =>
+      (content.parts ?? []).map((part) => part.text ?? '').join('');
+
+    it('quotes earlier user messages verbatim and keeps the newest turns from a model boundary', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'original request: build the parser' }],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'first pass done' }] },
+        { role: 'user', parts: [{ text: 'also handle CRLF' }] },
+        ...toolRound(2, 20_000),
+        ...toolRound(3, 2_000),
+        { role: 'model', parts: [{ text: 'all done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      const block = blockText(condensed[0]!);
+      expect(condensed[0]!.role).toBe('user');
+      expect(block.indexOf('original request: build the parser')).toBeLessThan(
+        block.indexOf('also handle CRLF'),
+      );
+      expect(block).not.toContain('r'.repeat(100));
+      expect(block).not.toContain('first pass done');
+      const tail = condensed.slice(1);
+      expect(tail[0]!.role).toBe('model');
+      expect(tail).toEqual(history.slice(history.length - tail.length));
+      expect(tail.length).toBeGreaterThan(1);
+    });
+
+    it('pins the first user message and omits middle ones past the total budget', () => {
+      const history: Content[] = [];
+      for (let i = 0; i < 40; i++) {
+        history.push({
+          role: 'user',
+          parts: [{ text: `request-${i}: ` + 'u'.repeat(3_000) }],
+        });
+        history.push({ role: 'model', parts: [{ text: 'ok' }] });
+      }
+
+      const condensed = condenseToUserMessages(history, 100_000)!;
+
+      const block = blockText(condensed[0]!);
+      const tailStart = history.length - (condensed.length - 1);
+      const newestHeadUser = (tailStart - 1) / 2;
+      expect(block).toContain('request-0: ');
+      expect(block).toContain(`request-${newestHeadUser}: `);
+      expect(block).not.toContain('request-1: ');
+      expect(block).toMatch(/except \d+ from the middle/);
+      expect(block.length).toBeLessThanOrEqual(
+        CONDENSED_USER_MESSAGES_MAX_CHARS,
+      );
+    });
+
+    it('truncates a later oversized user message to the per-message cap', () => {
+      const huge = 'p'.repeat(CONDENSED_USER_MESSAGE_MAX_CHARS * 3);
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first request' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+        { role: 'user', parts: [{ text: huge }] },
+        ...toolRound(1, 30_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 50_000)!;
+
+      const block = blockText(condensed[0]!);
+      expect(block).toContain('first request');
+      expect(block).toContain(
+        'p'.repeat(CONDENSED_USER_MESSAGE_MAX_CHARS) +
+          SLIM_TEXT_TRUNCATION_MARKER,
+      );
+      expect(block).not.toContain(
+        'p'.repeat(CONDENSED_USER_MESSAGE_MAX_CHARS + 1),
+      );
+    });
+
+    it('gives the oldest message, often an earlier summary, a larger cap', () => {
+      const summary = 'S'.repeat(CONDENSED_FIRST_MESSAGE_MAX_CHARS + 8_000);
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: summary }] },
+        { role: 'model', parts: [{ text: 'Got it.' }] },
+        { role: 'user', parts: [{ text: 'next step please' }] },
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 1_000_000)!;
+
+      const block = blockText(condensed[0]!);
+      expect(block).toContain(
+        'S'.repeat(CONDENSED_FIRST_MESSAGE_MAX_CHARS) +
+          SLIM_TEXT_TRUNCATION_MARKER,
+      );
+      expect(block).not.toContain(
+        'S'.repeat(CONDENSED_FIRST_MESSAGE_MAX_CHARS + 1),
+      );
+    });
+
+    it('quotes user text that rides a tool-result turn but not the tool output', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'q0' }] },
+        toolRound(1, 0)[0]!,
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'c1',
+                name: 'read_file',
+                response: { output: 'r'.repeat(20_000) },
+              },
+            },
+            { text: 'please also check the docs' },
+          ],
+        },
+        ...toolRound(2, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 22_000)!;
+
+      const block = blockText(condensed[0]!);
+      expect(block).toContain('please also check the docs');
+      expect(block).not.toContain('r'.repeat(100));
+      expect(condensed[1]!.role).toBe('model');
+    });
+
+    it('leaves injected system reminders out of the quotes', () => {
+      const reminder =
+        '<system-reminder>\nAvailable skills: ' +
+        'k'.repeat(CONDENSED_USER_MESSAGE_MAX_CHARS) +
+        '\n</system-reminder>';
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: reminder }, { text: 'build the parser' }],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 12_000)!;
+
+      const block = blockText(condensed[0]!);
+      expect(block).toContain('build the parser');
+      expect(block).not.toContain('Available skills');
+    });
+
+    it('stays within maxChars when the quote budget is below the per-message cap', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'q'.repeat(20_000) }] },
+      ];
+      for (let i = 0; i < 10; i++) history.push(...toolRound(i, 4_000));
+      history.push({ role: 'model', parts: [{ text: 'done' }] });
+
+      const condensed = condenseToUserMessages(history, 24_000)!;
+
+      const total = condensed.reduce(
+        (sum, entry) => sum + estimateContentChars(entry, 1600),
+        0,
+      );
+      expect(total).toBeLessThanOrEqual(24_000);
+      expect(blockText(condensed[0]!)).toContain('q'.repeat(1_000));
+    });
+
+    it('keeps the newest model turn even when it alone exceeds the budget', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'q' }] },
+        { role: 'model', parts: [{ text: 'm'.repeat(50_000) }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 1_000)!;
+
+      expect(condensed).toHaveLength(2);
+      expect(condensed[1]).toBe(history[1]);
+    });
+
+    it('starts the kept turns on a model turn even when an earlier user turn would fit', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'q0' }] },
+        { role: 'model', parts: [{ text: 'm'.repeat(20_000) }] },
+        { role: 'user', parts: [{ text: 'please continue' }] },
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      const condensed = condenseToUserMessages(history, 4_000)!;
+
+      expect(condensed.map((entry) => entry.role)).toEqual(['user', 'model']);
+      expect(blockText(condensed[0]!)).toContain('please continue');
+    });
+
+    it('returns undefined when no model turn can start the kept tail', () => {
+      expect(
+        condenseToUserMessages([{ role: 'user', parts: [{ text: 'q' }] }], 10),
+      ).toBeUndefined();
+    });
+
+    it('does not mutate the input history', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'q'.repeat(20_000) }] },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+      const before = structuredClone(history);
+
+      condenseToUserMessages(history, 1_000);
+
+      expect(history).toEqual(before);
     });
   });
 });
