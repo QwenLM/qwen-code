@@ -203,11 +203,14 @@ class HostedHookFaultGatesIT {
         });
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
-        // The worker loss is the accepted H2 limit: the command and its
-        // descendant outlive the worker with no owner, receipt or timer.
-        assertThat(running(hook)).isTrue();
-        assertThat(running(child)).isTrue();
-        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+        // #14502's parent-death reaper empties the unit even though no
+        // survivor can settle the record: the orphan can no longer change
+        // the Workspace after its owner is gone.
+        waitFor(() -> {
+            assertThat(running(hook)).isFalse();
+            assertThat(running(child)).isFalse();
+            assertHookUnitsEmpty();
+        });
         JsonNode refused = api("POST", "/v1/agents/sessions/" + session + "/close", null, "close", 409, 503);
         assertThat(refused.toString()).containsAnyOf("turn_active", "runtime_reconciliation_required");
         assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
