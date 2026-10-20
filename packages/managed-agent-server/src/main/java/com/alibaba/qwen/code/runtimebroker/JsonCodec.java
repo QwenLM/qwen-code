@@ -3,18 +3,19 @@ package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
-final class JsonCodec {
+public final class JsonCodec {
     private JsonCodec() {
     }
 
-    static byte[] encode(Object value) {
+    public static byte[] encode(Object value) {
         return JSON.toJSONBytes(value, JSONWriter.Feature.WriteNulls);
     }
 
-    static Map<String, Object> parseObject(byte[] bytes, String context) {
+    public static Map<String, Object> parseObject(byte[] bytes, String context) {
         Object parsed;
         try {
             parsed = JSON.parseObject(new String(bytes, StandardCharsets.UTF_8),
@@ -32,7 +33,7 @@ final class JsonCodec {
         return BrokerValues.immutableMap(object);
     }
 
-    static String requiredString(Map<String, Object> object, String field,
+    public static String requiredString(Map<String, Object> object, String field,
             String context) {
         Object value = object.get(field);
         if (!(value instanceof String)) {
