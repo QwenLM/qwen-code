@@ -165,7 +165,7 @@ final class WorkspaceCsiApplicationInventory {
             declaration("ma_resource_ref", "session_scope_key,owner_kind,owner_key,owner_revision,resource_key",
                     "session_scope_key:CHAR,owner_kind:VARCHAR,owner_key:CHAR,owner_revision:BIGINT,resource_key:CHAR,"
                     + "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,journal_revision:BIGINT,"
-                    + "resource_id:VARBINARY,gmt_create:BIGINT"),
+                    + "resource_id:VARBINARY,gmt_create:BIGINT,runtime_binding_key:CHAR"),
             declaration("ma_runtime_binding", "binding_id",
                     "binding_id:VARBINARY,request_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "workspace_generation:VARBINARY,canonical_cwd:VARCHAR,capability_digest:VARBINARY,"
@@ -227,7 +227,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "activation_expires_at:BIGINT,activation_head_revision:BIGINT,tenant_key:CHAR,harness_key:CHAR,"
                     + "harness_session_id:VARBINARY,head_kind:VARCHAR,phase:VARCHAR,operation_id:VARBINARY,"
                     + "claim_generation:BIGINT,claim_lease_until:BIGINT,wake_pending:BOOLEAN,wake_head_revision:BIGINT,"
-                    + "wake_retry_at:BIGINT,wake_scan_pending:BOOLEAN"),
+                    + "wake_retry_at:BIGINT,wake_scan_pending:BOOLEAN,cleanup_head_revision:BIGINT"),
             declaration("ma_session_journal_tx", "tenant_id,session_id,journal_revision",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,journal_revision:BIGINT,"
                     + "command_key_hash:CHAR,transaction_id:VARBINARY,operation:LONGTEXT,command_id:VARBINARY,"
