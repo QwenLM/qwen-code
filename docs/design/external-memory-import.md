@@ -111,6 +111,14 @@ stats only, without repeating ancestor discovery, realpath resolution, or Git
 metadata reads. Dependency checks are not an atomic filesystem snapshot. Ordinary
 project-memory caching and isolation remain unchanged.
 
+User imports stay in the reserved `imported/` subtree of the user memory root.
+Capped user scans and index generation give native entries priority over that
+subtree, preserving native recency ordering and the existing 200-document,
+200-line and character limits. Native long links keep the capacity they had before
+an import; imported entries fill only remaining space. Imports omitted from the
+bounded catalogue remain available through native search and explicit fetch.
+Project and team memory ordering is unchanged.
+
 ## Interfaces
 
 Workspace-qualified HTTP routes provide preview, batch submission, listing,

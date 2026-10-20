@@ -463,6 +463,10 @@ function sortScannedDocuments(
       )
     : docs.sort(
         (a, b) =>
+          Number(a.scope === 'user' && a.relativePath.startsWith('imported/')) -
+            Number(
+              b.scope === 'user' && b.relativePath.startsWith('imported/'),
+            ) ||
           b.mtimeMs - a.mtimeMs ||
           a.filename.localeCompare(b.filename) ||
           a.relativePath.localeCompare(b.relativePath),
