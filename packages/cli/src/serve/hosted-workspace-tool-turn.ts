@@ -184,11 +184,13 @@ import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
 import {
   HookEventName,
+  PermissionRequestHookOutput,
   PreToolUseHookOutput,
   createHookOutput,
   type HookOutput,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import {
+  HOSTED_TOOL_INPUT_ORDER,
   hostedHookOccurrenceId,
   semanticInputDigest,
 } from './hosted-hook-session.js';
@@ -1418,6 +1420,31 @@ function physicalToolStatus(
 }
 
 /**
+ * Why a PreToolUse output refuses its call, if it does: a stop, block or
+ * deny, or an ask about a Skill, which has no approval to answer it.
+ */
+function preToolUseRefusal(
+  output: HookOutput | undefined,
+  skill: boolean,
+): string | undefined {
+  const parsed = output && new PreToolUseHookOutput(output);
+  const permission = parsed?.getPermissionDecision();
+  if (
+    parsed?.shouldStopExecution() ||
+    parsed?.isBlockingDecision() ||
+    permission === 'deny'
+  )
+    return (
+      (permission === 'deny' && parsed?.getPermissionDecisionReason()) ||
+      parsed?.getEffectiveReason() ||
+      'PreToolUse Hook denied the call.'
+    );
+  return skill && permission === 'ask'
+    ? HOSTED_SKILL_APPROVAL_REFUSAL
+    : undefined;
+}
+
+/**
  * The replacement a saved PreToolUse output made to its call's input, by the
  * rules execution applied: an output that refuses the call replaces nothing,
  * and only an object can replace the input.
@@ -1426,18 +1453,59 @@ function preToolUseReplacement(
   output: HookOutput | undefined,
   skill: boolean,
 ): Record<string, unknown> | undefined {
-  const parsed = output && new PreToolUseHookOutput(output);
-  const permission = parsed?.getPermissionDecision();
   const input = output?.hookSpecificOutput?.['updatedInput'];
-  return parsed?.shouldStopExecution() ||
-    parsed?.isBlockingDecision() ||
-    permission === 'deny' ||
-    (skill && permission === 'ask') ||
+  return preToolUseRefusal(output, skill) !== undefined ||
     !input ||
     typeof input !== 'object' ||
     Array.isArray(input)
     ? undefined
     : (input as Record<string, unknown>);
+}
+
+/**
+ * What a PermissionRequest output decides about the input PreToolUse left:
+ * a stop, block or deny refuses the call, and only an allow may replace the
+ * whole input — with a JSON object, or the call is refused.
+ */
+function permissionRequestDecision(output: HookOutput | undefined): {
+  refusal?: string;
+  allowed?: boolean;
+  input?: Record<string, unknown>;
+} {
+  const parsed = output && new PermissionRequestHookOutput(output);
+  const decision = parsed?.getPermissionDecision();
+  if (
+    parsed?.shouldStopExecution() ||
+    parsed?.isBlockingDecision() ||
+    decision?.behavior === 'deny'
+  )
+    return { refusal: 'PermissionRequest Hook denied the call.' };
+  if (decision?.behavior !== 'allow') return {};
+  const input = parsed!.getUpdatedToolInput();
+  return input === null
+    ? {
+        refusal:
+          'PermissionRequest Hook allowed the call with an updatedInput that is not a JSON object, so the call did not run.',
+      }
+    : { allowed: true, input };
+}
+
+interface RecordedToolHook {
+  input: Record<string, unknown>;
+  refusedInputDigest?: string;
+  toolInputOrder?: unknown;
+  output?: HookOutput;
+}
+
+/** Whether a saved Hook plan was made for these event fields. */
+function recordedFor(
+  recorded: RecordedToolHook,
+  fields: Record<string, unknown>,
+): boolean {
+  return (
+    (recorded.refusedInputDigest ?? semanticInputDigest(recorded.input)) ===
+    semanticInputDigest(fields)
+  );
 }
 
 export { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
@@ -1660,7 +1728,8 @@ export class HostedWorkspaceToolTurn {
   // Once an approval expires nobody is answering, so the Turn asks no more.
   private unanswered = false;
   private promptHookRunner?: HostedPromptHookRunner;
-  private readonly hookPermission = new Map<string, 'allow' | 'deny'>();
+  // Calls a PermissionRequest Hook allowed, which the mode then never asks.
+  private readonly hookAllowed = new Set<string>();
   private readonly mcp?: HostedMcpSession;
   private readonly hooks?: HostedHookSession;
   private readonly profile?: string;
@@ -2511,16 +2580,33 @@ export class HostedWorkspaceToolTurn {
           entry.payload['batchId'] === assistant?.uuid,
       );
     const preToolOutputs = new Map<string, PreToolUseHookOutput>();
-    // Each call with the input its PreToolUse decision left. `earlier` is
-    // how an earlier release read the same records, taking any saved
-    // replacement even when it was refused; it may only match an after
-    // event that release already saved.
+    // Each call with the input its Hook decisions left. Records without an
+    // order are the earlier one's, where PreToolUse ran on what
+    // PermissionRequest left: there `earlier` is how an earlier release
+    // read them, taking any saved replacement even when it was refused; it
+    // may only match an after event that release already saved.
     const effective = await Promise.all(
       calls.map(async (call) => {
         const pre = await this.recordedHook(HookEventName.PreToolUse, call);
-        if (!pre) return { call, earlier: call };
-        if (pre.output)
+        const permission = await this.recordedHook(
+          HookEventName.PermissionRequest,
+          call,
+        );
+        const order = pre ? pre.toolInputOrder : permission?.toolInputOrder;
+        if (
+          (order !== undefined && order !== HOSTED_TOOL_INPUT_ORDER) ||
+          (pre && permission && permission.toolInputOrder !== order)
+        )
+          throw new HostedToolRecoveryRequiredError(
+            'Tool Hook records do not share a known order.',
+          );
+        if (pre?.output)
           preToolOutputs.set(call.callId, new PreToolUseHookOutput(pre.output));
+        if (order !== undefined) {
+          const decided = this.orderedHookInput(call, pre, permission);
+          return { call: decided, earlier: decided };
+        }
+        if (!pre) return { call, earlier: call };
         const input = pre.refusedInputDigest
           ? await this.preToolUseInput(call, pre.refusedInputDigest)
           : (pre.input['tool_input'] as Record<string, unknown>);
@@ -2695,6 +2781,51 @@ export class HostedWorkspaceToolTurn {
     };
   }
 
+  private permissionRequestFields(
+    call: ToolCallRequestInfo,
+  ): Record<string, unknown> {
+    return {
+      tool_name: call.name,
+      tool_input: call.args,
+      tool_use_id: call.callId,
+      prompt_id: this.promptId,
+    };
+  }
+
+  /**
+   * The input a call's saved Hook decisions left in the order where
+   * PreToolUse ran on the model's input and PermissionRequest, if it ran, on
+   * the input PreToolUse left. Each saved record must prove the input it ran
+   * on; nothing is guessed from equal inputs or the current Hooks.
+   */
+  private orderedHookInput(
+    call: ToolCallRequestInfo,
+    pre: RecordedToolHook | undefined,
+    permission: RecordedToolHook | undefined,
+  ): ToolCallRequestInfo {
+    if (!pre || !recordedFor(pre, this.preToolUseFields(call)))
+      throw new HostedToolRecoveryRequiredError(
+        'PreToolUse record does not match its tool call.',
+      );
+    const skill = call.name === 'skill' && this.skills !== undefined;
+    const decided = {
+      ...call,
+      args: preToolUseReplacement(pre.output, skill) ?? call.args,
+    };
+    if (!permission) return decided;
+    if (
+      preToolUseRefusal(pre.output, skill) !== undefined ||
+      !recordedFor(permission, this.permissionRequestFields(decided))
+    )
+      throw new HostedToolRecoveryRequiredError(
+        'PermissionRequest record does not match its PreToolUse result.',
+      );
+    return {
+      ...decided,
+      args: permissionRequestDecision(permission.output).input ?? decided.args,
+    };
+  }
+
   /**
    * A call's saved occurrence of a tool Hook event: the input it was planned
    * for (an oversized plan keeps only the digest of the input it refused)
@@ -2703,14 +2834,7 @@ export class HostedWorkspaceToolTurn {
   private async recordedHook(
     event: HookEventName,
     call: ToolCallRequestInfo,
-  ): Promise<
-    | {
-        input: Record<string, unknown>;
-        refusedInputDigest?: string;
-        output?: HookOutput;
-      }
-    | undefined
-  > {
+  ): Promise<RecordedToolHook | undefined> {
     const marker = this.session.authority.extensionRecord(
       'hook_execution',
       hostedHookOccurrenceId(event, `${this.promptId}:${call.callId}`),
@@ -2719,7 +2843,11 @@ export class HostedWorkspaceToolTurn {
     const record = parseHookExecution(marker.record);
     const plan = JSON.parse(
       (await this.session.resources.read(record.planRef)).toString(),
-    ) as { input: Record<string, unknown>; refusedInputDigest?: string };
+    ) as {
+      input: Record<string, unknown>;
+      refusedInputDigest?: string;
+      toolInputOrder?: unknown;
+    };
     const saved = record.resultRef
       ? (JSON.parse(
           (await this.session.resources.read(record.resultRef)).toString(),
@@ -2728,6 +2856,7 @@ export class HostedWorkspaceToolTurn {
     return {
       input: plan.input,
       refusedInputDigest: plan.refusedInputDigest,
+      toolInputOrder: plan.toolInputOrder,
       output: saved?.output,
     };
   }
@@ -3077,55 +3206,13 @@ export class HostedWorkspaceToolTurn {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.warmed, signal);
     const declarations = this.advertised ?? (await this.declarations(signal));
-    this.hookPermission.clear();
+    this.hookAllowed.clear();
     this.agentDispatched.clear();
-    const mixedSkillBatch =
-      this.skills !== undefined &&
-      calls.some((call) => call.name === 'skill') &&
-      calls.some((call) => call.name !== 'skill');
-    if (this.hooks && this.approval && !mixedSkillBatch) {
-      calls = await Promise.all(
-        calls.map(async (call) => {
-          const asks = hostedApprovalAsks(
-            this.approval!.settings,
-            call.name,
-            this.globProfile,
-          );
-          if (!asks || (call.name === 'skill' && this.skills)) return call;
-          const output = await this.hooks!.fire(
-            HookEventName.PermissionRequest,
-            `${this.promptId}:${call.callId}`,
-            {
-              tool_name: call.name,
-              tool_input: call.args,
-              tool_use_id: call.callId,
-              prompt_id: this.promptId,
-            },
-            signal,
-            this.promptHookRunner,
-          );
-          const decision = output?.hookSpecificOutput?.['decision'] as
-            | {
-                behavior?: 'allow' | 'deny';
-                updatedInput?: Record<string, unknown>;
-              }
-            | undefined;
-          if (decision?.behavior)
-            this.hookPermission.set(call.callId, decision.behavior);
-          if (
-            output?.continue === false ||
-            output?.decision === 'block' ||
-            output?.decision === 'deny'
-          )
-            this.hookPermission.set(call.callId, 'deny');
-          return decision?.updatedInput
-            ? { ...call, args: decision.updatedInput }
-            : call;
-        }),
-      );
-    }
     const prepareRequests = (
       source: ToolCallRequestInfo[],
+      // Hook decisions are admitted after the assistant record commits, so
+      // an input past the inline limit refuses its call, not the Turn.
+      hookInputs = false,
     ): HostedPreparedRequest[] => {
       const ids = new Set<string>();
       return source.map((call) => {
@@ -3751,10 +3838,15 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           if (
             !(cause instanceof HostedToolInputInlineLimitError) ||
-            (validationError === undefined && call.name !== 'workflow')
+            (validationError === undefined &&
+              call.name !== 'workflow' &&
+              !hookInputs)
           )
             throw cause;
-          validationError ??= `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
+          validationError ??=
+            call.name === 'workflow'
+              ? `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`
+              : `Hosted tool input exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit).`;
           encoded = UNENCODED_TOOL_INPUT;
         }
         // H3: the publication evidence chain pins the canonical input
@@ -3915,44 +4007,53 @@ export class HostedWorkspaceToolTurn {
     );
     try {
       this.uncertain = true;
-      if (
-        this.shell &&
-        requests.some((request) => request.isShell || request.monitoring) &&
-        !this.publisher
-      ) {
-        this.publisher = this.shell!.publisher ??= new HostedShellPublisher(
-          this.session,
-          this.shell!.resources,
-          this.shell!.assertWritable,
-          this.childRuns,
-          this.monitors,
-          () => this.shell!.monitorWakeKick?.(),
-        );
-        this.bindingGeneration = await this.broker.registerPublisher(
-          await this.publisher.start(),
-        );
-      } else if (
-        this.publication &&
-        this.backgroundLane &&
-        requests.some((request) => request.background || request.monitoring) &&
-        !this.publisher
-      ) {
-        // Publication mode: the record funnel of the detached family is
-        // this Session's, exactly like without capture bytes — without it
-        // a background exit's settle and tail could never reach the record.
-        this.publisher = this.backgroundLane.publisher ??=
-          new HostedShellPublisher(
+      const startPublisher = async (
+        selected: readonly HostedPreparedRequest[],
+      ) => {
+        if (
+          this.shell &&
+          selected.some((request) => request.isShell || request.monitoring) &&
+          !this.publisher
+        ) {
+          this.publisher = this.shell!.publisher ??= new HostedShellPublisher(
             this.session,
-            this.backgroundLane.resources,
-            this.backgroundLane.assertWritable,
+            this.shell!.resources,
+            this.shell!.assertWritable,
             this.childRuns,
             this.monitors,
-            () => this.backgroundLane!.monitorWakeKick?.(),
+            () => this.shell!.monitorWakeKick?.(),
           );
-        this.bindingGeneration = await this.broker.registerPublisher(
-          await this.publisher.start(),
-        );
-      }
+          this.bindingGeneration = await this.broker.registerPublisher(
+            await this.publisher.start(),
+          );
+        } else if (
+          this.publication &&
+          this.backgroundLane &&
+          selected.some(
+            (request) => request.background || request.monitoring,
+          ) &&
+          !this.publisher
+        ) {
+          // Publication mode: the record funnel of the detached family is
+          // this Session's, exactly like without capture bytes — without it
+          // a background exit's settle and tail could never reach the record.
+          this.publisher = this.backgroundLane.publisher ??=
+            new HostedShellPublisher(
+              this.session,
+              this.backgroundLane.resources,
+              this.backgroundLane.assertWritable,
+              this.childRuns,
+              this.monitors,
+              () => this.backgroundLane!.monitorWakeKick?.(),
+            );
+          this.bindingGeneration = await this.broker.registerPublisher(
+            await this.publisher.start(),
+          );
+        }
+      };
+      // A Hook can move a call to a background lane, so a Hook turn picks
+      // its lanes once the Hooks have decided the input that will run.
+      if (!this.hooks) await startPublisher(requests);
       messageId =
         restored?.saved.plan.batchId ??
         (await this.commit('assistant', parts, model));
@@ -3963,11 +4064,7 @@ export class HostedWorkspaceToolTurn {
         requests,
         refusals:
           restored?.saved.plan.calls.map((item) => item.refusal ?? undefined) ??
-          requests.map((request) =>
-            this.hookPermission.get(request.call.callId) === 'deny'
-              ? 'PermissionRequest Hook denied the call.'
-              : undefined,
-          ),
+          requests.map(() => undefined),
         inputRefs,
         definitionRefs,
         actionIds: new Map(
@@ -3976,6 +4073,21 @@ export class HostedWorkspaceToolTurn {
           ),
         ),
       };
+      const asks = new Set<number>();
+      if (this.hooks) {
+        const decided = this.nativeBatch.refusals;
+        requests = await this.decideHookInputs(
+          requests,
+          (inputs) => prepareRequests(inputs, true),
+          decided,
+          asks,
+          signal,
+        );
+        this.nativeBatch.requests = requests;
+        await startPublisher(
+          requests.filter((_, index) => decided[index] === undefined),
+        );
+      }
       refusals =
         restored?.saved.plan.stage === 'final'
           ? this.nativeBatch.refusals
@@ -3985,104 +4097,8 @@ export class HostedWorkspaceToolTurn {
               inputRefs,
               signal,
               restored?.nextApprovalOrdinal ?? 0,
+              asks,
             );
-      if (this.hooks) {
-        const updated = requests.map((request) => request.call);
-        const askAgain = new Set<number>();
-        for (const [index, request] of requests.entries()) {
-          if (refusals[index]) continue;
-          const output = await this.hooks.fire(
-            HookEventName.PreToolUse,
-            `${this.promptId}:${request.call.callId}`,
-            this.preToolUseFields(request.call),
-            signal,
-            this.promptHookRunner,
-          );
-          const parsed = output && new PreToolUseHookOutput(output);
-          const permission = parsed?.getPermissionDecision();
-          if (
-            parsed?.shouldStopExecution() ||
-            parsed?.isBlockingDecision() ||
-            permission === 'deny'
-          ) {
-            refusals[index] =
-              (permission === 'deny' &&
-                parsed?.getPermissionDecisionReason()) ||
-              parsed?.getEffectiveReason() ||
-              'PreToolUse Hook denied the call.';
-            continue;
-          }
-          if (request.skill && permission === 'ask') {
-            refusals[index] = HOSTED_SKILL_APPROVAL_REFUSAL;
-            continue;
-          }
-          const input = output?.hookSpecificOutput?.['updatedInput'];
-          if (
-            input &&
-            typeof input === 'object' &&
-            !Array.isArray(input) &&
-            !isDeepStrictEqual(input, request.call.args)
-          ) {
-            updated[index] = {
-              ...request.call,
-              args: input as Record<string, unknown>,
-            };
-            inputRefs.delete(index);
-            if (
-              this.approval &&
-              !request.skill &&
-              hostedApprovalAsks(
-                this.approval.settings,
-                request.call.name,
-                this.globProfile,
-              )
-            )
-              askAgain.add(index);
-          }
-          if (permission === 'ask') askAgain.add(index);
-        }
-        const revised = prepareRequests(updated);
-        requests = requests.map((request, index) => {
-          if (updated[index] !== request.call) return revised[index];
-          // An unchanged call keeps its prepared request, but not its
-          // stale verdict: the PreToolUse fire may have acquired the
-          // Workspace mount (the Session's Hook owner retains it until
-          // close), and prepareRequests re-evaluated the call against
-          // that current Session. A refusal found only now must still
-          // block the admission; a verdict never found is never invented.
-          if (revised[index].validationError === undefined) return request;
-          return {
-            ...request,
-            validationError: revised[index].validationError,
-          };
-        });
-        for (const [index, request] of requests.entries()) {
-          if (refusals[index]) continue;
-          if (request.validationError) {
-            refusals[index] = request.validationError;
-            continue;
-          }
-          if (askAgain.has(index)) {
-            if (!this.approval) {
-              refusals[index] =
-                'Hook requires approval, but no approval policy is available.';
-              continue;
-            }
-            const inputRef = await this.session.resources.publish(
-              'managed-tool-input',
-              request.inputBytes,
-            );
-            inputRefs.set(index, inputRef);
-            refusals[index] = await this.ask(
-              this.approval,
-              request.call,
-              inputRef,
-              messageId,
-              signal,
-            );
-          }
-        }
-      }
       this.nativeBatch.requests = requests;
       this.nativeBatch.refusals = refusals;
       if (restored?.saved.plan.stage !== 'final')
@@ -7453,9 +7469,87 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
+   * Runs PreToolUse once on each call's model input and admits the input it
+   * leaves; then, for each call the approval mode asks about, runs
+   * PermissionRequest once on that input, and only its allow may replace it.
+   * A Hook may also have taken the Workspace mount, so every call is admitted
+   * again after the last Hook, changed or not. Records each refusal and each
+   * PreToolUse ask still owed to the owner, and returns the final requests.
+   */
+  private async decideHookInputs(
+    requests: HostedPreparedRequest[],
+    prepare: (calls: ToolCallRequestInfo[]) => HostedPreparedRequest[],
+    refusals: Array<string | undefined>,
+    asks: Set<number>,
+    signal: AbortSignal,
+  ): Promise<HostedPreparedRequest[]> {
+    const inputs = requests.map((request) => request.call);
+    for (const [index, request] of requests.entries()) {
+      const output = await this.hooks!.fire(
+        HookEventName.PreToolUse,
+        `${this.promptId}:${request.call.callId}`,
+        this.preToolUseFields(request.call),
+        signal,
+        this.promptHookRunner,
+        undefined,
+        HOSTED_TOOL_INPUT_ORDER,
+      );
+      refusals[index] = preToolUseRefusal(output, request.skill);
+      if (refusals[index] !== undefined) continue;
+      const replacement = preToolUseReplacement(output, request.skill);
+      if (replacement) inputs[index] = { ...request.call, args: replacement };
+      if (output && new PreToolUseHookOutput(output).isAsk()) asks.add(index);
+    }
+    const admit = () => {
+      const admitted = prepare(inputs);
+      for (const [index, request] of admitted.entries())
+        refusals[index] ??= request.validationError;
+      return admitted;
+    };
+    requests = admit();
+    let permissionRan = false;
+    for (const [index, request] of requests.entries()) {
+      if (
+        refusals[index] !== undefined ||
+        !this.approval ||
+        request.skill ||
+        !hostedApprovalAsks(
+          this.approval.settings,
+          request.call.name,
+          this.globProfile,
+        )
+      )
+        continue;
+      permissionRan = true;
+      const decision = permissionRequestDecision(
+        await this.hooks!.fire(
+          HookEventName.PermissionRequest,
+          `${this.promptId}:${request.call.callId}`,
+          this.permissionRequestFields(request.call),
+          signal,
+          this.promptHookRunner,
+          undefined,
+          HOSTED_TOOL_INPUT_ORDER,
+        ),
+      );
+      refusals[index] = decision.refusal;
+      if (decision.allowed) this.hookAllowed.add(request.call.callId);
+      if (decision.input)
+        inputs[index] = { ...request.call, args: decision.input };
+    }
+    if (permissionRan) requests = admit();
+    if (!this.approval)
+      for (const index of asks)
+        refusals[index] ??=
+          'Hook requires approval, but no approval policy is available.';
+    return requests;
+  }
+
+  /**
    * Asks before each call that the approval mode does not pre-approve, one at
    * a time in the model's order, and returns the refusal for each call that
-   * will not run. Nothing runs once the turn is cancelled.
+   * will not run. Nothing runs once the turn is cancelled. A call in `asks`
+   * is asked about whatever the mode or a PermissionRequest Hook decided.
    */
   private async approve(
     requests: ReadonlyArray<{ call: ToolCallRequestInfo; inputBytes: Buffer }>,
@@ -7463,14 +7557,10 @@ export class HostedWorkspaceToolTurn {
     inputRefs: Map<number, ManagedSessionDurableRef>,
     signal: AbortSignal,
     nextOrdinal = 0,
+    asks: ReadonlySet<number> = new Set(),
   ): Promise<Array<string | undefined>> {
     const refusals: Array<string | undefined> =
-      this.nativeBatch?.refusals ??
-      requests.map((request) =>
-        this.hookPermission.get(request.call.callId) === 'deny'
-          ? 'PermissionRequest Hook denied the call.'
-          : undefined,
-      );
+      this.nativeBatch?.refusals ?? requests.map(() => undefined);
     if (this.nativeBatch) this.nativeBatch.refusals = refusals;
     const approval = this.approval;
     if (!approval) return refusals;
@@ -7481,12 +7571,13 @@ export class HostedWorkspaceToolTurn {
       if (
         refusals[index] ||
         (request.call.name === 'skill' && this.skills !== undefined) ||
-        (!(
-          this.publicPlanMode &&
-          this.planning &&
-          request.call.name === 'exit_plan_mode'
-        ) &&
-          (this.hookPermission.get(request.call.callId) === 'allow' ||
+        (!asks.has(index) &&
+          !(
+            this.publicPlanMode &&
+            this.planning &&
+            request.call.name === 'exit_plan_mode'
+          ) &&
+          (this.hookAllowed.has(request.call.callId) ||
             !hostedApprovalAsks(
               approval.settings,
               request.call.name,

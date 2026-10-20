@@ -255,6 +255,9 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
         ...(result.rawOutputSize === undefined
           ? {}
           : { rawOutputSize: result.rawOutputSize }),
+        ...(result.truncatedByProducer === true
+          ? { truncatedByProducer: true }
+          : {}),
         persistedOutputFiles: [],
         resultFilePaths: [],
       };

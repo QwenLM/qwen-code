@@ -507,9 +507,21 @@
                                  measures 5.8 s and adds 6 s at this ledger's
                                  granularity: the healthy sum becomes 8451 s,
                                  so the fork moves to 9051 s and the Verify
-                                 step stays 161 minutes. -->
-                            <!-- Cleanup retention budgets 60 s for its measured 22.2 s MySQL runtime. -->
-                            <forkedProcessTimeoutInSeconds>9111</forkedProcessTimeoutInSeconds>
+                                 step stays 161 minutes. The cleanup-retention
+                                 MySQL class measures 22.2 s, budgeted at 60 s:
+                                 the healthy sum becomes 8511 s, so the fork
+                                 moves to 9111 s and the Verify step to 162
+                                 minutes. The FG13b Hook intent store-rejection
+                                 cell adds 150 s: the healthy sum becomes
+                                 8661 s, so the fork moves to 9261 s and the
+                                 Verify step to 165 minutes. The FG13b Hook
+                                 dispatch store-rejection cell adds 150 s: the
+                                 healthy sum becomes 8811 s, so the fork moves
+                                 to 9411 s and the Verify step to 167 minutes;
+                                 the FG11f publication cell adds 82 s, so the
+                                 fork moves to 9493 s and the Verify step to
+                                 169 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9765</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
