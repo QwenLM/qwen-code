@@ -22,6 +22,7 @@ import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.Sche
 import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.ScheduleRow;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessConflictCodes;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -349,12 +350,22 @@ public class ManagedAutomationService {
                             "The automation is being scanned; retry."));
             if (AutomationLedgerStore.OUTCOME_FIRING.equals(
                     occurrence.outcome())) {
+                if (occurrence.nextRetryAt() > now
+                        && occurrence.attempts() > 1) {
+                    // The first same-key retry after a failure re-drives,
+                    // so a lost answer still recovers. Once that attempt
+                    // is spent, a retry inside the window must not spend
+                    // another one or move the scanner's schedule; the
+                    // scanner owns the next fire when the delay lapses.
+                    throw deferred(occurrence);
+                }
                 try {
                     scanner.fire(held, occurrence, owner, fence, now);
                 } catch (RuntimeException error) {
                     // The claim is durable and re-driven by the scanner
                     // with backoff; the same key answers it once known.
-                    scanner.defer(held, occurrence, owner, fence, error, now);
+                    scanner.defer(held, occurrence, owner, fence, error,
+                            clock.get());
                     throw unobtained(error);
                 }
                 // A definitive route refusal settles the decision as
@@ -808,11 +819,44 @@ public class ManagedAutomationService {
                 .toString();
     }
 
+    private static String deferredCode(OccurrenceRow occurrence) {
+        String error = occurrence.lastError();
+        if (error != null) {
+            int at = error.indexOf("\"code\":\"");
+            if (at >= 0) {
+                int end = error.indexOf('"', at + 8);
+                if (end > at) {
+                    return error.substring(at + 8, end);
+                }
+            }
+        }
+        return "automation_operation_unknown";
+    }
+
+    private static ManagedAgentException deferred(OccurrenceRow occurrence) {
+        String code = deferredCode(occurrence);
+        boolean retryable = "automation_operation_unknown".equals(code)
+                || HarnessConflictCodes.isTransient(code);
+        return new ManagedAgentException(
+                retryable ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.CONFLICT,
+                code,
+                retryable
+                        ? "The Hosted Harness answer is pending; retry"
+                                + " the same key."
+                        : "The Hosted Harness refused the automation operation.");
+    }
+
     static ManagedAgentException translate(DaemonHttpException error) {
         String code = AutomationScanner.errorCode(error);
+        // A self-healing Harness conflict (a dead predecessor's writer
+        // lease, a busy or briefly unavailable Workspace, a closing
+        // Session) answers the retryable 503 every other unobtained
+        // outcome takes: the same request under the same key succeeds
+        // once it lapses, so a 409 would tell the caller to stop.
         HttpStatus status = switch (error.getStatusCode()) {
             case 404 -> HttpStatus.NOT_FOUND;
-            case 409 -> HttpStatus.CONFLICT;
+            case 409 -> HarnessConflictCodes.isTransient(code)
+                    ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.CONFLICT;
             case 400 -> HttpStatus.BAD_REQUEST;
             default -> HttpStatus.SERVICE_UNAVAILABLE;
         };

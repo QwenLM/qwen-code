@@ -228,12 +228,14 @@ describe('ReadMcpResourceTool', () => {
       .build({ server_name: 'srv', uri: 'x://big' })
       .execute(signal);
     expect(capped.rawOutputSize).toBeNull();
+    expect(capped.truncatedByProducer).toBe(true);
 
     // Nothing was dropped, so the scheduler's own measurement is the truth.
     const intact = await tool
       .build({ server_name: 'srv', uri: 'x://small' })
       .execute(signal);
     expect(intact.rawOutputSize).toBeUndefined();
+    expect(intact.truncatedByProducer).toBeUndefined();
   });
 
   it('shares a per-turn blob budget across calls on the same signal', async () => {

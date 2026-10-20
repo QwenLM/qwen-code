@@ -3945,6 +3945,34 @@ describe('CoreToolScheduler', () => {
     );
   });
 
+  it('carries a producer-declared truncation bit when its raw size is unknown', async () => {
+    // A self-bounded producer cannot recover the pre-reduction size, but it
+    // knows it cut the body. Keep the bit instead of collapsing it into the
+    // unknown raw size (#14742).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+          truncatedByProducer: true,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-truncated',
+      'prompt-grep-truncated',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBe(true);
+    expect(new ToolCallEvent(call).truncated).toBe(true);
+  });
+
   /** Asserts lone tool `name` (Infinity budget) delivers `content` whole. */
   async function expectDeliveredWhole(name: string, content: string) {
     const { calls } = await runLoneTool(
@@ -7521,6 +7549,17 @@ describe('convertToFunctionResponse', () => {
     // A producer that bounds its own render still declares raw size unknown.
     expect(getToolOutputProvenance(declared)?.rawSize).toBeUndefined();
     expect(getToolOutputProvenance(declared)?.truncated).toBeUndefined();
+
+    // ...but when it also declares the cut itself, the bit survives.
+    const [cut] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null, truncatedByProducer: true },
+      cfg,
+    );
+    expect(getToolOutputProvenance(cut)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(cut)?.truncated).toBe(true);
   });
 
   const toolName = 'testTool';
@@ -15353,7 +15392,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 });
 
 describe('persistence size attribution', () => {
-  it('counts retained media with the configured estimate', async () => {
+  it('counts retained media with the configured estimate and bounds nested web_fetch envelopes', async () => {
     const cfg = {
       getTruncateToolOutputThreshold: () => 25000,
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
@@ -15400,13 +15439,22 @@ describe('persistence size attribution', () => {
       expect(event.injected_estimated_tokens).toBeGreaterThanOrEqual(800);
       expect(event.prompt_id).toBe('p');
       await owner.maybePersistLargeToolResult(
+        'page',
+        'web_fetch',
+        'header\n... [CONTENT TRUNCATED] ...\n' + 'x'.repeat(98000),
+        false,
+        'page-prompt',
+      );
+      expect(persist).toHaveBeenCalledTimes(2);
+      expect(log.mock.calls[1][1].prompt_id).toBe('page-prompt');
+      await owner.maybePersistLargeToolResult(
         'already',
         'shell',
         '<persisted-output>' + 'x'.repeat(60000),
         false,
         'p',
       );
-      expect(persist).toHaveBeenCalledTimes(1);
+      expect(persist).toHaveBeenCalledTimes(2);
     } finally {
       persist.mockRestore();
       log.mockRestore();

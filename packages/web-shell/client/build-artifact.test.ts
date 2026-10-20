@@ -44,6 +44,23 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it('keeps deletion-only copy out of the read-only transcript', () => {
+    for (const copy of [
+      'Delete permanently',
+      '所选原始消息将从历史中永久删除。已有摘要、命令执行效果和项目文件保持不变。已进入摘要的信息仍可能影响后续回复。',
+      'Session history changed. Select the messages again before deleting.',
+    ]) {
+      expect(
+        readPackageJavascript().includes(copy),
+        `Interactive copy: ${copy}`,
+      ).toBe(true);
+      expect(
+        readTranscriptBundle().includes(copy),
+        `Read-only copy: ${copy}`,
+      ).toBe(false);
+    }
+  });
+
   it.each(['.', 'assets'])(
     'ships the spreadsheet worker in a lazy chunk in dist/%s',
     (directory) => {

@@ -589,6 +589,12 @@ export interface ToolResult {
   /** Numeric size before a producer reduces its semantic result. */
   rawOutputSize?: ToolOutputSize | null;
   /**
+   * Set when the producer bounded its own render: the returned body is
+   * shortened. `rawOutputSize` may still be `null` (the pre-reduction size is
+   * unrecoverable), but the truncation fact itself is known here.
+   */
+  truncatedByProducer?: boolean;
+  /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
    */
