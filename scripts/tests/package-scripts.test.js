@@ -1091,6 +1091,26 @@ describe('package scripts', () => {
     expect(created).toContain('new file mode');
   });
 
+  it('keeps the root build above the heap ceiling that broke the CLI compile', () => {
+    const { build } = readPackageJson().scripts;
+    const cap = build.match(/--max-old-space-size=(\d+)/)?.[1];
+    expect(cap).toBeDefined();
+    // The CLI's TypeScript compile crossed the previous 4 GiB ceiling on the
+    // shared pool and failed the Java daemon E2E leg before any test ran
+    // (#14835). Keep the build-time cap at or above the 6144 MB that fixed it.
+    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+  });
+
+  it('keeps the pnpm prepare build above the same heap ceiling', () => {
+    const { nodeOptions } = parse(readWorkflow('pnpm-workspace.yaml'));
+    const cap = nodeOptions?.match(/--max-old-space-size=(\d+)/)?.[1];
+    expect(cap).toBeDefined();
+    // The pnpm prepare path compiles the same CLI project that crossed the
+    // 4 GiB ceiling in #14823; #14827 raised this cap, so pin it beside the
+    // root build script instead of leaving one half of the fix unguarded.
+    expect(Number(cap)).toBeGreaterThanOrEqual(6144);
+  });
+
   it('selects the CLI dependency closure without selecting the same-named root', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
