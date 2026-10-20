@@ -586,13 +586,15 @@ class HostedHookReplyLossFaultGatesIT {
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
         submit(session, "FG13_STORE_SETTLE");
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
-        assertThat(attach).as("Session attachment").isNotNull();
         // The worker already ran the Hook. An exhausted append leaves the
         // Turn recovery-blocked rather than failed, so quiescence is the
         // end-of-attempt barrier: the read below then has to recover from
         // the receipt rather than watch the original attempt land late.
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        // submit() returns 202 before the connector's background attach, so
+        // the lookup waits for the dispatch that the fired fault proves ran.
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var probe = harnessStatus(session, attach);
             assertThat(probe.statusCode()).as("harness status: %s", probe.body()).isEqualTo(200);
@@ -626,12 +628,14 @@ class HostedHookReplyLossFaultGatesIT {
         JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
         String session = createSession(definition.path("id").asText(), "initial");
         submit(session, "FG13_STORE_PLAN_SETTLE");
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
-        assertThat(attach).as("Session attachment").isNotNull();
         // The child settled; only the PreToolUse marker's own commit is
         // refused. Quiescence is the end-of-attempt barrier, after which the
         // marker is rebuilt from the saved receipts.
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        // submit() returns 202 before the connector's background attach, so
+        // the lookup waits for the dispatch that the fired fault proves ran.
+        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var probe = harnessStatus(session, attach);
             assertThat(probe.statusCode()).as("harness status: %s", probe.body()).isEqualTo(200);
