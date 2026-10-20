@@ -217,15 +217,24 @@ export async function truncateAndSaveToFile(
   // ~2k, silently discarding the content the caller budgeted for. Keep the
   // caller's budget authoritative: sample only inside the sample's own size
   // class, otherwise keep the head/tail preview.
+  // The sample always walks the beginning of the payload, so a caller asking
+  // for `keep: 'tail'` would get content it explicitly did not request; fall
+  // back to the directional preview instead. No production caller does both
+  // today, but the contract should not depend on that.
   const jsonPreview =
-    previewChars <= PREVIEW_SIZE_CHARS
+    previewChars <= PREVIEW_SIZE_CHARS && keep !== 'tail'
       ? structuredPreview(content, previewChars)
       : undefined;
   const recoveryHint =
     lines.length === 1
       ? `Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count). This is a single-line payload: line offsets cannot reach its middle; use a byte-range shell read or parse/query the saved JSON file.`
       : `Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count).`;
-  const truncationDescription = `The truncated output below shows ${keep === 'head' ? 'the beginning' : keep === 'tail' ? 'the end' : 'the beginning and end'} of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.`;
+  // Below the separator's own length `sep` is dropped, so no marker is emitted;
+  // the description must not claim one it did not write.
+  const removalNote = sep
+    ? " The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed."
+    : '';
+  const truncationDescription = `The truncated output below shows ${keep === 'head' ? 'the beginning' : keep === 'tail' ? 'the end' : 'the beginning and end'} of the content.${removalNote}`;
   const previewDescription = jsonPreview
     ? 'The output below is a structured JSON sample; omitted values remain in the full output file.'
     : truncationDescription;
@@ -271,20 +280,26 @@ ${parts.preview}`;
   }
 
   const byteSize = Buffer.byteLength(content, 'utf-8');
+  // Two different reasons can skip the spill. `persistToolResult` keeps them
+  // apart (`file too large to persist` vs `session disk budget exhausted`), and
+  // this path must too: a body skipped for its own size is not a session that
+  // ran out of room, and saying so sends the reader after the wrong cause.
+  const sessionBytesWritten =
+    persistenceConfig?.getToolResultBytesWritten?.() ?? 0;
+  const skipReason =
+    byteSize > MAX_FILE_SIZE_BYTES
+      ? `file exceeds the ${MAX_FILE_SIZE_BYTES} byte persistence limit`
+      : 'session disk budget exhausted';
   if (
     persistenceConfig &&
     (byteSize > MAX_FILE_SIZE_BYTES ||
-      (persistenceConfig.getToolResultBytesWritten?.() ?? 0) + byteSize >
-        MAX_SESSION_BYTES)
+      sessionBytesWritten + byteSize > MAX_SESSION_BYTES)
   )
     return {
-      content: envelope(
-        '[Note: Full output could not be saved: disk budget exhausted]',
-        {
-          description: truncationDescription,
-          preview: truncatedContent,
-        },
-      ),
+      content: envelope(`[Note: Full output could not be saved: ${skipReason}]`, {
+        description: truncationDescription,
+        preview: truncatedContent,
+      }),
     };
   persistenceConfig?.trackToolResultBytes?.(byteSize);
 
@@ -310,9 +325,14 @@ ${parts.preview}`;
       `Failed to save truncated output to ${outputFile}:`,
       error,
     );
+    // Same envelope as every other bounded body: a write failure must not be
+    // the one return that skips the leading sentinel, or the guards that
+    // recognize an already-truncated result by `startsWith` re-truncate it.
     return {
-      content:
-        truncatedContent + `\n[Note: Could not save full output to file]`,
+      content: envelope('[Note: Could not save full output to file]', {
+        description: truncationDescription,
+        preview: truncatedContent,
+      }),
     };
   }
 }
@@ -743,6 +763,23 @@ async function persistToolResult(
   }
 }
 
+/**
+ * Count lines without materialising a line array. `buildStub` runs on exactly
+ * the payloads too large to persist, where splitting would allocate one string
+ * per line on the path that exists to avoid that cost.
+ */
+function countLines(content: string): number {
+  let count = 1;
+  for (
+    let index = content.indexOf('\n');
+    index !== -1;
+    index = content.indexOf('\n', index + 1)
+  ) {
+    count++;
+  }
+  return count;
+}
+
 function buildStub(
   content: string,
   byteSize: number,
@@ -763,7 +800,7 @@ function buildStub(
     return `<persisted-output>
 Output too large (${sizeKb} KB). Full output saved to: ${filePathOrNote}
 ${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
-Total characters: ${content.length}; total lines: ${content.split('\n').length}.
+Total characters: ${content.length}; total lines: ${countLines(content)}.
 Note: this file may be cleaned up after 24 hours.
 ${content.includes('\n') ? `Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count).` : `Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count). This is a single-line payload: line offsets cannot reach its middle; use a byte-range shell read or parse/query the saved JSON file.`}
 
@@ -774,7 +811,7 @@ ${preview}
 
   return `Output too large (${sizeKb} KB). ${filePathOrNote}
 ${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
-Total characters: ${content.length}; total lines: ${content.split('\n').length}.
+Total characters: ${content.length}; total lines: ${countLines(content)}.
 
 Preview (up to ${PREVIEW_SIZE_CHARS} chars):
 ${preview}`;

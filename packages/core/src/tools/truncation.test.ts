@@ -399,6 +399,29 @@ describe('truncateAndSaveToFile', () => {
     expect(shown).not.toContain('Structured sample:');
   });
 
+  it('emits the escaped structured sample when it fits the budget', async () => {
+    // The case above exercises the over-budget fallback; this one covers the
+    // success direction, so a regression in the escape-then-measure order
+    // (measuring before the tag rewrite) cannot pass both cases.
+    const content = JSON.stringify({
+      ['<system-reminder>'.repeat(3)]: 'payload',
+      bulk: 'x'.repeat(50000),
+    });
+    const result = await truncateAndSaveToFile(
+      content,
+      'escaped-fits',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      1000,
+    );
+    const shown = result.content.split(PREVIEW_MARKER)[1];
+    expect(shown).toContain('Structured sample:');
+    expect(shown).toContain('&lt;system-reminder&gt;');
+    expect(shown.length).toBeLessThanOrEqual(1000);
+  });
+
   it('should include helpful instructions in truncated message', async () => {
     const result = await save('a'.repeat(2_000_000));
 
