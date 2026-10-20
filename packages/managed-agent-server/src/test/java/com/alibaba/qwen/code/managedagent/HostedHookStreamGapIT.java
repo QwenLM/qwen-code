@@ -190,10 +190,13 @@ class HostedHookStreamGapIT {
         awaitHookCalled();
         publicCut.awaitFirstFrame();
         webShellCut.awaitFirstFrame();
-        long publicCutAt = publicCut.lastSequence();
-        long webShellCutAt = webShellCut.lastSequence();
         publicCut.abort();
         webShellCut.abort();
+        // Read the cursors only after the readers stopped: a frame appended
+        // between the read and the abort would otherwise be replayed on
+        // resume and redden the union as a duplicate.
+        long publicCutAt = publicCut.lastSequence();
+        long webShellCutAt = webShellCut.lastSequence();
         awaitDenied();
         awaitCompleted(session, turn);
         List<JsonNode> publicView = new Observer("public", session,
