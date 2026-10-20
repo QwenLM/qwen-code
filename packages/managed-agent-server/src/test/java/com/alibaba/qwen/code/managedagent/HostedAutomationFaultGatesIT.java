@@ -1292,12 +1292,12 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-cancel-retire", 202);
     }
 
-    // FG11d: the fire is parked at the relay, so the claim sits at `intent` with
-    // no turn started, and the definition is retired there. Retiring settles the
-    // claim instead of leaving it to the recovery sweep: the occurrence records
-    // `skipped` for `definition_retired` with no attempt, no run is committed,
-    // and the model never sees the marker. A claim is only `cancelled` when a
-    // run exists to cancel — that is the sibling cell, not this one.
+    // FG11d: the fire is parked in the relay before the Harness admits it, so the
+    // occurrence exists and no run does, and the definition is retired there. The
+    // retire settles the occurrence instead of leaving it to the recovery sweep:
+    // `skipped` for `definition_retired` with no attempt, no run, no Turn. A claim
+    // already held at `intent` is a different branch — the Harness cancels it on
+    // its own, which the CLI-side session case pins; this lane does not reach it.
     @Test
     @Timeout(600)
     void fg11dRetireAtIntentSettlesTheClaimOnMySql() throws Exception {
@@ -1308,17 +1308,33 @@ class HostedAutomationFaultGatesIT {
         Hold parked = hold("retire-at-intent",
                 body -> kind(body, "fire_run") && id.equals(body.path("scheduleId").asText()));
         // The manual fire blocks while parked, so it cannot run on this thread.
+        // Its answer crosses threads as data: an assertion raised inside the
+        // thread would be swallowed, and the case would then accept any status.
+        AtomicReference<HttpResponse<String>> answered = new AtomicReference<>();
+        AtomicReference<Throwable> lost = new AtomicReference<>();
         Thread manual = Thread.ofVirtual().start(() -> {
             try {
-                request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-intent-run", 409);
-            } catch (Throwable refused) {
-                // The retire may also answer the fire 202 before it is refused.
+                answered.set(send("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-intent-run"));
+            } catch (Throwable failure) {
+                lost.set(failure);
             }
         });
-        assertThat(parked.reached().await(150, TimeUnit.SECONDS)).as("the fire parked at intent").isTrue();
+        assertThat(parked.reached().await(150, TimeUnit.SECONDS)).as("the fire parked at admission").isTrue();
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-intent-retire", 202);
         parked.release().countDown();
         manual.join(150_000);
+        assertThat(lost.get()).as("the fire request completes").isNull();
+        HttpResponse<String> answer = answered.get();
+        assertThat(answer).as("the fire was answered").isNotNull();
+        // Retire and the fire race: the retire either refuses the fire outright or
+        // wins after admission. Any other answer is a defect, so nothing here may
+        // absorb it.
+        assertThat(answer.statusCode()).as("the fire is admitted or refused: %s", answer.body())
+                .isIn(202, 409);
+        if (answer.statusCode() == 409) {
+            assertThat(answer.body()).as("the refused fire names the skipped run")
+                    .contains("automation_run_skipped");
+        }
         Map<String, Object> claim = jdbc.queryForMap("SELECT outcome, reason, attempts FROM ma_schedule_occurrence"
                 + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?", tenant, id,
                 "manual:fg11d-intent-run");

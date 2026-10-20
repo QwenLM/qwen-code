@@ -40,18 +40,18 @@ faults: `held(...)` parks an operation before the Harness sees it,
 a case arms.
 
 `disable-span` and `retire-at-intent` run on that stock fixture: parking
-`fire_run` in the relay is the intent hold this slice needed, because the
-occurrence is committed and the run has not reached the Harness. `close-*`
-still needs a Session close the fixture cannot accept, which Limits records
-instead of claiming it is ready.
+`fire_run` in the relay holds the fire between the occurrence commit and the
+Harness admission, which is the window this cell needs. `close-*` still needs a
+Session close the fixture cannot accept, which Limits records instead of
+claiming it is ready.
 
 ## Slice 1: retire, disable, close
 
-| Cell                 | Setup                                                                                  | Expected                                                                                                                                                                                   |
-| -------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `retire-at-intent`   | Retire while the claim sits at the Harness as `intent` (the relay parks the operation) | The occurrence settles `skipped` for `definition_retired` with no attempt; no run commits and no model Turn starts, and the claim is never `unknown`.                                      |
-| `disable-span`       | Create the definition disabled, let two due slots pass, then enable it                 | The disabled span records no `fired` occurrence and no run; the first slot after re-enabling fires once.                                                                                   |
-| `close-queued-input` | Close the Session while an automation input is queued behind a held turn               | The queued input settles without a model Turn; a live definition on the closed Session records `skipped(session_not_active)` for each slot, which is today's behaviour and is pinned here. |
+| Cell                 | Setup                                                                                                        | Expected                                                                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `retire-at-intent`   | Retire after the occurrence commits but before the Harness admits `fire_run` (the relay parks the operation) | The occurrence settles `skipped` for `definition_retired` with no attempt; no run commits and no model Turn starts, and the claim is never `unknown`.                                      |
+| `disable-span`       | Create the definition disabled, let two due slots pass, then enable it                                       | The disabled span records no `fired` occurrence and no run; the first slot after re-enabling fires once.                                                                                   |
+| `close-queued-input` | Close the Session while an automation input is queued behind a held turn                                     | The queued input settles without a model Turn; a live definition on the closed Session records `skipped(session_not_active)` for each slot, which is today's behaviour and is pinned here. |
 
 ## Slice 2: the cancellation matrix
 
@@ -80,14 +80,16 @@ around it.
 - These cells do not exercise Workspace tools or publication; FG11f owns
   those, and is blocked on the execution-authority gap recorded in its
   design.
-- `retire-at-intent` pins what the code does, not what this record first
-  proposed. Parking `fire_run` at the relay leaves the occurrence committed and
-  unstarted, and retiring there settles it `skipped` with `definition_retired`
-  and zero attempts. No `automation_run` commits, so `cancelled` — the state a
-  cancel gives a run that exists — never arises, and `not_started_proven` stays
-  a property of the Harness's own execution line, which this lane could only
-  read through a run it does not create. The cell asserts the skip, the spent
-  attempt count, the absent run and the absent Turn.
+- `retire-at-intent` is retirement before Harness admission, not a committed
+  intent. The relay parks `fire_run` before the Harness sees it, so the
+  occurrence exists and no `automation_run` does: retiring there settles the
+  occurrence `skipped` with `definition_retired` and zero attempts, and there is
+  no run to cancel. A claim already held at `intent` is a different branch —
+  `HostedAutomationSession.fire()` cancels it once the definition retired under
+  it, and the CLI-side case "ends a claim its definition retired under as
+  cancelled, never started" pins that path to `cancelled` with
+  `not_started_proven`. This lane does not exercise that branch, so the gap
+  stays open here rather than being read as closed by this cell.
 - `close-*` needs a workspace-backed Session: the automation API refuses a
   Session without one (`session_not_found`), while closing a workspace
   Session in this fixture answers `409 workspace_unavailable` with

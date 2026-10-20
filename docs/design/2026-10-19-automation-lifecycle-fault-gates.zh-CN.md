@@ -32,17 +32,17 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 `relayed(...)` 丢掉一次应答，scanner 自己的调度器在用例布置期间被挂起。
 
 `disable-span` 与 `retire-at-intent` 能直接跑在这套夹具上：relay 扣住
-`fire_run` 就是这一片所需的 intent 握点——occurrence 已提交、run 尚未到达
-Harness。`close-*` 仍需要夹具当前无法接受的会话关闭，记在「边界」里，而不是
-当作已就绪。
+`fire_run`，把这次 fire 停在 occurrence 已提交、Harness 尚未准入之间，这正是
+这一格需要的窗口。`close-*` 仍需要夹具当前无法接受的会话关闭，记在「边界」里，
+而不是当作已就绪。
 
 ## 第 1 片：retire、disable、close
 
-| 格子                 | 构造                                                       | 预期                                                                                                                              |
-| -------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `retire-at-intent`   | claim 以 `intent` 停在 Harness 时 retire（relay 扣住操作） | occurrence 结算为 `skipped`/`definition_retired` 且 attempts 为 0；不提交 run、不起模型 Turn，claim 绝不为 `unknown`              |
-| `disable-span`       | 以禁用状态创建定义，跨两个到期 slot 后再 enable            | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                |
-| `close-queued-input` | 有 automation input 排在 held turn 之后时关闭 Session      | 排队的 input 结算且不产生模型 Turn；关闭 Session 上的存活定义每个 slot 记 `skipped(session_not_active)`，这是今天的行为，在此钉住 |
+| 格子                 | 构造                                                                       | 预期                                                                                                                              |
+| -------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `retire-at-intent`   | occurrence 已提交、Harness 尚未准入 `fire_run` 时 retire（relay 扣住操作） | occurrence 结算为 `skipped`/`definition_retired` 且 attempts 为 0；不提交 run、不起模型 Turn，claim 绝不为 `unknown`              |
+| `disable-span`       | 以禁用状态创建定义，跨两个到期 slot 后再 enable                            | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                |
+| `close-queued-input` | 有 automation input 排在 held turn 之后时关闭 Session                      | 排队的 input 结算且不产生模型 Turn；关闭 Session 上的存活定义每个 slot 记 `skipped(session_not_active)`，这是今天的行为，在此钉住 |
 
 ## 第 2 片：取消矩阵
 
@@ -63,13 +63,14 @@ Harness。`close-*` 仍需要夹具当前无法接受的会话关闭，记在「
 
 - 这些格子不执行 Workspace 工具、不触及发布；FG11f 负责那些，并受其设计
   中记录的执行授权缺口阻塞。
-- `retire-at-intent` 钉的是代码的实际行为，而不是本文最初的设想。relay 扣住
-  `fire_run` 时 occurrence 已提交且尚未开始，此时 retire 让 occurrence 以
-  `skipped`/`definition_retired` 收口、attempts 为 0。由于没有 `automation_run`
-  提交，`cancelled`（取消一个已存在的 run 才会出现的状态）不会发生，
-  `not_started_proven` 属于 Harness 自己的执行状态线，本车道只能通过一个它不会
-  创建的 run 才读得到。用例因此断言跳过、已花费尝试数、缺席的 run 与缺席的
-  Turn。
+- `retire-at-intent` 是 Harness 准入前的 retire，不是已提交的 intent。relay 在
+  Harness 看到 `fire_run` 之前扣住它，因此只有 occurrence、没有 `automation_run`：
+  此时 retire 让 occurrence 以 `skipped`/`definition_retired` 收口、attempts 为 0，
+  没有可取消的 run。已提交 intent 是另一条路径——`HostedAutomationSession.fire()`
+  在定义于其下 retire 后取消它已持有的 `intent`，由 CLI 侧用例「ends a claim its
+  definition retired under as cancelled, never started」钉成 `cancelled` 与
+  `not_started_proven`。本车道不执行那条分支，缺口在此保留，而不是被这一格当作
+  已结清。
 - `close-*` 需要工作区支撑的 Session：automation API 拒绝没有工作区的
   Session（`session_not_found`），而在本夹具里关闭工作区 Session 会得到
   `409 workspace_unavailable`，消息为 `Hosted Workspace execution is not
