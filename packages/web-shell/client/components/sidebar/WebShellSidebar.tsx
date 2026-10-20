@@ -4911,6 +4911,9 @@ export function WebShellSidebar({
               else handleLoadSession(session.sessionId, session.workspaceCwd);
             } else if (
               event.key === 'F2' &&
+              !event.ctrlKey &&
+              !event.metaKey &&
+              !event.altKey &&
               event.target === event.currentTarget &&
               showRename &&
               !busy

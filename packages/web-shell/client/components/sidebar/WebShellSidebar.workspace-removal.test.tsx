@@ -152,6 +152,7 @@ const {
         listStandaloneSessionsPage,
         archiveStandaloneSessions: archiveSessionsData,
         unarchiveStandaloneSessions: unarchiveSessionsData,
+        exportStandaloneSession: vi.fn(),
         workspaceByCwd: vi.fn(() => ({
           listWorkspaceSessions,
           // The header actions poll git; answer as a non-git workspace.
@@ -792,6 +793,7 @@ beforeEach(() => {
   workspace.refreshCapabilities.mockReset();
   workspace.refreshCapabilities.mockResolvedValue(capabilities);
   workspace.client.workspaceByCwd.mockReset();
+  workspace.client.exportStandaloneSession.mockReset();
   listWorkspaceSessions.mockReset();
   listWorkspaceSessions.mockResolvedValue([]);
   listStandaloneSessionsPage.mockReset();
@@ -2713,6 +2715,43 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.querySelector('input')).toBeNull();
   });
 
+  it('ignores F2 pressed with a modifier key held', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push(
+      {
+        sessionId: 'current-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Current session',
+      },
+      {
+        sessionId: 'other-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Other session',
+      },
+    );
+
+    renderSidebar();
+    await expandWorkspace('project');
+
+    const row = inlineSessionAction(
+      'Other session',
+      'Rename',
+    )!.closest<HTMLElement>('[role="button"]')!;
+    await act(async () => {
+      row.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'F2',
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('input')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it('opens the standalone rename dialog on F2 without loading the session', async () => {
     const standaloneCapabilities = {
       ...capabilities,
@@ -2816,6 +2855,116 @@ describe('WebShellSidebar workspace removal', () => {
 
     expect(container.querySelector('input')).toBeNull();
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('starts an inline rename on F2 when rename is excluded from inlineItems', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push(
+      {
+        sessionId: 'current-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Current session',
+      },
+      {
+        sessionId: 'other-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Other session',
+      },
+    );
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
+    await expandWorkspace('project');
+
+    // No inline Rename button exists under this config, so locate the row itself.
+    let row: HTMLDivElement | undefined;
+    await vi.waitFor(() => {
+      row = Array.from(
+        container.querySelectorAll<HTMLDivElement>('[role="button"]'),
+      ).find((entry) => entry.textContent?.includes('Other session'));
+      expect(row).toBeDefined();
+    });
+
+    await act(async () => {
+      row!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input');
+    expect(input?.getAttribute('aria-label')).toBe('Rename: Other session');
+  });
+
+  it('opens the standalone rename dialog on F2 when rename is excluded from inlineItems', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    connection.sessionId = 'standalone-active';
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-active',
+          displayName: 'Standalone active chat',
+          workspaceCwd: '/private/standalone/standalone-active',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
+    const onLoadStandaloneSession = vi.fn();
+
+    renderSidebar({
+      onLoadStandaloneSession,
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { inlineItems: ['pin'] },
+    });
+
+    let row: HTMLDivElement | undefined;
+    await vi.waitFor(() => {
+      row = Array.from(
+        container.querySelectorAll<HTMLDivElement>('[role="button"]'),
+      ).find((entry) => entry.textContent?.includes('Standalone active chat'));
+      expect(row).toBeDefined();
+    });
+
+    await act(async () => {
+      row!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog?.getAttribute('aria-label')).toBe('Rename');
+    expect(onLoadStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it('renders archived rows without a button role or tabindex', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push({
+      sessionId: 'current-session',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Current session',
+    });
+    archived.sessions.push({
+      sessionId: 'archived-session',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Archived session',
+      isArchived: true,
+    });
+
+    renderSidebar();
+    await expandArchived();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="archivedRow"]'),
+    ).find((entry) => entry.textContent?.includes('Archived session'));
+    expect(row).toBeDefined();
+    expect(row!.getAttribute('role')).toBeNull();
+    expect(row!.getAttribute('tabindex')).toBeNull();
   });
 
   it('keeps the next rename editor when an earlier rename settles late', async () => {
@@ -7086,9 +7235,9 @@ describe('WebShellSidebar standalone grouping', () => {
       ],
     });
     // Hold an export open so the row stays busy for the whole test.
-    (
-      workspace.client as { exportStandaloneSession?: unknown }
-    ).exportStandaloneSession = vi.fn(() => new Promise(() => {}));
+    workspace.client.exportStandaloneSession.mockImplementation(
+      () => new Promise(() => {}),
+    );
 
     renderSidebar({
       onLoadStandaloneSession: vi.fn(),
