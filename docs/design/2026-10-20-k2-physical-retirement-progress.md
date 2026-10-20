@@ -4,171 +4,145 @@
 
 ## Status and delivery boundary
 
-As of 2026-10-20, this is a design-only follow-up to the simplified #14758 at
-`c6820459026adf3619c9080b5b73cacc52922998`. The resident Read/Write/Edit runtime
-is already implemented by #14340. This PR remains Draft and implements no
-resident Workspace retirement command, admission fence or physical cleanup.
-The [resident runtime design](2026-10-14-k2-resident-workspace.md) remains the
-first-release contract.
+The resident Read/Write/Edit runtime is already implemented by #14340 and
+documented by merged #14758. This follow-up combines design and implementation
+in one PR: a private maintenance command, idle admission, a durable fence,
+inspection and explicit original-Pod deletion. Test evidence and native ACK
+qualification are separate; unavailable checks remain pending.
 
-The former #14765 implementation at
-`5535175e0f1b087a498a2822a092d8d1e85788ee` remains in history but is withdrawn
-from this tree. Its node-source protocols, physical coordinator, inventory
-extension, companion table and V14 migration are not carried forward. The
-installation/cold-bootstrap proposal #14761 is closed and is not a prerequisite.
-Main's existing runtime, private retirement and recovery implementations remain
-unchanged.
+The former #14765 candidate at `5535175e0f1b087a498a2822a092d8d1e85788ee`
+remains in history. Its node-source coordinator, inventory extension and companion
+migration are withdrawn. #14761 is closed and is not a dependency. Existing
+private Session retirement and recovery retain their semantics.
 
-## Problem and existing behavior
+## Problem and trust boundary
 
-Normal resident Session close settles work, revokes the logical context and
-releases its Runtime Session. The shared binding remains `READY`, storage remains
-`RESERVED`, and the next Session can reuse the original Pod, PVC and files. A
-successful close is not authorization to retire that Workspace or delete its Pod.
+Normal Session close settles work, revokes the logical context and releases its
+Runtime Session. Binding stays `READY`, storage stays `RESERVED`, and B reuses
+A's original Pod/PVC and file bytes. This does not authorize Workspace retirement.
+The private Session-isolated `DRAINED` receipt cannot retire a shared resident
+binding without an isolation key.
 
-The existing private application-retirement `DRAINED` result belongs to a
-Session-isolated profile pinned to the original generation-1 owner. Its isolation
-key is the original Session. It cannot serve as a resident Workspace drain
-receipt: a resident binding spans successive Sessions and has no Session isolation
-key. Reusing that result or changing only its labels would bypass the missing
-Workspace-level admission decision.
+Trust the administrator, Kubernetes control plane, host and qualified ACK Disk
+CSI. Supported storage is `diskplugin.csi.alibabacloud.com`, `ReadWriteOncePod`,
+`Filesystem`, `ext4` and the registered disk serial. Preserve tenant, actor,
+Workspace/runtime generation, original Pod/container/mount, PVC/PV and namespace
+protection checks. This does not independently prove continuous host confinement.
+Lease expiry, node failure, DELETE success and Pod absence never prove physical
+stop, CSI unpublish or safe volume reuse.
 
-The future capability needs an explicit maintenance request that first prevents
-new work, then records narrowly scoped original-Pod deletion attempts. It must
-preserve occupied storage whenever physical completion is unproven.
+## Minimal maintenance entry
 
-## Trust boundary and supported platform
+`ResidentWorkspaceRetirementMain` reuses the existing non-web maintenance Boot
+configuration. It loads the service's DataSource, credential-encryption key and
+resident mappings, starts no listener/Harness/worker and does not migrate SQL.
+Commands are `inspect <request-json>`, `begin <request-json>` and
+`delete-pod <request-json> <resourceVersion>`.
 
-Inherit the resident runtime's trust in the administrator, Kubernetes control
-plane, host and qualified ACK Disk CSI. Storage remains limited to
-`diskplugin.csi.alibabacloud.com`, `ReadWriteOncePod`, `Filesystem` and `ext4`,
-with matching registered disk serial. Preserve tenant, actor, Workspace and
-runtime generations, original Pod/container, mount, PVC/PV and protection checks.
+The trusted administrator already controls the maintenance host and deployment
+credentials. A strict JSON request of at most 16 KiB names tenant, Workspace,
+expected generation, actor and retirement ID. The actor is an
+administrator-asserted audit identity, not authentication. Commands also require
+its current Workspace `OWNER` grant. No new HTTP API, signing key or permission
+framework is introduced. Callers cannot choose a replacement Pod or endpoint.
+Kubernetes API/token/CA settings stay in deployment configuration; plans contain
+no credentials. See the [deployment guide](../../deploy/k2-resident/README.md).
 
-This proposal does not require Go node services, a custom containerd/shim,
-cold-bootstrap installation, source journals or independent continuous host
-confinement proof. Platform trust still does not turn lease expiry, node failure,
-a successful DELETE reply or Pod absence into proof of CSI unpublish or safe
-volume reuse.
+## Idle admission and durable fence
 
-## Proposed Workspace retirement admission
+`begin` admits only an already provisioned idle Workspace: all public Sessions
+are terminal, journal heads are sealed or permanently deleted with cleared writer
+identity/lease, all Runtime Sessions are `RELEASED`,
+and all tool executions are `SETTLED`. Unknown execution/release refuses admission.
 
-Retirement is a separate, explicitly authorized operation on one persisted
-tenant/Workspace and its current generation. The initial implementation should
-accept only an idle Workspace: all public Sessions must have completed their
-lifecycle, all Runtime Sessions must be `RELEASED`, and every tool execution must
-be `SETTLED`. An active or uncertain Session, writer, execution or release refuses
-retirement. Forced cancellation and recovery of interrupted work are outside
-this increment.
+Acquire the existing tenant `runtime_placement` guard first, then the
+`output_publication` guard and the Workspace row shared with Session creation.
+Use the original slot/binding, registration/reservation and child-record checks.
+A live original binding coordinator claim is required. In one short transaction,
+save an immutable plan, move Workspace `ACTIVE` to `DRAINING` and seal the original
+binding `DRAINING` with drain requested. Revoke its old coordinator generation.
+Keep the active slot and `RESERVED` owner. No network call holds SQL locks.
 
-Admission must lock the same Workspace row used by Session creation. In one
-transaction it must revalidate actor authority and all original ownership,
-persist an immutable idempotent retirement plan, and move the Workspace from
-`ACTIVE` to `DRAINING` while fencing the original binding against new acquisition
-and dispatch. Either a competing Session is admitted first and retirement is
-refused, or retirement wins and the Session is refused. A stale registration,
-foreign actor or mismatched generation cannot create or advance the plan.
+Creation first means retirement refuses; retirement first means creation refuses.
+Same-ID/same-request replay returns the saved plan. Different actors, generations,
+content or competing plans cannot overwrite it. A concurrent live maintenance
+claim may refuse a duplicate; inspect/retry the same request after settlement.
 
-Persist the tenant, Workspace generation, actor/request digest, original binding
-and runtime generation, storage registration revision, physical-volume identity,
-namespace/protection identities, and original Pod UID/specification digest. Keep
-credentials out of the plan. An idempotent retry returns that same plan; a
-different request cannot overwrite it. Recheck authorization for later mutations.
+| Consumer                                 | Enforcement                                                                                                                                          |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session creation and resolution          | Existing Workspace `ACTIVE`, identity and actor checks; creation shares the tenant guard and Workspace row.                                          |
+| Runtime acquire, activation and dispatch | Existing final binding readiness/drain, Session ownership and execution checks, including requests paused after preparation.                         |
+| Warm/provision                           | Current resident Workspace identity and `ACTIVE` are checked under the tenant guard before returning/creating a binding.                             |
+| Background recovery                      | Generic coordinator claims refuse a sealed resident binding, including after Broker restart. Existing version/generation checks reject stale writes. |
+| Retention                                | A `DRAINING` binding and its active slot retain the original family; reservation is never cleared.                                                   |
 
-The durable fence must cover Session creation and resolution, Runtime Session
-acquisition/activation, tool dispatch, restore/provisioning and maintenance retry.
-Audit the registry, resident admission, execution authority, Broker and resident
-provisioner together. Existing `DRAINING` state alone is not a claim that every
-consumer already enforces this proposed workflow. Specify and test the full SQL
-lock order against Session close and existing recovery before implementation.
+Existing close/settlement authority remains intact. Fence older Server/Broker
+binaries before enabling maintenance. There is no automatic undo or restoration.
 
-After the fence commits, failures or lease expiry must not restore `ACTIVE`,
-clear the original slot, create a replacement generation or fall back to a
-primary/local runtime. This first maintenance increment has no automatic abort
-or resume-to-service operation.
+## Explicit deletion and uncertain outcomes
 
-## Proposed deletion progress
+`begin` performs no deletion. An explicit `delete-pod` verifies the configured
+namespace/protection and PVC/PV, original Pod UID/specification/container and node
+identity/readiness through the trusted API. Unexpected owner/finalizer, deleting
+or missing Pod, identity changes and ambiguous observations refuse a new DELETE.
 
-Use a private maintenance surface scoped to the persisted Workspace and original
-binding. Ordinary Session close and file tools do not invoke it. The surface and
-credential contract require implementation review; this PR exposes no new API
-or executable command.
+Persist exact normal DELETE bytes before transmission: original UID and observed
+`resourceVersion` preconditions, 30-second grace and Background propagation. Reuse
+`ma_operation` coordinator fields with a 60-second sender claim. Save the attempt
+as `UNKNOWN` in SQL; only that invocation sends it. Result writes check the
+original plan and live sender generation. Grant revocation blocks new actions;
+an already sent attempt can still record its factual result under its claim.
 
-Before a deletion attempt, corroborate the pinned namespace/protection, PVC/PV,
-registration and original Pod identity through the trusted Kubernetes API.
-Reject changed UID/specification, unexpected owners/finalizers, an already
-deleting Pod or ambiguous platform observations. Missing resources or an
-unavailable node must preserve the fence and reservation. Do not delete PVC/PV,
-Secrets or namespace protection as part of this operation.
+Each original UID/resourceVersion is attempted once, at most eight attempts per
+plan. A crash after persistence but before send is indistinguishable from a lost
+reply. Restart and same-version retry read the retained attempt without resending,
+even when Kubernetes is unavailable. Another explicit attempt requires a freshly
+verified different version. The counter and fence survive restart.
 
-Persist the exact normal Pod DELETE request before transmission, including the
-original UID and observed `resourceVersion` preconditions, a 30-second grace
-period and Background propagation. Use one durable sender claim per attempt.
-All network calls occur outside SQL transactions; each later write revalidates
-the original plan and claim generation. Bound and retain actual HTTP status and
-reply bytes without synthesizing a reply after transport failure.
-
-One `resourceVersion` may be attempted at most once. A crash after persistence
-but before transmission is indistinguishable from a lost reply and remains
-`UNKNOWN`; recovery must not resend that request. A fresh, verified observation
-with a different version may authorize an explicit next attempt, with at most
-eight attempts. Restarting a process must not reset the counter or the fence.
-
-Conceptual progress distinguishes a saved plan/fence, recorded attempts, observed
-deletion and Pod absence. These are observations, not a physical-completion
-state machine. Neither HTTP 200/202/404 nor a later GET finding no original Pod
-grants `STOPPED`, `UNPUBLISHED` or `RELEASED` authority. Keep the binding fenced,
-the original active slot retained and storage `RESERVED`. Physical stop,
-CSI unpublish, final release and volume reuse require a separate qualified design.
+Retain actual HTTP status and at most 64 KiB of response bytes. A complete response
+is `RETURNED`, including 200/202/404/409/503; incomplete/oversized replies and
+transport failure remain `UNKNOWN`. Do not manufacture a response. `inspect`
+performs no Kubernetes calls or SQL writes and returns status/digests without
+credentials. Workspace/binding remain `DRAINING`, the active slot remains and
+storage stays `RESERVED`. No PVC/PV, Secret or protection object is deleted.
 
 ## Persistence and compatibility
 
-Start from the published canonical schema and existing Workspace/operation
-ledgers. Prefer a separately versioned resident maintenance record over
-reinterpreting the private Session-isolated retirement inventory. Exact operation
-and work kinds, key constraints and payload limits must be specified with the
-implementation; current canonical CHECK constraints do not admit arbitrary new
-kinds. Any necessary schema changes must follow the current shared-schema policy
-and update all validators and consumers together.
+Reuse `ma_operation` with `WORKSPACE_RETIREMENT` and `ma_operation_work` with
+`POD_DELETE_ATTEMPT`. A version-1 immutable plan binds the exact request, original
+binding/runtime generation, original resource identity digest and configured
+mapping digest. The retained original binding and mapping pin registration,
+physical volume, Pod/specification and protection identities. Validate the plan
+digest and those original records on subsequent use. Attempts retain exact
+request bytes, version, ordinal, sender generation and response/unknown result.
+Mutable progress never enters immutable application snapshots.
 
-Do not restore the former node-source table, source-associated inventory or V14
-companion migration. No database or protocol change is made by this design PR.
-Main's retained snapshots, schema validation and private retirement semantics
-remain intact. Mutable maintenance progress must not invalidate immutable
-historical application snapshots or relax their integrity checks.
+Append the canonical shared-schema migration for the new CHECK values and update
+Server/Broker enums, initialization and validation together. Preserve published
+migrations and legacy/partial/foreign catalog refusal. The new maintenance
+migration does not restore the withdrawn node-source schema.
 
-## Failure and acceptance requirements
+## Verification and acceptance
 
-| Scenario                                         | Required future observation                                                                                                     |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| Ordinary A→close→B handoff                       | Before maintenance, B reads A's exact file bytes on the same original Pod/PVC; ordinary close retains `READY`/`RESERVED`.       |
-| Idle retirement races with creation              | The Workspace lock admits one outcome; an active Session refuses retirement, and a committed fence refuses every later Session. |
-| Old context or stale maintenance caller          | Reactivation, acquisition and dispatch refuse; foreign actor, generation or claim cannot advance progress.                      |
-| Process crash or lost DELETE reply               | The fence, plan, counter and unknown attempt survive; no duplicate send for the same version and no replacement Pod.            |
-| Replaced/deleting/missing Pod or changed storage | No new unsafe DELETE; status preserves the original identity and reservation without claiming physical completion.              |
-| 200/202/404/409, timeout or node loss            | Preserve the actual response or unknown outcome; never release storage or authorize another owner.                              |
+| Layer                             | Required observation                                                                                                                                                   |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Component/H2                      | Owner/identity refusal, exact replay, busy and malformed-plan refusal, durable admission fences, retained slot/reservation and bounded attempts.                       |
+| Independent MySQL 8.4 connections | Creation/retirement races under REPEATABLE READ, repeated requests, revoked owner, stale sender generation and original storage preservation.                          |
+| Independent JVMs                  | Actual private begin/inspect/replay with retained SQL; crash before send, after send and before reply save retains unknown attempts without resend.                    |
+| Target ACK                        | First prove ordinary A→close→B exact bytes on the same Pod/container/binding/PVC/PV, then explicit retirement/deletion with new work refused and reservation retained. |
 
-Future verification must separate component/H2, real MySQL with independent
-connections, independent application/Broker processes and target ACK results.
-Test the entire race and crash boundary, including persistence-before-send,
-send-before-reply and reply-before-save. Validate malformed plans, retained bytes,
-stale credentials, claim generations and ownership drift against the production
-admission path, rather than manufacturing the old source-associated `DRAINED`.
+Transport tests check exact request bytes, real HTTP statuses/bodies, size bounds,
+timeouts, rotating tokens and no redirects/retries. Record exact source revision,
+environment, identities, results and unavailable checks. H2, MySQL and loopback
+HTTP are not native CSI qualification. Earlier withdrawn-candidate reports do not
+validate this implementation. Scope the independent-process fixture separately
+from actual ACK behavior.
 
-This revision runs documentation formatting, bilingual/reference checks and a
-full-tree comparison against #14758. It does not run new Node/Maven runtime tests,
-MySQL, independent-process or ACK retirement acceptance. All proposed runtime
-acceptance remains pending. Earlier #14765 fixtures and test reports remain tied
-to the withdrawn candidate and do not validate this design's implementation.
+## Deferred work
 
-## Implementation gates and deferred work
-
-Before implementing, review the Workspace maintenance authority and credential
-surface, full consumer/lock-order audit, canonical persistence contract and ACK
-qualification plan. Then implement and test idle admission/fencing before adding
-network deletion. Keep each stage's evidence bound to its exact source commit.
-
-Shell, MCP, Hooks, active-Session forced drain, automatic replacement or resume,
+Shell, MCP, Hooks, forced drain of active Sessions, automatic replacement/resume,
 node installation, physical-release proof, destructive storage cleanup and
-cross-Workspace volume reuse remain deferred. Resident Pod/node/storage costs
-continue while resources are retained, including after an uncertain retirement.
+cross-Workspace volume reuse remain deferred. Pod/node/storage costs continue
+while resources remain, including after uncertain retirement. The
+[resident runtime design](2026-10-14-k2-resident-workspace.md) remains the normal
+Session handoff contract.

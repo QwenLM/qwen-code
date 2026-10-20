@@ -7,26 +7,34 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -41,11 +49,15 @@ class KubernetesHttpRuntimeClientTest {
     private final AtomicReference<String> path = new AtomicReference<>();
     private final AtomicReference<String> method = new AtomicReference<>();
     private final AtomicReference<String> requestBody = new AtomicReference<>();
+    private final AtomicReference<String> contentType = new AtomicReference<>();
+    private final AtomicReference<String> accept = new AtomicReference<>();
     private final AtomicReference<byte[]> response = new AtomicReference<>("{\"kind\":\"Pod\"}".getBytes(StandardCharsets.UTF_8));
     private final AtomicInteger status = new AtomicInteger(200);
     private final AtomicInteger calls = new AtomicInteger();
     private final CountDownLatch releaseBody = new CountDownLatch(1);
     private volatile boolean stallBody;
+    private volatile boolean stallHeaders;
+    private volatile boolean dropResponse;
     private java.util.concurrent.ExecutorService executor;
 
     @BeforeEach
@@ -61,9 +73,18 @@ class KubernetesHttpRuntimeClientTest {
             path.set(exchange.getRequestURI().toString());
             method.set(exchange.getRequestMethod());
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            contentType.set(exchange.getRequestHeaders().getFirst("Content-Type"));
+            accept.set(exchange.getRequestHeaders().getFirst("Accept"));
+            if (dropResponse) {
+                exchange.close();
+                return;
+            }
             exchange.getResponseHeaders().set("Location", origin.resolve("/redirected").toString());
-            exchange.sendResponseHeaders(status.get(), response.get().length);
             try {
+                if (stallHeaders) {
+                    releaseBody.await(3, TimeUnit.SECONDS);
+                }
+                exchange.sendResponseHeaders(status.get(), response.get().length);
                 if (stallBody) {
                     releaseBody.await(3, TimeUnit.SECONDS);
                 }
@@ -233,6 +254,108 @@ class KubernetesHttpRuntimeClientTest {
                 () -> new KubernetesHttpRuntimeClient(URI.create("https://kubernetes.default.svc"), token, token));
         assertThrows(IllegalArgumentException.class, () -> new KubernetesHttpRuntimeClient(origin, token,
                 HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS).build(), Duration.ofSeconds(1)));
+    }
+
+    @Test
+    void deletesOnlyTheNamedPodWithExactOptionsAndRotatingCredentials() throws Exception {
+        byte[] options = ("{ \"apiVersion\": \"v1\", \"kind\": \"DeleteOptions\","
+                + "\"gracePeriodSeconds\":30,\"propagationPolicy\":\"Background\","
+                + "\"preconditions\":{\"uid\":\"original-uid\",\"resourceVersion\":\"192\"}}\n")
+                .getBytes(StandardCharsets.UTF_8);
+        client.deletePod("runtimes", "resident.one", options).toCompletableFuture().join();
+        assertEquals("DELETE", method.get());
+        assertEquals("/api/v1/namespaces/runtimes/pods/resident.one", path.get());
+        assertArrayEquals(options, requestBody.get().getBytes(StandardCharsets.UTF_8));
+        assertEquals("application/json", contentType.get());
+        assertEquals("application/json", accept.get());
+        assertEquals("Bearer token-one", authorization.get());
+        Files.writeString(token, "delete-token-two\n");
+        client.deletePod("runtimes", "resident.one", options).toCompletableFuture().join();
+        assertEquals("Bearer delete-token-two", authorization.get());
+        assertEquals(2, calls.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {200, 202, 302, 307, 308, 400, 401, 403, 404, 409, 429, 500, 503})
+    void retainsActualDeleteStatusAndUnparsedBytesWithoutRetryOrRedirect(int code) {
+        status.set(code);
+        byte[] body = new byte[] {0, (byte) 0xff, 1};
+        response.set(body);
+        var result = client.deletePod("runtimes", "resident-one", new byte[] {'{', '}'})
+                .toCompletableFuture().join();
+        assertEquals(code, result.status());
+        assertArrayEquals(body, result.body());
+        assertTrue(result.complete());
+        assertEquals(1, calls.get());
+        assertEquals("/api/v1/namespaces/runtimes/pods/resident-one", path.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {65535, 65536, 65537})
+    void boundsDeleteReplyBytesAndIdentifiesTruncation(int size) {
+        byte[] body = new byte[size];
+        Arrays.fill(body, (byte) 'x');
+        response.set(body);
+        status.set(409);
+        var result = client.deletePod("runtimes", "resident-one", new byte[] {'{', '}'})
+                .toCompletableFuture().join();
+        assertEquals(409, result.status());
+        assertArrayEquals(Arrays.copyOf(body, Math.min(size, 64 * 1024)), result.body());
+        assertEquals(size <= 64 * 1024, result.complete());
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void rejectsUnsafeDeleteNamesAndUnboundedOptionsBeforeSending() {
+        byte[] options = new byte[] {'{', '}'};
+        assertThrows(IllegalArgumentException.class, () -> client.deletePod("../runtimes", "resident", options));
+        assertThrows(IllegalArgumentException.class, () -> client.deletePod("runtime.one", "resident", options));
+        for (String name : new String[] {"../pod", "pod?name", "pod/name", "pod..name", "x".repeat(254)}) {
+            assertThrows(IllegalArgumentException.class, () -> client.deletePod("runtimes", name, options));
+        }
+        assertThrows(IllegalArgumentException.class, () -> client.deletePod("runtimes", null, options));
+        assertThrows(IllegalArgumentException.class, () -> client.deletePod("runtimes", "resident", null));
+        assertThrows(IllegalArgumentException.class, () -> client.deletePod("runtimes", "resident", new byte[0]));
+        assertThrows(IllegalArgumentException.class,
+                () -> client.deletePod("runtimes", "resident", new byte[16 * 1024 + 1]));
+        assertEquals(0, calls.get());
+        byte[] maximumOptions = ("{}" + " ".repeat(16 * 1024 - 2)).getBytes(StandardCharsets.UTF_8);
+        client.deletePod("runtimes", "resident", maximumOptions).toCompletableFuture().join();
+        assertArrayEquals(maximumOptions, requestBody.get().getBytes(StandardCharsets.UTF_8));
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void failsDeleteWithoutInventingHttpResponseAfterLostReply() {
+        dropResponse = true;
+        var pending = client.deletePod("runtimes", "resident-one", new byte[] {'{', '}'}).toCompletableFuture();
+        assertInstanceOf(IOException.class, assertThrows(CompletionException.class, pending::join).getCause());
+        assertEquals(1, calls.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void boundsDeleteThatStallsBeforeOrAfterResponseHeaders(boolean beforeHeaders) throws Exception {
+        stallHeaders = beforeHeaders;
+        stallBody = !beforeHeaders;
+        var pending = client.deletePod("runtimes", "resident-one", new byte[] {'{', '}'}).toCompletableFuture();
+        var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> pending.get(2, TimeUnit.SECONDS));
+        assertTrue(failure.getCause() instanceof HttpTimeoutException || failure.getCause() instanceof TimeoutException);
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void failsDeleteBeforeSendingWhenTheTokenIsMissingOrMalformed() throws Exception {
+        for (String value : new String[] {"injected\r\nheader", "x".repeat(16 * 1024 + 1)}) {
+            Files.writeString(token, value);
+            var pending = client.deletePod("runtimes", "resident-one", new byte[] {'{', '}'}).toCompletableFuture();
+            assertInstanceOf(IOException.class, assertThrows(CompletionException.class, pending::join).getCause());
+        }
+        Files.delete(token);
+        var pending = client.deletePod("runtimes", "resident-one", new byte[] {'{', '}'}).toCompletableFuture();
+        assertInstanceOf(IOException.class, assertThrows(CompletionException.class, pending::join).getCause());
+        assertEquals(0, calls.get());
     }
 
     private static RuntimeBrokerException failure(CompletableFuture<?> pending) {
