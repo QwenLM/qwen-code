@@ -40,7 +40,8 @@ function markBunRuntime(): () => void {
 
 // The Bun PTY backend is POSIX-only (bun-pty.ts); Windows stays gated under
 // Bun until ConPTY is validated there. The real-load test is host-gated;
-// interleaving tests pin POSIX to exercise that branch on every host.
+// interleaving tests pin POSIX and mock only the native load probe so they
+// exercise call isolation without requiring another host's native package.
 // Neither a spoofed platform nor a skipped real-load test validates Windows.
 function markPosix(): () => void {
   const original = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -156,51 +157,64 @@ describe('getPty', () => {
   });
 
   it("keeps each call's own result when another call lands in between", async () => {
-    // `failing` starts first and records a failed-both-backends reason; a
-    // Bun-marker call then lands on a different runtime before `failing` is
-    // read. A reason delivered out-of-band (module state, read after the
-    // call) would leak the Bun outcome into it (#11881).
-    const failing = loadPty();
-    await new Promise((resolve) => setImmediate(resolve));
-    const restoreBun = markBunRuntime();
-    const restorePlatform = markPosix();
-
+    vi.resetModules();
+    const addonProbe = vi.fn();
+    vi.doMock('./bun-pty.js', () => ({ loadAddon: addonProbe }));
     try {
-      const bun = await loadPty();
-      expect(bun.impl?.name).toBe('qwen-bun-pty');
-      expect(bun.loadError).toBeNull();
+      const { loadPty: isolatedLoadPty } = await import('./getPty.js');
+      // The failing Node call starts before the Bun call but is read after it.
+      // Only native loading is simulated; per-call result ownership is real.
+      const failing = isolatedLoadPty();
+      await new Promise((resolve) => setImmediate(resolve));
+      const restoreBun = markBunRuntime();
+      const restorePlatform = markPosix();
+      try {
+        const bun = await isolatedLoadPty();
+        expect(bun.impl?.name).toBe('qwen-bun-pty');
+        expect(bun.loadError).toBeNull();
+        expect(addonProbe).toHaveBeenCalledOnce();
+      } finally {
+        restorePlatform();
+        restoreBun();
+      }
+      const failed = await failing;
+      expect(failed.impl).toBeNull();
+      expect(failed.loadError).toMatch(
+        /native module failed to dlopen: pty\.node/,
+      );
+      expect(failed.loadError).not.toMatch(/Bun runtime/);
     } finally {
-      restorePlatform();
-      restoreBun();
+      vi.doUnmock('./bun-pty.js');
+      vi.resetModules();
     }
-
-    const failed = await failing;
-
-    expect(failed.impl).toBeNull();
-    expect(failed.loadError).toMatch(
-      /native module failed to dlopen: pty\.node/,
-    );
-    expect(failed.loadError).not.toMatch(/Bun runtime/);
   });
 
   it("does not reuse a previous call's result for a later failure", async () => {
-    const restoreBun = markBunRuntime();
-    const restorePlatform = markPosix();
-
+    vi.resetModules();
+    const addonProbe = vi.fn();
+    vi.doMock('./bun-pty.js', () => ({ loadAddon: addonProbe }));
     try {
-      const bun = await loadPty();
-      expect(bun.impl?.name).toBe('qwen-bun-pty');
+      const { loadPty: isolatedLoadPty } = await import('./getPty.js');
+      const restoreBun = markBunRuntime();
+      const restorePlatform = markPosix();
+      try {
+        const bun = await isolatedLoadPty();
+        expect(bun.impl?.name).toBe('qwen-bun-pty');
+        expect(bun.loadError).toBeNull();
+        expect(addonProbe).toHaveBeenCalledOnce();
+      } finally {
+        restorePlatform();
+        restoreBun();
+      }
+      const later = await isolatedLoadPty();
+      expect(later.impl).toBeNull();
+      expect(later.loadError).toMatch(
+        /native module failed to dlopen: pty\.node/,
+      );
+      expect(later.loadError).not.toMatch(/Bun runtime/);
     } finally {
-      restorePlatform();
-      restoreBun();
+      vi.doUnmock('./bun-pty.js');
+      vi.resetModules();
     }
-
-    const later = await loadPty();
-
-    expect(later.impl).toBeNull();
-    expect(later.loadError).toMatch(
-      /native module failed to dlopen: pty\.node/,
-    );
-    expect(later.loadError).not.toMatch(/Bun runtime/);
   });
 });

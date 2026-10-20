@@ -247,29 +247,38 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 20_000);
 
   it('delivers exit exactly once and closes the fd when the child exits while paused', async () => {
-    const pty = spawn('/bin/sh', [
-      '-c',
-      'echo READY; sleep 0.2; echo TAIL_AFTER_PAUSE; exit 7',
-    ]);
-    let output = '';
-    pty.onData((data) => (output += data));
-    let exits = 0;
-    let exit: { exitCode: number; signal?: number } | undefined;
-    pty.onExit((e) => {
-      exits += 1;
-      exit = e;
-    });
+    const baseline = getPtyBudgetStats();
+    const live = [
+      spawn('/bin/sh', [
+        '-c',
+        'echo READY; read x; echo TAIL_AFTER_PAUSE; exit 7',
+      ]),
+    ];
+    try {
+      const pty = live[0]!;
+      let output = '';
+      pty.onData((data) => (output += data));
+      let exits = 0;
+      let exit: { exitCode: number; signal?: number } | undefined;
+      pty.onExit((e) => {
+        exits += 1;
+        exit = e;
+      });
 
-    expect(await waitFor(() => output.includes('READY'))).toBe(true);
-    pty.pause();
+      expect(await waitFor(() => output.includes('READY'), 5_000)).toBe(true);
+      pty.pause();
+      pty.write('go\n');
 
-    expect(await waitFor(() => exits > 0, 5_000)).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
-    expect(exits).toBe(1);
-    expect(exit!.exitCode).toBe(7);
-    // Wrapper parity: a paused consumer receives no data, not even the tail.
-    expect(output).not.toContain('TAIL_AFTER_PAUSE');
-    expectFdClosed(pty);
+      expect(await waitFor(() => exits > 0, 5_000)).toBe(true);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(exits).toBe(1);
+      expect(exit!.exitCode).toBe(7);
+      // Wrapper parity: a paused consumer receives no data, not even the tail.
+      expect(output).not.toContain('TAIL_AFTER_PAUSE');
+      expectFdClosed(pty);
+    } finally {
+      await cleanupPtys(live, baseline);
+    }
   }, 20_000);
 
   it('keeps exit detection while paused output floods past 3 MB', async () => {
@@ -360,25 +369,48 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 40_000);
 
   it('releases the fd when flow-control pause is followed by cancel', async () => {
-    const pty = spawn('/bin/sh', ['-c', 'sleep 30'], {
-      handleFlowControl: true,
-    });
-    let exits = 0;
-    let exit: { exitCode: number; signal?: number } | undefined;
-    pty.onExit((e) => {
-      exits += 1;
-      exit = e;
-    });
+    const baseline = getPtyBudgetStats();
+    const live = [
+      spawn(
+        '/bin/sh',
+        ['-c', 'echo READY; read x; echo HELD_AFTER_XOFF; read y'],
+        { handleFlowControl: true },
+      ),
+    ];
+    try {
+      const pty = live[0]!;
+      let output = '';
+      pty.onData((data) => (output += data));
+      let exits = 0;
+      let exit: { exitCode: number; signal?: number } | undefined;
+      pty.onExit((e) => {
+        exits += 1;
+        exit = e;
+      });
 
-    pty.write('\x13'); // XOFF
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    pty.kill('SIGHUP'); // cancel while paused
+      expect(await waitFor(() => output.includes('READY'), 5_000)).toBe(true);
+      const beforePause = output;
+      pty.write('\x13'); // XOFF
+      expect(pty.stats.paused).toBe(true);
+      pty.write('go\n');
+      const heldBytes = Buffer.byteLength('go\r\nHELD_AFTER_XOFF\r\n');
+      expect(
+        await waitFor(() => pty.stats.pausedBytes >= heldBytes, 5_000),
+      ).toBe(true);
+      expect(output).toBe(beforePause);
+      expect(pty.stats.resourceFailed).toBe(false);
+      pty.kill('SIGHUP'); // cancel while paused
 
-    expect(await waitFor(() => exits > 0, 5_000)).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
-    expect(exits).toBe(1);
-    expect(exit!.signal).toBe(1);
-    expectFdClosed(pty);
+      expect(await waitFor(() => exits > 0, 5_000)).toBe(true);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(exits).toBe(1);
+      expect(exit!.signal).toBe(1);
+      expect(pty.stats.pausedBytes).toBe(0);
+      expect(output).toBe(beforePause);
+      expectFdClosed(pty);
+    } finally {
+      await cleanupPtys(live, baseline);
+    }
   }, 20_000);
 
   it('intercepts flow-control messages when handleFlowControl is on', async () => {
@@ -516,7 +548,11 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
 
   it('holds a flood under the cap byte-exact and stays alive until resume', async () => {
     const LINES = 8000;
-    const LIMIT = 512 * 1024;
+    const expected =
+      Array.from({ length: LINES }, (_, i) => `K${i}`).join('\r\n') + '\r\n';
+    const expectedBytes = Buffer.byteLength(expected);
+    // 54,890 master bytes include ONLCR expansion; only 64 bytes remain.
+    const LIMIT = expectedBytes + 64;
     const pty = track(
       spawn(
         '/bin/sh',
@@ -531,16 +567,22 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     });
 
     pty.pause();
-    expect(await waitFor(() => pty.stats.pausedBytes >= 50_000)).toBe(true);
+    expect(
+      await waitFor(() => pty.stats.pausedBytes === expectedBytes, 5_000),
+    ).toBe(true);
+    expect(output).toBe('');
+    expect(pty.stats.resourceFailed).toBe(false);
     expect(pty.stats.pausedBytes).toBeLessThanOrEqual(LIMIT);
     expect(errors.length).toBe(0);
     fs.fstatSync(fdOf(pty)); // still open: nothing was terminated
 
     pty.resume();
-    const expected =
-      Array.from({ length: LINES }, (_, i) => `K${i}`).join('\r\n') + '\r\n';
-    expect(await waitFor(() => output.includes(`K${LINES - 1}`))).toBe(true);
+    expect(
+      await waitFor(() => Buffer.byteLength(output) === expectedBytes, 5_000),
+    ).toBe(true);
     expect(output).toBe(expected);
+    expect(errors).toHaveLength(0);
+    expect(pty.stats.resourceFailed).toBe(false);
 
     pty.kill();
     expect(await waitForFdClosed(pty)).toBe(true);
