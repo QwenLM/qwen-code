@@ -267,8 +267,17 @@ export function SplitView({
       : Math.random().toString(36).slice(2),
   );
 
+  const paneIdsRef = useRef(paneIds);
+  paneIdsRef.current = paneIds;
   useEffect(() => {
     if (!sessionIdsControlled) return;
+    const addedSessionId = normalizedSessionIds.find(
+      (id) => !paneIdsRef.current.includes(id),
+    );
+    if (addedSessionId) {
+      setMaximizedPaneId(null);
+      setActivePaneId(addedSessionId);
+    }
     setPaneIds((prev) =>
       prev.length === normalizedSessionIds.length &&
       prev.every((id, index) => id === normalizedSessionIds[index])
@@ -276,8 +285,6 @@ export function SplitView({
         : normalizedSessionIds,
     );
   }, [normalizedSessionIds, sessionIdsControlled]);
-  const paneIdsRef = useRef(paneIds);
-  paneIdsRef.current = paneIds;
 
   // Dismiss the "add session" picker on Escape or a click outside it.
   useEffect(() => {

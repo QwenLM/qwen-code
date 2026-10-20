@@ -14,6 +14,7 @@ const DEFAULT_INLINE_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
 const DROPDOWN_ONLY_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
   'archive',
   'group',
+  'split',
 ];
 
 interface VisibilityResult {
@@ -74,6 +75,7 @@ describe('session action visibility matrix', () => {
         'export',
         'group',
         'rename',
+        'split',
       ]);
       expect([...hover]).toEqual(['details']);
       expect(showDropdownTrigger).toBe(true);
@@ -117,6 +119,7 @@ describe('session action visibility matrix', () => {
         'group',
         'pin',
         'rename',
+        'split',
       ]);
     });
 

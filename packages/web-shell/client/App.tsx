@@ -10496,6 +10496,47 @@ export function App({
     },
     [closeUsageTabs, externalSplitControlled],
   );
+  const addSessionToSplitView = useCallback(
+    (sessionId: string) => {
+      if (!isLargeScreen || !projectFeaturesAvailable) return;
+      if (
+        mainView === 'split' &&
+        (splitSessionIds.includes(sessionId) ||
+          splitSessionIds.length >= MAX_SPLIT_PANES)
+      ) {
+        return;
+      }
+      closeMobileDrawer();
+      if (mainView === 'split') {
+        handleSplitPanesChange([...splitSessionIds, sessionId]);
+        return;
+      }
+      const requested = Array.from(
+        new Set(
+          workspaceContextActive && connection.sessionId
+            ? [connection.sessionId, sessionId]
+            : [sessionId],
+        ),
+      );
+      if (externalSplitControlled) {
+        onSplitSessionIdsChangeRef.current?.(requested);
+      } else {
+        openSplitView(requested);
+      }
+    },
+    [
+      closeMobileDrawer,
+      connection.sessionId,
+      externalSplitControlled,
+      handleSplitPanesChange,
+      isLargeScreen,
+      mainView,
+      openSplitView,
+      projectFeaturesAvailable,
+      splitSessionIds,
+      workspaceContextActive,
+    ],
+  );
   const notifyControlledSplitClose = useCallback(() => {
     if (externalSplitControlled) {
       onSplitSessionIdsChangeRef.current?.([]);
@@ -21696,6 +21737,10 @@ export function App({
                     openSplitView();
                   }}
                   canOpenSplitView={isLargeScreen && projectFeaturesAvailable}
+                  onAddSessionToSplitView={addSessionToSplitView}
+                  splitSessionIds={
+                    mainView === 'split' ? splitSessionIds : undefined
+                  }
                   theme={selectedTheme}
                   onThemeChange={(theme) => {
                     handleThemeChange(theme);
