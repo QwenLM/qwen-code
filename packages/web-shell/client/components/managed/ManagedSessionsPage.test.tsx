@@ -407,6 +407,33 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it('invalidates the composer MCP cache scope when the selected Session changes without file actions', async () => {
+    const list = vi.fn(async (sessionId: string) => ({
+      object: 'agent.mcp_catalog' as const,
+      session_id: sessionId,
+      servers: [],
+    }));
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    const first = mocks.editorProps!.fileReferenceActions!;
+    expect(first.scopeKey).toBeTruthy();
+    await first.loadMcpStatus!();
+
+    await render('s1');
+    expect(mocks.editorProps!.fileReferenceActions!.scopeKey).toBe(
+      first.scopeKey,
+    );
+
+    await render('s2');
+    const second = mocks.editorProps!.fileReferenceActions!;
+    expect(second.scopeKey).not.toBe(first.scopeKey);
+    await second.loadMcpStatus!();
+    expect(list.mock.calls.map(([sessionId]) => sessionId)).toEqual([
+      's1',
+      's2',
+    ]);
+  });
+
   it('keeps Workspace file references available alongside MCP and the pinned Skill catalog', async () => {
     const skills = [{ name: 'review', description: 'Pinned review.' }];
     const list = vi.fn().mockResolvedValue({ skills });
