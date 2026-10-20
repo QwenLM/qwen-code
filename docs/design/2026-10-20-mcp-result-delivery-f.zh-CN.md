@@ -4,7 +4,7 @@
 
 ## 问题与范围
 
-Issue #14447 的 FG12f 行要求四种投递行为：在 Broker 或 Runtime 不可用时重放已提交的原始结果；把超过 60 KiB 的原始应答按输出上限结算且不留 hold；在有调用在飞时送达 `notifications/tools/list_changed` 且不重发该调用；以及在 `outcome_unknown` 之后送达迟到结论时恰好结算一次。本切片覆盖前三格。第四格目前没有能结算迟到应答的生产路径，因此记录为未覆盖缺口，不用用例去声称。
+Issue #14447 的 FG12f 行要求四种投递行为：在 Broker 或 Runtime 不可用时重放已提交的原始结果；把超过 60 KiB 的原始应答按输出上限结算且不留 hold；在有调用在飞时送达 `notifications/tools/list_changed` 且不重发该调用；以及在 `outcome_unknown` 之后送达迟到结论时恰好结算一次。本切片覆盖全部四格（连接存活的情形）；连接已关闭的形态仍未覆盖，记录在 #14880。
 
 ## 现状
 
@@ -15,14 +15,15 @@ Issue #14447 的 FG12f 行要求四种投递行为：在 Broker 或 Runtime 不�
 
 ## 决定
 
-1. **新增一个类、三格。** `HostedMcpResultDeliveryIT` 承载重放、输出上限与列表变更三格，复用应答丢失类已有的 Broker 代理装置与私有控制面。
+1. **新增一个类、四格。** `HostedMcpResultDeliveryIT` 承载重放、输出上限、列表变更与迟到结论四格，复用应答丢失类已有的 Broker 代理装置与私有控制面。
 2. **重放在两层取证。** 同一 operation id 提交两次；第二次应答必须等于已发布的 `resultRef` 内容，且不得新增 `mcp-invoke` 控制或 Broker 交换，落库记录数保持一条。
 3. **输出上限通过落库记录取证。** 61 KiB 的资源读取结算为 `managed_mcp_output_limit`，落库记录为 `failed`/`settled`，夹具恰好记录一次副作用，随后的关闭到达 `released` 且不再补发 invoke，因此没有留下 hold。
-4. **列表变更只钉当前实现确有的行为。** 夹具在回答读取之前发出 `notifications/tools/list_changed`；用例断言恰好一次 invoke、一次副作用，以及该调用保持启动时的 `catalogRevision`。issue 里「产生新配置代际」这一条不断言，因为本树的通知不会回写配置记录，断言它等于钉一个并不存在的行为。
-5. **迟到应答不进入本切片。** `outcome_unknown` 之后的结算需要 Broker 或 Harness 的迟到结算路径，目前不存在；补它是生产改动，不是门禁，仍记为缺口。
-6. **预算按实测重钉。** 三格在 JDK 21 + MySQL 8.0.46 上多轮实测 13.98-16.01 s，按 2 倍计给健康总和加 30 s。健康的绝对值、fork、Verify 与 job 上限均钉在 `scripts/tests/hosted-process-ci.test.js`，本文不再复述：main 每落一个 Hosted 类它们就会变，而正文里抄写的字面值在评审中已漂移两次。
+4. **迟到应答在连接存活时即可结算。** 夹具先回一个无法解析的结果，`receive()` 记 `outcome_unknown` 但保留 pending；随后同 id 的合法应答由 `settled()` 结算原操作，不需要生产改动。
+5. **列表变更只钉当前实现确有的行为。** 夹具在回答读取之前发出 `notifications/tools/list_changed`；用例断言恰好一次 invoke、一次副作用，以及该调用保持启动时的 `catalogRevision`。issue 里「产生新配置代际」这一条不断言，因为本树的通知不会回写配置记录，断言它等于钉一个并不存在的行为。
+6. **连接已关闭的形态不进入本切片。** 连接消失后应答没有接收方，该形态仍作为缺口记录在 #14880。
+7. **预算按实测重钉。** 四格在 JDK 21 + MySQL 8.0.46 上实测 24.16 s（含冷启动建表），按 2 倍计把该类由 30 s 抬到 50 s，即健康总和加 20 s。健康的绝对值、fork、Verify 与 job 上限均钉在 `scripts/tests/hosted-process-ci.test.js`，本文不再复述：main 每落一个 Hosted 类它们就会变，而正文里抄写的字面值在评审中已漂移两次。
 
 ## 验收
 
-- 三格在 MySQL 8.x 车道通过，证据落在 `target/fg12-cases/fg12f/<tenant>/`。
+- 四格在 MySQL 8.x 车道通过，证据落在 `target/fg12-cases/fg12f/<tenant>/`。
 - 元测试 roster 含 `HostedMcpResultDeliveryIT`，上述 fork 账目在 `hosted-process-ci.test.js` 中成立。

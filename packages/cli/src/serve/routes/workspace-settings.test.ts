@@ -290,6 +290,39 @@ function makeQualifiedApp(
   };
 }
 
+describe('terminal-only Mods settings', () => {
+  it.each([
+    { route: '/workspace/settings', scope: 'user', qualified: false },
+    {
+      route: '/workspaces/primary/settings',
+      scope: 'workspace',
+      qualified: true,
+    },
+  ])(
+    'keeps terminal-only Mods out of $route',
+    async ({ route, scope, qualified }) => {
+      const { app, persistSetting } = qualified
+        ? makeQualifiedApp()
+        : makeApp();
+
+      const read = await request(app).get(route);
+      expect(read.status).toBe(200);
+      expect(
+        read.body.settings.map((setting: { key: string }) => setting.key),
+      ).not.toContain('experimental.mods');
+
+      const write = await request(app).post(route).send({
+        scope,
+        key: 'experimental.mods',
+        value: true,
+      });
+      expect(write.status).toBe(400);
+      expect(write.body).toMatchObject({ code: 'disallowed_key' });
+      expect(persistSetting).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('POST /workspace/settings', () => {
   it('updates live sessions when Session Workflow changes', async () => {
     // Seeded as the post-write state: the route reads back the effective value.
