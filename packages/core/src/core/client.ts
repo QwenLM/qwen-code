@@ -778,6 +778,14 @@ export class LlmClient {
     this.getChat().addHistory(content);
   }
 
+  /**
+   * Marks replayed content as already injected. Only for parts another chat
+   * already reported (speculation accept); see `LlmChat.markToolResultsInjected`.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    this.getChat().markToolResultsInjected(contents);
+  }
+
   getChat(): LlmChat {
     if (!this.chat) {
       throw new Error('Chat not initialized');
@@ -4867,7 +4875,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             await arenaAgentClient?.reportError('Loop detected');
             this.lastApiCompletionTimestamp = Date.now();
@@ -5174,7 +5184,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
@@ -5211,7 +5223,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
