@@ -4,7 +4,7 @@
 
 ## Problem and scope
 
-Issue #14447's FG12f row asks for four delivery behaviours: replay a committed raw result while the Broker or Runtime is unavailable; settle a raw response over 60 KiB at the output limit without leaving a hold; deliver `notifications/tools/list_changed` with a call in flight without resending that call; and settle a late conclusive reply after `outcome_unknown` exactly once. This slice gates all four on a live connection; the closed-connection variant remains open. The fourth has no production path that settles a late reply today, so it is recorded as an open gap instead of being claimed by a case.
+Issue #14447's FG12f row asks for four delivery behaviours: replay a committed raw result while the Broker or Runtime is unavailable; settle a raw response over 60 KiB at the output limit without leaving a hold; deliver `notifications/tools/list_changed` with a call in flight without resending that call; and settle a late conclusive reply after `outcome_unknown` exactly once. This slice gates all four on a live connection; the closed-connection variant remains open and is recorded in #14880.
 
 ## Current state
 
