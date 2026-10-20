@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModRuntime } from './runtime.js';
 import type { ModLog, ModOptions } from './types.js';
+import type { ModToolNext } from './tool-events.js';
 
 const signal = () => new AbortController().signal;
 const fixture = (
@@ -190,54 +191,57 @@ describe('ModRuntime with the real QuickJS worker', () => {
     });
   });
 
-  it.each(['tool.call', 'tool.check', 'tool.*'])(
-    'rejects terminal %s registrations before any plugin starts',
-    async (event) => {
-      await expect(
-        createTerminal([
-          fixture(),
-          `export function register(on) {
-            on('${event}', ($, e, next) => next(e));
-          }`,
-        ]),
-      ).rejects.toThrow(`${event} is not supported in terminal sessions`);
-      expect(logs).toEqual([]);
-    },
-  );
-
-  it.each(['*', '!session.*', '!tool.call'])(
-    'limits terminal %s subscriptions with a visible diagnostic',
+  it.each([
+    'tool.call',
+    'tool.check',
+    'tool.*',
+    '*',
+    '!session.*',
+    '!tool.call',
+  ])(
+    'dispatches terminal %s subscriptions through the real worker',
     async (pattern) => {
       const runtime = await createTerminal([
         `export function register(on) {
-          on('${pattern}', ($, e, next) => next(
-            typeof e.args === 'string' ? {...e, args:'observed:' + e.args} : e
-          ));
+          on('${pattern}', ($, e, next) => {
+            $.ui.log('observed:' + ('input' in e ? 'check' : 'call'));
+            return next(e);
+          });
         }`,
         fixture(),
       ]);
-      expect(runtime.hasToolHooks).toBe(false);
-      expect(logs).toEqual([
-        {
-          to: 'transcript',
-          text: expect.stringContaining(
-            'tool.call and tool.check are not supported',
-          ),
-        },
-        { to: 'transcript', text: 'start:hello:terminal:true' },
-      ]);
-      expect(await runtime.runCommand('hello', 'input', signal())).toBe(
-        '1:observed:input',
+      expect(runtime.hasToolHooks).toBe(true);
+      expect(logs.map((log) => log.text).join('\n')).not.toContain(
+        'not supported',
       );
-      const next = vi.fn(async () => ({ result: 'unexpected' }));
+      logs.length = 0;
+      const next = vi.fn<ModToolNext>(async (changed, active, check) => ({
+        result: await check(
+          {
+            tool: changed.tool,
+            input: { path: changed['path'] },
+            tool_use_id: changed.tool_use_id,
+          },
+          { decision: 'allow' },
+          active,
+        ),
+      }));
       await expect(
         runtime.runTool(
           { tool: 'write_file', tool_use_id: 'call-1', path: '/unused' },
           next,
           signal(),
         ),
-      ).rejects.toThrow(/not supported in terminal sessions/);
-      expect(next).not.toHaveBeenCalled();
+      ).resolves.toEqual({ result: { decision: 'allow' } });
+      expect(next).toHaveBeenCalledOnce();
+      const events = logs.map((log) => log.text);
+      expect(events.includes('observed:call')).toBe(
+        pattern !== 'tool.check' && pattern !== '!tool.call',
+      );
+      // The registration handling tool.call is an ancestor of its nested check.
+      expect(events.includes('observed:check')).toBe(
+        pattern === 'tool.check' || pattern === '!tool.call',
+      );
     },
   );
 

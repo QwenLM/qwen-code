@@ -36,6 +36,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ChannelRouteRepository.Cha
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessConflictCodes;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -82,11 +83,6 @@ public class ManagedChannelService {
     private static final int MAX_CLAIM_SESSIONS = 64;
     private static final int RECONCILE_LIMIT = 50;
     private static final String SEPARATOR = "\u0000";
-    /** Harness 409 codes that heal on their own; see {@link #translate}. */
-    private static final java.util.Set<String> TRANSIENT_HARNESS_CONFLICTS =
-            java.util.Set.of("managed_session_writer_conflict",
-                    "workspace_busy", "workspace_unavailable",
-                    "hosted_session_closing");
 
     private final ChannelInstanceStore instances;
     private final ChannelRouteRepository routes;
@@ -780,7 +776,7 @@ public class ManagedChannelService {
         // Session) are the opposite: the adapter drops every 409, so they
         // cross as the retryable 503.
         HttpStatus status = http.getStatusCode() == 409
-                ? (TRANSIENT_HARNESS_CONFLICTS.contains(code)
+                ? (HarnessConflictCodes.isTransient(code)
                         ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.CONFLICT)
                 : http.getStatusCode() == 400 ? HttpStatus.BAD_REQUEST
                         : HttpStatus.SERVICE_UNAVAILABLE;

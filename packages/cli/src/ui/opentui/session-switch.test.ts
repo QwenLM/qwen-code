@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionService } from '@qwen-code/qwen-code-core';
 import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { ModSession } from '../../services/mod-session.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
   handleBranchSession,
@@ -250,6 +251,46 @@ describe('handleResumeSession', () => {
     );
   });
 
+  it('revokes tools before init and restores a fresh owner after failed resume rolls back', async () => {
+    const { config, calls } = createFakeConfig();
+    Object.assign(config, { isInteractive: () => true });
+    const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
+    const old = owner.captureToolSignal();
+    const syncSession = vi.fn();
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      invalidateTools: () => owner.invalidateTools(),
+      restoreTools: () => owner.restoreTools(),
+      syncSession,
+    } as unknown as interactiveMods.InteractiveModSession);
+    let initializes = 0;
+    const client = {
+      initialize: async () => {
+        initializes++;
+        expect(owner.captureToolSignal().aborted).toBe(true);
+        if (initializes === 1) throw new Error('forward init failed');
+      },
+    };
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue(
+      client as ReturnType<Config['getGeminiClient']>,
+    );
+    try {
+      await handleResumeSession(createFakeHost(config), 'target-session');
+      expect(calls.startNewSession.map(([id]) => id)).toEqual([
+        'target-session',
+        'old-session',
+      ]);
+      expect(old.aborted).toBe(true);
+      expect(owner.captureToolSignal()).not.toBe(old);
+      expect(owner.captureToolSignal().aborted).toBe(false);
+      expect(syncSession).not.toHaveBeenCalled();
+      const nextTool = vi.fn((active: AbortSignal) => active.throwIfAborted());
+      nextTool(owner.captureToolSignal());
+      expect(nextTool).toHaveBeenCalledOnce();
+    } finally {
+      await owner.close();
+    }
+  });
+
   it('re-initializes the client when rolling back after the core swap', async () => {
     // The forward initialize succeeds; the failure lands at the transcript
     // reset (after the core swap, before the UI commit). The rollback's
@@ -357,6 +398,8 @@ describe('handleBranchSession', () => {
     });
     vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
       syncSession,
+      invalidateTools: vi.fn(),
+      restoreTools: vi.fn().mockResolvedValue(undefined),
     } as unknown as interactiveMods.InteractiveModSession);
     const forkSession = vi.fn(async () => {});
     const renameSession = vi.fn(async () => true);
@@ -401,6 +444,8 @@ describe('handleBranchSession', () => {
     const syncSession = vi.fn();
     vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
       syncSession,
+      invalidateTools: vi.fn(),
+      restoreTools: vi.fn().mockResolvedValue(undefined),
     } as unknown as interactiveMods.InteractiveModSession);
     const removeSession = vi.fn(async () => true);
     const sessionService = {
@@ -428,4 +473,112 @@ describe('handleBranchSession', () => {
       expect.any(Number),
     );
   });
+});
+
+describe('failed switch Mod ownership recovery', () => {
+  beforeEach(() => {
+    vi.spyOn(
+      SessionService.prototype,
+      'assertLegacySessionExecution',
+    ).mockImplementation(() => {});
+    vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
+      emptySession(),
+    );
+    vi.spyOn(SessionService.prototype, 'getSessionTitle').mockReturnValue(
+      'Target',
+    );
+  });
+  afterEach(() => vi.restoreAllMocks());
+  it.each(
+    ['resume', 'branch'].flatMap((direction) =>
+      [
+        'rollback-init',
+        'forward-old',
+        'forward-target',
+        'before-invalidate',
+      ].map((mode) => ({ direction, mode })),
+    ),
+  )(
+    '$direction restores eligible Mod ownership after $mode',
+    async ({ direction, mode }) => {
+      const { config } = createFakeConfig();
+      let sessionId = config.getSessionId();
+      const oldSessionId = sessionId;
+      Object.assign(config, {
+        getSessionId: () => sessionId,
+        isInteractive: () => true,
+      });
+      const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
+      const old = owner.captureToolSignal();
+      const restore = vi.fn(() => owner.restoreTools());
+      const binding = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          invalidateTools: () => owner.invalidateTools(),
+          restoreTools: restore,
+          syncSession: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession);
+      const settle = vi.fn(() => {
+        expect(owner.captureToolSignal().aborted).toBe(
+          mode === 'forward-target',
+        );
+      });
+      const client = {
+        beginTelemetrySwap: () => true,
+        abortTelemetrySwap: settle,
+        commitTelemetrySwap: settle,
+        initialize: vi.fn(async () => {
+          throw new Error('init failed');
+        }),
+      };
+      vi.spyOn(config, 'startNewSession').mockImplementation((id) => {
+        if (!id) throw new Error('missing session ID');
+        if (mode === 'forward-old')
+          throw new Error('start failed before mutation');
+        sessionId = id;
+        if (mode === 'forward-target')
+          throw new Error('start failed after mutation');
+        return sessionId;
+      });
+      vi.spyOn(config, 'getLlmClient').mockReturnValue(
+        client as unknown as ReturnType<typeof config.getLlmClient>,
+      );
+      vi.spyOn(config, 'getGeminiClient').mockReturnValue(
+        client as unknown as ReturnType<typeof config.getGeminiClient>,
+      );
+      const service = config.getSessionService();
+      Object.assign(service, { findSessionTitlesByPrefix: async () => [] });
+      vi.spyOn(config, 'getSessionService').mockReturnValue(service);
+      if (mode === 'before-invalidate') {
+        if (direction === 'resume')
+          vi.mocked(SessionService.prototype.loadSession).mockRejectedValue(
+            new Error('load failed'),
+          );
+        else
+          vi.spyOn(service, 'forkSession').mockRejectedValue(
+            new Error('fork failed'),
+          );
+      }
+      try {
+        const host = createFakeHost(config);
+        if (direction === 'resume')
+          await handleResumeSession(host, 'target-session');
+        else await handleBranchSession(host, 'recovery');
+        expect(host.startNewSession).not.toHaveBeenCalled();
+        const renew = mode === 'rollback-init' || mode === 'forward-old';
+        expect(restore).toHaveBeenCalledTimes(renew ? 1 : 0);
+        expect(old.aborted).toBe(mode !== 'before-invalidate');
+        expect(owner.captureToolSignal().aborted).toBe(
+          mode === 'forward-target',
+        );
+        if (renew) expect(owner.captureToolSignal()).not.toBe(old);
+        else expect(owner.captureToolSignal()).toBe(old);
+        expect(sessionId === oldSessionId).toBe(mode !== 'forward-target');
+        expect(settle).toHaveBeenCalledOnce();
+      } finally {
+        binding.mockRestore();
+        await owner.close();
+      }
+    },
+  );
 });

@@ -628,31 +628,6 @@ port.on('message', async (request: ModRequest) => {
           throw new Error('Mod ' + plugin.name + ': ' + String(error));
         }
       }
-      if (surface === 'terminal') {
-        for (const realm of realms) {
-          const unsupported = realm.patterns.find((pattern) =>
-            ['tool.call', 'tool.check', 'tool.*'].includes(pattern),
-          );
-          if (unsupported)
-            throw new Error(
-              `Mod ${realm.plugin.name}: ${unsupported} is not supported in terminal sessions.`,
-            );
-        }
-        for (const realm of realms) {
-          const limited = realm.patterns.filter(
-            (pattern) =>
-              patternMatches(pattern, 'tool.call') ||
-              patternMatches(pattern, 'tool.check'),
-          );
-          if (limited.length)
-            send({
-              type: 'log',
-              plugin: realm.plugin.name,
-              to: 'transcript',
-              text: `Terminal Mod subscriptions (${limited.join(', ')}) only receive supported session, command, and ui.log events; tool.call and tool.check are not supported.`,
-            });
-        }
-      }
       starting = true;
       await dispatch(
         'session.start',
@@ -663,15 +638,13 @@ port.on('message', async (request: ModRequest) => {
       );
       result = {
         commands: [...commands.values()],
-        tools:
-          surface !== 'terminal' &&
-          realms.some((realm) =>
-            realm.patterns.some(
-              (pattern) =>
-                patternMatches(pattern, 'tool.call') ||
-                patternMatches(pattern, 'tool.check'),
-            ),
+        tools: realms.some((realm) =>
+          realm.patterns.some(
+            (pattern) =>
+              patternMatches(pattern, 'tool.call') ||
+              patternMatches(pattern, 'tool.check'),
           ),
+        ),
       };
     } else if (request.type === 'command') {
       if (!commands.has(request.command))
@@ -694,10 +667,6 @@ port.on('message', async (request: ModRequest) => {
         },
       );
     } else if (request.type === 'tool') {
-      if (surface === 'terminal')
-        throw new Error(
-          'Mod tool middleware is not supported in terminal sessions.',
-        );
       result = await dispatch(
         'tool.call',
         request.input,

@@ -903,9 +903,10 @@ function autoApprovePendingTools(
       autoApproveCompatiblePendingTools: (
         signal: AbortSignal,
         triggeringCallId: string,
+        isActive: () => boolean,
       ) => Promise<void>;
     }
-  ).autoApproveCompatiblePendingTools(signal, triggeringCallId);
+  ).autoApproveCompatiblePendingTools(signal, triggeringCallId, () => true);
 }
 
 describe('CoreToolScheduler', () => {
@@ -3943,6 +3944,34 @@ describe('CoreToolScheduler', () => {
     expect(new ToolCallEvent(plainCalls[0]).raw_content_length).toBe(
       'plain body'.length,
     );
+  });
+
+  it('carries a producer-declared truncation bit when its raw size is unknown', async () => {
+    // A self-bounded producer cannot recover the pre-reduction size, but it
+    // knows it cut the body. Keep the bit instead of collapsing it into the
+    // unknown raw size (#14742).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+          truncatedByProducer: true,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-truncated',
+      'prompt-grep-truncated',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBe(true);
+    expect(new ToolCallEvent(call).truncated).toBe(true);
   });
 
   /** Asserts lone tool `name` (Infinity budget) delivers `content` whole. */
@@ -7521,6 +7550,17 @@ describe('convertToFunctionResponse', () => {
     // A producer that bounds its own render still declares raw size unknown.
     expect(getToolOutputProvenance(declared)?.rawSize).toBeUndefined();
     expect(getToolOutputProvenance(declared)?.truncated).toBeUndefined();
+
+    // ...but when it also declares the cut itself, the bit survives.
+    const [cut] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null, truncatedByProducer: true },
+      cfg,
+    );
+    expect(getToolOutputProvenance(cut)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(cut)?.truncated).toBe(true);
   });
 
   const toolName = 'testTool';
@@ -12581,6 +12621,119 @@ describe('CoreToolScheduler telemetry spans', () => {
     return onAllToolCallsComplete;
   }
 
+  it.each([
+    ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    ToolConfirmationOutcome.ProceedAlwaysProject,
+    ToolConfirmationOutcome.ProceedAlwaysUser,
+  ])(
+    'does not apply approval side effects after abort during onConfirm: %s',
+    async (outcome) => {
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const originalOnConfirm = vi.fn(() => barrier);
+      const execute = vi.fn(async () => textResult('executed'));
+      const persist = vi.fn();
+      const setApprovalMode = vi.fn();
+      const tool = new MockTool({
+        name: 'confirmation_barrier',
+        getDefaultPermission: async () => 'ask',
+        getConfirmationDetails: async () => ({
+          type: 'exec',
+          title: 'Confirm command',
+          command: 'echo barrier',
+          rootCommand: 'echo',
+          permissionRules: ['Bash(echo barrier)'],
+          onConfirm: originalOnConfirm,
+        }),
+        execute,
+      });
+      const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+        schedulerWithCallbacks(
+          makeSchedulerConfig(makeToolRegistry(tool), {
+            ...INTERACTIVE_CLI,
+            setApprovalMode,
+            getOnPersistPermissionRule: () => persist,
+          }),
+        );
+      const controller = new AbortController();
+      await scheduler.schedule(
+        [
+          toolRequest('barrier-first', tool.name, {}, 'barrier'),
+          toolRequest('barrier-sister', tool.name, {}, 'barrier'),
+        ],
+        controller.signal,
+      );
+      const waiting = await waitForApproval(onToolCallsUpdate);
+      const responding = waiting.confirmationDetails.onConfirm(outcome);
+      await vi.waitFor(() => expect(originalOnConfirm).toHaveBeenCalledOnce());
+      controller.abort();
+      release();
+      await responding;
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(persist).not.toHaveBeenCalled();
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(
+        firstBatch<CompletedToolCall>(onAllToolCallsComplete).every(
+          (call) => call.status === 'cancelled',
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('does not apply a pending confirmation to a replacement with the same call id', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalOnConfirm = vi.fn(() => barrier);
+    const persist = vi.fn();
+    const execute = vi.fn(async () => textResult('executed'));
+    const tool = new MockTool({
+      name: 'replacement_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'exec',
+        title: 'Confirm command',
+        command: 'echo replacement',
+        rootCommand: 'echo',
+        permissionRules: ['Bash(echo replacement)'],
+        onConfirm: originalOnConfirm,
+      }),
+      execute,
+    });
+    const { scheduler, onToolCallsUpdate } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        ...INTERACTIVE_CLI,
+        getOnPersistPermissionRule: () => persist,
+      }),
+    );
+    const controller = new AbortController();
+    await scheduler.schedule(
+      toolRequest('same-call', tool.name, {}, 'replacement'),
+      controller.signal,
+    );
+    const waiting = await waitForApproval(onToolCallsUpdate);
+    const responding = waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+    );
+    await vi.waitFor(() => expect(originalOnConfirm).toHaveBeenCalledOnce());
+    const internals = scheduler as unknown as { toolCalls: ToolCall[] };
+    const replacement = { ...internals.toolCalls[0] };
+    internals.toolCalls = [replacement];
+    release();
+    await responding;
+    expect(persist).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(internals.toolCalls[0]).toBe(replacement);
+    expect(replacement.status).toBe('awaiting_approval');
+    controller.abort();
+  });
+
   it('keeps the exact runtime through manual approval', async () => {
     let runtimeDuringExecute: RuntimeContentGeneratorView | undefined;
     const tool = new MockEditTool(async () => {
@@ -13064,9 +13217,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       'prompt-rethrow-aborted',
     );
 
-    abortController.abort();
     const boom = new Error('originalOnConfirm boom while aborted');
     const throwingOnConfirm = async () => {
+      abortController.abort();
       throw boom;
     };
     await expect(
@@ -15353,7 +15506,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 });
 
 describe('persistence size attribution', () => {
-  it('counts retained media with the configured estimate', async () => {
+  it('counts retained media with the configured estimate and bounds nested web_fetch envelopes', async () => {
     const cfg = {
       getTruncateToolOutputThreshold: () => 25000,
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
@@ -15400,13 +15553,22 @@ describe('persistence size attribution', () => {
       expect(event.injected_estimated_tokens).toBeGreaterThanOrEqual(800);
       expect(event.prompt_id).toBe('p');
       await owner.maybePersistLargeToolResult(
+        'page',
+        'web_fetch',
+        'header\n... [CONTENT TRUNCATED] ...\n' + 'x'.repeat(98000),
+        false,
+        'page-prompt',
+      );
+      expect(persist).toHaveBeenCalledTimes(2);
+      expect(log.mock.calls[1][1].prompt_id).toBe('page-prompt');
+      await owner.maybePersistLargeToolResult(
         'already',
         'shell',
         '<persisted-output>' + 'x'.repeat(60000),
         false,
         'p',
       );
-      expect(persist).toHaveBeenCalledTimes(1);
+      expect(persist).toHaveBeenCalledTimes(2);
     } finally {
       persist.mockRestore();
       log.mockRestore();

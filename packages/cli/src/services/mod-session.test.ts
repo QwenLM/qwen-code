@@ -169,6 +169,45 @@ describe('Mod session ownership', () => {
     expect(next).toHaveBeenCalledTimes(1);
   });
 
+  it('revokes queued tools before configuration changes and reopens only on session commit', async () => {
+    const { session, runtime, config } = setup();
+    await session.initialize(new AbortController().signal);
+    runtime.hasToolHooks = true;
+    const old = session.captureToolSignal();
+    session.invalidateTools();
+    expect(old.aborted).toBe(true);
+    expect(session.captureToolSignal().aborted).toBe(true);
+    const next = vi.fn(async () => ({ result: {} }));
+    await expect(
+      session.toolCall(() => {})!(
+        { tool: 'write_file' },
+        next,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow();
+    expect(next).not.toHaveBeenCalled();
+    // Reinitializing the same session must still create a new generation.
+    await session.syncSession('resume');
+    expect(session.captureToolSignal()).not.toBe(old);
+    expect(session.captureToolSignal().aborted).toBe(false);
+    config.getSessionId.mockReturnValue('session-2');
+    await expect(
+      session.toolCall(() => {})!(
+        { tool: 'write_file' },
+        next,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow();
+    expect(next).not.toHaveBeenCalled();
+    await session.syncSession('resume');
+    await session.toolCall(() => {})!(
+      { tool: 'write_file' },
+      next,
+      new AbortController().signal,
+    );
+    expect(next).toHaveBeenCalledOnce();
+  });
+
   it('cancels and settles tool work before ending a session', async () => {
     const { session, runtime } = setup();
     const signal = new AbortController().signal;

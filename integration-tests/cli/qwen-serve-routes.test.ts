@@ -492,6 +492,7 @@ describe('qwen serve — capabilities envelope', () => {
       'non_blocking_prompt',
       'session_language',
       'user_language_sync',
+      'session_message_deletion',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
