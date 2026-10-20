@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  attachToolOutputProvenance,
+  measureToolOutput,
+} from '../tools/tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
 import type {
@@ -54,7 +59,11 @@ import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGe
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
 import { APIConnectionTimeoutError } from 'openai';
 import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
-import type { Config } from '../config/config.js';
+import {
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  type Config,
+} from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
@@ -142,6 +151,7 @@ const {
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
+  logToolResultSize: vi.fn(),
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
   logProtocolTagSanitized: mockLogProtocolTagSanitized,
@@ -275,6 +285,9 @@ describe('LlmChat', async () => {
     // Pass-through for tests that don't care about retry logic.
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
     mockConfig = {
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getSessionId: () => 'test-session-id',
       getTelemetryLogPromptsEnabled: () => true,
       getUsageStatisticsEnabled: () => true,
@@ -715,7 +728,10 @@ describe('LlmChat', async () => {
     expect(syncReviewedDeclarations).toHaveBeenCalledOnce();
     expect(syncReviewedDeclarations).toHaveBeenCalledWith(
       expect.arrayContaining([
-        expect.objectContaining({ role: 'user', parts: [searchResponse] }),
+        expect.objectContaining({
+          role: 'user',
+          parts: [expect.objectContaining(searchResponse)],
+        }),
       ]),
       chat,
     );
@@ -731,7 +747,15 @@ describe('LlmChat', async () => {
       syncedShapes.push({
         length: history.length,
         hasSearchResponse: history.some((entry) =>
-          (entry.parts ?? []).some((part) => part === searchResponse),
+          (entry.parts ?? []).some(
+            (part) =>
+              part.functionResponse?.id ===
+                searchResponse.functionResponse?.id &&
+              part.functionResponse?.name ===
+                searchResponse.functionResponse?.name &&
+              part.functionResponse?.response?.['output'] ===
+                searchResponse.functionResponse?.response?.['output'],
+          ),
         ),
       });
     });
@@ -2860,7 +2884,9 @@ describe('LlmChat', async () => {
       const output = sentParts[1].functionResponse?.response?.['output'];
       expect(typeof output).toBe('string');
       expect((output as string).length).toBeLessThanOrEqual(100);
-      expect(chat.getHistory()[0].parts).toEqual(sentParts);
+      expect(chat.getHistory()[0].parts).toEqual(
+        JSON.parse(JSON.stringify(sentParts)),
+      );
     });
 
     const retainOneImage = () =>
@@ -3937,6 +3963,46 @@ describe('LlmChat', async () => {
       expect(hasChunkText(events, 'answer after compact')).toBe(true);
     });
 
+    it('re-issues the durability snapshot after reactive compaction', async () => {
+      const compressedHistory = [
+        userText('summary'),
+        modelText('ack'),
+        userText('latest'),
+      ];
+      // The fixture appends the answer to the same array, so freeze what the
+      // retry must have captured before the send runs.
+      const expectedContents = structuredClone(compressedHistory);
+      reactiveCompaction(135_000, compressedHistory);
+      mockRequests(
+        new Error(
+          "This model's maximum context length is 128000 tokens. However, your messages resulted in 135000 tokens.",
+        ),
+        textStream('answer after compact'),
+      );
+      const snapshots: Content[][] = [];
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'latest' },
+        'prompt-id-recompress-resnapshot',
+        undefined,
+        {
+          onPreparedRequest: async (prepared) => {
+            snapshots.push(prepared.request.contents);
+          },
+        },
+      );
+      await drain(stream);
+
+      // One capture per attempt. The retry must capture the compacted history:
+      // its snapshot is what recovery re-sends, so replaying the captured
+      // pre-compaction contents would durably persist the oversized request
+      // that the provider just rejected.
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[1]).not.toEqual(snapshots[0]);
+      expect(snapshots[1]).toEqual(expectedContents);
+    });
+
     /** Reactive overflow without an actual count: the baseline is a `~` projection. */
     async function expectProjectedBaseline(
       message: string,
@@ -4357,6 +4423,7 @@ describe('LlmChat', async () => {
       // The snapshot carries the pending turn the compression belongs to:
       // resume replaces history wholesale at the compression record, so a
       // snapshot without it would resurrect the answer with no question.
+      expect(recordPayload.summaryPrefixLength).toBe(summaryAck().length);
       expect(recordPayload.compressedHistory).toEqual([
         ...summaryAck(),
         { role: 'user', parts: [{ text: userMessage }] },
@@ -12286,6 +12353,9 @@ describe('LlmChat', async () => {
       expect(info.newTokenCount).toBeLessThan(1000);
       expect(fastChat.isLastPromptTokenCountEstimated()).toBe(true);
       expect(recordChatCompression).toHaveBeenCalledWith(checkpointWith(true));
+      expect(
+        recordChatCompression.mock.calls[0][0].summaryPrefixLength,
+      ).toBeUndefined();
     });
 
     // Issue #9309: /compress-fast then /compress banners use two scales (API
@@ -12393,6 +12463,201 @@ describe('LlmChat', async () => {
   // #9454: API counts describe the serialization of the route (model + auth
   // + endpoint) that produced them. /model keeps this LlmChat, so the old
   // route's counts must not anchor admission, clamp or compression.
+  describe('tool result injection accounting', () => {
+    beforeEach(() => {
+      mockConfig.getToolOutputBatchBudget = () => 200000;
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'test-model',
+        contextWindowSize: 1000000,
+      });
+      vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+        compressionStatus: CompressionStatus.NOOP,
+        originalTokenCount: 0,
+        newTokenCount: 0,
+      });
+    });
+    const result = () =>
+      attachToolOutputProvenance(
+        [
+          fnResponse(
+            'shell',
+            { output: 'x'.repeat(20000) },
+            'anonymous-result',
+          ),
+        ],
+        {
+          callId: 'anonymous-result',
+          toolName: 'shell',
+          toolType: 'native',
+          promptId: 'p',
+          rawSize: { chars: 20000, estimatedTokens: 5000 },
+          truncated: false,
+        },
+      );
+    const injected = (index: number) => requestAt(index).contents as Content[];
+    const resultChars = (index: number) =>
+      measureToolOutput(
+        injected(index)
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.functionResponse),
+      ).chars;
+
+    it('records the submitted result once per tool call', async () => {
+      mockStreamsOnce(textStream('done'), textStream('again'));
+      await sendDrain(result(), 'first');
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(1);
+      const event = vi
+        .mocked(logToolResultSize)
+        .mock.calls.find(([, entry]) => entry.layer === 'injection')![1];
+      expect(event.raw_content_length).toBe(20000);
+      expect(event.injected_content_length).toBe(resultChars(0));
+      await sendDrain('next', 'second');
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, entry]) => entry.layer === 'injection'),
+      ).toHaveLength(1);
+    });
+
+    it.each(['constructor', 'setHistory'] as const)(
+      'does not recount %s history while counting new fork results',
+      async (load) => {
+        const inherited = result();
+        const history = [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'shell',
+                  args: {},
+                  id: 'anonymous-result',
+                },
+              },
+            ],
+          },
+          { role: 'user', parts: inherited },
+          modelText('parent complete'),
+        ];
+        if (load === 'constructor') chat = new LlmChat(mockConfig, {}, history);
+        else chat.setHistory(history);
+        vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+          compressionStatus: CompressionStatus.NOOP,
+          originalTokenCount: 0,
+          newTokenCount: 0,
+        });
+        const fresh = attachToolOutputProvenance(
+          [fnResponse('shell', { output: 'fresh' }, 'fork-result')],
+          {
+            callId: 'fork-result',
+            toolName: 'shell',
+            toolType: 'native',
+            promptId: 'fork',
+            truncated: false,
+          },
+        );
+        mockStreamsOnce(textStream('done'), textStream('again'));
+        await sendDrain(fresh, 'fork');
+        await sendDrain('next', 'replay');
+        const events = vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection')
+          .map(([, event]) => event);
+        expect(events).toHaveLength(1);
+        expect(events[0].call_id).toBe('fork-result');
+        expect(events[0].prompt_id).toBe('fork');
+      },
+    );
+
+    // A result parked through addHistory has not been submitted to the
+    // generator yet, so its one owed injection event must survive until the
+    // turn that actually carries it.
+    it('counts a parked result once on the turn that submits it', async () => {
+      chat.addHistory({ role: 'user', parts: result() });
+      mockStreamsOnce(textStream('done'), textStream('again'));
+      await sendDrain('next', 'parked');
+      await sendDrain('next', 'again');
+      const events = vi
+        .mocked(logToolResultSize)
+        .mock.calls.filter(([, event]) => event.layer === 'injection')
+        .map(([, event]) => event);
+      expect(events).toHaveLength(1);
+      expect(events[0].call_id).toBe('anonymous-result');
+      expect(events[0].prompt_id).toBe('p');
+    });
+
+    it('records each parallel result and preserves user steering', async () => {
+      const second = attachToolOutputProvenance(
+        [fnResponse('read_file', { output: 'y'.repeat(20000) }, 'second')],
+        {
+          callId: 'second',
+          toolName: 'read_file',
+          toolType: 'native',
+          promptId: 'p',
+          rawSize: { chars: 20000, estimatedTokens: 5000 },
+          truncated: false,
+        },
+      );
+      mockStreamsOnce(textStream('done'));
+      await sendDrain(
+        [...result(), ...second, { text: 'Preserve this user instruction.' }],
+        'first',
+      );
+      expect(
+        injected(0)
+          .flatMap((entry) => entry.parts ?? [])
+          .some((part) => part.text === 'Preserve this user instruction.'),
+      ).toBe(true);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(2);
+    });
+
+    it('counts a retried generator request once', async () => {
+      mockRetryWithBackoff.mockImplementation(async (apiCall) => {
+        try {
+          return await apiCall();
+        } catch {
+          return apiCall();
+        }
+      });
+      streamMock()
+        .mockRejectedValueOnce(new Error('temporary transport failure'))
+        .mockResolvedValueOnce(textStream('done'));
+      await sendDrain(result(), 'retry');
+      expect(streamMock()).toHaveBeenCalledTimes(2);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(1);
+    });
+
+    it('does not count a request cancelled before generator dispatch', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: result(), config: { abortSignal: controller.signal } },
+        'cancelled',
+      );
+      await expect(drain(stream)).rejects.toThrow();
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(0);
+    });
+  });
+
   describe('route-scoped token counts (#9454)', () => {
     const switchRoute = (routeKey: string) => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(routeKey);
