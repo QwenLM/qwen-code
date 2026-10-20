@@ -709,10 +709,15 @@ describe('Hosted real-process gates', () => {
       // FG13b Hook dispatch store-rejection cell adds 150 s, so the fork
       // moves to 9411 and the Verify step to 167 minutes; the FG11f publication
       // cell adds 82 s (2x its measured 41.1 s), so the fork moves to 9493 and
-      // the step to 169 minutes; the FG11d cancel cell adds 15 s (2x its
-      // measured 7.4 s), so the fork moves to 10080 and the step to 179
-      // minutes; the FG11d retire-at-intent cell adds 18 s (2x its measured
-      // 8.6 s), so the fork moves to 10098 and the step stays 179 minutes):
+      // the step to 169 minutes; FG12f result and catalog delivery add 30 s,
+      // and the FG11f refusing arms add 242 s, moving the fork to 9765 and
+      // the step to 173 minutes. Hook result and plan-result store rejection
+      // add 300 s, moving the fork to 10065 and the step to 178 minutes.
+      // The FG11d cancel cell adds 15 s, moving the fork to 10080 and
+      // the step to 179 minutes. The FG12f delivery allowance adds 20 s,
+      // moving the fork to 10100. The FG11d retire-at-intent cell adds 18 s,
+      // moving the fork to 10118. Cleanup adds 60 s, moving the fork to
+      // 10178 and the step to 180 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
