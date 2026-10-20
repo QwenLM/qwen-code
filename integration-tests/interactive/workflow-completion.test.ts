@@ -47,6 +47,7 @@ const WORKFLOW_CASE_OPTIONS = { timeout: 600_000, retry: 0 };
 describe.skipIf(pickE2eRenderer() === 'opentui')(
   'saved workflow slash-command completion',
   () => {
+    const usedCaseDirs = new Set<string>();
     let rig: TestRig;
     let server: FakeOpenAIServer | undefined;
     let session: InteractiveSession | undefined;
@@ -131,6 +132,11 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
           settings: { telemetry: { enabled: false } },
         },
       );
+      // sanitizeTestName is lossy, so distinct markers are not by themselves
+      // proof of distinct directories; nothing else catches a duplicate or
+      // dropped marker before a KEEP_OUTPUT leg hits ENOTEMPTY.
+      expect(usedCaseDirs.has(rig.testDir!)).toBe(false);
+      usedCaseDirs.add(rig.testDir!);
       const qwenHome = join(rig.testDir!, '.qwen-home');
       mkdirSync(qwenHome, { recursive: true });
       writeFileSync(
