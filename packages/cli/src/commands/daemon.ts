@@ -28,6 +28,7 @@ import {
 import { sanitizeTerminalText } from '../ui/utils/textUtils.js';
 
 const HEALTH_TIMEOUT_MS = 1_000;
+const DETAIL_TIMEOUT_MS = 1_500;
 const STOP_TIMEOUT_MS = 10_000;
 const STOP_POLL_MS = 100;
 const FOLLOW_POLL_MS = 250;
@@ -46,6 +47,15 @@ interface DaemonStatusRow {
 interface StatusArgs {
   json?: boolean;
   prune?: boolean;
+  detail?: boolean;
+}
+
+interface DaemonDetailSummary {
+  status: string;
+  version?: string;
+  uptimeMs?: number;
+  sessions?: { active: number; admissionInFlight?: number };
+  issues: string[];
 }
 
 interface LogsArgs {
@@ -224,6 +234,109 @@ export async function probeHealth(
       ? 'stale'
       : 'unreachable';
   }
+}
+
+export function summarizeDaemonStatus(
+  value: unknown,
+): DaemonDetailSummary | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  const response = value as Record<string, unknown>;
+  if (response['v'] !== 1 || typeof response['status'] !== 'string') {
+    return undefined;
+  }
+  const daemon =
+    response['daemon'] !== null && typeof response['daemon'] === 'object'
+      ? (response['daemon'] as Record<string, unknown>)
+      : undefined;
+  const runtime =
+    response['runtime'] !== null && typeof response['runtime'] === 'object'
+      ? (response['runtime'] as Record<string, unknown>)
+      : undefined;
+  const rawSessions = runtime?.['sessions'];
+  const sessions =
+    rawSessions !== null && typeof rawSessions === 'object'
+      ? (rawSessions as Record<string, unknown>)
+      : undefined;
+  const issues = Array.isArray(response['issues'])
+    ? response['issues']
+        .map((issue) =>
+          issue !== null && typeof issue === 'object'
+            ? (issue as Record<string, unknown>)['message']
+            : undefined,
+        )
+        .filter((message): message is string => typeof message === 'string')
+    : [];
+  const version = daemon?.['qwenCodeVersion'];
+  const uptimeMs = daemon?.['uptimeMs'];
+  const active = sessions?.['active'];
+  const admissionInFlight = sessions?.['admissionInFlight'];
+  return {
+    status: response['status'],
+    ...(typeof version === 'string' ? { version } : {}),
+    ...(typeof uptimeMs === 'number' ? { uptimeMs } : {}),
+    ...(typeof active === 'number'
+      ? {
+          sessions: {
+            active,
+            ...(typeof admissionInFlight === 'number'
+              ? { admissionInFlight }
+              : {}),
+          },
+        }
+      : {}),
+    issues,
+  };
+}
+
+export async function fetchDaemonDetail(
+  record: DaemonDiscoveryRecord,
+): Promise<DaemonDetailSummary | string> {
+  const token = process.env['QWEN_SERVER_TOKEN']?.trim();
+  try {
+    const response = await fetch(
+      new URL('/daemon/status?detail=summary', record.url),
+      {
+        signal: AbortSignal.timeout(DETAIL_TIMEOUT_MS),
+        redirect: 'manual',
+        ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+      },
+    );
+    if (response.status === 401 || response.status === 403) {
+      return 'auth required; set QWEN_SERVER_TOKEN';
+    }
+    if (!response.ok) {
+      return `status endpoint returned HTTP ${response.status}`;
+    }
+    const summary = summarizeDaemonStatus(await response.json());
+    return summary ?? 'invalid status response';
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+export function formatDaemonDetail(
+  record: DaemonDiscoveryRecord,
+  detail: DaemonDetailSummary | string,
+): string {
+  if (typeof detail === 'string') {
+    return `qwen daemon: port ${record.port}: detail unavailable: ${detail}`;
+  }
+  const uptime =
+    detail.uptimeMs === undefined
+      ? 'unknown'
+      : formatDaemonAge(detail.uptimeMs);
+  const sessions =
+    detail.sessions === undefined
+      ? ''
+      : ` sessions=${detail.sessions.active}` +
+        (detail.sessions.admissionInFlight === undefined
+          ? ''
+          : `(+${detail.sessions.admissionInFlight} admitting)`);
+  return (
+    `qwen daemon: port ${record.port}: status=${detail.status}` +
+    ` version=${detail.version ?? 'unknown'} uptime=${uptime}` +
+    `${sessions} issues=${detail.issues.length}`
+  );
 }
 
 export function selectDaemonEntries(
@@ -657,6 +770,20 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
     );
   }
 
+  const details = new Map<number, DaemonDetailSummary | string>();
+  if (argv.detail === true) {
+    await Promise.all(
+      rows
+        .filter((row) => row.health === 'running')
+        .map(async (row) => {
+          details.set(
+            row.entry.record.port,
+            await fetchDaemonDetail(row.entry.record),
+          );
+        }),
+    );
+  }
+
   if (argv.json === true) {
     for (const row of rows) {
       writeStdoutLine(
@@ -670,6 +797,9 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
           auth: row.entry.record.auth,
           startedAt: row.entry.record.startedAt,
           ageMs: age(row.entry.record.startedAt),
+          ...(argv.detail === true
+            ? { detail: details.get(row.entry.record.port) ?? null }
+            : {}),
           logPath: logPathFor(row.entry.record),
         }),
       );
@@ -696,6 +826,18 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
         `${formatDaemonAge(age(record.startedAt)).padEnd(6)}` +
         `${workspaces}  ${sanitize(record.url)}`,
     );
+  }
+  if (argv.detail === true) {
+    for (const row of rows) {
+      const detail = details.get(row.entry.record.port);
+      if (detail !== undefined) {
+        writeStdoutLine(formatDaemonDetail(row.entry.record, detail));
+      } else {
+        writeStdoutLine(
+          `qwen daemon: port ${row.entry.record.port}: detail unavailable (${row.health})`,
+        );
+      }
+    }
   }
   writeStdoutLine('');
   writeStdoutLine('Use `qwen daemon logs --port <port> --follow` to tail one.');
@@ -1002,6 +1144,12 @@ const statusCommand: CommandModule<unknown, StatusArgs> = {
         type: 'boolean',
         default: false,
         describe: 'Remove records whose process is gone',
+      })
+      .option('detail', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Fetch /daemon/status for version, uptime, active sessions, and issue count',
       }),
   handler: async (argv) => {
     await handleStatus(argv);

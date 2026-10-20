@@ -32,7 +32,9 @@ import {
   canonicalizeStartWorkspaces,
   daemonCommand,
   formatDaemonAge,
+  formatDaemonDetail,
   formatDaemonStartSummary,
+  fetchDaemonDetail,
   followFile,
   pidResolvableHere,
   probeHealth,
@@ -40,6 +42,7 @@ import {
   processStartTime,
   resolveStartEnvPath,
   selectDaemonEntries,
+  summarizeDaemonStatus,
   sweepStaleStartLogs,
   tailLines,
   terminateTree,
@@ -140,6 +143,59 @@ describe('qwen daemon command', () => {
     expect(summary).toContain('started pid');
     expect(summary).toContain('http://127.0.0.1:4170');
     expect(summary).toContain('qwen daemon stop --port 4170');
+  });
+
+  it('summarizes a daemon status response', () => {
+    const summary = summarizeDaemonStatus({
+      v: 1,
+      status: 'ok',
+      daemon: { qwenCodeVersion: '0.25.3', uptimeMs: 65_000 },
+      runtime: { sessions: { active: 2, admissionInFlight: 1 } },
+      issues: [{ message: 'one' }],
+    });
+    expect(summary).toEqual({
+      status: 'ok',
+      version: '0.25.3',
+      uptimeMs: 65_000,
+      sessions: { active: 2, admissionInFlight: 1 },
+      issues: ['one'],
+    });
+    expect(formatDaemonDetail(entry(4170).record, summary!)).toContain(
+      'status=ok version=0.25.3 uptime=1m sessions=2(+1 admitting) issues=1',
+    );
+    expect(
+      formatDaemonDetail(
+        entry(4170).record,
+        'auth required; set QWEN_SERVER_TOKEN',
+      ),
+    ).toContain('detail unavailable');
+    expect(summarizeDaemonStatus({ v: 1 })).toBeUndefined();
+  });
+
+  it('reads daemon status detail over HTTP', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              v: 1,
+              status: 'ok',
+              daemon: { qwenCodeVersion: '0.25.3', uptimeMs: 1_000 },
+              runtime: { sessions: { active: 0 } },
+              issues: [],
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    try {
+      await expect(
+        fetchDaemonDetail(entry(4170).record),
+      ).resolves.toMatchObject({ status: 'ok', version: '0.25.3' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('drops parent session bindings from the child environment', () => {
