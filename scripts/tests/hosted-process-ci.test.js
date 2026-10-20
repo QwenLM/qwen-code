@@ -475,9 +475,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (173 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (179 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 263, 276],
+    ['hosted-harness-mysql', 269, 282],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -694,12 +694,15 @@ describe('Hosted real-process gates', () => {
       // FG13b Hook dispatch store-rejection cell adds 150 s, so the fork
       // moves to 9411 and the Verify step to 167 minutes; the FG11f publication
       // cell adds 82 s (2x its measured 41.1 s), so the fork moves to 9493 and
-      // the step to 169 minutes):
+      // the step to 169 minutes; the FG11d cancel cell adds 15 s (2x its
+      // measured 7.4 s), so the fork moves to 10080 and the step to 179
+      // minutes; the FG11d retire-at-intent cell adds 18 s (2x its measured
+      // 8.6 s), so the fork moves to 10098 and the step stays 179 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(9765);
+        expect(forkSeconds).toBe(10118);
       }
     },
   );
@@ -768,12 +771,21 @@ describe('Hosted real-process gates', () => {
   // measures 22.2s on JDK 21 + MySQL 8.4.11, budgeted at 60s, so it becomes
   // 8511s; the FG13b Hook intent store-rejection cell adds 150s, so it
   // becomes 8661s; the FG13b Hook dispatch store-rejection cell adds 150s,
-  // so it becomes 8811s. The largest
+  // so it becomes 8811s; the FG11f publication cell adds 82s, so it becomes
+  // 8893s; the FG12f delivery cell adds 30s, so it becomes 8923s; the FG11f
+  // refusing-arms cells add 242s, so it becomes 9165s; the FG13b Hook result
+  // store-rejection cell adds 150s, so it becomes 9315s; the FG13b Hook
+  // plan-result store-rejection cell adds 150s, so it becomes 9465s; the FG11d
+  // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s; the
+  // FG12f delivery entry moves from 30s to 50s at 2x (four cases, 24.16s
+  // measured), so it becomes 9500s; the FG11d retire-at-intent cell adds 18s
+  // (2x its measured 8.6s), so it becomes 9518s. The
+  // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9165;
+  const hostedForkHealthySeconds = 9518;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
