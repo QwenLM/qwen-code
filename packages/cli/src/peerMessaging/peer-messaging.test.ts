@@ -1395,12 +1395,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     if (!started) throw new Error('peer messaging failed to start');
     messaging = started;
 
-    const queued: string[] = [];
-    started.setSubmitFn((modelText) => {
-      queued.push(modelText);
-      return true;
-    });
-    started.setQueuedPeerCount(() => queued.length);
+    started.setSubmitFn(() => true);
 
     const consumed = peerFrame({
       content: 'consumed',
@@ -1413,10 +1408,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await send(started.socketPath!, consumed);
     await send(started.socketPath!, waiting);
     await settle();
-    expect(queued).toHaveLength(2);
 
     // The session consumed the first message; the second dies in the queue.
-    queued.shift();
+    started.settleConsumedFrame(consumed.msgId);
 
     await started.close();
     messaging = null;
@@ -1520,7 +1514,6 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       queue.push(modelText);
       return true;
     });
-    started.setQueuedPeerCount(() => queue.length);
 
     await started.close();
     messaging = null;
@@ -1532,6 +1525,90 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     for (const frame of frames) {
       expect(statusesFor(frame.msgId)).toEqual(['delivered', 'expired']);
     }
+  });
+
+  it('settles an out-of-order consumption by identity, not position', async () => {
+    // The mid-turn drain takes a later "now" while an earlier "next" stays
+    // queued, so consumption no longer forms a prefix of the arrival order.
+    // The corrective receipts must follow the message ids: the consumed
+    // frame keeps its standing delivered receipt, and the frame still
+    // queued gets the expiry correction — the exact mapping the old
+    // positional tail slice got backwards.
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    started.setSubmitFn(() => true);
+
+    const next = peerFrame({
+      content: 'next first',
+      from: sender.socketPath,
+    });
+    const now = peerFrame({
+      content: 'now second',
+      from: sender.socketPath,
+    });
+    await send(started.socketPath!, next);
+    await send(started.socketPath!, now);
+    await settle();
+
+    // The mid-turn boundary took the "now" frame past the queued "next".
+    started.settleConsumedFrame(now.msgId);
+
+    await started.close();
+    messaging = null;
+
+    const statusesFor = (msgId: string) =>
+      receipts
+        .filter((r) => r.type === 'control' && r.origMsgId === msgId)
+        .map((r) => (r as { status: string }).status);
+    expect(statusesFor(next.msgId)).toEqual(['delivered', 'expired']);
+    expect(statusesFor(now.msgId)).toEqual(['delivered']);
+  });
+
+  it('tracks a settled frame back in when a failed settlement restores it', async () => {
+    // A boundary that failed restored the envelope: it is undecided again,
+    // so the expiry correction at close applies to it after all — restoring
+    // must undo the consumption settlement, or a restored frame's sender
+    // keeps a delivered receipt for a body that never reached the model.
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    started.setSubmitFn(() => true);
+
+    const frame = peerFrame({
+      content: 'taken then restored',
+      from: sender.socketPath,
+    });
+    await send(started.socketPath!, frame);
+    await settle();
+
+    started.settleConsumedFrame(frame.msgId);
+    started.trackUndecidedFrame({
+      msgId: frame.msgId,
+      from: sender.socketPath,
+    });
+
+    await started.close();
+    messaging = null;
+
+    const statuses = receipts
+      .filter((r) => r.type === 'control' && r.origMsgId === frame.msgId)
+      .map((r) => (r as { status: string }).status);
+    expect(statuses).toEqual(['delivered', 'expired']);
   });
 
   it('flags a re-admitted body under a reviewed id once its tombstone prunes', async () => {

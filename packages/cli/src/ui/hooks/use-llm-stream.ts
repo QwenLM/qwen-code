@@ -3604,11 +3604,17 @@ export const useLlmStream = (
 
   const drainSteerAtBoundary = useCallback(
     async (signal: AbortSignal): Promise<SteerInput | undefined> => {
-      // Never a barrier here. This is core's continuation steer — reached from
-      // the `next_speaker === 'model'` and stop-hook continuations, where core
-      // substitutes `Please continue.` — and it pops no peer envelope. Holding
-      // typed text behind one this call cannot deliver would withhold the
-      // user's own correction while the model carries on with the course that
+      // Never a barrier here. This is core's continuation steer — takeSteerInput
+      // reaches it from four sites in core/client.ts, none of them the
+      // tool-round boundary where the peer pop lives: after a completed
+      // response with no tool calls pending (client.ts:5355, where the drained
+      // text is the entire next request rather than an appended continuation),
+      // both stop-hook continuations (client.ts:5495 and :5605, where it is
+      // appended behind core's own continueReason), and the
+      // `next_speaker === 'model'` continuation (client.ts:5722, where it
+      // replaces `Please continue.`). Holding typed text behind a peer
+      // envelope one of these calls cannot deliver would withhold the user's
+      // own correction while the model carries on with the course that
       // correction was meant to change.
       const messages =
         midTurnDrainRef?.current?.(

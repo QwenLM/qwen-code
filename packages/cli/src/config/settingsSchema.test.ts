@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect, expectTypeOf } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
@@ -447,6 +449,12 @@ describe('SettingsSchema', () => {
       expect(
         getSettingsSchema().agents.properties.crossSessionMidTurn.description,
       ).toContain('"now"');
+      // The fourth qualifying class — a same-user process claiming this
+      // session's own review class — is the one nothing authenticates, and
+      // the toggle's own surface is where that caveat must not go missing.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurn.description,
+      ).toContain('which nothing authenticates');
     });
 
     it('should bound mid-turn cross-session delivery per window', () => {
@@ -473,6 +481,20 @@ describe('SettingsSchema', () => {
         getSettingsSchema().agents.properties.crossSessionMidTurnBudget
           .description,
       ).toContain('a negative number is read as 0');
+      // The `settings.md` row is the hand-maintained third copy — no
+      // generator reads that file — so pin it here too against the shipped
+      // reader.
+      expect(
+        readFileSync(
+          fileURLToPath(
+            new URL(
+              '../../../../docs/users/configuration/settings.md',
+              import.meta.url,
+            ),
+          ),
+          'utf8',
+        ),
+      ).toContain('a negative number is read as `0`');
     });
 
     it('should offer exactly the hold lifetimes core knows how to parse', () => {

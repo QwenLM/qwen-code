@@ -141,10 +141,13 @@ export default tseslint.config(
     // constants are read at schema-definition time, and importing them through
     // `peer-messaging.ts` reaches core at import time, which breaks the CLI
     // suites that partially mock core — at collection, with an error naming a
-    // mock rather than this file. So this module imports nothing at all.
+    // mock rather than this file. So this module imports nothing at runtime:
+    // type-only imports are exempt (erased at compile time, as in the core
+    // barrel guard), and the dynamic-import companion below closes the hole
+    // `no-restricted-imports` cannot see.
     files: ['packages/cli/src/peerMessaging/mid-turn-constants.ts'],
     rules: {
-      'no-restricted-imports': [
+      '@typescript-eslint/no-restricted-imports': [
         'error',
         {
           patterns: [
@@ -158,8 +161,9 @@ export default tseslint.config(
                 '@qwen-code/qwen-code-core',
                 '@qwen-code/qwen-code-core/**',
               ],
+              allowTypeImports: true,
               message:
-                'mid-turn-constants.ts must import nothing: it is read by the settings schema at definition time, and any value import reaching the peer runtime or core breaks partially-mocking CLI suites at collection. Keep the constants here, or move the unreadable-value reader into this leaf beside them.',
+                'mid-turn-constants.ts must import nothing at runtime: it is read by the settings schema at definition time, and any value import reaching the peer runtime or core breaks partially-mocking CLI suites at collection. Keep the constants here, or move the unreadable-value reader into this leaf beside them.',
             },
           ],
         },
@@ -374,6 +378,25 @@ export default tseslint.config(
           selector: "ImportExpression[source.value=/(^|\\x2f)serve(\\x2f|$)/i]",
           message:
             'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+        },
+      ],
+    },
+  },
+  {
+    // Same hole as the #8084 guard above, for the mid-turn-constants leaf: a
+    // dynamic `await import('./peer-messaging.js')` would slip past its
+    // no-restricted-imports patterns and drag the peer runtime in at call
+    // time. Any dynamic import counts — the leaf's contract is to reach no
+    // module at runtime.
+    files: ['packages/cli/src/peerMessaging/mid-turn-constants.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...generalRestrictedSyntaxSelectors,
+        {
+          selector: 'ImportExpression',
+          message:
+            'mid-turn-constants.ts must import nothing at runtime: it is read by the settings schema at definition time, and any dynamic import reaching the peer runtime or core breaks partially-mocking CLI suites at collection. Keep the constants here, or move the unreadable-value reader into this leaf beside them.',
         },
       ],
     },

@@ -1550,7 +1550,9 @@ describe('useMessageQueue', () => {
         result.current.addMessage('typed B');
       });
 
-      expect(result.current.hasMidTurnTakeablePeer()).toBe(true);
+      expect(
+        result.current.firstMidTurnTakeablePeerDelivery(),
+      ).not.toBeUndefined();
 
       let drained: string[] = [];
       act(() => {
@@ -1642,7 +1644,9 @@ describe('useMessageQueue', () => {
       // into the steer batch first, and that removal promotes the envelope.
       // The envelope is therefore this boundary's to deliver and is a barrier,
       // so the eligibility answer must be yes even while the pop is empty.
-      expect(result.current.hasMidTurnTakeablePeer()).toBe(true);
+      expect(
+        result.current.firstMidTurnTakeablePeerDelivery(),
+      ).not.toBeUndefined();
       expect(result.current.drainPeerEntries(1)).toEqual([]);
       let drained: string[] = [];
       act(() => {
@@ -1665,7 +1669,7 @@ describe('useMessageQueue', () => {
           next('m2'),
         );
       });
-      expect(result.current.hasMidTurnTakeablePeer()).toBe(false);
+      expect(result.current.firstMidTurnTakeablePeerDelivery()).toBeUndefined();
       expect(result.current.drainPeerEntries(1)).toEqual([]);
 
       act(() => {
@@ -1675,10 +1679,49 @@ describe('useMessageQueue', () => {
           now('m3'),
         );
       });
-      expect(result.current.hasMidTurnTakeablePeer()).toBe(true);
+      expect(
+        result.current.firstMidTurnTakeablePeerDelivery(),
+      ).not.toBeUndefined();
       expect(
         result.current.drainPeerEntries(1).map(({ modelText }) => modelText),
       ).toEqual(['<envelope now>']);
+    });
+
+    it('walls the takeable scan at an entry the steer drain leaves behind', () => {
+      // The pop takes a "now" only from the leading run of peer entries, so
+      // the scan must answer for that run as the boundary will leave it: an
+      // entry the steer drain does not take — a slash command, or text
+      // deferred past the turn — left ahead of an envelope is a wall the pop
+      // breaks on, and nothing behind it is this boundary's to deliver. Let
+      // the scan slip past the wall and it barriers on a delivery the pop
+      // cannot make, freezing the user's own input for the whole turn.
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('/help');
+        result.current.addPeerMessage('<envelope now>', 'Session A: now', {
+          msgId: 'm1',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+      });
+      expect(result.current.firstMidTurnTakeablePeerDelivery()).toBeUndefined();
+      // The pop agrees with the scan: the wall holds for it too.
+      expect(result.current.drainPeerEntries(1)).toEqual([]);
+
+      // Same wall for deferred text.
+      act(() => {
+        result.current.clearQueue();
+        result.current.addMessage('typed later', true);
+        result.current.addPeerMessage('<envelope again>', 'Session A: now', {
+          msgId: 'm2',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+      });
+      expect(result.current.firstMidTurnTakeablePeerDelivery()).toBeUndefined();
+      expect(result.current.drainPeerEntries(1)).toEqual([]);
     });
 
     it('drains leading peer envelopes with projection and delivery pin', () => {

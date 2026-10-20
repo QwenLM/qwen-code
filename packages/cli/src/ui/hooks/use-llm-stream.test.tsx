@@ -8367,6 +8367,9 @@ describe('useLlmStream', () => {
     });
 
     expect(drainSteer).toHaveBeenCalledWith(false, false, false);
+    // The peer pop is the tool-round boundary's alone; this path must never
+    // reach for it, eligible or not.
+    expect(peerDrain).not.toHaveBeenCalled();
   });
 
   it('provides queued steer input to core at the next sampling boundary', async () => {

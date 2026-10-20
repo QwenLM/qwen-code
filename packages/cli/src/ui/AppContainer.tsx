@@ -535,6 +535,12 @@ export function useQueuedSubmissionDrain({
         },
       );
     } else if (submission.kind === 'peer') {
+      // The pop settled the envelope out of the undecided set: it is on its
+      // way to the model, so its 'delivered' receipt stands. A failed
+      // admission or delivery below restores it, which tracks it back in.
+      if (submission.delivery) {
+        peerMessaging?.settleConsumedFrame(submission.delivery.msgId);
+      }
       // Peer envelopes skip user-input preprocessing (slash/shell/@):
       // the text is peer-authored, so submit them on the Teammate send
       // type, whose early return exists for exactly this hazard. That
@@ -562,6 +568,9 @@ export function useQueuedSubmissionDrain({
           // (the full envelope) without it.
           notificationDisplayText: submission.displayText,
           onAdmissionFailed: () => {
+            if (submission.delivery) {
+              peerMessaging?.trackUndecidedFrame(submission.delivery);
+            }
             restorePeerMessage(
               submission.modelText,
               submission.displayText,
@@ -571,6 +580,9 @@ export function useQueuedSubmissionDrain({
             markAdmissionFailed();
           },
           onDeliveryFailed: () => {
+            if (submission.delivery) {
+              peerMessaging?.trackUndecidedFrame(submission.delivery);
+            }
             restorePeerMessage(
               submission.modelText,
               submission.displayText,
@@ -668,7 +680,6 @@ export function usePeerMidTurnDrain({
   sessionId,
   drainPeerEntries,
   restorePeerEntries,
-  hasMidTurnTakeablePeer,
   firstMidTurnTakeablePeerDelivery,
   addHistoryItem,
 }: {
@@ -678,7 +689,6 @@ export function usePeerMidTurnDrain({
   sessionId: string;
   drainPeerEntries: (limit: number) => QueuedPeerSteer[];
   restorePeerEntries: (entries: QueuedPeerSteer[]) => void;
-  hasMidTurnTakeablePeer: () => boolean;
   firstMidTurnTakeablePeerDelivery: () => PeerQueuedDelivery | undefined;
   addHistoryItem: (item: HistoryItemWithoutId, timestamp: number) => number;
 }): PeerMidTurnDrain | null {
@@ -739,7 +749,7 @@ export function usePeerMidTurnDrain({
     // was never eligible; and since the boundary calls this drain every tool
     // round, a spent window with nothing takeable queued stays silent.
     if (!budget.hasAllowance(Date.now(), capacity)) {
-      if (hasMidTurnTakeablePeer()) {
+      if (firstMidTurnTakeablePeerDelivery() !== undefined) {
         writePauseNotice(Date.now());
       }
       return null;
@@ -748,6 +758,13 @@ export function usePeerMidTurnDrain({
     // size — so there is no unpaid remainder for this drain to hand back.
     const taken = drainPeerEntries(1);
     if (taken.length === 0) return null;
+    // The take settled the envelope out of the undecided set: it left the
+    // queue toward this boundary's submission, so its 'delivered' receipt
+    // stands. A rejected pin below consumes it for good; a failed
+    // tryConsume or settlement restores it, which tracks it back in.
+    for (const { delivery } of taken) {
+      if (delivery) peerMessaging.settleConsumedFrame(delivery.msgId);
+    }
     const [entry] = taken;
     if (peerMessaging.drainQueuedFrame(entry.delivery) === false) {
       // Stale recipient pin: drainQueuedFrame sends the `misaddressed` receipt
@@ -760,6 +777,9 @@ export function usePeerMidTurnDrain({
       // back between the two calls revives a stamp and makes that false. The
       // idle drain stays the guaranteed fallback, so put the envelope back
       // rather than drop it — "no budget" must mean "later", never "lost".
+      for (const { delivery } of taken) {
+        if (delivery) peerMessaging.trackUndecidedFrame(delivery);
+      }
       restorePeerEntries(taken);
       return null;
     }
@@ -785,6 +805,12 @@ export function usePeerMidTurnDrain({
       restore: () => {
         if (settled) return;
         settled = true;
+        // The settlement failed before the model saw anything, so the
+        // envelope is undecided again — back into the queue and back into
+        // the corrective-receipt set.
+        for (const { delivery } of taken) {
+          if (delivery) peerMessaging.trackUndecidedFrame(delivery);
+        }
         restorePeerEntries(taken);
         // Nothing reached the model, so the allowance was never spent.
         budget.refund(taken.length);
@@ -2839,7 +2865,6 @@ export const AppContainer = (props: AppContainerProps) => {
     peekNextUserBatchKey,
     hasQueuedUserMessages,
     getPendingSubmissionCount,
-    getQueuedPeerCount,
     claimGoalTurn,
     claimDirectUserAdmission,
     removeGoalTurns,
@@ -2850,7 +2875,6 @@ export const AppContainer = (props: AppContainerProps) => {
     addPeerMessage,
     restorePeerMessage,
     drainPeerEntries,
-    hasMidTurnTakeablePeer,
     firstMidTurnTakeablePeerDelivery,
     restorePeerEntries,
   } = useMessageQueue();
@@ -2947,15 +2971,11 @@ export const AppContainer = (props: AppContainerProps) => {
         return true;
       },
     );
-    // close() settles whatever is still queued with a corrective receipt;
-    // it needs the current depth to tell consumed entries from queued ones.
-    peerMessaging.setQueuedPeerCount(getQueuedPeerCount);
-  }, [
-    addPeerMessage,
-    getPendingSubmissionCount,
-    getQueuedPeerCount,
-    peerMessaging,
-  ]);
+    // close() settles whatever is still undecided with a corrective
+    // receipt: every consumption and rejection settles its frame out of
+    // that set at the pop, the drain or the pin check, so the instance
+    // needs no queue-side wiring to tell them apart.
+  }, [addPeerMessage, getPendingSubmissionCount, peerMessaging]);
 
   // Opt-in mid-turn delivery of accepted peer messages. Off by default, and a
   // session with no inbox can never take them, so the drain stays null and the
@@ -2971,7 +2991,6 @@ export const AppContainer = (props: AppContainerProps) => {
     sessionId: config.getSessionId(),
     drainPeerEntries,
     restorePeerEntries,
-    hasMidTurnTakeablePeer,
     firstMidTurnTakeablePeerDelivery,
     addHistoryItem,
   });

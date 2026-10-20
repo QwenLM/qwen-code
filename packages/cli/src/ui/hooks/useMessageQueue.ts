@@ -117,17 +117,11 @@ export interface UseMessageQueueReturn {
    */
   drainPeerEntries: (limit: number) => QueuedPeerSteer[];
   /**
-   * Whether the tool-round boundary has an envelope it could really take: a
-   * `"now"` inside the leading run of peer entries. The boundary's barrier and
-   * the pause notice both ask this one question, so neither can hold user text
-   * behind an envelope the other would never deliver.
-   */
-  hasMidTurnTakeablePeer: () => boolean;
-  /**
-   * The delivery of the envelope this boundary's peer pop would take — the
-   * same scan `hasMidTurnTakeablePeer` answers — so the caller that owns the
-   * recipient check can judge deliverability without popping. Undefined when
-   * nothing is takeable.
+   * The delivery of the envelope this boundary's peer pop would take, so the
+   * caller that owns the recipient check can judge deliverability without
+   * popping, and the once-per-window pause notice can ask whether anything
+   * takeable waits. Undefined when nothing is takeable; a defined return is
+   * exactly when the scan finds a takeable envelope.
    */
   firstMidTurnTakeablePeerDelivery: () => PeerQueuedDelivery | undefined;
   /** Puts a mid-turn batch back, still peer, at the head of the queue. */
@@ -572,15 +566,6 @@ export function useMessageQueue(): UseMessageQueueReturn {
     );
   }, []);
 
-  const hasMidTurnTakeablePeer = useCallback(
-    () =>
-      firstMidTurnTakeablePeerIndex(
-        queueRef.current,
-        isMidTurnSteerDrainable,
-      ) !== -1,
-    [],
-  );
-
   const firstMidTurnTakeablePeerDelivery = useCallback(():
     | PeerQueuedDelivery
     | undefined => {
@@ -605,14 +590,19 @@ export function useMessageQueue(): UseMessageQueueReturn {
           : !isSlashCommand(message.text)) &&
         (includeDeferred || !message.deferUntilIdle);
       // Same barrier as `popNextSubmission`'s idle path, narrowed to the
-      // envelope this boundary is about to deliver: text queued behind it
-      // never overtakes it into a submission. An envelope the boundary cannot
-      // take — the opt-in is off, the sender asked for "next", the window is
-      // spent — is not a barrier, because holding the user's own input for the
-      // rest of the turn to keep the place of a delivery that will not happen
-      // is the freeze this narrowing exists to prevent. Peer text still stays
-      // out of this raw-string channel by `deferUntilIdle`, as it always has.
-      // Goal commands keep their barrier-free priority, as they do there.
+      // envelope this boundary is about to deliver. The no-overtake guarantee
+      // — text queued behind it never overtakes it into a submission — is a
+      // claim about the boundaries that pop peers: the tool-round boundary is
+      // the only caller passing `peerMidTurnActive`, and it pops what it just
+      // barriered right after. A drain that pops no peer envelope (the
+      // continuation steer) passes `false` and holds nothing. An envelope the
+      // boundary cannot take — the opt-in is off, the sender asked for "next",
+      // the window is spent — is not a barrier, because holding the user's own
+      // input for the rest of the turn to keep the place of a delivery that
+      // will not happen is the freeze this narrowing exists to prevent. Peer
+      // text still stays out of this raw-string channel by `deferUntilIdle`,
+      // as it always has. Goal commands keep their barrier-free priority, as
+      // they do there.
       const barrierIndex = peerMidTurnActive
         ? firstMidTurnTakeablePeerIndex(current, shouldDrain)
         : -1;
@@ -653,7 +643,6 @@ export function useMessageQueue(): UseMessageQueueReturn {
     restoreMessages,
     restorePeerMessage,
     drainPeerEntries,
-    hasMidTurnTakeablePeer,
     firstMidTurnTakeablePeerDelivery,
     restorePeerEntries,
     drainQueue,

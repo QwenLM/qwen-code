@@ -87,6 +87,18 @@ export interface PeerQueuedDelivery {
   priority?: PeerMessagePriority;
 }
 
+/**
+ * The receipt identity of an accepted frame whose fate is not settled yet —
+ * what `settleUnconsumed` needs to correct the frame's 'delivered' receipt at
+ * close. The queue and the restore path both carry this much in a
+ * `PeerQueuedDelivery`, so neither has to hand back a full frame.
+ */
+interface UndecidedPeerFrame {
+  msgId: string;
+  from?: string;
+  replyToken?: string;
+}
+
 export {
   clearInheritedPeerMessagingEnv,
   MESSAGING_SOCKET_ENV,
@@ -359,11 +371,12 @@ export class PeerMessaging {
   private validControllerIds: ReadonlySet<string> | null = null;
   /**
    * Accepted frames whose 'delivered' receipt has not been earned yet:
-   * still buffered here or still queued in the session's input queue.
-   * Settled with a corrective receipt at close.
+   * still buffered here, still queued in the session's input queue, or
+   * popped and awaiting a boundary settlement. Consumption and rejection
+   * settle a frame out of this set; everything still in it dies unconsumed
+   * at close and is settled with a corrective receipt there.
    */
-  private readonly outstanding: PeerUserFrame[] = [];
-  private queuedPeerCount: (() => number) | null = null;
+  private readonly outstanding: UndecidedPeerFrame[] = [];
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
   >();
@@ -555,14 +568,32 @@ export class PeerMessaging {
   }
 
   /**
-   * Register a counter for the peer entries still waiting in the
-   * session's input queue. At close, that many of the most recently
-   * submitted frames are settled alongside the buffered ones: the queue
-   * drains in order, so the unconsumed tail is exactly the queue's
-   * current depth.
+   * A popped or drained frame was consumed — it reached the model, so its
+   * 'delivered' receipt stands and no corrective receipt is owed at close.
    */
-  setQueuedPeerCount(fn: () => number): void {
-    this.queuedPeerCount = fn;
+  settleConsumedFrame(msgId: string): void {
+    for (let i = this.outstanding.length - 1; i >= 0; i--) {
+      if (this.outstanding[i]?.msgId === msgId) this.outstanding.splice(i, 1);
+    }
+  }
+
+  /**
+   * A settled-out frame came back: an admission or boundary settlement
+   * failed and the envelope was restored to the queue, so it is undecided
+   * again and the corrective receipt at close applies to it after all.
+   * Idempotent: a frame still tracked is left alone rather than duplicated.
+   */
+  trackUndecidedFrame(delivery: PeerQueuedDelivery): void {
+    if (this.outstanding.some((frame) => frame.msgId === delivery.msgId)) {
+      return;
+    }
+    this.outstanding.push({
+      msgId: delivery.msgId,
+      ...(delivery.from !== undefined ? { from: delivery.from } : {}),
+      ...(delivery.replyToken !== undefined
+        ? { replyToken: delivery.replyToken }
+        : {}),
+    });
   }
 
   getHeld(): readonly HeldMessage[] {
@@ -803,17 +834,15 @@ export class PeerMessaging {
 
   /**
    * Correct the 'delivered' receipts of accepted messages the session
-   * never consumed. Without this, a sender told "delivered" about a
+   * never consumed. Outstanding holds exactly those: every consumption or
+   * rejection settled its frame out of the set, so the whole set is
+   * corrected here. Without this, a sender told "delivered" about a
    * message that dies in the buffer or the input queue at exit cannot
    * tell that from "delivered and read" — the distinction the receipts
    * exist to carry.
    */
   private async settleUnconsumed(): Promise<void> {
-    const queued = this.queuedPeerCount?.() ?? 0;
-    const dropped = this.outstanding.slice(
-      Math.max(0, this.outstanding.length - this.buffered.length - queued),
-    );
-    const receipts = dropped
+    const receipts = this.outstanding
       .filter((frame) => frame.from !== undefined)
       .map((frame) =>
         sendDeliveryStatus(
@@ -1028,11 +1057,17 @@ export class PeerMessaging {
   }
 
   private trackOutstanding(frame: PeerUserFrame): void {
-    this.outstanding.push(frame);
-    // Only the unconsumed tail can ever matter, and it is bounded: at
-    // most MAX_ACCEPTED_BACKLOG frames wait here and another
-    // MAX_ACCEPTED_BACKLOG in the session's input queue. Anything older
-    // was necessarily consumed.
+    this.outstanding.push({
+      msgId: frame.msgId,
+      ...(frame.from !== undefined ? { from: frame.from } : {}),
+      ...(frame.replyToken !== undefined
+        ? { replyToken: frame.replyToken }
+        : {}),
+    });
+    // Every consumption settles its frame out, so what remains is bounded
+    // by the backlog here plus what the input queue holds. The bound keeps
+    // a long session from growing the set without end; past it, the oldest
+    // undecided frame's corrective receipt is skipped rather than sent.
     while (this.outstanding.length > 2 * MAX_ACCEPTED_BACKLOG) {
       this.outstanding.shift();
     }
@@ -1135,6 +1170,10 @@ export class PeerMessaging {
     if (delivery.admissionKey !== undefined) {
       this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
     }
+    // The reject is final — the misaddressed receipt above settles it — so
+    // the frame leaves the undecided set instead of collecting an extra
+    // corrective receipt at close.
+    this.settleConsumedFrame(delivery.msgId);
     return false;
   }
 

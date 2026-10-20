@@ -111,7 +111,11 @@ dropped on change.
   session's own review class (what the mode-parity default delivers without
   review), a trusted controller, a process this session started with its
   child token, and a same-user process that claims this session's own review
-  class — a claim nothing authenticates.
+  class — a claim nothing authenticates. One acceptance path outranks these
+  four: an operator-set `agents.crossSessionInbound: 'accept'` short-circuits
+  the sender classes entirely, so under it any same-user process that can
+  reach the session's socket is delivered — and with it steerable mid-turn —
+  whatever class it claims, or none.
 - **One envelope per boundary.** A chatty peer may slow a turn, never own it:
   at most one peer message per tool round regardless of the budget.
 - **Budget 3 per 5-minute window.** Deliberately far below the 50-envelope

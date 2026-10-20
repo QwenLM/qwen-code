@@ -594,7 +594,7 @@ describe('AppContainer State Management', () => {
       restoreMessages: vi.fn(),
       restorePeerMessage: vi.fn(),
       drainPeerEntries: vi.fn().mockReturnValue([]),
-      hasMidTurnTakeablePeer: vi.fn().mockReturnValue(false),
+      firstMidTurnTakeablePeerDelivery: vi.fn().mockReturnValue(undefined),
       restorePeerEntries: vi.fn(),
       drainQueue: vi.fn().mockReturnValue([]),
     });
@@ -2568,7 +2568,11 @@ describe('AppContainer State Management', () => {
           submitQuery,
           submissionInFlightRef: { current: false },
           submissionSettledRevision: 0,
-          peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+          peerMessaging: {
+            drainQueuedFrame,
+            settleConsumedFrame: vi.fn(),
+            trackUndecidedFrame: vi.fn(),
+          } as unknown as PeerMessaging,
         }),
       );
 
@@ -8857,7 +8861,6 @@ describe('AppContainer State Management', () => {
         ) => {
           submitFn = fn;
         },
-        setQueuedPeerCount: vi.fn(),
         onHeldChange: (fn: (held: readonly HeldMessage[]) => void) => {
           heldListener = fn;
           return () => {};
@@ -8876,6 +8879,8 @@ describe('AppContainer State Management', () => {
         // The mid-turn drain re-checks the recipient pin before it takes an
         // envelope; `true` is the ordinary "still addressed to us" answer.
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging;
       return {
         value,
@@ -9133,10 +9138,10 @@ describe('AppContainer State Management', () => {
         delivery,
       );
       expect(addMessage).not.toHaveBeenCalled();
-      // close() settles still-queued entries; it needs the live depth.
-      expect(peer.value.setQueuedPeerCount).toHaveBeenCalledWith(
-        expect.any(Function),
-      );
+      // close() settles whatever is still undecided with a corrective
+      // receipt, and it no longer needs queue-side wiring: every pop,
+      // drain and pin check settles its frame out of the undecided set at
+      // the moment it commits (asserted by the consumption tests below).
     });
 
     it('hands the drain the peer handle at the one production call site', () => {
@@ -9183,9 +9188,9 @@ describe('AppContainer State Management', () => {
           },
         }),
       );
-      // Both halves of the drain's eligibility read the same answer, the way
-      // the real queue does: what the popper would take is the only thing the
-      // notice and the barrier may treat as waiting.
+      // What the popper would take is the only thing the notice and the
+      // barrier may treat as waiting, and the one accessor the real queue
+      // exports answers both.
       const takeableIndex = () =>
         queue.findIndex(({ delivery }) => delivery?.priority === 'now');
       const drainPeerEntries = vi.fn((limit: number) => {
@@ -9194,7 +9199,8 @@ describe('AppContainer State Management', () => {
         if (index === -1) return [];
         return queue.splice(index, 1);
       });
-      const hasMidTurnTakeablePeer = () => takeableIndex() !== -1;
+      const firstMidTurnTakeablePeerDelivery = () =>
+        queue[takeableIndex()]?.delivery;
       const restorePeerEntries = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         removeGoalTurns: vi.fn().mockReturnValue([]),
@@ -9217,7 +9223,7 @@ describe('AppContainer State Management', () => {
         restorePeerMessage: vi.fn(),
         drainQueue: vi.fn().mockReturnValue([]),
         drainPeerEntries,
-        hasMidTurnTakeablePeer,
+        firstMidTurnTakeablePeerDelivery,
         restorePeerEntries,
       });
       const peer = makePeerMessaging();
@@ -9303,6 +9309,10 @@ describe('AppContainer State Management', () => {
       const applied = mockedUseMessageQueue.mock.results.at(-1)!
         .value as unknown as Record<string, Mock>;
       expect(typeof applied['drainPeerEntries']).toBe('function');
+      expect(typeof applied['firstMidTurnTakeablePeerDelivery']).toBe(
+        'function',
+      );
+      expect(typeof applied['restorePeerEntries']).toBe('function');
       const ref = mockedUseLlmStream.mock.calls.at(-1)?.[
         MID_TURN_PEER_DRAIN_ARG_INDEX
       ] as { current: (() => unknown) | null } | undefined;
@@ -9938,7 +9948,6 @@ describe('usePeerMidTurnDrain', () => {
       if (index === -1) return [];
       return queue.splice(index, 1).map((entry) => ({ ...entry }));
     });
-    const hasMidTurnTakeablePeer = () => takeableIndex() !== -1;
     const firstMidTurnTakeablePeerDelivery = () =>
       queue[takeableIndex()]?.delivery;
     const restorePeerEntries = vi.fn();
@@ -9956,7 +9965,6 @@ describe('usePeerMidTurnDrain', () => {
         restorePeerEntries,
         // Same role it has in the live container: whether an envelope waits
         // behind a spent window that could actually deliver it.
-        hasMidTurnTakeablePeer,
         firstMidTurnTakeablePeerDelivery,
         addHistoryItem,
       }),
@@ -10001,6 +10009,8 @@ describe('usePeerMidTurnDrain', () => {
     } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       enabled: false,
       queue: [envelope('first', 'frame-1')],
@@ -10051,6 +10061,8 @@ describe('usePeerMidTurnDrain', () => {
     } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       queue: [first],
     });
@@ -10112,7 +10124,11 @@ describe('usePeerMidTurnDrain', () => {
       restorePeerEntries,
       addHistoryItem,
     } = renderPeerDrain({
-      peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+      peerMessaging: {
+        drainQueuedFrame,
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
+      } as unknown as PeerMessaging,
       capacity: 1,
       // A stale pin sits ahead of a deliverable envelope. The drain takes one
       // envelope per boundary, so the stale one is spent here and the live one
@@ -10186,6 +10202,8 @@ describe('usePeerMidTurnDrain', () => {
       const drain = usePeerMidTurnDrain({
         peerMessaging: {
           drainQueuedFrame,
+          settleConsumedFrame: vi.fn(),
+          trackUndecidedFrame: vi.fn(),
           getSessionId: () => 'session-a',
         } as unknown as PeerMessaging,
         enabled: true,
@@ -10193,7 +10211,6 @@ describe('usePeerMidTurnDrain', () => {
         sessionId: 'session-a',
         drainPeerEntries: queue.drainPeerEntries,
         restorePeerEntries: queue.restorePeerEntries,
-        hasMidTurnTakeablePeer: queue.hasMidTurnTakeablePeer,
         firstMidTurnTakeablePeerDelivery:
           queue.firstMidTurnTakeablePeerDelivery,
         addHistoryItem,
@@ -10276,6 +10293,8 @@ describe('usePeerMidTurnDrain', () => {
     } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       capacity: 1,
       queue: [first, second],
@@ -10366,6 +10385,8 @@ describe('usePeerMidTurnDrain', () => {
       renderPeerDrain({
         peerMessaging: {
           drainQueuedFrame: vi.fn(() => true),
+          settleConsumedFrame: vi.fn(),
+          trackUndecidedFrame: vi.fn(),
         } as unknown as PeerMessaging,
         capacity: 3,
         queue: [first, second, third],
@@ -10409,6 +10430,8 @@ describe('usePeerMidTurnDrain', () => {
     const { drain, queue, drainPeerEntries, addHistoryItem } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       capacity: 1,
       queue: [first, second],
@@ -10448,6 +10471,8 @@ describe('usePeerMidTurnDrain', () => {
     const { drain, queue, drainPeerEntries, addHistoryItem } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       capacity: 1,
       queue: [first, second],
@@ -10492,6 +10517,8 @@ describe('usePeerMidTurnDrain', () => {
     } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       capacity: 1,
       queue: [first],
@@ -10559,6 +10586,8 @@ describe('usePeerMidTurnDrain', () => {
     } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       capacity: 1,
       queue: [first],
@@ -10605,6 +10634,8 @@ describe('usePeerMidTurnDrain', () => {
     const { drain, queue, drainPeerEntries, addHistoryItem } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       capacity: 1,
       queue: [first],
@@ -10631,6 +10662,8 @@ describe('usePeerMidTurnDrain', () => {
     const { drain, queue, addHistoryItem } = renderPeerDrain({
       peerMessaging: {
         drainQueuedFrame: vi.fn(() => true),
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
       } as unknown as PeerMessaging,
       capacity: 1,
       queue: [first],
@@ -10655,6 +10688,8 @@ describe('usePeerMidTurnDrain', () => {
     vi.setSystemTime(NOW);
     const peerMessaging = {
       drainQueuedFrame: vi.fn(() => true),
+      settleConsumedFrame: vi.fn(),
+      trackUndecidedFrame: vi.fn(),
     } as unknown as PeerMessaging;
 
     const deliverable = renderPeerDrain({
@@ -10673,8 +10708,11 @@ describe('usePeerMidTurnDrain', () => {
     expect(nextOnly.view.result.current?.eligible?.()).toBe(false);
 
     // Window spent: the drain refuses at the peek, so the boundary must not
-    // hold user text for a delivery that will not happen.
+    // hold user text for a delivery that will not happen. A takeable envelope
+    // waits behind the spent window here, so this refusal cannot be the
+    // empty-queue kind — it is the window's, and only the window's.
     expect(deliverable.drain()?.entries).toHaveLength(1);
+    deliverable.queue.push(envelope('again', 'frame-3'));
     expect(deliverable.view.result.current?.eligible?.()).toBe(false);
   });
 
@@ -10695,7 +10733,11 @@ describe('usePeerMidTurnDrain', () => {
       restorePeerEntries,
       addHistoryItem,
     } = renderPeerDrain({
-      peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+      peerMessaging: {
+        drainQueuedFrame,
+        settleConsumedFrame: vi.fn(),
+        trackUndecidedFrame: vi.fn(),
+      } as unknown as PeerMessaging,
       capacity: 0,
       queue: [first, second],
     });
