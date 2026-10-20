@@ -362,6 +362,36 @@ export function TrajectoryPanel({
     historyReleased,
     bookmarks,
   } = useTrajectoryWindow(loadPage);
+  const [followState, setFollowState] = useState<{
+    loader: typeof loadPage;
+    paused: boolean;
+    pending?: { of: typeof trajectory };
+  }>({ loader: loadPage, paused: false });
+  if (followState.loader !== loadPage)
+    setFollowState({ loader: loadPage, paused: false });
+  const pauseFollowing = useCallback(() => {
+    setFollowState((current) =>
+      current.loader !== loadPage || (current.paused && !current.pending)
+        ? current
+        : { loader: loadPage, paused: true },
+    );
+  }, [loadPage]);
+  const previousLive = useRef({ loader: loadPage, status: lifecycle.status });
+  useLayoutEffect(() => {
+    const previous = previousLive.current;
+    previousLive.current = { loader: loadPage, status: lifecycle.status };
+    if (
+      previous.loader === loadPage &&
+      previous.status === 'live' &&
+      lifecycle.status !== 'live'
+    )
+      pauseFollowing();
+  }, [loadPage, lifecycle.status, pauseFollowing]);
+  const following =
+    followState.loader === loadPage &&
+    !followState.paused &&
+    windowMode === 'latest';
+  const returning = followState.loader === loadPage && !!followState.pending;
   const [refreshedGap, setRefreshedGap] = useState({
     loader: loadPage,
     revision: 0,
@@ -373,6 +403,15 @@ export function TrajectoryPanel({
     pendingGapRefresh.current = { revision: historyGapRevision, trajectory };
     refreshWindow();
   }, [historyGapRevision, trajectory, refreshWindow]);
+  const returnToLatest = useCallback(() => {
+    if (!canRefresh) return;
+    setFollowState({
+      loader: loadPage,
+      paused: true,
+      pending: { of: trajectory },
+    });
+    refresh();
+  }, [canRefresh, loadPage, trajectory, refresh]);
   useEffect(() => {
     pendingGapRefresh.current = undefined;
   }, [loadPage]);
@@ -417,6 +456,7 @@ export function TrajectoryPanel({
     filterState.loader === loadPage ? filterState.value : EMPTY_FILTER;
   const changeFilter = useCallback(
     (value: TrajectoryFilter) => {
+      pauseFollowing();
       setFilterState((current) =>
         current.loader === loadPage &&
         current.value.query === value.query &&
@@ -426,7 +466,7 @@ export function TrajectoryPanel({
           : { loader: loadPage, value, scope: current.scope },
       );
     },
-    [loadPage],
+    [loadPage, pauseFollowing],
   );
   const clearFilter = useCallback(
     () => changeFilter(EMPTY_FILTER),
@@ -536,13 +576,14 @@ export function TrajectoryPanel({
       : undefined;
   const setRange = useCallback(
     (next: TimelineRange | undefined) => {
+      pauseFollowing();
       setRangeState(
         next !== undefined && trajectory !== undefined
           ? { range: next, of: trajectory, mode }
           : undefined,
       );
     },
-    [trajectory, mode],
+    [trajectory, mode, pauseFollowing],
   );
 
   useEffect(() => {
@@ -680,6 +721,7 @@ export function TrajectoryPanel({
   const toggleGroup = useCallback(
     (key: string) => {
       if (!trajectory || !layout?.groups.has(key)) return;
+      pauseFollowing();
       const element = scrollRef.current;
       if (element) {
         const index = Math.min(
@@ -717,6 +759,7 @@ export function TrajectoryPanel({
       filterActive,
       signature,
       currentOverrides,
+      pauseFollowing,
     ],
   );
 
@@ -792,6 +835,7 @@ export function TrajectoryPanel({
   const moveSelection = useCallback(
     (nextIndex: number) => {
       if (visualRows.length === 0) return;
+      pauseFollowing();
       const clamped = Math.min(Math.max(nextIndex, 0), visualRows.length - 1);
       const key = visualRows[clamped]!.key;
       setExecutionSelection(undefined);
@@ -801,7 +845,14 @@ export function TrajectoryPanel({
       }
       virtualizer.scrollToIndex(clamped, { align: 'auto' });
     },
-    [inspectorOpen, loadPage, trajectory, virtualizer, visualRows],
+    [
+      inspectorOpen,
+      loadPage,
+      trajectory,
+      virtualizer,
+      visualRows,
+      pauseFollowing,
+    ],
   );
 
   /**
@@ -811,6 +862,7 @@ export function TrajectoryPanel({
    */
   const selectRow = useCallback(
     (key: string, focus = true) => {
+      pauseFollowing();
       setExecutionSelection(undefined);
       setSelectedKey(key);
       if (inspectorOpen && trajectory && loadPage) {
@@ -818,13 +870,14 @@ export function TrajectoryPanel({
       }
       if (focus) scrollRef.current?.focus({ preventScroll: true });
     },
-    [inspectorOpen, trajectory, loadPage],
+    [inspectorOpen, trajectory, loadPage, pauseFollowing],
   );
 
   const openInspector = useCallback(
     (key = selectedKey) => {
       if (!trajectory || !loadPage || !key) return;
       if (!trajectory.rowIndexByKey.has(key)) return;
+      pauseFollowing();
       setExecutionSelection(undefined);
       setInspectorSelection({
         of: trajectory,
@@ -834,7 +887,7 @@ export function TrajectoryPanel({
       setSelectedKey(key);
       setInspectorOpen(true);
     },
-    [trajectory, loadPage, selectedKey],
+    [trajectory, loadPage, selectedKey, pauseFollowing],
   );
 
   const closeInspector = useCallback(() => {
@@ -889,6 +942,12 @@ export function TrajectoryPanel({
       } else if (event.key === 'End') {
         event.preventDefault();
         moveSelection(visualRows.length - 1);
+      } else if (
+        event.key === 'PageUp' ||
+        event.key === 'PageDown' ||
+        event.key === ' '
+      ) {
+        pauseFollowing();
       }
     },
     [
@@ -904,6 +963,7 @@ export function TrajectoryPanel({
       hiddenCounts,
       collapsed,
       toggleGroup,
+      pauseFollowing,
     ],
   );
 
@@ -1025,6 +1085,44 @@ export function TrajectoryPanel({
       windowNavigationRef.current?.focus({ preventScroll: true });
     }
   }, [navigationVersion, hasRows, virtualizer, scrollTo]);
+
+  const pendingLatestScroll = useRef(false);
+  useEffect(() => {
+    const pending = followState.loader === loadPage && followState.pending;
+    if (!pending || status === 'loading') return;
+    if (error || olderFailure || navigationError) {
+      pauseFollowing();
+    } else if (
+      status === 'ready' &&
+      trajectory !== pending.of &&
+      windowMode === 'latest'
+    ) {
+      pendingLatestScroll.current = true;
+      setFollowState({ loader: loadPage, paused: false });
+      setSelectedKey(undefined);
+      setExecutionSelection(undefined);
+      setInspectorOpen(false);
+      setInspectorSelection(undefined);
+      setFilterState((current) => ({ ...current, value: EMPTY_FILTER }));
+      setRangeState(undefined);
+    }
+  }, [
+    followState,
+    loadPage,
+    status,
+    error,
+    olderFailure,
+    navigationError,
+    trajectory,
+    windowMode,
+    pauseFollowing,
+  ]);
+  useLayoutEffect(() => {
+    if (!pendingLatestScroll.current) return;
+    pendingLatestScroll.current = false;
+    if (scrollRef.current)
+      scrollTo(scrollRef.current, scrollRef.current.scrollHeight);
+  }, [following, visualRows, scrollTo]);
 
   /** A span stands for one row: select it and bring it into view. */
   const selectSpan = useCallback(
@@ -1176,12 +1274,21 @@ export function TrajectoryPanel({
   return (
     <div ref={panelRef} className={styles.panel} data-testid="trajectory-panel">
       <TrajectoryExecutions
+        key={`executions-${filterState.scope}`}
         rows={executions.rows}
         omitted={executions.omitted}
         incomplete={lifecycle.incomplete || lifecycle.truncated}
         outsideWindow={lifecycle.outsideWindow.length}
         selectedKey={selectedExecution?.key}
+        following={following}
+        liveStatus={lifecycle.status}
+        historySnapshot={trajectory}
+        onPause={pauseFollowing}
+        onReturnToLatest={returnToLatest}
+        canReturn={canRefresh}
+        returning={returning}
         onSelect={(key) => {
+          pauseFollowing();
           setSelectedKey(undefined);
           setInspectorOpen(false);
           setExecutionSelection({ loader: loadPage, key });
@@ -1218,7 +1325,10 @@ export function TrajectoryPanel({
             <button
               type="button"
               className={styles.iconButton}
-              onClick={refresh}
+              onClick={() => {
+                pauseFollowing();
+                refresh();
+              }}
               disabled={!canRefresh}
               title={t('common.refresh')}
               aria-label={t('common.refresh')}
@@ -1284,7 +1394,13 @@ export function TrajectoryPanel({
           inside it for the same reason. */}
       <TrajectoryOverview
         model={timeline}
-        viewportControl={viewportControl}
+        viewportControl={{
+          ...viewportControl,
+          applyViewport: (next) => {
+            pauseFollowing();
+            viewportControl.applyViewport(next);
+          },
+        }}
         {...(timingAbsent || allStartsMissing
           ? {
               notice: t(
@@ -1297,7 +1413,10 @@ export function TrajectoryPanel({
         describe={describeSpan}
         {...(range !== undefined ? { range } : {})}
         onRangeChange={setRange}
-        onModeChange={setMode}
+        onModeChange={(next) => {
+          pauseFollowing();
+          setMode(next);
+        }}
       />
 
       <div className={styles.context}>
@@ -1469,7 +1588,11 @@ export function TrajectoryPanel({
               type="button"
               className={styles.headerButton}
               aria-disabled={!canOlder}
-              onClick={older}
+              onClick={() => {
+                if (!canOlder) return;
+                pauseFollowing();
+                older();
+              }}
               data-testid="trajectory-window-older"
             >
               {t('trajectory.window.older')}
@@ -1478,7 +1601,11 @@ export function TrajectoryPanel({
               type="button"
               className={styles.headerButton}
               aria-disabled={!canNewer}
-              onClick={newer}
+              onClick={() => {
+                if (!canNewer) return;
+                pauseFollowing();
+                newer();
+              }}
               data-testid="trajectory-window-newer"
             >
               {t('trajectory.window.newer')}
@@ -1503,7 +1630,7 @@ export function TrajectoryPanel({
                 type="button"
                 className={styles.headerButton}
                 onClick={() => {
-                  if (canRefresh) refresh();
+                  returnToLatest();
                 }}
                 aria-disabled={!canRefresh}
                 data-testid="trajectory-window-latest"
@@ -1673,6 +1800,8 @@ export function TrajectoryPanel({
                   : undefined
               }
               onKeyDown={handleKeyDown}
+              onWheel={pauseFollowing}
+              onPointerDown={pauseFollowing}
               onScroll={(event) => {
                 scrollTopRef.current = event.currentTarget.scrollTop;
               }}

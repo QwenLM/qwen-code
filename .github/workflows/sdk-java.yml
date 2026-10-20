@@ -913,9 +913,9 @@ jobs:
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
     # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 19 arms × 10 = 190 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 203 + 2.
-    timeout-minutes: 205
+    # one failed. Ceilings: 20 arms × 10 = 200 plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. Install MySQL binaries): 213 + 2.
+    timeout-minutes: 215
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1038,6 +1038,11 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-after-prepare
+      - name: 'Run approval result-commit crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-after-result
       - name: 'Run approval decision reply-loss E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
