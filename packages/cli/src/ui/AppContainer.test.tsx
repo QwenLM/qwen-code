@@ -9939,6 +9939,8 @@ describe('usePeerMidTurnDrain', () => {
       return queue.splice(index, 1).map((entry) => ({ ...entry }));
     });
     const hasMidTurnTakeablePeer = () => takeableIndex() !== -1;
+    const firstMidTurnTakeablePeerDelivery = () =>
+      queue[takeableIndex()]?.delivery;
     const restorePeerEntries = vi.fn();
     const addHistoryItem = vi.fn();
     // Mutable so `setSessionId` can swap the receiving session on a rerender
@@ -9955,6 +9957,7 @@ describe('usePeerMidTurnDrain', () => {
         // Same role it has in the live container: whether an envelope waits
         // behind a spent window that could actually deliver it.
         hasMidTurnTakeablePeer,
+        firstMidTurnTakeablePeerDelivery,
         addHistoryItem,
       }),
     );
@@ -10144,6 +10147,117 @@ describe('usePeerMidTurnDrain', () => {
     expect(drainPeerEntries).toHaveBeenCalledTimes(2);
     expect(restorePeerEntries).not.toHaveBeenCalled();
     expect(queue).toEqual([newer]);
+  });
+
+  it('releases user steering a boundary whose only takeable envelope is stale-pinned', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    // R3-4 residual, as a combined queue/drain regression: eligibility used
+    // to count a stale-pinned "now" envelope as deliverable, so the barrier
+    // held the user's queued correction while the pop rejected the envelope
+    // as misaddressed — one boundary of withholding for a delivery that
+    // never happened. The pin is part of the eligibility answer now, and the
+    // real queue hook drives both sides below the way the live container
+    // wires them.
+    const stale: PeerQueuedDelivery = {
+      msgId: 'frame-stale',
+      toSessionId: 'session-old',
+      priority: 'now',
+    };
+    const live: PeerQueuedDelivery = {
+      msgId: 'frame-live',
+      toSessionId: 'session-a',
+      priority: 'now',
+    };
+    const drainQueuedFrame = vi.fn(
+      (delivery?: PeerQueuedDelivery) =>
+        delivery?.toSessionId === undefined ||
+        delivery.toSessionId === 'session-a',
+    );
+    const addHistoryItem = vi.fn();
+    // This describe auto-mocks the queue hook module, so the real hook comes
+    // in by hand — the regression needs the real queue driving both the
+    // barrier and the pop, the way the live container wires them.
+    const { useMessageQueue: realUseMessageQueue } = await vi.importActual<
+      typeof import('./hooks/useMessageQueue.js')
+    >('./hooks/useMessageQueue.js');
+    const { result } = renderHook(() => {
+      const queue = realUseMessageQueue();
+      const drain = usePeerMidTurnDrain({
+        peerMessaging: {
+          drainQueuedFrame,
+          getSessionId: () => 'session-a',
+        } as unknown as PeerMessaging,
+        enabled: true,
+        capacity: 3,
+        sessionId: 'session-a',
+        drainPeerEntries: queue.drainPeerEntries,
+        restorePeerEntries: queue.restorePeerEntries,
+        hasMidTurnTakeablePeer: queue.hasMidTurnTakeablePeer,
+        firstMidTurnTakeablePeerDelivery:
+          queue.firstMidTurnTakeablePeerDelivery,
+        addHistoryItem,
+      });
+      return { queue, drain };
+    });
+    // The boundary sequence the tool round runs, in order: eligibility
+    // decides the barrier flag, the steer drain consumes it, the peer pop
+    // runs last.
+    const boundary = () => {
+      const drain = result.current.drain;
+      const eligible = drain?.eligible?.() ?? false;
+      const drained = result.current.queue.drainQueue(false, false, eligible);
+      const batch = drain ? drain() : null;
+      return { eligible, drained, batch };
+    };
+
+    act(() => {
+      result.current.queue.addPeerMessage(
+        '<envelope stale>',
+        'Session A: stale',
+        stale,
+      );
+      result.current.queue.addMessage('typed correction');
+    });
+
+    let round!: ReturnType<typeof boundary>;
+    act(() => {
+      round = boundary();
+    });
+    // The stale pin is not deliverable, so it is not a barrier: the queued
+    // correction flows on this boundary instead of waiting one out.
+    expect(round.eligible).toBe(false);
+    expect(round.drained).toEqual(['typed correction']);
+    // The pop still runs and consumes the stale frame — its `misaddressed`
+    // receipt is what drainQueuedFrame sends — costing no allowance, leaving
+    // no attribution line and nothing restored.
+    expect(round.batch).toBeNull();
+    expect(drainQueuedFrame).toHaveBeenCalledTimes(1);
+    expect(drainQueuedFrame).toHaveBeenCalledWith(stale);
+    expect(result.current.queue.messageQueue).toEqual([]);
+    expect(writtenItems(addHistoryItem)).toHaveLength(0);
+
+    act(() => {
+      result.current.queue.addPeerMessage(
+        '<envelope live>',
+        'Session A: live',
+        live,
+      );
+      result.current.queue.addMessage('typed B');
+    });
+
+    act(() => {
+      round = boundary();
+    });
+    // A deliverable envelope is a real barrier again: text behind it waits
+    // while the pop delivers it — the pin demoted only the envelope that
+    // could not be delivered.
+    expect(round.eligible).toBe(true);
+    expect(round.drained).toEqual([]);
+    expect(round.batch?.entries.map(({ modelText }) => modelText)).toEqual([
+      '<envelope live>',
+    ]);
+    expect(result.current.queue.messageQueue).toEqual(['typed B']);
   });
 
   it('defers envelopes the window cannot pay for and notices once per window', () => {

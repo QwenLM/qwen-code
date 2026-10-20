@@ -284,6 +284,7 @@ import {
   PeerMidTurnBudget,
   peerMidTurnBudgetOf,
   type PeerMessaging,
+  type PeerQueuedDelivery,
 } from '../peerMessaging/peer-messaging.js';
 import { PEER_MID_TURN_WINDOW_MS } from '../peerMessaging/mid-turn-constants.js';
 import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
@@ -668,6 +669,7 @@ export function usePeerMidTurnDrain({
   drainPeerEntries,
   restorePeerEntries,
   hasMidTurnTakeablePeer,
+  firstMidTurnTakeablePeerDelivery,
   addHistoryItem,
 }: {
   peerMessaging: PeerMessaging | null;
@@ -677,6 +679,7 @@ export function usePeerMidTurnDrain({
   drainPeerEntries: (limit: number) => QueuedPeerSteer[];
   restorePeerEntries: (entries: QueuedPeerSteer[]) => void;
   hasMidTurnTakeablePeer: () => boolean;
+  firstMidTurnTakeablePeerDelivery: () => PeerQueuedDelivery | undefined;
   addHistoryItem: (item: HistoryItemWithoutId, timestamp: number) => number;
 }): PeerMidTurnDrain | null {
   // Survives renders so the window keeps counting across them; created lazily
@@ -790,9 +793,25 @@ export function usePeerMidTurnDrain({
   };
   // The boundary asks this before it lets the steer barrier hold user text
   // behind an envelope: same budget, same queue, same instant, so the barrier
-  // and the pop can never disagree about what this boundary delivers.
-  drain.eligible = () =>
-    liveBudget().hasAllowance(Date.now(), capacity) && hasMidTurnTakeablePeer();
+  // and the pop can never disagree about what this boundary delivers. The
+  // recipient pin is part of that answer — an envelope `drainQueuedFrame`
+  // would reject as misaddressed delivers nothing at this boundary, so it is
+  // not a barrier; the pop still consumes it and sends the receipt.
+  drain.eligible = () => {
+    if (!liveBudget().hasAllowance(Date.now(), capacity)) return false;
+    const delivery = firstMidTurnTakeablePeerDelivery();
+    if (delivery === undefined) return false;
+    // The same decision `drainQueuedFrame` makes from the same fields, so the
+    // barrier and the pop cannot disagree about the pin either. The id is the
+    // live one both sides read: the container wires the same
+    // `config.getSessionId()` getter into the peer messaging and passes it
+    // here as `sessionId`. (`drainQueuedFrame` also delivers when its getter
+    // is absent; that branch cannot arise in this hook.)
+    return (
+      delivery.toSessionId === undefined ||
+      delivery.toSessionId === sessionIdRef.current
+    );
+  };
   return drain;
 }
 
@@ -2832,6 +2851,7 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePeerMessage,
     drainPeerEntries,
     hasMidTurnTakeablePeer,
+    firstMidTurnTakeablePeerDelivery,
     restorePeerEntries,
   } = useMessageQueue();
 
@@ -2952,6 +2972,7 @@ export const AppContainer = (props: AppContainerProps) => {
     drainPeerEntries,
     restorePeerEntries,
     hasMidTurnTakeablePeer,
+    firstMidTurnTakeablePeerDelivery,
     addHistoryItem,
   });
 

@@ -123,6 +123,13 @@ export interface UseMessageQueueReturn {
    * behind an envelope the other would never deliver.
    */
   hasMidTurnTakeablePeer: () => boolean;
+  /**
+   * The delivery of the envelope this boundary's peer pop would take — the
+   * same scan `hasMidTurnTakeablePeer` answers — so the caller that owns the
+   * recipient check can judge deliverability without popping. Undefined when
+   * nothing is takeable.
+   */
+  firstMidTurnTakeablePeerDelivery: () => PeerQueuedDelivery | undefined;
   /** Puts a mid-turn batch back, still peer, at the head of the queue. */
   restorePeerEntries: (entries: QueuedPeerSteer[]) => void;
   drainQueue: (
@@ -574,6 +581,16 @@ export function useMessageQueue(): UseMessageQueueReturn {
     [],
   );
 
+  const firstMidTurnTakeablePeerDelivery = useCallback(():
+    | PeerQueuedDelivery
+    | undefined => {
+    const index = firstMidTurnTakeablePeerIndex(
+      queueRef.current,
+      isMidTurnSteerDrainable,
+    );
+    return index === -1 ? undefined : queueRef.current[index].delivery;
+  }, []);
+
   const drainQueue = useCallback(
     (
       includeDeferred = false,
@@ -637,6 +654,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
     restorePeerMessage,
     drainPeerEntries,
     hasMidTurnTakeablePeer,
+    firstMidTurnTakeablePeerDelivery,
     restorePeerEntries,
     drainQueue,
   };
