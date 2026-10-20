@@ -877,3 +877,27 @@ describe('SendMessageTool — peer mode', () => {
     );
   });
 });
+
+describe('SendMessageTool — auto-classifier projection', () => {
+  it('forwards the routing fields, the message, and the sender urgency', () => {
+    expect(
+      noTeamTool().toAutoClassifierInput({
+        to: 'docs-cd',
+        message: 'check the tests',
+        priority: 'now',
+      }),
+    ).toEqual({
+      to: 'docs-cd',
+      message: 'check the tests',
+      priority: 'now',
+    });
+  });
+
+  it('leaves the priority absent for the default urgency', () => {
+    const input = noTeamTool().toAutoClassifierInput({
+      to: 'docs-cd',
+      message: 'check the tests',
+    });
+    expect(input).not.toHaveProperty('priority');
+  });
+});

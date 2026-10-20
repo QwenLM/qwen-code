@@ -651,7 +651,9 @@ export class SendMessageTool extends BaseDeclarativeTool<
    * Forward the routing fields and the message verbatim to the classifier —
    * `to`/`task_id` identify the privileged sink and the `message` itself is
    * the new instruction the recipient will execute, so the classifier needs
-   * the full text to evaluate the action's safety.
+   * the full text to evaluate the action's safety. `priority` rides along
+   * (the wire's convention: absence is the default "next") so the classifier
+   * can tell a mid-turn "now" from an ordinary "next".
    */
   override toAutoClassifierInput(
     params: SendMessageParams,
@@ -660,6 +662,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
       to: params.to,
       task_id: params.task_id,
       message: params.message,
+      ...(params.priority === undefined ? {} : { priority: params.priority }),
     };
   }
 }
