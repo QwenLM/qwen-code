@@ -339,6 +339,14 @@ export class JavaManagedAgentClient {
     );
   }
 
+  getSessionMcp(sessionId: string, signal?: AbortSignal) {
+    return this.post<Schemas['PublicMcpCatalog']>(
+      '/session-mcp/query',
+      { sessionId },
+      signal,
+    );
+  }
+
   changeModel(
     request: Schemas['WebShellChangeModelRequest'],
     signal?: AbortSignal,
