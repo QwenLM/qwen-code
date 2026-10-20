@@ -23,10 +23,11 @@ import {
   type ToolResultBoundaryStage,
 } from './tool-result-boundary-diagnostics.js';
 import {
-  isAlreadyTruncated,
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
+  persistedOutputPointerRange,
 } from './truncation.js';
+import { transcriptMarkerRange } from './agent/transcript-marker.js';
 import { canonicalToolName, ToolNames } from './tool-names.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
@@ -108,24 +109,26 @@ type TextSlot = {
   text: string;
   protectedPrefix?: string;
   /**
-   * A `<persisted-output>` envelope carries the only handle to its spilled
-   * artifact as ordinary inline text, so slicing it anywhere mid-pointer
-   * orphans the artifact for the rest of the session. `fitText` slices
-   * 1/5 head : 4/5 tail without pointer awareness, and `persistedOutputFiles`
-   * only travels with entries the tool layer finalized — a send-boundary
-   * synthetic entry has none. Recover the envelope's `Full output saved to:`
-   * path here and route it through `fitText`'s pointer header, whose existing
-   * rule keeps the path atomic: delivered whole, or dropped in favour of the
-   * bare notice — never shipped as a partial string.
+   * The character range of an inline recovery handle: a spill envelope's
+   * `Full output saved to:` line, or a subagent transcript marker. Slicing
+   * through either orphans the artifact for the rest of the session, and
+   * `fitText` otherwise slices 1/5 head : 4/5 tail without looking. `fitText`
+   * keeps the range whole and budgets the preview around it; the artifact path
+   * in its header still comes from `persistedOutputFiles` — data this module
+   * owns — never from the text.
    */
-  envelopePointer?: string;
+  recoveryRange?: { start: number; end: number };
 };
 
-/** The `Full output saved to: <path>` handle of a tool-layer spill envelope. */
-function envelopePointerOf(text: string): string | undefined {
-  if (!isAlreadyTruncated(text) || !text.startsWith('<persisted-output>'))
-    return undefined;
-  return /Full output saved to: (\S+)/.exec(text)?.[1];
+/**
+ * The inline recovery handle a producer rendered into this text, if any. Both
+ * ranges are producer-owned inverses (see `truncation.ts` and
+ * `agent/transcript-marker.ts`), so neither can drift from the renderer.
+ */
+function recoveryRangeOf(
+  text: string,
+): { start: number; end: number } | undefined {
+  return persistedOutputPointerRange(text) ?? transcriptMarkerRange(text);
 }
 
 function isBudgetExemptOutputName(name: string | undefined): boolean {
@@ -175,13 +178,13 @@ function collectTextSlots(
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const part = parts[partIndex];
       if (includeTopLevelText && typeof part.text === 'string') {
-        const envelopePointer = envelopePointerOf(part.text);
+        const recoveryRange = recoveryRangeOf(part.text);
         slots.push({
           entryIndex,
           partIndex,
           field: 'text',
           text: part.text,
-          ...(envelopePointer ? { envelopePointer } : {}),
+          ...(recoveryRange ? { recoveryRange } : {}),
         });
       }
       const response = part.functionResponse?.response;
@@ -203,23 +206,25 @@ function collectTextSlots(
           ? output.slice(protectedPrefix.length)
           : output;
         if (budgetedOutput.length > 0) {
-          const envelopePointer = envelopePointerOf(budgetedOutput);
+          const recoveryRange = recoveryRangeOf(budgetedOutput);
           slots.push({
             entryIndex,
             partIndex,
             field: 'output',
             text: budgetedOutput,
             ...(protectedPrefix ? { protectedPrefix } : {}),
-            ...(envelopePointer ? { envelopePointer } : {}),
+            ...(recoveryRange ? { recoveryRange } : {}),
           });
         }
       }
       if (typeof error === 'string') {
+        const recoveryRange = recoveryRangeOf(error);
         slots.push({
           entryIndex,
           partIndex,
           field: 'error',
           text: error,
+          ...(recoveryRange ? { recoveryRange } : {}),
         });
       }
     }
@@ -284,6 +289,7 @@ function fitText(
   text: string,
   maxChars: number,
   persistedOutputFiles: string[] | undefined,
+  recoveryRange?: { start: number; end: number },
 ): string {
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
@@ -309,13 +315,28 @@ function fitText(
 
   const separator = '\n\n';
   const marker = '\n...\n';
-  const previewBudget = maxChars - header.length - separator.length;
+  // An inline handle is the artifact's only way back wherever the entry has no
+  // persisted path of its own, so it is delivered whole above the preview and
+  // the body is sliced without it. Below the room that needs, the bare notice
+  // is the fail-closed branch: no path fragment, complete or not.
+  const preserved = recoveryRange
+    ? text.slice(recoveryRange.start, recoveryRange.end)
+    : '';
+  const body = recoveryRange
+    ? text.slice(0, recoveryRange.start) + text.slice(recoveryRange.end)
+    : text;
+  const preservedBlock = preserved ? `${separator}${preserved}` : '';
+  const previewBudget =
+    maxChars - header.length - preservedBlock.length - separator.length;
   if (previewBudget <= 0) {
     return header;
   }
+  if (body.length <= previewBudget) {
+    return `${header}${preservedBlock}${separator}${body}`;
+  }
   if (previewBudget <= marker.length) {
-    return `${header}${separator}${sliceStartWithoutBrokenSurrogate(
-      text,
+    return `${header}${preservedBlock}${separator}${sliceStartWithoutBrokenSurrogate(
+      body,
       previewBudget,
     )}`;
   }
@@ -323,10 +344,10 @@ function fitText(
   const contentBudget = previewBudget - marker.length;
   const headBudget = Math.floor(contentBudget / 5);
   const tailBudget = contentBudget - headBudget;
-  return `${header}${separator}${sliceStartWithoutBrokenSurrogate(
-    text,
+  return `${header}${preservedBlock}${separator}${sliceStartWithoutBrokenSurrogate(
+    body,
     headBudget,
-  )}${marker}${sliceEndWithoutBrokenSurrogate(text, tailBudget)}`;
+  )}${marker}${sliceEndWithoutBrokenSurrogate(body, tailBudget)}`;
 }
 
 function replaceTextSlots(
@@ -344,15 +365,13 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
-    // An envelope slot renders its own inline pointer through `fitText`'s
-    // header so the send boundary keeps the artifact path atomic; genuine
-    // entry-level artifacts still win when no envelope rides the text.
+    // The header path is the entry's persisted artifact — data this module
+    // wrote, never a string recovered from model-visible text.
     const replacement = fitText(
       slot.text,
       allocations[index],
-      slot.envelopePointer !== undefined
-        ? [slot.envelopePointer]
-        : entry.persistedOutputFiles,
+      entry.persistedOutputFiles,
+      slot.recoveryRange,
     );
 
     if (slot.field === 'text') {

@@ -12460,8 +12460,11 @@ describe('LlmChat', async () => {
         .map((part) => part.functionResponse?.response?.['output'])
         .filter((output): output is string => typeof output === 'string');
     /** A per-tool-layer spill envelope whose recovery pointer sits at the front. */
-    const spillEnvelope = (n: number) =>
-      `<persisted-output>\nOutput too large (512 KB). Full output saved to: /home/runner/.qwen/tmp/project-temp-dir/shell_${'a'.repeat(12)}${n}.log\nFull output sha256: ${'f'.repeat(64)}\nNote: this file may be cleaned up after 24 hours.\n\nPreview (up to 2100 chars):\n${'p'.repeat(1_900)}\n</persisted-output>`;
+    const spillEnvelope = (
+      n: number,
+      base = '/home/runner/.qwen/tmp/project-temp-dir',
+    ) =>
+      `<persisted-output>\nOutput too large (512 KB). Full output saved to: ${base}/shell_${'a'.repeat(12)}${n}.log\nFull output sha256: ${'f'.repeat(64)}\nNote: this file may be cleaned up after 24 hours.\n\nPreview (up to 2100 chars):\n${'p'.repeat(1_900)}\n</persisted-output>`;
     const reportUsage = async (promptTokenCount: number, target = chat) => {
       mockStreamsOnce(
         textStream('ok', {
@@ -12686,8 +12689,8 @@ describe('LlmChat', async () => {
     // `<persisted-output>` envelope must keep its artifact path atomic —
     // the whole path, or no path at all — never a string severed mid-way.
     it('keeps spill pointers atomic when the pressure cut reaches an envelope', async () => {
-      // 8 slots sharing ~2.1k chars ≈ 266 each: above the pointer header's
-      // own length, so every envelope survives with its path intact.
+      // 8 slots sharing ~2.1k chars ≈ 266 each: above the notice's own
+      // length, so every envelope survives with its path intact.
       await reportUsage(849_000);
       await sendDrain(
         Array.from({ length: 8 }, (_, n) =>
@@ -12703,15 +12706,50 @@ describe('LlmChat', async () => {
       expect(outputs).toHaveLength(8);
       for (const [n, output] of outputs.entries()) {
         const path = `/home/runner/.qwen/tmp/project-temp-dir/shell_${'a'.repeat(12)}${n}.log`;
-        // The intact path survives — delivered by the envelope's own pointer
-        // header even though the preview text around it was cut.
+        // The intact path survives — kept on its own line above the preview
+        // even though the text around it was cut.
         expect(output.includes(path)).toBe(true);
         // The headroom budget is still honoured: every slot was shortened.
         expect(output.length).toBeLessThan(20_000);
       }
     });
 
-    it('lets the pointer header give way whole rather than ship a partial path', async () => {
+    it('keeps a spaced spill pointer whole through the send boundary', async () => {
+      // A home directory containing a space is a real path chain
+      // (`os.homedir()`): a whitespace-delimited read of the pointer line
+      // would recover and advertise only the first segment.
+      const base = '/home/runner/My Projects/tool-results';
+      await reportUsage(849_000);
+      await sendDrain(
+        Array.from({ length: 8 }, (_, n) =>
+          fnResponse(
+            'shell',
+            { output: `${spillEnvelope(n, base)}${'x'.repeat(18_000)}` },
+            `spaced-${n}`,
+          ),
+        ),
+        'second',
+      );
+      const outputs = resultOutputs(1);
+      expect(outputs).toHaveLength(8);
+      for (const [n, output] of outputs.entries()) {
+        const line = `Full output saved to: ${base}/shell_${'a'.repeat(12)}${n}.log`;
+        expect(output).toContain(line);
+        // Every fragment of the spaced directory is the whole directory, never
+        // a prefix of it.
+        for (
+          let at = output.indexOf('/home/runner/My');
+          at !== -1;
+          at = output.indexOf('/home/runner/My', at + 1)
+        ) {
+          expect(output.slice(at).startsWith('/home/runner/My Projects/')).toBe(
+            true,
+          );
+        }
+      }
+    });
+
+    it('ships the spill pointer whole or not at all', async () => {
       // 8 slots sharing ~5.3k chars ≈ 660 each: the plain head/tail slice
       // would land smack inside the pointer line (character ~131), so this
       // band is exactly where a partial `shell_a…` fragment would ship.
@@ -12729,7 +12767,7 @@ describe('LlmChat', async () => {
       const outputs = resultOutputs(1);
       expect(outputs).toHaveLength(8);
       for (const [n, output] of outputs.entries()) {
-        // Every surviving pointer fragment — header or preview — is exactly
+        // Every surviving pointer fragment — kept line or preview — is exactly
         // this slot's complete path; nothing severed mid-string.
         const stems = output.match(/shell_[a-z0-9._-]*/g) ?? [];
         for (const stem of stems) {
@@ -12918,6 +12956,58 @@ describe('LlmChat', async () => {
         'second',
       );
       expect(resultChars(1)).toBeLessThan(12_000);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
+      expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+    });
+
+    it('disarms the tools’ normalised file path, not the raw @-completion argument', async () => {
+      // The recorders key the cache by `unescapePath(file_path.trim())`, so the
+      // escaped form history keeps cannot name the entry this cut armed.
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      const markAllReadsEvictedFromHistory = vi.fn();
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+        markReadEvictedFromHistory,
+        markAllReadsEvictedFromHistory,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [
+              fnCall(
+                'tool_call',
+                {
+                  name: 'read_file',
+                  arguments: { file_path: '/repo/My\\ Project/cut.txt' },
+                },
+                'escaped-cut',
+              ),
+            ],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
+      await sendDrain(
+        [
+          fnResponse(
+            'tool_call',
+            { output: 'x'.repeat(20_000) },
+            'escaped-cut',
+          ),
+        ],
+        'second',
+      );
+
+      expect(vi.mocked(fsPromises.stat)).toHaveBeenCalledWith(
+        '/repo/My Project/cut.txt',
+      );
       expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
       expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();

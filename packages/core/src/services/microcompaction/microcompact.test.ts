@@ -2028,6 +2028,28 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     });
   });
 
+  it('reports the tools’ normalised path for an @-completion-escaped argument', () => {
+    // History keeps the raw model-authored argument; the cache is keyed by
+    // `unescapePath(file_path.trim())`, so the raw form names no entry.
+    const history: Content[] = [
+      fileCall('c0', 'read_file', '/proj/My\\ Project/old.ts'),
+      fileResult('c0', 'read_file', 'old long content '.repeat(50)),
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toMatchObject({
+      toolsCleared: 1,
+      evictedReadPaths: ['/proj/My Project/old.ts'],
+      unresolvedEvictedReads: 0,
+    });
+  });
+
   it('does not let a kept read_file result vouch for residency (issue #4239)', () => {
     // A kept read_file result may be a cache-hit placeholder or partial
     // slice, so it cannot prove the file's bytes stay resident. The path

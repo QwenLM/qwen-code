@@ -45,6 +45,7 @@ import {
   formatQuotaExhaustedMessage,
 } from '../utils/quotaErrorDetection.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
+import { unescapePath } from '../utils/paths.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   containsXmlToolCalls,
@@ -3454,7 +3455,18 @@ export class LlmChat {
               if (typeof filePath !== 'string' || !filePath)
                 unresolvedRead = true;
               else
-                paths.push(resolvePath(this.config.getTargetDir(), filePath));
+                // History keeps the model-authored argument, but the recorders
+                // key the cache by the tools' own normalised absolute path
+                // (`unescapePath(file_path.trim())` in read-file/edit/
+                // write-file). Deriving the raw string here would stat and
+                // invalidate a key no entry can have, so an @-completion-escaped
+                // path would silently stay resident.
+                paths.push(
+                  resolvePath(
+                    this.config.getTargetDir(),
+                    unescapePath(filePath.trim()),
+                  ),
+                );
             }
           }
           // A PreToolUse or PermissionRequest `updatedInput` replaces the executed
