@@ -3274,6 +3274,8 @@ describe('AppContainer State Management', () => {
         '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
           '</system-reminder>\n\ncontinue the review',
         false,
+        // #11553: no composer provenance on this submit, so the history row
+        // must still show the user's text without the injected envelope.
         'continue the review',
         false,
       );
@@ -4797,6 +4799,84 @@ describe('AppContainer State Management', () => {
       });
 
       expect(mockSetText).toHaveBeenCalledWith(modelText);
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        'review this',
+        false,
+      );
+    });
+
+    it('restores a queued prompt as the user wrote it and keeps the model text for resubmit', async () => {
+      // The queue-pop restore is the twin of the auto-restore path above: ESC
+      // must hand the composer the same text on both, while an unchanged
+      // resubmit still sends the notice the queued entry consumed.
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'info', text: 'Request cancelled.' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: ['review this'],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('review this'),
+        popAllMessages: vi
+          .fn()
+          .mockReturnValue({ modelText, submittedPrompt: 'review this' }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel({
+        pendingItem: null,
+        lastTurnUserItem: null,
+        canUndoLastLoggedUserMessage: false,
+        turnProducedMeaningfulContent: false,
+      });
+
+      expect(mockSetText).toHaveBeenCalledWith('review this');
+
+      capturedUIActions.handleFinalSubmit('review this', {
+        submittedPrompt: 'review this',
+      });
       expect(mockQueueMessage).toHaveBeenCalledWith(
         modelText,
         false,

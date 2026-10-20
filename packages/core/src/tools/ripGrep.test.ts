@@ -611,6 +611,21 @@ describe('RipGrepTool', () => {
       expect(result.returnDisplay).toContain('truncated');
     });
 
+    it('declares its raw size unknown once it bounds its own output', async () => {
+      // The scheduler measures an undeclared producer body itself. A bounded
+      // render must not be offered as its own pre-reduction size (#13652 R2-5).
+      const whole = await searchWith(`fileA.txt:1:keep me${EOL}`, {
+        pattern: 'keep',
+      });
+      expect(whole.llmContent).not.toContain('truncated');
+      expect(whole.rawOutputSize).toBeUndefined();
+
+      const longMatch = 'fileA.txt:1:' + 'a'.repeat(30_000);
+      const bounded = await searchWith(`${longMatch}${EOL}`, { pattern: 'a+' });
+      expect(bounded.llmContent).toMatch(/\[\d+ lines? truncated\] \.\.\./);
+      expect(bounded.rawOutputSize).toBeNull();
+    });
+
     it('should return "No matches found" when pattern does not exist', async () => {
       const result = await searchWith('', { pattern: 'nonexistentpattern' });
       expect(result.llmContent).toContain(

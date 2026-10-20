@@ -12,8 +12,20 @@ import { ReadFileTool } from './read-file.js';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { logToolOutputTruncated } from '../telemetry/loggers.js';
-import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
+import {
+  measureToolOutput,
+  type ToolOutputBudgetSource,
+} from './tool-output-size.js';
+import {
+  logToolOutputTruncated,
+  logToolResultSize,
+  logToolResultPersisted,
+} from '../telemetry/loggers.js';
+import {
+  ToolOutputTruncatedEvent,
+  ToolResultSizeEvent,
+  ToolResultPersistedEvent,
+} from '../telemetry/types.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
@@ -256,8 +268,11 @@ export async function truncateToolOutput(
     lines?: number;
     keep?: 'head' | 'tail' | 'both';
     previewChars?: number;
+    layer?: 'producer' | 'per_tool' | 'combined';
+    source?: ToolOutputBudgetSource;
   },
   promptId?: string,
+  callId?: string,
 ): Promise<{ content: string; outputFile?: string }> {
   // Per-call `limits` override the global config thresholds. Used for
   // per-tool budgets (maxOutputChars) and the combined second-pass that runs
@@ -294,6 +309,36 @@ export async function truncateToolOutput(
     outputDirectory !== undefined,
   );
 
+  try {
+    // Measurement is part of the observation: an estimator throw must not
+    // fail the truncation pass it only observes.
+    const inputSize = measureToolOutput(content, config);
+    const outputSize = measureToolOutput(result.content, config);
+    logToolResultSize(
+      config,
+      new ToolResultSizeEvent(
+        toolName,
+        toolName.startsWith('mcp__') ? 'mcp' : 'native',
+        limits?.layer ?? 'per_tool',
+        inputSize.chars,
+        outputSize.chars,
+        inputSize.estimatedTokens,
+        outputSize.estimatedTokens,
+        result.content !== content,
+        Number.isFinite(threshold) ? threshold : undefined,
+        limits?.source ??
+          (limits?.threshold !== undefined
+            ? 'per_tool'
+            : config.isTruncateToolOutputThresholdExplicit?.()
+              ? 'explicit'
+              : 'global'),
+        callId,
+        promptId,
+      ),
+    );
+  } catch {
+    /* Telemetry is observational. */
+  }
   if (result.outputFile) {
     try {
       logToolOutputTruncated(
@@ -333,6 +378,7 @@ export async function truncateLlmContent(
     keep?: 'head' | 'tail' | 'both';
   },
   promptId?: string,
+  callId?: string,
 ): Promise<{ content: PartListUnion; outputFile?: string }> {
   // --- string path ---
   if (typeof content === 'string') {
@@ -345,7 +391,14 @@ export async function truncateLlmContent(
     if (content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) {
       return { content };
     }
-    return truncateToolOutput(config, toolName, content, limits, promptId);
+    return truncateToolOutput(
+      config,
+      toolName,
+      content,
+      limits,
+      promptId,
+      callId,
+    );
   }
 
   // --- Part[] / single Part path ---
@@ -374,6 +427,7 @@ export async function truncateLlmContent(
     combined,
     limits,
     promptId,
+    callId,
   );
 
   // Unchanged (within budget or token-aware fallback): leave the original
@@ -433,6 +487,30 @@ export function normalizeToolResultCallId(callId: string): string | undefined {
 }
 
 export async function persistAndTruncateToolResult(
+  callId: string,
+  toolName: string,
+  content: string,
+  config: Config,
+  promptId?: string,
+): Promise<PersistResult> {
+  const result = await persistToolResult(callId, toolName, content, config);
+  try {
+    if (result.outputFile)
+      logToolResultPersisted(
+        config,
+        new ToolResultPersistedEvent(promptId ?? '', {
+          toolName,
+          bytesWritten: result.bytesWritten,
+          outputFile: result.outputFile ?? '',
+        }),
+      );
+  } catch {
+    /* Telemetry is observational. */
+  }
+  return result;
+}
+
+async function persistToolResult(
   callId: string,
   toolName: string,
   content: string,

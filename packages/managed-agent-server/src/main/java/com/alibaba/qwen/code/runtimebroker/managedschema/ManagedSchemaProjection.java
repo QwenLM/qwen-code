@@ -81,7 +81,7 @@ public enum ManagedSchemaProjection {
                     + "last_verified_at, retention_until"),
     RESOURCE_REF(
             "session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, "
-                    + "workspace_id, session_id, journal_revision, resource_id, gmt_create"),
+                    + "workspace_id, session_id, journal_revision, resource_id, gmt_create, runtime_binding_key"),
     RUNTIME_BINDING(
             "binding_id, request_key, scope_key, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, isolation_key, provisioner_kind, "
@@ -133,7 +133,7 @@ public enum ManagedSchemaProjection {
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, wake_pending, "
-                    + "wake_head_revision, wake_retry_at, wake_scan_pending"),
+                    + "wake_head_revision, wake_retry_at, wake_scan_pending, cleanup_head_revision"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_key_hash, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "
