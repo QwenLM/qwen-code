@@ -298,7 +298,7 @@ jobs:
           fi
           if [[ "${TIER}" == 'none' ]]; then
             if [[ "${TOUCHED}" == 'true' ]]; then
-              echo 'No full run for this review: not an approval, or an earlier approval run already covers this head.'
+              echo 'No full run for this review: the pull request is closed, this is not an approval, or an earlier approval run already covers this head.'
             else
               echo 'No Managed Agent paths changed.'
             fi

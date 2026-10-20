@@ -410,6 +410,22 @@ describe('Managed Agent gate required check', () => {
     });
     expect(result.status).toBe(code);
   });
+
+  it('names a closed pull request among the reasons no full run starts', () => {
+    const result = spawnSync('bash', ['-c', report], {
+      env: {
+        PATH: process.env.PATH,
+        EVENT_NAME: 'pull_request_review',
+        SCOPE_RESULT: 'success',
+        TIER: 'none',
+        TOUCHED: 'true',
+        SUITE_RESULT: 'skipped',
+      },
+      encoding: 'utf8',
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('pull request is closed');
+  });
 });
 
 describe('Managed Agent gate tier selection', () => {
@@ -511,6 +527,23 @@ describe('Managed Agent gate tier selection', () => {
     // gates anything, and a full run only starves live lanes on the host lock.
     expect(tier({ ...approve, PR_STATE: 'closed' })).toBe('tier=none');
     expect(tier({ ...approve, PR_STATE: 'open' })).toBe('tier=full');
+  });
+
+  it('feeds the pull request state into the tier step', () => {
+    expect(
+      evaluate(step.env.PR_STATE, {
+        github: github('pull_request_review', {
+          pull_request: { state: 'closed' },
+        }),
+      }),
+    ).toBe('closed');
+  });
+
+  it('keeps the fast tier when a push or merge group has no pull request', () => {
+    // Neither payload carries a pull_request object, so the env line renders
+    // empty and must not be mistaken for a closed pull request.
+    expect(tier({ EVENT_NAME: 'push', PR_STATE: '' })).toBe('tier=fast');
+    expect(tier({ EVENT_NAME: 'merge_group', PR_STATE: '' })).toBe('tier=fast');
   });
 
   it('skips an approval only when an earlier approval run covers the head', () => {
