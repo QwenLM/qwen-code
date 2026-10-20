@@ -146,6 +146,7 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
   let ports;
   let env;
   let holderDir;
+  const holderPids = [];
   const foreign = [];
 
   beforeEach(async () => {
@@ -193,14 +194,17 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     // names this test's own work dir, so nothing else matches.
     spawnSync('pkill', ['-f', work]);
     for (const child of foreign.splice(0)) child.kill();
-    if (holderDir && existsSync(holderDir)) {
-      for (const file of readdirSync(holderDir)) {
-        try {
-          process.kill(Number(readFileSync(join(holderDir, file), 'utf8')));
-        } catch {
-          // Holder already gone.
-        }
+    // Holders are tracked by pid, not by their records: a regression that
+    // drops the records without killing them would otherwise leave Node
+    // processes parked on this machine after a red run.
+    for (const pid of holderPids.splice(0)) {
+      try {
+        process.kill(pid);
+      } catch {
+        // Holder already gone.
       }
+    }
+    if (holderDir && existsSync(holderDir)) {
       rmSync(holderDir, { recursive: true, force: true });
     }
     rmSync(work, { recursive: true, force: true });
@@ -231,6 +235,9 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
         .map((line) => line.split('=')),
     );
     holderDir = chosen.RMQ_HOLDER_DIR;
+    for (const file of readdirSync(holderDir)) {
+      holderPids.push(Number(readFileSync(join(holderDir, file), 'utf8')));
+    }
     return chosen;
   };
   const parkedPorts = (chosen) =>
