@@ -130,6 +130,32 @@ describe('Managed file reference snapshots', () => {
     expect(current.error).toBe('Workspace storage is unavailable.');
   });
 
+  it('still surfaces an unsupported refusal after the mount probe succeeded', async () => {
+    await render();
+    vi.mocked(provider.workspaceFiles!.read).mockRejectedValueOnce(
+      Object.assign(
+        new Error('Workspace file access requires an updated CLI.'),
+        { status: 409, code: 'workspace_files_unsupported' },
+      ),
+    );
+    await act(async () => {
+      await expect(
+        current.actions!.prepareFileReference!({
+          id: 'file:src/a.ts',
+          kind: 'file',
+          value: 'src/a.ts',
+          serialized: '@src/a.ts',
+          metadata: { fileKind: 'file', filePath: 'src/a.ts' },
+        }),
+      ).rejects.toThrow('Workspace file access requires an updated CLI.');
+    });
+    // The same code can mean the broker failed mid-request, so only the mount
+    // probe may treat it as an absent capability.
+    expect(current.error).toBe(
+      'Workspace file access requires an updated CLI.',
+    );
+  });
+
   it('stores exact contents in the chip, survives JSON draft persistence and submits without rereading', async () => {
     await render();
     const saved = JSON.parse(
