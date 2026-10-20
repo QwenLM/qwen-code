@@ -277,10 +277,10 @@ it
       env: {},
       limits: { writeQueueBytes: 4096 },
     });
-    const original: Array<Error & { code?: string }> = [],
-      thrown: unknown[] = [];
-    const second = vi.fn(),
-      once = vi.fn();
+    const original: Array<Error & { code?: string }> = [];
+    const thrown: unknown[] = [];
+    const second = vi.fn();
+    const once = vi.fn();
     const monitor = vi.fn();
     pty.on(errorMonitor, () => {
       throw new Error('injected monitor');

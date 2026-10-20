@@ -257,6 +257,11 @@ export interface ShellExecutionResult {
     | 'qwen-bun-pty'
     | 'child_process'
     | 'none';
+  /**
+   * True when output was discarded at the maxBufferedOutputBytes bound, so
+   * `output` is a retained prefix rather than the whole stream.
+   */
+  outputCaptureLimitExceeded?: boolean;
 }
 
 /** A handle for an ongoing shell execution. */
@@ -1355,6 +1360,7 @@ export class ShellExecutionService {
           resolve({
             rawOutput: finalBuffer,
             output: boundedOutput,
+            outputCaptureLimitExceeded,
             exitCode: code,
             signal: signal ? os.constants.signals[signal] : null,
             error:
@@ -1761,6 +1767,7 @@ export class ShellExecutionService {
             // process that's still running.
             aborted: false,
             promoted: true,
+            outputCaptureLimitExceeded,
             pid: child.pid,
             executionMethod: 'child_process',
           });
@@ -2466,6 +2473,7 @@ export class ShellExecutionService {
             resolve({
               rawOutput: finalBuffer,
               output: fullOutput,
+              outputCaptureLimitExceeded,
               exitCode,
               signal,
               error: failureError,
@@ -2896,6 +2904,7 @@ export class ShellExecutionService {
               // (result.aborted)` branches must NOT trigger.
               aborted: false,
               promoted: true,
+              outputCaptureLimitExceeded,
               pid: ptyProcess.pid,
               executionMethod: ptyInfo?.name ?? 'node-pty',
             });
