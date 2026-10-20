@@ -107,8 +107,8 @@ beforeAll(async () => {
   }
 }, 120_000);
 
-afterAll(() => {
-  manager?.dispose();
+afterAll(async () => {
+  await manager?.dispose();
   // Clean the build output so it isn't left dirtying the tree.
   fs.rmSync(path.join(fixtureDir, 'build'), { recursive: true, force: true });
 });

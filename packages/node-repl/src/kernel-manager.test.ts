@@ -1244,7 +1244,7 @@ describe('NodeReplKernelManager', () => {
       fs.mkdirSync(readableRoot);
       const original = path.join(readableRoot, 'original.png');
       fs.writeFileSync(original, Buffer.from(PNG_BASE64, 'base64'));
-      manager.dispose();
+      await manager.dispose();
       manager = makeManager({ readableRoots: [readableRoot] });
       expect(
         (
@@ -1581,7 +1581,7 @@ describe('NodeReplKernelManager', () => {
     async () => {
       const volatileCwd = path.join(workDir, 'volatile-cwd');
       fs.mkdirSync(volatileCwd);
-      manager.dispose();
+      await manager.dispose();
       manager = new NodeReplKernelManager({
         cwd: volatileCwd,
         homeDir: os.homedir(),

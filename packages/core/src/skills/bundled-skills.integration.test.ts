@@ -14,6 +14,8 @@ import {
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import { parseSkillContent } from './skill-load.js';
+import { SkillManager } from './skill-manager.js';
+import { makeFakeConfig } from '../test-utils/config.js';
 
 // Bundled skills are loaded from disk at runtime by SkillManager. A typo in
 // frontmatter (missing `description`, malformed YAML, broken `---` delimiter,
@@ -30,13 +32,26 @@ const bundledDir = path.join(
 
 const skillNames = fs
   .readdirSync(bundledDir, { withFileTypes: true })
-  .filter((d) => d.isDirectory())
+  .filter(
+    (d) =>
+      d.isDirectory() &&
+      fs.existsSync(path.join(bundledDir, d.name, 'SKILL.md')),
+  )
   .map((d) => d.name);
 
 describe('bundled SKILL.md files', () => {
   it('discovers at least one bundled skill', () => {
     expect(skillNames.length).toBeGreaterThan(0);
   });
+
+  it.each(['browser-use', 'computer-use'])(
+    'keeps retired %s documentation out of the bundled skill catalog',
+    async (name) => {
+      expect(skillNames).not.toContain(name);
+      const manager = new SkillManager(makeFakeConfig());
+      await expect(manager.loadSkill(name, 'bundled')).resolves.toBeNull();
+    },
+  );
 
   it.each(skillNames)('%s/SKILL.md parses with required fields', (name) => {
     const file = path.join(bundledDir, name, 'SKILL.md');
