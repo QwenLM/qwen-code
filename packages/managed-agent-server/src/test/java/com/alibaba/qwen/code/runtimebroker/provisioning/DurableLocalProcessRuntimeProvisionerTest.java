@@ -446,7 +446,10 @@ class DurableLocalProcessRuntimeProvisionerTest {
                         provisioner, TRANSPORT, bindings,
                         new InMemoryRuntimeSessionRepository(),
                         new InMemoryToolExecutionRepository(), "broker",
-                        Duration.ofMillis(300), Duration.ofMillis(300))) {
+                        // The failing spawn releases the store lock in
+                        // milliseconds; a 1.2s operation deadline could beat
+                        // it on a loaded runner and leave the lock held.
+                        Duration.ofSeconds(5), Duration.ofMillis(300))) {
             assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> await(service.warm("harness")));
             var request = provisioner.createRequest(scope, "harness");
