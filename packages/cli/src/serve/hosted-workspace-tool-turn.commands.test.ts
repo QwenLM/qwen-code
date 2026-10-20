@@ -1727,7 +1727,7 @@ it.each(['bob', '*', 'parent'])(
           name: 'send_message',
           response: expect.objectContaining({
             error:
-              'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message and retry.',
+              'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.',
           }),
         }),
       }),
@@ -1743,7 +1743,9 @@ it.each(['bob', '*', 'parent'])(
       'assistant',
       'tool_result',
     ]);
-    expect(history[1].message?.parts).toEqual(responses);
+    expect(history[1].message?.parts).toEqual([
+      { functionResponse: responses[0].functionResponse },
+    ]);
   },
 );
 

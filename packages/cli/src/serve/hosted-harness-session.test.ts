@@ -138,6 +138,7 @@ import {
 } from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import { HostedSessionCommandSession } from './hosted-session-command-session.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 import { teamMemberPreamble } from './hosted-member-chain.js';
 import { hostedWakeContinuationId } from './hosted-wake-continuation.js';
@@ -15924,6 +15925,8 @@ describe('Hosted Harness no-tool session', () => {
     'assistant-member',
     'assistant-child',
     'hook',
+    'member-bob',
+    'member-broadcast',
   ] as const)(
     'preserves the real model/record boundary for send_message: %s (#14062)',
     async (mode) => {
@@ -15931,6 +15934,27 @@ describe('Hosted Harness no-tool session', () => {
       const errors = vi.spyOn(stdio, 'writeStderrLineSafe');
       const member = mode !== 'child' && mode !== 'assistant-child';
       const assistantOverflow = mode.startsWith('assistant-');
+      const commandLane = mode === 'member-bob' || mode === 'member-broadcast';
+      const to =
+        mode === 'member-bob'
+          ? 'bob'
+          : mode === 'member-broadcast'
+            ? '*'
+            : 'parent';
+      const runCommand = HostedSessionCommandSession.prototype.runCommand;
+      const commandCalls = vi
+        .spyOn(HostedSessionCommandSession.prototype, 'runCommand')
+        .mockImplementation(async function (
+          this: HostedSessionCommandSession,
+          params,
+        ) {
+          await runCommand.call(this, params);
+          await this.handover(params.commandId, BOOT_ID);
+          await this.answered(params.commandId, {
+            outcome: 'answered',
+            text: 'Scripted leader accepted the short message.',
+          });
+        });
       const dense = JSON.stringify(Array.from({ length: 6500 }, () => 'aa'));
       const message = assistantOverflow ? 'x'.repeat(65_400) : dense;
       const requests: Array<{
@@ -15961,7 +15985,7 @@ describe('Hosted Harness no-tool session', () => {
                     function: {
                       name: 'send_message',
                       arguments: JSON.stringify({
-                        to: 'parent',
+                        to,
                         message:
                           round === 2
                             ? 'shorter'
@@ -16193,14 +16217,33 @@ describe('Hosted Harness no-tool session', () => {
             event.kind === 'domain.committed' &&
             event.payload['domain'] === 'session_message',
         );
-        expect(deliveries).toHaveLength(assistantOverflow ? 0 : 1);
+        expect(deliveries).toHaveLength(
+          assistantOverflow || commandLane ? 0 : 1,
+        );
         expect(
           journal.events.some(
             (event) =>
               event.kind === 'domain.committed' &&
               event.payload['domain'] === 'session_command',
           ),
-        ).toBe(false);
+        ).toBe(commandLane);
+        const commands =
+          (
+            commandCalls.mock.contexts[0] as
+              | HostedSessionCommandSession
+              | undefined
+          )?.commands() ?? [];
+        if (commandLane) {
+          expect(commandCalls).toHaveBeenCalledOnce();
+          expect(commandCalls.mock.calls[0][0]).toMatchObject({
+            kind: 'member_message',
+            args: { to, message: 'shorter' },
+          });
+          expect(commands).toHaveLength(1);
+          expect(commands[0].run.delivery?.state).toBe('consumed');
+        } else {
+          expect(commandCalls).not.toHaveBeenCalled();
+        }
         expect(requests).toHaveLength(assistantOverflow ? 1 : 3);
         if (assistantOverflow)
           expect(errors).toHaveBeenCalledWith(
@@ -16217,7 +16260,7 @@ describe('Hosted Harness no-tool session', () => {
                 expect.objectContaining({
                   type: 'text',
                   text: expect.stringContaining(
-                    'once encoded (byte_limit); shorten the message and retry.',
+                    'once encoded (byte_limit); shorten the message or other arguments and retry.',
                   ),
                 }),
               ]),
@@ -16230,7 +16273,11 @@ describe('Hosted Harness no-tool session', () => {
               content: expect.arrayContaining([
                 expect.objectContaining({
                   type: 'text',
-                  text: expect.stringContaining('queued for delivery'),
+                  text: expect.stringContaining(
+                    commandLane
+                      ? 'Scripted leader accepted'
+                      : 'queued for delivery',
+                  ),
                 }),
               ]),
             }),

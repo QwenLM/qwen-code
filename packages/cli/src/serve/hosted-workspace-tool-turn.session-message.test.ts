@@ -395,7 +395,7 @@ it.each(['child', 'task', 'member', 'broadcast'] as const)(
       name: 'send_message',
     });
     expect(JSON.stringify(responses)).toContain(
-      'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message and retry.',
+      'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.',
     );
     expect(messages()).toHaveLength(0);
     expect(
@@ -461,18 +461,63 @@ it.each([65_536, 65_537])(
   },
 );
 
-it('requires recovery when the overflow refusal cannot commit (#14062)', async () => {
-  vi.spyOn(session.sink, 'write').mockRejectedValueOnce(
-    new Error('Store unavailable'),
-  );
-  await expect(
-    execute(
-      createTurn(1, PARENT_LINEAGE()),
-      call({ to: 'parent', message: '"'.repeat(20_000) }),
-    ),
-  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
-  expect(messages()).toHaveLength(0);
-});
+it.each(['assistant', 'tool_result'] as const)(
+  'requires recovery when the overflow %s cannot commit (#14062)',
+  async (failedType) => {
+    const write = session.sink.write.bind(session.sink);
+    const writes = vi
+      .spyOn(session.sink, 'write')
+      .mockImplementation((record) => {
+        if (record.type === failedType) throw new Error('Store unavailable');
+        return write(record);
+      });
+    await expect(
+      execute(
+        createTurn(1, PARENT_LINEAGE()),
+        call({ to: 'parent', message: '"'.repeat(20_000) }),
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(writes.mock.calls.map(([record]) => record.type)).toEqual(
+      failedType === 'assistant' ? ['assistant'] : ['assistant', 'tool_result'],
+    );
+    expect((await session.sink.project()).map((record) => record.type)).toEqual(
+      failedType === 'assistant' ? [] : ['assistant'],
+    );
+    expect(messages()).toHaveLength(0);
+  },
+);
+
+it.each(['to', 'task_id'] as const)(
+  'identifies oversized %s arguments when the message is short (#14062)',
+  async (recipientKey) => {
+    const teams =
+      recipientKey === 'to'
+        ? new HostedTeamSession(
+            { authority: session.authority, resources: session.resources },
+            sessionKey,
+          )
+        : undefined;
+    const responses = await execute(
+      createTurn(0, undefined, 'prompt', teams),
+      call(
+        { [recipientKey]: '"'.repeat(20_000), message: 'hi' },
+        'recipient-dense',
+      ),
+    );
+    expect(responses[0].functionResponse).toMatchObject({
+      id: 'recipient-dense',
+      name: 'send_message',
+      response: {
+        error: expect.stringContaining(
+          'shorten the message or other arguments',
+        ),
+      },
+    });
+    expect(messages()).toHaveLength(0);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
 
 it('runs a launch and a message in one batch without the mount', async () => {
   const taskId = await launchChild();
