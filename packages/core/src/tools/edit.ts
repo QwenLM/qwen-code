@@ -742,10 +742,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
       // Track AI contribution for commit attribution
       if (!mutation && !this.params.modified_by_user) {
+        // Record the bytes that actually reached disk, in the same LF view as
+        // `currentContent`: the splice can absorb a trailing bare `\r` from
+        // `newContent`, so the two strings differ by exactly that byte and the
+        // stored hash would not match the file (nor align in the char diff).
         CommitAttributionService.getInstance().recordEdit(
           this.params.file_path,
           editData.currentContent,
-          editData.newContent,
+          editData.contentForWrite.replace(/\r\n/g, '\n'),
         );
       }
 

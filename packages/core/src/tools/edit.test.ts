@@ -626,6 +626,29 @@ describe('EditTool', () => {
           CommitAttributionService.getInstance().getFileAttribution(filePath),
         ).toBeUndefined();
       });
+
+      it('records the bytes written rather than the LF-normalized preview', async () => {
+        // A new_string ending in a bare CR can be absorbed by the CRLF that
+        // follows the span, so `newContent` and `contentForWrite` differ by
+        // exactly that byte. The attribution hash must describe the file on
+        // disk, or the next read resets the AI contribution.
+        const original = 'const a = 1;\r\nconst b = 2;\r\n';
+        seedFile(filePath, original);
+        const recordEdit = vi.spyOn(
+          CommitAttributionService.getInstance(),
+          'recordEdit',
+        );
+
+        const result = await run(edit(filePath, 'const a', 'A\r'));
+
+        expect(result.error).toBeUndefined();
+        const written = readText(filePath);
+        expect(written).toBe('A = 1;\r\nconst b = 2;\r\n');
+        expect(recordEdit).toHaveBeenCalledTimes(1);
+        expect(recordEdit.mock.calls[0][2]).toBe(
+          written.replace(/\r\n/g, '\n'),
+        );
+      });
     });
 
     it('should create a new file if old_string is empty and file does not exist, and return created message', async () => {
