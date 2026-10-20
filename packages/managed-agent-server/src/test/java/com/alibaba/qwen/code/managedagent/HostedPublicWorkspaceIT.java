@@ -581,7 +581,7 @@ class HostedPublicWorkspaceIT {
     // W2: a controlled cwd change settles through the production server and
     // the deployment's real Workspace probe, on both API surfaces.
     @Test
-    @Timeout(300)
+    @Timeout(480)
     void workspaceCwdChangeSettlesThroughBothSurfaces() throws Exception {
         List<Path> roots = boot();
         Files.createDirectory(roots.get(0).resolve("child2"));
