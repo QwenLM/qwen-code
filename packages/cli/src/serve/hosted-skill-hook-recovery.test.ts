@@ -19,8 +19,10 @@ import {
   type HookOutput,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import {
+  HOSTED_TOOL_INPUT_ORDER,
   HostedHookRecoveryRequiredError,
   HostedHookSession,
+  type HostedToolInputOrder,
 } from './hosted-hook-session.js';
 import type { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
@@ -167,6 +169,7 @@ afterEach(async () => {
 
 async function firePreTool(
   fields: Record<string, unknown> = {},
+  toolInputOrder?: string,
 ): Promise<void> {
   const hooks = new HostedHookSession(options, session, pin, broker);
   await hooks.fire(
@@ -181,6 +184,9 @@ async function firePreTool(
       ...fields,
     },
     new AbortController().signal,
+    undefined,
+    undefined,
+    toolInputOrder as HostedToolInputOrder | undefined,
   );
 }
 
@@ -253,6 +259,38 @@ it('uses the saved Hook updatedInput after replacement instead of the original S
   expect(JSON.stringify(history.at(-1))).not.toContain('Original secret body.');
   expect(hookControl).toHaveBeenCalledTimes(controls);
 });
+
+it.each([
+  { order: HOSTED_TOOL_INPUT_ORDER, recovers: true },
+  { order: 'pre-permission/1', recovers: false },
+])(
+  'reads a Skill PreToolUse saved under order $order only when that order is known',
+  async ({ order, recovers }) => {
+    output = {
+      hookSpecificOutput: {
+        hookEventName: HookEventName.PreToolUse,
+        updatedInput: { skill: 'testing' },
+      },
+    };
+    await firePreTool({}, order);
+    const controls = hookControl.mock.calls.length;
+    if (recovers) {
+      expect(await recover()).toBe(1);
+      expect(
+        (await session.sink.project()).at(-1)?.message?.parts?.[0]
+          .functionResponse?.response?.['output'],
+      ).toBe(skills.response({ skill: 'testing' }));
+    } else {
+      await expect(recover()).rejects.toBeInstanceOf(
+        HostedHookRecoveryRequiredError,
+      );
+      expect((await session.sink.project()).map((entry) => entry.type)).toEqual(
+        ['assistant'],
+      );
+    }
+    expect(hookControl).toHaveBeenCalledTimes(controls);
+  },
+);
 
 it('durably refuses an interrupted Skill call before its PreToolUse marker committed', async () => {
   const original = session.authority.commitExtensionRecord.bind(

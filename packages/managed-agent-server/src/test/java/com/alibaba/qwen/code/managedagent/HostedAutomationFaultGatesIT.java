@@ -19,6 +19,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
@@ -1089,12 +1090,31 @@ class HostedAutomationFaultGatesIT {
     // arm faults the physical object write. The store never rewrites the
     // object and never re-runs the Shell, so these assertions read what it
     // kept rather than assuming a retry the store does not drive.
+    // One method per arm keeps a stall in one arm inside its own ceiling. The
+    // selector keeps the meaning it has for fg11b and fg11c: unset runs every
+    // arm, and naming one runs only that one.
+    @Test
+    @Timeout(600)
+    void fg11fPublicationFailsBeforeWriteOnMySql() throws Exception {
+        assumeTrue(selected("fg11f", "fail-before-write"));
+        runPublicationArm("fail-before-write");
+    }
+
+    @Test
+    @Timeout(600)
+    void fg11fPublicationTimesOutOnMySql() throws Exception {
+        assumeTrue(selected("fg11f", "timeout"));
+        runPublicationArm("timeout");
+    }
+
     @Test
     @Timeout(600)
     void fg11fPublicationFaultsSettleOnceOnMySql() throws Exception {
-        assumeTrue(anySelected("fg11f", "drop-ack-after-write", "fail-before-write", "timeout"));
-        String arm = List.of("drop-ack-after-write", "fail-before-write", "timeout").stream()
-                .filter(name -> selected("fg11f", name)).findFirst().orElse("drop-ack-after-write");
+        assumeTrue(selected("fg11f", "drop-ack-after-write"));
+        runPublicationArm("drop-ack-after-write");
+    }
+
+    private void runPublicationArm(String arm) throws Exception {
         publicationFaults = publicationFaults(arm);
         boot("fg11f");
         String definition = request("POST", "/v1/agents", Map.of(
@@ -1229,6 +1249,47 @@ class HostedAutomationFaultGatesIT {
                 }
             }
         };
+    }
+
+    // FG11d slice 2: a public TASK_CANCEL stops only the run it names; the
+    // definition and its future slots survive.
+    @Test
+    @Timeout(600)
+    void fg11dCancelStopsOnlyTheTargetRunOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("cancel");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-cancel-base", 202).path("id").asText();
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-cancel-run", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-cancel-run")));
+        // The public task id is the projection's, not the run record id. The
+        // listing is newest-first; pin the kind so a later task cannot silently
+        // take the cancel.
+        JsonNode tasks = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200);
+        JsonNode task = tasks.path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        String taskId = task.path("id").asText();
+        assertThat(taskId).as("the run projects a public task").isNotEmpty();
+        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel", null,
+                "fg11d-cancel-task", 202);
+        // The parked model is the hold point: the turn cannot run, so the cancel
+        // wins and the run settles cancelled before the model is released.
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(run))
+                .as("the target run is cancelled").isEqualTo("cancelled"));
+        assertThat(request("GET", "/v1/agents/sessions/" + session + "/tasks/" + taskId, null, null, 200)
+                .path("state").asText()).as("the task settles cancelled").isEqualTo("cancelled");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", Integer.class, tenant, id,
+                "manual:fg11d-cancel-run")).as("the occurrence settles once").isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", String.class, tenant, id,
+                "manual:fg11d-cancel-run")).as("the occurrence fired once").isEqualTo("fired");
+        assertThat(request("GET", "/v1/agent-automations/" + id, null, null, 200).path("state").asText())
+                .as("the schedule survives its run's cancel").isEqualTo("live");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-cancel-retire", 202);
     }
 
     private void boot(String letter) throws Exception {
@@ -1655,7 +1716,8 @@ class HostedAutomationFaultGatesIT {
 
     // Awaitility ignores the interrupt a @Timeout sends, so every wait fails on it.
     private static ConditionFactory waiting() {
-        return await().failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted())
+        return await().ignoreExceptionsInstanceOf(CannotAcquireLockException.class)
+                .failFast("The case's @Timeout interrupted it", () -> Thread.currentThread().isInterrupted())
                 .pollInterval(Duration.ofMillis(200));
     }
 
