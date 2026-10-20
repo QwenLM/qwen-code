@@ -532,6 +532,13 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  refreshModels(
+    beforeRefresh?: (target: {
+      workspaceCwd: string;
+      sessionId?: string;
+    }) => void | Promise<void>,
+  ): Promise<void>;
+
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
