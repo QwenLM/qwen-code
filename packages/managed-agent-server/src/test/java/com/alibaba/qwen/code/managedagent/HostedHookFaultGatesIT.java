@@ -19,6 +19,7 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
@@ -580,7 +581,7 @@ class HostedHookFaultGatesIT {
     }
 
     private void waitFor(org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(Duration.ofSeconds(60)).ignoreException(java.net.ConnectException.class).failFast(() -> {
+        await().atMost(Duration.ofSeconds(60)).ignoreException(java.net.ConnectException.class).ignoreExceptionsInstanceOf(CannotAcquireLockException.class).failFast(() -> {
             if (modelFailure.get() != null) {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }
