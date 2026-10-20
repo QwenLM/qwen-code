@@ -1430,11 +1430,31 @@ export function TrajectoryPanel({
       >
         {t('trajectory.boundary.newer')}
       </button>
-      {historyReleased && !canNewer && (
-        <span className={styles.boundaryText}>
-          {t('trajectory.window.released')}
-        </span>
-      )}
+      {/* Newer stops a window short of the latest, at the first bookmark or
+          once bookmarks are released, so the way back sits beside it. */}
+      <button
+        type="button"
+        className={styles.boundaryButton}
+        aria-disabled={!canRefresh}
+        onClick={() => {
+          if (!canRefresh) return;
+          pendingBoundaryFocusRef.current = 'trajectory-window-latest';
+          returnToLatest();
+        }}
+        data-testid="trajectory-window-latest"
+      >
+        {t('trajectory.window.return')}
+      </button>
+      {historyReleased &&
+        !canNewer &&
+        status !== 'loading' &&
+        !navigationError &&
+        !error &&
+        !olderFailure && (
+          <span className={styles.boundaryText}>
+            {t('trajectory.window.released')}
+          </span>
+        )}
     </div>
   );
 

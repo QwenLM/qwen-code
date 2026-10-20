@@ -730,6 +730,44 @@ describe('execution following', () => {
     ).toBe(SCROLL_HEIGHT);
   });
 
+  it('offers the way back to latest beside a Newer that cannot move', async () => {
+    const loadPage: TrajectoryPageLoader = async ({ cursor }) => {
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `page-${index}`)], {
+        hasMore: true,
+        nextCursor: String(index + 1),
+      });
+    };
+    const container = await render(loadPage);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-older"]',
+        )!
+        .click(),
+    );
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-window-newer"]')!
+        .getAttribute('aria-disabled'),
+    ).toBe('true');
+    const back = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-window-latest"]',
+    )!;
+    expect(back.textContent).toBe('Back to latest');
+    back.focus();
+    await act(async () => back.click());
+    expect(followStatus(container)).toBe('');
+    expect(container.textContent).toContain('page-0');
+    expect(
+      container.querySelector('[data-testid="trajectory-window-latest"]'),
+    ).toBeNull();
+    // The button left with the history window; the records take focus.
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="trajectory-rows"]'),
+    );
+  });
+
   it('keeps the way back to latest when an earlier window cannot move', async () => {
     let expired = false;
     const loadPage: TrajectoryPageLoader = async ({ cursor }) => {
