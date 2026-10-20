@@ -350,7 +350,13 @@ try {
     assert.equal(
       records.filter((event) => event.data.record?.type === 'tool_result')
         .length,
-      ['result-checkpoint', 'turn-reply'].includes(current.fault) ? 1 : 0,
+      ['result-checkpoint', 'result-reply', 'turn-reply'].includes(
+        current.fault,
+      )
+        ? 1
+        : 0,
+      // The lost result reply landed durably: the settle (#14570) applies
+      // the committed tool_result exactly once instead of latching.
     );
     const started =
       current.fault.startsWith('result-') || current.fault === 'turn-reply';

@@ -71,7 +71,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 //   and a helper moved into a nested type stays visible.
 // - A call resolves to exactly one member: through the caller's enclosing
 //   type chain for a bare or this. call, through the named type for a
-//   Type. call. A reference the audit cannot resolve to one member — an
+//   Type. call, or through a same-file final class declared by a parameter
+//   or block local. A direct `var = new Type(...)` also names that final
+//   class. Block scopes restore their receiver bindings; fields, other
+//   inference, local/anonymous classes and generic methods stay unknown.
+//   A reference the audit cannot resolve to one member — an
 //   overload set tied on name and arity, a call on a receiver whose type
 //   the parse cannot see, a method reference whose arity is not spelled —
 //   is never guessed: when every candidate provably reaches neither the
@@ -144,6 +148,7 @@ class SessionRowLockOrderTest {
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
             "ManagedActionStore.java", "ManagedToolDetailsStore.java",
             "ManagedToolResultProjector.java",
+            "WorkspaceCsiApplicationInventory.java",
             "WorkspaceExecutionStore.java", "WorkspaceMigrationStore.java",
             "WorkspaceRecoveryStore.java");
 
@@ -193,7 +198,8 @@ class SessionRowLockOrderTest {
                     Map.entry("ManagedSchemaJdbcTemplate.java",
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
                     Map.entry("ManagedSessionStore.java",
-                            Set.of("ManagedSessionStore.storedTransaction/1",
+                            Set.of("ManagedSessionStore.sha256/1",
+                                    "ManagedSessionStore.storedTransaction/1",
                                     "ManagedSessionStore.usesDataSource/1")),
                     Map.entry("ManagedSnapshotStore.java",
                             Set.of("ItemReader.read/3",
@@ -234,8 +240,6 @@ class SessionRowLockOrderTest {
                                     "ToolPublicationDataStore.requireStagedCall/2",
                                     "ToolPublicationDataStore.usesDataSource/1",
                                     "VerificationBudget.timeout/2",
-                                    "VerifiedAcknowledgement.catalog/0",
-                                    "VerifiedAcknowledgement.finished/0",
                                     "VerifiedStream.readRange/3",
                                     "VerifiedStream.size/0")),
                     Map.entry("ToolPublicationRetentionStore.java",
@@ -249,6 +253,32 @@ class SessionRowLockOrderTest {
                                     "ToolPublicationStore.usesDataSource/1")),
                     Map.entry("WorkspaceCreationStore.java",
                             Set.of("WorkspaceCreationStore.enabled/0")),
+                    Map.entry("WorkspaceCsiApplicationHistory.java",
+                            Set.of("WorkspaceCsiApplicationHistory.number/1",
+                                    "WorkspaceCsiApplicationHistory.readFrozenOwner/2")),
+                    Map.entry("WorkspaceCsiApplicationInventory.java",
+                            Set.of("Cell.bytes/0|Row.bytes/0|Snapshot.bytes/0",
+                                    "Cell.equals/1", "Cell.hashCode/0",
+                                    "Cell.isNull/0", "Cell.kind/0", "Cell.text/0",
+                                    "Encoder.write/1",
+                                    "FrozenOwnerReader.read/2|Inspection.read/2",
+                                    "Inspection.context/2", "Inspection.snapshot/0",
+                                    "Kind.accepts/1", "Kind.binary/0", "Kind.integral/0",
+                                    "NativeReadEvidence.number/1|Row.number/1",
+                                    "NativeReadEvidence.text/1|Row.text/1",
+                                    "Row.fields/0", "Row.key/0", "Row.membership/0",
+                                    "Row.withMembership/1", "Snapshot.table/1", "Snapshot.tables/0",
+                                    "WorkspaceCsiApplicationInventory.compareKeys/2",
+                                    "WorkspaceCsiApplicationInventory.encode/1",
+                                    "WorkspaceCsiApplicationInventory.hash/1",
+                                    "WorkspaceCsiApplicationInventory.key/1",
+                                    "WorkspaceCsiApplicationInventory.parse/1",
+                                    "WorkspaceCsiApplicationInventory.write/2")),
+                    Map.entry("WorkspaceCsiApplicationStore.java",
+                            Set.of("Sql.run/1", "WorkspaceCsiApplicationStore.encode/1")),
+                    Map.entry("WorkspaceCsiApplicationWorkerMatch.java",
+                            Set.of("WorkspaceCsiApplicationWorkerMatch.number/1",
+                                    "WorkspaceCsiApplicationWorkerMatch.object/1")),
                     Map.entry("WorkspaceExecutionStore.java",
                             Set.of("WorkspaceExecutionStore.createdStorageRoot/2",
                                     "WorkspaceExecutionStore.storageKey/2")),
@@ -938,6 +968,141 @@ class SessionRowLockOrderTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("lockSession")
                 .hasMessageContaining("fieldLockWriter");
+    }
+
+    @Test
+    void theAuditFollowsFinalClassParametersAndScopedLocals() {
+        String synthetic = """
+                class SyntheticStore {
+                    void before(Nested nested) {
+                        nested.lockSession();
+                        jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                    }
+                    void after() {
+                        final Nested nested = new Nested();
+                        jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                        nested.lockSession();
+                    }
+                    void inferred() {
+                        var nested = new Nested();
+                        jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                        nested.lockSession();
+                    }
+                    static final class Nested {
+                        void lockSession() {
+                            jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                        }
+                    }
+                    static final class Other {
+                        void lockSession() { }
+                    }
+                }
+                """;
+        Audit result = audit(synthetic);
+        assertThat(result.violations()).containsExactlyInAnyOrder("after", "inferred");
+        assertThat(result.lockers()).containsExactlyInAnyOrder("before", "after", "inferred", "lockSession");
+    }
+
+    @Test
+    void theAuditDoesNotLeakALocalReceiverToAField() {
+        for (String body : List.of(
+                "nested.lockSession(); { final Nested nested = new Nested(); nested.lockSession(); }",
+                "{ final Nested nested = new Nested(); nested.lockSession(); } nested.lockSession();")) {
+            String synthetic = """
+                    class SyntheticStore {
+                        Port nested;
+                        void writer() {
+                            jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                            %s
+                        }
+                        interface Port { void lockSession(); }
+                        static final class Nested implements Port {
+                            public void lockSession() {
+                                jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                            }
+                        }
+                    }
+                    """.formatted(body);
+            assertThatThrownBy(() -> audit(synthetic))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("lockSession")
+                    .hasMessageContaining("writer");
+        }
+    }
+
+    @Test
+    void theAuditKeepsUnknownOrPolymorphicReceiverTypesClosed() {
+        for (String declaration : List.of(
+                "Mutable nested = new Mutable();",
+                "final Mutable nested = new Mutable();",
+                "var nested = factory();",
+                "var nested = (Nested) factory();")) {
+            String synthetic = """
+                    class SyntheticStore {
+                        void writer() {
+                            %s
+                            jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                            nested.lockSession();
+                        }
+                        static class Mutable {
+                            void lockSession() {
+                                jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                            }
+                        }
+                        static final class Nested {
+                            void lockSession() {
+                                jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                            }
+                        }
+                    }
+                    """.formatted(declaration);
+            assertThatThrownBy(() -> audit(synthetic))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("lockSession")
+                    .hasMessageContaining("writer");
+        }
+    }
+
+    @Test
+    void theAuditKeepsOverloadsOnAnExactReceiverAmbiguous() {
+        String synthetic = """
+                class SyntheticStore {
+                    void writer(Nested nested) {
+                        jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                        nested.lockSession(value);
+                    }
+                    static final class Nested {
+                        void lockSession(String value) {
+                            jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                        }
+                        void lockSession(Integer value) { }
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Nested.lockSession/1");
+    }
+
+    @Test
+    void theAuditDoesNotAttributeAShadowingTypeParameter() {
+        String synthetic = """
+                class SyntheticStore {
+                    <Nested extends Port> void writer(Nested nested) {
+                        jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                        nested.lockSession();
+                    }
+                    interface Port { void lockSession(); }
+                    static final class Nested {
+                        void lockSession() {
+                            jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                        }
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lockSession");
     }
 
     // Two overloads tied on name and arity collapse under a (name, arity)
@@ -1700,9 +1865,10 @@ class SessionRowLockOrderTest {
         CompilationUnitTree unit = parse(source);
         Map<Key, MethodTree> methods = new LinkedHashMap<>();
         Map<String, String> constants = new HashMap<>();
+        Set<String> finalTypes = new HashSet<>();
         for (Tree declaration : unit.getTypeDecls()) {
             if (declaration instanceof ClassTree type) {
-                harvest(type, "", methods, constants);
+                harvest(type, "", methods, constants, finalTypes);
             }
         }
         // A call through a type the file imports leaves the file: no
@@ -1719,7 +1885,7 @@ class SessionRowLockOrderTest {
         Map<Key, List<List<Event>>> heldLambdas = new LinkedHashMap<>();
         for (Map.Entry<Key, MethodTree> member : methods.entrySet()) {
             MemberScan scan = eventsOf(member.getValue(), member.getKey(),
-                    methods, constants, importedTypes, ambiguous);
+                    methods, constants, importedTypes, finalTypes, ambiguous);
             events.put(member.getKey(), scan.events());
             heldLambdas.put(member.getKey(), scan.heldLambdas());
         }
@@ -1826,9 +1992,13 @@ class SessionRowLockOrderTest {
     // their flattened initializer, so a conditional lock clause in a
     // constant scores exactly like the inline spelling.
     private static void harvest(ClassTree type, String ownerPath,
-            Map<Key, MethodTree> methods, Map<String, String> constants) {
+            Map<Key, MethodTree> methods, Map<String, String> constants,
+            Set<String> finalTypes) {
         String path = ownerPath.isEmpty() ? type.getSimpleName().toString()
                 : ownerPath + "." + type.getSimpleName();
+        if (type.getModifiers().getFlags().contains(Modifier.FINAL)) {
+            finalTypes.add(path);
+        }
         for (Tree member : type.getMembers()) {
             if (member instanceof MethodTree method
                     && !method.getName().contentEquals("<init>")) {
@@ -1848,7 +2018,7 @@ class SessionRowLockOrderTest {
                 constants.put(field.getName().toString(),
                         flatten(field.getInitializer(), constants));
             } else if (member instanceof ClassTree nested) {
-                harvest(nested, path, methods, constants);
+                harvest(nested, path, methods, constants, finalTypes);
             }
         }
     }
@@ -1946,9 +2116,26 @@ class SessionRowLockOrderTest {
     // statement's own SQL takes effect.
     private static MemberScan eventsOf(MethodTree method, Key caller,
             Map<Key, MethodTree> methods, Map<String, String> constants,
-            Set<String> importedTypes, List<Ambiguous> ambiguous) {
+            Set<String> importedTypes, Set<String> finalTypes,
+            List<Ambiguous> ambiguous) {
+        boolean typedReceivers = method.getTypeParameters().isEmpty();
+        boolean[] localClass = {false};
+        new TreeScanner<Void, Void>() {
+            @Override
+            public Void visitClass(ClassTree node, Void unused) {
+                localClass[0] = true;
+                return null;
+            }
+        }.scan(method.getBody(), null);
+        typedReceivers &= !localClass[0];
+        Map<String, String> receivers = new HashMap<>();
+        for (VariableTree parameter : method.getParameters()) {
+            receivers.put(parameter.getName().toString(), typedReceivers
+                    ? receiverType(parameter, caller, finalTypes) : "");
+        }
         EventScanner scanner = new EventScanner(new ArrayList<>(), caller,
-                methods, new HashMap<>(constants), importedTypes, ambiguous);
+                methods, new HashMap<>(constants), importedTypes,
+                finalTypes, receivers, typedReceivers, ambiguous);
         if (method.getBody() != null) {
             scanner.scan(method.getBody(), null);
         }
@@ -1957,6 +2144,30 @@ class SessionRowLockOrderTest {
 
     private record MemberScan(List<Event> events,
             List<List<Event>> heldLambdas) { }
+
+    // A final same-file class cannot dispatch to a hidden subtype. Only
+    // explicit parameter/local types and direct `var = new Type(...)`
+    // inference qualify; fields, casts and other inference stay unknown.
+    private static String receiverType(VariableTree variable, Key caller,
+            Set<String> finalTypes) {
+        String type = String.valueOf(variable.getType());
+        if (variable.getType() == null || type.equals("var")) {
+            if (!(variable.getInitializer() instanceof NewClassTree creation)
+                    || creation.getClassBody() != null) {
+                return "";
+            }
+            type = creation.getIdentifier().toString();
+        }
+        for (String owner = caller.owner(); owner != null;
+                owner = owner.lastIndexOf('.') < 0 ? null
+                        : owner.substring(0, owner.lastIndexOf('.'))) {
+            String candidate = owner + "." + type;
+            if (finalTypes.contains(candidate)) {
+                return candidate;
+            }
+        }
+        return finalTypes.contains(type) ? type : "";
+    }
 
     // The statement walk over one body. The constants map is the member's
     // own overlay of the file's class constants: the String locals the
@@ -1973,6 +2184,9 @@ class SessionRowLockOrderTest {
         private final Map<Key, MethodTree> methods;
         private final Map<String, String> constants;
         private final Set<String> importedTypes;
+        private final Set<String> finalTypes;
+        private final Map<String, String> receivers;
+        private final boolean typedReceivers;
         private final List<Ambiguous> ambiguous;
         // The lambda nodes passed straight into a call, marked at the call
         // site: only their bodies fold into the enclosing member.
@@ -1981,13 +2195,37 @@ class SessionRowLockOrderTest {
 
         EventScanner(List<Event> events, Key caller,
                 Map<Key, MethodTree> methods, Map<String, String> constants,
-                Set<String> importedTypes, List<Ambiguous> ambiguous) {
+                Set<String> importedTypes, Set<String> finalTypes,
+                Map<String, String> receivers, boolean typedReceivers,
+                List<Ambiguous> ambiguous) {
             this.events = events;
             this.caller = caller;
             this.methods = methods;
             this.constants = constants;
             this.importedTypes = importedTypes;
+            this.finalTypes = finalTypes;
+            this.receivers = new HashMap<>(receivers);
+            this.typedReceivers = typedReceivers;
             this.ambiguous = ambiguous;
+        }
+
+        @Override
+        public Void visitBlock(BlockTree node, Void unused) {
+            Map<String, String> previous = new HashMap<>(receivers);
+            try {
+                for (StatementTree statement : node.getStatements()) {
+                    scan(statement, unused);
+                    if (statement instanceof VariableTree variable) {
+                        receivers.put(variable.getName().toString(),
+                                typedReceivers ? receiverType(variable,
+                                        caller, finalTypes) : "");
+                    }
+                }
+                return null;
+            } finally {
+                receivers.clear();
+                receivers.putAll(previous);
+            }
         }
 
         @Override
@@ -2058,6 +2296,7 @@ class SessionRowLockOrderTest {
 
         @Override
         public Void visitVariable(VariableTree node, Void unused) {
+            receivers.put(node.getName().toString(), "");
             // A String local's spelling scores where the variable is used:
             // the declaration runs no statement. Calls in the initializer
             // still evaluate here.
@@ -2111,7 +2350,8 @@ class SessionRowLockOrderTest {
             // audit() folds the provably benign ones and fails closed on
             // any that reach a side.
             EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, importedTypes, ambiguous);
+                    methods, constants, importedTypes, finalTypes,
+                    receivers, typedReceivers, ambiguous);
             held.scan(node.getBody(), null);
             heldLambdas.add(held.events);
             heldLambdas.addAll(held.heldLambdas);
@@ -2133,7 +2373,8 @@ class SessionRowLockOrderTest {
             scan(node.getTypeArguments(), null);
             scan(node.getArguments(), null);
             EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, importedTypes, ambiguous);
+                    methods, constants, importedTypes, finalTypes,
+                    receivers, typedReceivers, ambiguous);
             for (Tree member : node.getClassBody().getMembers()) {
                 if (member instanceof MethodTree method) {
                     if (method.getBody() != null) {
@@ -2156,7 +2397,8 @@ class SessionRowLockOrderTest {
             // an anonymous-class body; folding them inline would score the
             // session lock the body takes where it never runs.
             EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, importedTypes, ambiguous);
+                    methods, constants, importedTypes, finalTypes,
+                    receivers, typedReceivers, ambiguous);
             for (Tree member : node.getMembers()) {
                 if (member instanceof MethodTree method
                         && method.getBody() != null
@@ -2209,7 +2451,7 @@ class SessionRowLockOrderTest {
 
         private void addCall(MethodInvocationTree node) {
             resolve(node.getMethodSelect(), node.getArguments().size(),
-                    caller, methods, importedTypes, ambiguous).forEach(key ->
+                    caller, methods, importedTypes, receivers, ambiguous).forEach(key ->
                     events.add(new Event(false, false, key)));
         }
 
@@ -2234,11 +2476,12 @@ class SessionRowLockOrderTest {
     // The same-file member an invocation resolves to, or the reference
     // recorded as ambiguous. A bare or this. call searches the caller's
     // enclosing type chain innermost first; a Type. call searches the
-    // named type. Any other receiver hides its type from the parse, so the
-    // call is never resolved — it is exempt when every same-named member
-    // is benign and throws otherwise.
+    // named type. An exact same-file final receiver uses its full owner
+    // path. Other receivers remain ambiguous and fail closed when any
+    // same-named candidate reaches either audited side.
     private static List<Key> resolve(Tree select, int argCount, Key caller,
             Map<Key, MethodTree> methods, Set<String> importedTypes,
+            Map<String, String> receivers,
             List<Ambiguous> ambiguous) {
         if (select instanceof IdentifierTree identifier) {
             return resolveInOwnerChain(identifier.getName().toString(),
@@ -2251,22 +2494,37 @@ class SessionRowLockOrderTest {
                     return resolveInOwnerChain(name, argCount, caller,
                             methods, ambiguous);
                 }
-                List<Key> inType = methods.keySet().stream()
-                        .filter(key -> key.ownerSimpleName()
-                                .contentEquals(base.getName().toString())
-                                && key.name().contentEquals(name)
-                                && key.arity() == argCount)
-                        .toList();
-                if (inType.size() == 1) {
-                    return List.of(inType.getFirst());
-                }
-                if (!inType.isEmpty()) {
-                    ambiguous.add(new Ambiguous(caller,
-                            inType.getFirst().handle(), inType));
-                    return List.of();
-                }
-                if (importedTypes.contains(base.getName().toString())) {
-                    return List.of();
+                String receiver = base.getName().toString();
+                if (receivers.containsKey(receiver)) {
+                    List<Key> exact = methods.keySet().stream()
+                            .filter(key -> key.owner().equals(receivers.get(receiver))
+                                    && key.name().equals(name)
+                                    && key.arity() == argCount).toList();
+                    if (exact.size() == 1) {
+                        return List.of(exact.getFirst());
+                    }
+                    if (!exact.isEmpty()) {
+                        ambiguous.add(new Ambiguous(caller, handle(exact), exact));
+                        return List.of();
+                    }
+                } else {
+                    List<Key> inType = methods.keySet().stream()
+                            .filter(key -> key.ownerSimpleName()
+                                    .contentEquals(base.getName().toString())
+                                    && key.name().contentEquals(name)
+                                    && key.arity() == argCount)
+                            .toList();
+                    if (inType.size() == 1) {
+                        return List.of(inType.getFirst());
+                    }
+                    if (!inType.isEmpty()) {
+                        ambiguous.add(new Ambiguous(caller,
+                                inType.getFirst().handle(), inType));
+                        return List.of();
+                    }
+                    if (importedTypes.contains(base.getName().toString())) {
+                        return List.of();
+                    }
                 }
             }
             List<Key> any = methods.keySet().stream()

@@ -113,6 +113,13 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         }
     }
 
+    @Test
+    void originalHostedProducerDrainsApplicationWithoutReleasingItsBindingOrHolder() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            acceptance(database.source(), directory, true, false, true);
+        }
+    }
+
     static void acceptance(DataSource source, Path directory, boolean hostedProducer) throws Exception {
         acceptance(source, directory, hostedProducer, false);
     }
@@ -128,6 +135,15 @@ class WorkspaceCsiSqlWorkerMySqlIT {
 
     static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
             String recoveryCut, int isolation) throws Exception {
+        acceptance(source, directory, hostedProducer, coldRecovery, recoveryCut, isolation, false);
+    }
+
+    private static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery, boolean retirement) throws Exception {
+        acceptance(source, directory, hostedProducer, coldRecovery, "receipt_complete", 0, retirement);
+    }
+
+    private static void acceptance(DataSource source, Path directory, boolean hostedProducer, boolean coldRecovery,
+            String recoveryCut, int isolation, boolean retirement) throws Exception {
         Path root = Path.of("../..").toRealPath();
         assertThat(Files.isRegularFile(root.resolve("packages/cli/dist/src/serve/managed-csi-file-worker.js")))
                 .as("Run npm run build before this explicitly invoked integration gate").isTrue();
@@ -175,6 +191,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             original.headers().map().forEach((key, values) -> values.forEach(value -> mapped.header(key, value)));
             return actualClient.sendAsync(mapped.build(), call.getArgument(1));
         }).when(mappedClient).sendAsync(any(HttpRequest.class), any());
+        var application = new WorkspaceCsiApplicationStore(jdbc, manager, journal, bindings, sessions, new HttpRuntimeTransport(mappedClient));
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, JSON, properties, registration,
                 sessionId, request.requestKey(), bindings, sessions, new HttpRuntimeTransport(mappedClient));
         var provisioner = mock(RuntimeProvisioner.class);
@@ -197,6 +214,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                             nativeReads.incrementAndGet();
                             return access.readNative(token, body);
                         })) {
+            broker.registerCsiApplicationAuthority("tenant", sessionId,
+                    (token, body) -> application.workerAuthority("tenant", sessionId, token, body));
             broker.start();
             var adapter = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             var executor = Executors.newCachedThreadPool();
@@ -214,7 +233,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         Object response = switch (route) {
                             case "/fixture:setup" -> {
                                 var handle = identity(binding, registration, reserved, broker.getBaseUri(),
-                                        WorkspaceCsiRuntimeIdentity.map(body.get("mount")));
+                                        WorkspaceCsiRuntimeIdentity.map(body.get("mount")), retirement);
                                 assertThat(placement.compareAndSet(null, handle)).isTrue();
                                 yield Map.of("boot", WorkspaceCsiRuntimeIdentity.boot(request, binding.getProvisionSeed(), handle),
                                         "pod", WorkspaceCsiRuntimeIdentity.pod(WorkspaceCsiRuntimeIdentity.map(handle.getValue().get("placement"))));
@@ -232,6 +251,11 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                                     "activationRevision", jdbc.queryForObject(
                                             "SELECT first_activation_journal_revision FROM ma_runtime_binding", Long.class),
                                     "nativeReads", nativeReads.get());
+                            case "/fixture:retire" -> {
+                                var claimed = bindings.claimOperation(initial.getBindingId(), "owned-retire", Duration.ofMinutes(5));
+                                var intent = storage.beginRetirement(registration, bindings, claimed, storage.inspect(registration), UUID.randomUUID().toString());
+                                yield Map.of("retirementId", intent.operationId());
+                            }
                             case "/fixture:leases" -> jdbc.queryForObject("SELECT writer_lease_until, activation_expires_at, "
                                     + com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime.SQL_NOW
                                     + " FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'", (row, number) ->
@@ -281,7 +305,11 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     String suffix = route.substring(prefix.length());
                     String token = exchange.getRequestHeaders().getFirst(ManagedSessionStoreModels.WRITER_TOKEN_HEADER);
                     var query = query(exchange);
-                    Object response = suffix.startsWith("/resources/")
+                    Object response = suffix.startsWith("/csi-retirement")
+                            ? suffix.equals("/csi-retirement")
+                                ? application.status("tenant", sessionId, query.get("workspaceId"), query.get("retirementId"), token)
+                                : application.command("tenant", sessionId, token, suffix.substring("/csi-retirement:".length()), raw.getBytes(StandardCharsets.UTF_8))
+                            : suffix.startsWith("/resources/")
                             ? journal.readOwnerResource("tenant", query.get("workspaceId"), sessionId,
                                     suffix.substring("/resources/".length()), token)
                             : transaction.execute(status -> switch (suffix) {
@@ -350,6 +378,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         "recoveryCut", recoveryCut,
                         "runtime", Map.of("bindingId", binding.getBindingId(), "generation", Long.toString(binding.getGeneration()))));
                 inputBody.put("isolation", isolation);
+                inputBody.put("retirement", retirement);
                 JSON.writeValue(input.toFile(), inputBody);
                 Path producer = directory.resolve("producer.mjs");
                 try (var script = WorkspaceCsiSqlWorkerMySqlIT.class.getResourceAsStream("/csi-sql-worker-acceptance.mjs");
@@ -401,6 +430,17 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     assertThat(result.path("coldRecovery").asBoolean()).isTrue();
                     assertThat(result.path("coldRefusalChecks").asInt()).isEqualTo(9);
                     assertThat(jdbc.queryForObject("SELECT activation_epoch FROM ma_session_head", Long.class)).isEqualTo(2);
+                }
+                if (retirement) {
+                    assertThat(result.path("retirement").path("stage").asText()).isEqualTo("DRAINED");
+                    assertThat(result.path("retirement").path("progressVersion").asInt()).isEqualTo(4);
+                    assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head", String.class)).isEqualTo("SEALED");
+                    assertThat(jdbc.queryForObject("SELECT wake_scan_pending FROM ma_session_head", Boolean.class)).isFalse();
+                    assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding", String.class)).isEqualTo("DRAINING");
+                    assertThat(jdbc.queryForObject("SELECT csi_phase FROM ma_storage_owner", String.class)).isEqualTo("DRAINING");
+                    assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session", String.class)).isEqualTo("RELEASED");
+                    assertThat(jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class)).isEqualTo(binding.getBindingId());
+                    assertThat(jdbc.queryForObject("SELECT progress_stage FROM ma_operation WHERE operation_kind='CSI_RETIREMENT'", String.class)).isEqualTo("DRAINED");
                 }
                 assertThat(jdbc.queryForObject("SELECT first_activation_journal_revision FROM ma_runtime_binding", Long.class)).isEqualTo(2);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE operation = 'CSI_RESOURCE_READ'"
@@ -630,7 +670,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
     }
 
     private static RuntimeResourceHandle identity(RuntimeBindingRecord binding, WorkspaceCsiRegistration registration,
-            WorkspaceCsiReservationStore.Reservation reservation, URI broker, Map<String, Object> mount) {
+            WorkspaceCsiReservationStore.Reservation reservation, URI broker, Map<String, Object> mount, boolean retirement) {
         var seed = binding.getProvisionSeed();
         var storage = new LinkedHashMap<String, Object>(Map.of("clusterDomain", registration.clusterDomain(),
                 "namespace", registration.namespace(), "pvcUid", registration.pvcUid(), "pvUid", registration.pvUid(),
@@ -639,7 +679,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         storage.putAll(Map.of("registrationRevision", Long.toString(registration.revision()), "reservationId", reservation.reservationId(),
                 "reservationRevision", Long.toString(reservation.revision())));
         var authority = ManagedCsiFilesProtocol.authority(broker.toString().replaceFirst("/$", ""));
-        var boot = ManagedCsiFilesProtocol.boot(binding.getRequest(), seed, storage, authority);
+        var boot = retirement ? ManagedCsiFilesProtocol.finalizationBoot(binding.getRequest(), seed, storage, authority)
+                : ManagedCsiFilesProtocol.boot(binding.getRequest(), seed, storage, authority);
         String uid = UUID.randomUUID().toString();
         var placement = new LinkedHashMap<String, Object>(Map.of("clusterDomain", registration.clusterDomain(), "namespace", registration.namespace(),
                 "namespaceUid", uid, "podName", WorkspaceCsiRuntimeIdentity.name(seed), "podUid", uid, "nodeName", "owned-node", "nodeUid", uid,
@@ -660,8 +701,11 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         value.put("mount", mount);
         value.put("profileIdentity", ManagedCsiFilesProtocol.identity(binding.getRequest()));
         value.put("authority", authority);
+        if (retirement) {
+            value.put("finalization", boot.get("finalization"));
+        }
         value.put("identity", WorkspaceCsiRuntimeIdentity.digest(value));
-        var handle = new RuntimeResourceHandle("kubernetes-workspace", 3, value);
+        var handle = new RuntimeResourceHandle("kubernetes-workspace", retirement ? 4 : 3, value);
         WorkspaceCsiRuntimeIdentity.validate(binding.getRequest(), seed, handle);
         return handle;
     }
