@@ -68,7 +68,7 @@ import {
 import { useTimelineViewport } from '../../trajectory/useTimelineViewport';
 import { TrajectoryWaterfallCell } from './TrajectoryWaterfallCell';
 import { TrajectoryToolbar } from './TrajectoryToolbar';
-import { TrajectorySummaryBar } from './TrajectorySummaryBar';
+import { TrajectorySummaryBar, compactTokens } from './TrajectorySummaryBar';
 import {
   isRetryableFailure,
   trajectoryPillState,
@@ -118,16 +118,6 @@ export interface TrajectoryPanelProps {
    */
   loadPage?: TrajectoryPageLoader;
   historyGapRevision?: number;
-}
-
-/**
- * Thresholds are the rounded boundary, not the raw one: 999,950 tokens is
- * `1.0M`, because `999.9k` is what the next unit down rounds away from.
- */
-function compactTokens(value: number): string {
-  if (value >= 999_950) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return String(value);
 }
 
 function usageSummary(usage: DaemonTurnUsage): string {
@@ -367,6 +357,7 @@ export function TrajectoryPanel({
     mode: windowMode,
     navigationVersion,
     navigationError,
+    loadingKind,
     canRefresh,
     canOlder,
     canNewer,
@@ -918,8 +909,14 @@ export function TrajectoryPanel({
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       // Keys pressed on a control inside the grid, such as a boundary row's
-      // button, belong to that control.
-      if (event.target !== event.currentTarget) return;
+      // button, belong to that control. A row's own buttons are out of the tab
+      // order and only hold focus because they were clicked; the grid keeps
+      // their keys.
+      if (
+        event.target !== event.currentTarget &&
+        (event.target as HTMLElement).tabIndex >= 0
+      )
+        return;
       if (event.key === 'Escape') {
         // Only claimed when there is a selection to drop; otherwise Escape is
         // left to whatever encloses the panel.
@@ -1270,6 +1267,9 @@ export function TrajectoryPanel({
     [t],
   );
 
+  // The executions strip reports news only while it is mounted; once the list
+  // empties it unmounts and can no longer clear what it reported.
+  const newExecutions = executionsUpdated && executions.rows.length > 0;
   const pill = trajectoryPillState({
     windowMode,
     following,
@@ -1290,7 +1290,8 @@ export function TrajectoryPanel({
   });
   const topBoundary = trajectoryTopBoundary({
     truncated,
-    loading: status === 'loading',
+    // A refresh of the latest window leaves the start of it where it is.
+    loading: status === 'loading' && loadingKind !== 'latest',
     olderFailure,
   });
   const rangeLabel =
@@ -1403,8 +1404,8 @@ export function TrajectoryPanel({
         summary={summary}
         pill={pill}
         onPill={() => {
-          if (pill === 'live') pauseFollowing();
-          else returnToLatest();
+          if (pill === 'paused' || pill === 'history') returnToLatest();
+          else pauseFollowing();
         }}
         warnings={warnings}
         onRetry={retry}
@@ -1413,7 +1414,8 @@ export function TrajectoryPanel({
           refresh();
         }}
         onReturnToLatest={returnToLatest}
-        canRefresh={canRefresh && windowMode === 'latest'}
+        canRefresh={canRefresh}
+        history={windowMode === 'history'}
         failuresOn={filter.status === 'error'}
         onToggleFailures={() =>
           changeFilter({
@@ -1507,7 +1509,7 @@ export function TrajectoryPanel({
         {visualRows.length === 0 ? (
           <>
             {trajectory && boundaryRow}
-            {status === 'error' && error ? (
+            {status === 'error' && error && !trajectory ? (
               <div className={styles.placeholder} role="alert">
                 <span>
                   {error.kind === 'partial'
@@ -1684,7 +1686,7 @@ export function TrajectoryPanel({
             </div>
           </div>
         )}
-        {pill === 'paused' && (awayFromTail || executionsUpdated) && (
+        {pill === 'paused' && (awayFromTail || newExecutions) && (
           <button
             type="button"
             className={styles.jumpLatest}
@@ -1696,7 +1698,7 @@ export function TrajectoryPanel({
           >
             <ArrowDownIcon size={13} aria-hidden="true" />
             {t('trajectory.jumpLatest')}
-            {executionsUpdated && (
+            {newExecutions && (
               <span
                 className={styles.updatedDot}
                 role="img"

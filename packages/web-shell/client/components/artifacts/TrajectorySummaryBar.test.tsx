@@ -29,7 +29,7 @@ const SUMMARY: TrajectorySummary = {
   plottedCount: 37,
   missingStartCount: 0,
   missingTimingCount: 0,
-  tokens: { input: 412_000, output: 6_800, cached: 380_000 },
+  tokens: { input: 412_000, output: 6_800 },
 };
 
 type Props = ComponentProps<typeof TrajectorySummaryBar>;
@@ -54,6 +54,7 @@ async function mount(
     onRefresh: vi.fn(),
     onReturnToLatest: vi.fn(),
     canRefresh: true,
+    history: false,
     failuresOn: false,
     onToggleFailures: vi.fn(),
     about: {
@@ -111,17 +112,19 @@ it('hides the failure chip when nothing failed', async () => {
 });
 
 it.each([
-  ['live', 'Live', true],
-  ['paused', 'Paused', true],
-  ['history', 'Earlier window', true],
-  ['returning', 'Updating…', false],
-  ['connecting', 'Connecting…', false],
-] as const)('pill %s reads %s', async (pill, text, actionable) => {
+  ['live', 'Live', 'Pause following'],
+  ['connecting', 'Connecting…', 'Pause following'],
+  ['reconnecting', 'Reconnecting…', 'Pause following'],
+  ['returning', 'Updating…', 'Pause following'],
+  ['paused', 'Paused', 'Return to latest'],
+  ['history', 'Earlier window', 'Return to latest'],
+] as const)('pill %s reads %s', async (pill, text, action) => {
   const { props } = await mount({ pill });
   const button = byTestId('trajectory-follow-status')!;
   expect(button.textContent).toBe(text);
+  expect(button.title).toBe(action);
   await act(async () => button.click());
-  expect(props.onPill).toHaveBeenCalledTimes(actionable ? 1 : 0);
+  expect(props.onPill).toHaveBeenCalledTimes(1);
 });
 
 it('renders no pill without live state to report', async () => {
@@ -167,4 +170,42 @@ it('keeps scope caveats behind About', async () => {
     'Totals cover the loaded records: 2 pages, 4 turns.',
   );
   expect(document.body.textContent).toContain('excluded from search');
+});
+
+it('announces failed reads while the records stay on screen', async () => {
+  await mount({
+    warnings: [
+      { kind: 'navigation-failed', failure: { kind: 'expired' } },
+      { kind: 'history-gap' },
+    ],
+  });
+  const alert = byTestId('trajectory-failure-alert')!;
+  expect(alert.getAttribute('role')).toBe('alert');
+  expect(alert.textContent).not.toBe('');
+});
+
+it('offers the way back to latest from an earlier window', async () => {
+  const { container, props } = await mount({
+    history: true,
+    warnings: [
+      { kind: 'navigation-failed', failure: { kind: 'expired' } },
+      { kind: 'history-gap' },
+    ],
+  });
+  const refresh = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Refresh"]',
+  )!;
+  expect(refresh.disabled).toBe(true);
+  await act(async () => byTestId('trajectory-warnings')!.click());
+  const actions = [
+    ...document.querySelectorAll<HTMLButtonElement>('ul button'),
+  ];
+  expect(actions.map((button) => button.textContent)).toEqual([
+    'Back to latest',
+    'Back to latest',
+  ]);
+  expect(actions.every((button) => !button.disabled)).toBe(true);
+  await act(async () => actions.forEach((button) => button.click()));
+  expect(props.onReturnToLatest).toHaveBeenCalledTimes(2);
+  expect(props.onRefresh).not.toHaveBeenCalled();
 });

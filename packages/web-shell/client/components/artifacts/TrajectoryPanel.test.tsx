@@ -353,7 +353,7 @@ describe('execution following', () => {
       });
       expect(read).toHaveBeenCalledTimes(2);
       expect(followStatus(container)).toBe('Updating…');
-      expect(button.getAttribute('aria-disabled')).toBe('true');
+      expect(button.title).toBe('Pause following');
       await act(async () => complete(page(REAL_EVENTS)));
       expect(followStatus(container)).toBe('Live');
       expect(
@@ -631,6 +631,49 @@ describe('execution following', () => {
       container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
         .scrollTop,
     ).toBe(SCROLL_HEIGHT);
+  });
+
+  it('keeps the way back to latest when an earlier window cannot move', async () => {
+    let expired = false;
+    const loadPage: TrajectoryPageLoader = async ({ cursor }) => {
+      if (expired)
+        throw Object.assign(new Error('gone'), {
+          body: { code: 'invalid_transcript_cursor' },
+        });
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `page-${index}`)], {
+        hasMore: true,
+        nextCursor: String(index + 1),
+      });
+    };
+    const container = await render(loadPage);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-older"]',
+        )!
+        .click(),
+    );
+    expired = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-older"]',
+        )!
+        .click(),
+    );
+    expect(followStatus(container)).toBe('Earlier window');
+    // The window did not move; that is said, not only marked by the chip.
+    expect(
+      container.querySelector('[data-testid="trajectory-failure-alert"]'),
+    ).not.toBeNull();
+    await openWarnings(container);
+    const back = findButton(container, 'Back to latest');
+    expect(back.disabled).toBe(false);
+    expired = false;
+    await act(async () => back.click());
+    expect(followStatus(container)).toBe('');
+    expect(container.textContent).toContain('page-0');
   });
 });
 
@@ -2439,6 +2482,23 @@ describe('collapsible trajectory', () => {
     ).not.toBeNull();
   });
 
+  it('keeps row navigation after a fold button takes focus from a click', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    const button = fold(container);
+    button.focus();
+    await act(async () =>
+      button.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }),
+      ),
+    );
+    expect(requestRow(container).dataset.selected).toBe('true');
+  });
+
   it('retains stable request folds across failed and successful refreshes', async () => {
     let fail = false;
     const container = await render(async () =>
@@ -2859,6 +2919,26 @@ describe('trajectory diagnostic filters', () => {
       container.querySelector('[data-testid="trajectory-filter-empty"]'),
     ).not.toBeNull();
     expect(button(container, 'Next').disabled).toBe(true);
+  });
+
+  it('still offers to clear a filter that matches nothing after a refresh fails', async () => {
+    let fail = false;
+    const container = await render(async () =>
+      fail ? page([], { replayError: 'offline' }) : page(events()),
+    );
+    await typeQuery(container, 'no such record');
+    fail = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-filter-empty"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="trajectory-failure-alert"]'),
+    ).not.toBeNull();
   });
 
   it('preserves filters across refresh and clears them immediately on loader change', async () => {

@@ -20,7 +20,7 @@ export interface TrajectorySummary {
   missingStartCount: number;
   missingTimingCount: number;
   /** Main-session requests that reported usage; absent when none did. */
-  tokens?: { input: number; output: number; cached: number };
+  tokens?: { input: number; output: number };
 }
 
 export function summarizeTrajectory(trajectory: Trajectory): TrajectorySummary {
@@ -42,10 +42,9 @@ export function summarizeTrajectory(trajectory: Trajectory): TrajectorySummary {
         summary.mainRequestMs =
           (summary.mainRequestMs ?? 0) + row.timing.durationMs;
         if (row.usage) {
-          summary.tokens ??= { input: 0, output: 0, cached: 0 };
+          summary.tokens ??= { input: 0, output: 0 };
           summary.tokens.input += row.usage.inputTokens;
           summary.tokens.output += row.usage.outputTokens;
-          summary.tokens.cached += row.usage.cachedTokens ?? 0;
         }
       }
     } else if (row.kind === 'tool') {

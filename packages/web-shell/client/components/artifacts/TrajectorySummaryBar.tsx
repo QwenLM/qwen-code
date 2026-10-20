@@ -65,6 +65,7 @@ export function TrajectorySummaryBar({
   onRefresh,
   onReturnToLatest,
   canRefresh,
+  history,
   failuresOn,
   onToggleFailures,
   about,
@@ -77,6 +78,8 @@ export function TrajectorySummaryBar({
   onRefresh: () => void;
   onReturnToLatest: () => void;
   canRefresh: boolean;
+  /** An earlier window is on screen: a refresh would leave it for the latest. */
+  history: boolean;
   failuresOn: boolean;
   onToggleFailures: () => void;
   about: TrajectoryAboutInfo;
@@ -84,6 +87,16 @@ export function TrajectorySummaryBar({
   const { t, language } = useI18n();
   const labelFirst = language.startsWith('zh');
   const failures = summary ? summary.requestFailures + summary.toolFailures : 0;
+  // A read that just failed leaves the records as they were, so the chip alone
+  // would go unnoticed; it is also announced.
+  const failureAlert = warnings
+    .map((warning) =>
+      warning.kind === 'refresh-failed' || warning.kind === 'navigation-failed'
+        ? failureText(warning.failure, t)
+        : '',
+    )
+    .filter(Boolean)
+    .join(' ');
   const duration = (value: number | undefined) =>
     value === undefined ? '—' : formatDuration(value);
   const stat = (label: string, value: string, headline = false) => {
@@ -152,6 +165,15 @@ export function TrajectorySummaryBar({
         )}
       </div>
       <div className={styles.actions}>
+        {failureAlert && (
+          <div
+            className={styles.srOnly}
+            role="alert"
+            data-testid="trajectory-failure-alert"
+          >
+            {failureAlert}
+          </div>
+        )}
         {warnings.length > 0 && (
           <Popover>
             <PopoverTrigger asChild>
@@ -176,6 +198,7 @@ export function TrajectorySummaryBar({
                       onRefresh={onRefresh}
                       onReturnToLatest={onReturnToLatest}
                       canRefresh={canRefresh}
+                      history={history}
                     />
                   </li>
                 ))}
@@ -201,7 +224,7 @@ export function TrajectorySummaryBar({
           type="button"
           className={styles.iconButton}
           onClick={onRefresh}
-          disabled={!canRefresh}
+          disabled={!canRefresh || history}
           aria-label={t('common.refresh')}
           title={t('common.refresh')}
         >
@@ -237,26 +260,21 @@ function StatusPill({
 }) {
   const { t } = useI18n();
   if (state === 'none') return null;
-  const actionable =
-    state === 'live' || state === 'paused' || state === 'history';
   const label = t(`trajectory.pill.${state}`);
+  // While following, connecting or on the way back to the latest records, the
+  // pill pauses; otherwise it returns to the latest.
   const action =
-    state === 'live'
-      ? t('trajectory.pill.pause')
-      : actionable
-        ? t('trajectory.pill.resume')
-        : undefined;
+    state === 'paused' || state === 'history'
+      ? t('trajectory.pill.resume')
+      : t('trajectory.pill.pause');
   return (
     <button
       type="button"
       className={styles.chip}
       data-state={state}
-      aria-disabled={!actionable}
-      aria-label={action ? `${label} · ${action}` : label}
+      aria-label={`${label} · ${action}`}
       title={action}
-      onClick={() => {
-        if (actionable) onClick();
-      }}
+      onClick={onClick}
       data-testid="trajectory-follow-status"
     >
       {state === 'live' ? (
@@ -283,12 +301,14 @@ function WarningItem({
   onRefresh,
   onReturnToLatest,
   canRefresh,
+  history,
 }: {
   warning: TrajectoryWarning;
   onRetry: () => void;
   onRefresh: () => void;
   onReturnToLatest: () => void;
   canRefresh: boolean;
+  history: boolean;
 }) {
   const { t } = useI18n();
   switch (warning.kind) {
@@ -331,9 +351,9 @@ function WarningItem({
               type="button"
               className={styles.action}
               disabled={!canRefresh}
-              onClick={onRefresh}
+              onClick={history ? onReturnToLatest : onRefresh}
             >
-              {t('common.refresh')}
+              {t(history ? 'trajectory.window.return' : 'common.refresh')}
             </button>
           </div>
         </>
