@@ -23,13 +23,13 @@ cut, not about a Hook-specific frame.
 `bothStreamsResumeTheHeldHookTurnOnMySql` in
 `HostedHookStreamGapIT`, one cold boot on the `hosted-harness-mysql` lane:
 
-| Step | What happens                                                                                  |
-| ---- | --------------------------------------------------------------------------------------------- |
-| 1    | A `PreToolUse` command Hook holds for 20 s in the Runtime worker, then denies.                |
-| 2    | Both clients read the Session stream from the start: public (SSE) and WebShell (JSON cursor). |
-| 3    | Once the Hook is holding and both clients have read a frame, both clients are cut.            |
-| 4    | The Hook's deny lands while neither client is connected; the turn completes.                  |
-| 5    | Each client reconnects with its own cursor and reads to the ledger's tail.                    |
+| Step | What happens                                                                                       |
+| ---- | -------------------------------------------------------------------------------------------------- |
+| 1    | A `PreToolUse` command Hook is held in the Runtime worker until the test releases it, then denies. |
+| 2    | Both clients read the Session stream from the start: public (SSE) and WebShell (JSON cursor).      |
+| 3    | Once the Hook is holding and both clients have read a frame, both clients are cut.                 |
+| 4    | The Hook's deny lands while neither client is connected; the turn completes.                       |
+| 5    | Each client reconnects with its own cursor and reads to the ledger's tail.                         |
 
 The tool-call start frame is emitted only when the call leaves the Hook, so
 the cut deliberately happens before it: the frames written during the hold
