@@ -11,7 +11,14 @@
 // them fails the gate only on CI, after a broker boot, or not at all.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -120,6 +127,7 @@ describe('EventTransport broker gates CI', () => {
       order.indexOf('Start the RocketMQ LiteTopic cluster'),
     );
     const dir = mkdtempSync(join(tmpdir(), 'rmq-ports-'));
+    let holderDir;
     try {
       const envFile = join(dir, 'github_env');
       writeFileSync(envFile, '');
@@ -134,14 +142,42 @@ describe('EventTransport broker gates CI', () => {
           .split('\n')
           .map((line) => line.split('=')),
       );
-      expect(Object.keys(chosen).sort()).toEqual([...names].sort());
-      const ports = Object.values(chosen).map(Number);
+      expect(Object.keys(chosen).sort()).toEqual(
+        [...names, 'RMQ_HOLDER_DIR'].sort(),
+      );
+      const ports = names.map((name) => Number(chosen[name]));
       expect(new Set(ports).size).toBe(names.length);
       // The broker also binds listenPort - 2 (fast channel) and + 1 (HA).
       const broker = Number(chosen.RMQ_BROKER_PORT);
       expect(ports).not.toContain(broker - 2);
       expect(ports).not.toContain(broker + 1);
+      // Every chosen port (and the broker companions) stays parked behind a
+      // live holder process until the broker script takes it over, so a
+      // sibling job cannot steal the port in between.
+      holderDir = chosen.RMQ_HOLDER_DIR;
+      const held = readdirSync(holderDir).sort();
+      expect(held).toHaveLength(6);
+      for (const file of held) {
+        const pid = Number(readFileSync(join(holderDir, file), 'utf8'));
+        try {
+          process.kill(pid, 0);
+        } catch {
+          throw new Error(
+            `holder ${pid} for port ${file} is not alive (dir ${holderDir})`,
+          );
+        }
+      }
     } finally {
+      if (holderDir && existsSync(holderDir)) {
+        for (const file of readdirSync(holderDir)) {
+          try {
+            process.kill(Number(readFileSync(join(holderDir, file), 'utf8')));
+          } catch {
+            // Holder already gone.
+          }
+        }
+        rmSync(holderDir, { recursive: true, force: true });
+      }
       rmSync(dir, { recursive: true, force: true });
     }
     const verify = step('Verify the EventTransport broker gates').run;
