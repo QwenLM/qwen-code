@@ -72,10 +72,10 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
 const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
-// Advanced-table toolbar polish in the shared transcript entry measures
-// 2,036,696 renderer bytes on main 81e83de6b6 plus this change, leaving
-// 1,304 below this cap. The forbidden-input and import.meta guards remain.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_038_000;
+// Shell-task runtime labels in the shared transcript dictionary bring the
+// PR #14831 renderer to 2,039,104 bytes; those labels account for 1,558 bytes.
+// Keep 896 bytes of headroom. The forbidden-input and import.meta guards remain.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_040_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
