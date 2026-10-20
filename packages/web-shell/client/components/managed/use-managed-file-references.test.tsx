@@ -170,7 +170,7 @@ describe('Managed file reference snapshots', () => {
     expect(prepared.text).toContain('"src/a.ts" → "reference-1-a.ts"');
   });
 
-  it('preserves the existing total encoded input bound', async () => {
+  it('applies the 8 MiB encoded input bound to referenced files', async () => {
     await render();
     const prepared = await current.prepareInput(
       'prompt '.repeat(8000) + '@src/a.ts',
@@ -183,7 +183,21 @@ describe('Managed file reference snapshots', () => {
     );
     await expect(
       encodeManagedInput(prepared.text, [], prepared.files),
-    ).rejects.toThrow('48 KiB');
+    ).resolves.toHaveLength(2);
+    await expect(
+      encodeManagedInput(
+        prepared.text,
+        [],
+        [
+          ...prepared.files,
+          {
+            name: 'large.txt',
+            media_type: 'text/plain',
+            text: 'x'.repeat(8 * 1024 * 1024),
+          },
+        ],
+      ),
+    ).rejects.toThrow('8 MiB');
   });
 
   it('rejects a snapshot from another Session even with an identical Workspace context', async () => {

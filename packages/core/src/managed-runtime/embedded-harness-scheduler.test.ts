@@ -1705,11 +1705,21 @@ describe('EmbeddedHarnessScheduler', () => {
     // before the fault is armed.
     headroom = false;
     await scheduler.submit(activation('a2'));
+    await waitUntil(() => scheduler.isMemoryBlocked);
     fsFault.failAppends = 20;
     headroom = true;
-    await advanceTimersUntil(() => fsFault.failAppends === 1, 1_000);
+    // Drive one claim at a time without advancing the lease renewal timer:
+    // a renewal must not consume a fault intended for the claim streak.
+    for (let attempt = 2; attempt <= 20; attempt++) {
+      scheduler.notifyCapacityChanged();
+      await waitUntil(() => claimSpy.mock.calls.length === attempt);
+      await expect(claimSpy.mock.results.at(-1)!.value).rejects.toThrow(
+        'disk busy',
+      );
+    }
     headroom = false;
     expect(claimSpy).toHaveBeenCalledTimes(20);
+    expect(fsFault.failAppends).toBe(1);
     expect(scheduler.haltedError).toBeUndefined();
 
     finishHandler.resolve();

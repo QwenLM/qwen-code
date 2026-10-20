@@ -201,6 +201,22 @@ describe('withChildAgentConsumption', () => {
     expect(agents.markConsumed).toHaveBeenCalledTimes(1);
   });
 
+  it('consumes the original child notification after its continuation completes', async () => {
+    const { session, agents } = world();
+    const turn = withChildAgentConsumption(
+      harness(session, async () => ({ systemPayload: { state: 'completed' } })),
+      session,
+    );
+    await expect(
+      turn({
+        ...TURN,
+        turnId: 'wake-recovery:replacement',
+        notificationTurnId: TURN.turnId,
+      }),
+    ).resolves.toBe('settled');
+    expect(agents.markConsumed).toHaveBeenCalledExactlyOnceWith('run-1');
+  });
+
   // R1-74: a cancelled or errored wake burns the input, so the pump still
   // advances — but the acceptance stays at accepting: the consumption
   // gate only fires for a turn that actually completed.
