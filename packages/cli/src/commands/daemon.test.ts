@@ -151,23 +151,76 @@ describe('qwen daemon command', () => {
 
   it('waits for a daemon to report ready', async () => {
     const responses = [
-      { status: 'warning', issues: ['starting'] },
+      { status: 'warning', issues: ['starting'], starting: true },
       { status: 'ok', issues: [] },
     ];
     const fetchDetail = vi.fn(async () => responses.shift()!);
     await expect(
-      waitForDaemonReady(entry(4170).record, undefined, 1_000, 1, fetchDetail),
+      waitForDaemonReady(
+        entry(4170).record,
+        undefined,
+        1_000,
+        1,
+        fetchDetail,
+        () => true,
+      ),
     ).resolves.toMatchObject({ status: 'ok' });
     expect(fetchDetail).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a permanent warning as ready', async () => {
+    const fetchDetail = vi.fn(async () => ({
+      status: 'warning',
+      issues: ['channel restore failed'],
+      starting: false,
+    }));
+    await expect(
+      waitForDaemonReady(
+        entry(4170).record,
+        undefined,
+        1_000,
+        1,
+        fetchDetail,
+        () => true,
+      ),
+    ).resolves.toMatchObject({ status: 'warning' });
+    expect(fetchDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails readiness when the listener identity is lost', async () => {
+    const fetchDetail = vi.fn(async () => ({ status: 'ok', issues: [] }));
+    const identity = vi
+      .fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    await expect(
+      waitForDaemonReady(
+        entry(4170).record,
+        undefined,
+        1_000,
+        1,
+        fetchDetail,
+        identity,
+      ),
+    ).resolves.toBe('daemon process exited before readiness');
+    expect(fetchDetail).toHaveBeenCalledTimes(1);
   });
 
   it('returns the last status when readiness times out', async () => {
     const fetchDetail = vi.fn(async () => ({
       status: 'warning',
       issues: ['starting'],
+      starting: true,
     }));
     await expect(
-      waitForDaemonReady(entry(4170).record, undefined, 0, 1, fetchDetail),
+      waitForDaemonReady(
+        entry(4170).record,
+        undefined,
+        0,
+        1,
+        fetchDetail,
+        () => true,
+      ),
     ).resolves.toMatchObject({ status: 'warning' });
     expect(fetchDetail).toHaveBeenCalledTimes(1);
   });

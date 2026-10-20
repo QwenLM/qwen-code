@@ -58,6 +58,7 @@ interface DaemonDetailSummary {
   uptimeMs?: number;
   sessions?: { active: number; admissionInFlight?: number };
   issues: string[];
+  starting?: boolean;
 }
 
 interface LogsArgs {
@@ -281,15 +282,18 @@ export function summarizeDaemonStatus(
     rawSessions !== null && typeof rawSessions === 'object'
       ? (rawSessions as Record<string, unknown>)
       : undefined;
-  const issues = Array.isArray(response['issues'])
-    ? response['issues']
-        .map((issue) =>
-          issue !== null && typeof issue === 'object'
-            ? (issue as Record<string, unknown>)['message']
-            : undefined,
-        )
-        .filter((message): message is string => typeof message === 'string')
+  const issueRecords = Array.isArray(response['issues'])
+    ? response['issues'].filter(
+        (issue): issue is Record<string, unknown> =>
+          issue !== null && typeof issue === 'object',
+      )
     : [];
+  const issues = issueRecords
+    .map((issue) => issue['message'])
+    .filter((message): message is string => typeof message === 'string');
+  const starting = issueRecords.some(
+    (issue) => issue['code'] === 'daemon_runtime_starting',
+  );
   const version = daemon?.['qwenCodeVersion'];
   const uptimeMs = daemon?.['uptimeMs'];
   const active = sessions?.['active'];
@@ -309,7 +313,18 @@ export function summarizeDaemonStatus(
         }
       : {}),
     issues,
+    ...(starting ? { starting: true } : {}),
   };
+}
+
+export function isDaemonReady(
+  detail: DaemonDetailSummary | string,
+): detail is DaemonDetailSummary {
+  return (
+    typeof detail !== 'string' &&
+    detail.status !== 'error' &&
+    detail.starting !== true
+  );
 }
 
 export async function fetchDaemonDetail(
@@ -356,13 +371,20 @@ export async function waitForDaemonReady(
     allowToken: boolean,
   ) => Promise<DaemonDetailSummary | string> = (candidate, allowToken) =>
     fetchDaemonDetail(candidate, allowToken, token),
+  identityVerified: () => boolean = () => listenerIdentityVerified(record),
 ): Promise<DaemonDetailSummary | string> {
-  const allowToken = listenerIdentityVerified(record);
   const deadline = Date.now() + timeoutMs;
   let result: DaemonDetailSummary | string = 'daemon status unavailable';
   while (true) {
-    result = await fetchDetail(record, allowToken);
-    if (typeof result !== 'string' && result.status === 'ok') return result;
+    if (!identityVerified()) {
+      return 'daemon process exited before readiness';
+    }
+    result = await fetchDetail(record, true);
+    if (isDaemonReady(result)) {
+      return identityVerified()
+        ? result
+        : 'daemon process exited before readiness';
+    }
     if (Date.now() >= deadline) return result;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
@@ -757,9 +779,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
   if (record) {
     const ready =
       argv.wait === true ? await waitForDaemonReady(record, token) : undefined;
-    const readyFailed =
-      ready !== undefined &&
-      (typeof ready === 'string' || ready.status !== 'ok');
+    const readyFailed = ready !== undefined && !isDaemonReady(ready);
 
     if (argv.json === true) {
       writeStdoutLine(
@@ -1198,7 +1218,7 @@ const startCommand: CommandModule<unknown, StartArgs> = {
       .option('wait', {
         type: 'boolean',
         default: false,
-        describe: 'Wait until /daemon/status reports ready before returning',
+        describe: 'Wait until the daemon runtime is serving before returning',
       })
       .option('json', {
         type: 'boolean',
