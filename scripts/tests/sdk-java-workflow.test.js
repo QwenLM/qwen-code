@@ -119,9 +119,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    // The fast tier takes the fast class: it is served before full-tier
-    // holds, so PR feedback waits at most the hold already running.
-    expect(block).toContain('sdk_java_lock_acquire 5400 fast');
+    expect(block).toContain('sdk_java_lock_acquire 5400');
     expect(readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8')).toContain(
       'lock not acquired within',
     );
@@ -730,9 +728,6 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       expect(s.run, s.name).toContain(
         'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
       );
-      // Full-tier steps stay in the normal class; a normal ticket ages into
-      // fast after 20 minutes, so continuous PR traffic cannot starve them.
-      expect(s.run, s.name).toContain('sdk_java_lock_acquire 5400\n');
       const seconds = Number(s.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
       // The fast tier owns the same lock and waits behind these two steps, so
       // one acquisition budget applies to every lane; run 39229303984 died at

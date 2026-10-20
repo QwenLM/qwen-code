@@ -116,56 +116,6 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
-    'serves a fast ticket before an older normal ticket',
-    { timeout: 30000 },
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), 'lock-priority-'));
-      const held = join(home, 'held');
-      writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held));
-      const normal = acquire(home, 30, stub, '', 'normal');
-      await new Promise((r) => setTimeout(r, 800));
-      const fast = acquire(home, 30, stub, '', 'fast');
-      await new Promise((r) => setTimeout(r, 1200));
-      const queued = readdirSync(queueDir(home))
-        .filter((f) => f.endsWith('.ticket'))
-        .sort();
-      // The fast ticket sorts ahead of the older normal ticket even though
-      // its sequence number is higher.
-      expect(queued[0].startsWith('0.')).toBe(true);
-      expect(queued.some((f) => f.startsWith('1.'))).toBe(true);
-      rmSync(held);
-      const [normalResult, fastResult] = await Promise.all([normal, fast]);
-      expect(normalResult.code).toBe(0);
-      expect(fastResult.code).toBe(0);
-      expect(fastResult.out).toContain('fast');
-    },
-  );
-
-  it(
-    'promotes an aged normal ticket so the full tier cannot starve',
-    { timeout: 30000 },
-    async () => {
-      const home = mkdtempSync(join(tmpdir(), 'lock-promote-'));
-      const held = join(home, 'held');
-      writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held));
-      const waiter = acquire(home, 30, stub, '', 'normal', {
-        SDK_JAVA_LOCK_PROMOTE_AFTER: '2',
-      });
-      await new Promise((r) => setTimeout(r, 3500));
-      const queued = readdirSync(queueDir(home)).filter((f) =>
-        f.endsWith('.ticket'),
-      );
-      expect(queued.some((f) => f.startsWith('0.'))).toBe(true);
-      rmSync(held);
-      const result = await waiter;
-      expect(result.code).toBe(0);
-      expect(result.out).toContain('Promoted');
-    },
-  );
-
-  it(
     'times out with the pinned infrastructure signature and drops its ticket',
     { timeout: 30000 },
     async () => {

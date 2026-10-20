@@ -234,11 +234,10 @@ jobs:
           MATRIX_JAVA: '${{ matrix.java }}'
           TIER: '${{ inputs.tier }}'
         run: |-
-          # Ticketed queue, not a bare flock: only the head of
-          # ${lock}.queue retries the lock. The fast class is served first,
-          # so PR feedback waits at most one full-tier hold.
+          # Ticketed queue, not a bare flock: only the oldest live ticket
+          # retries the lock — see the sourced helper.
           source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-          sdk_java_lock_acquire 5400 fast
+          sdk_java_lock_acquire 5400
           mvn --batch-mode --no-transfer-progress clean test
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
