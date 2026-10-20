@@ -338,11 +338,14 @@ describe('Managed Agent gate required check', () => {
     (event, tier, cancelled, expected) => {
       expect(
         evaluate(gate.jobs.gate.if, {
-          // Only an approval reaches this arm of a review event.
+          // Only an approval on an open pull request reaches this arm.
           github: github(
             event,
             event === 'pull_request_review'
-              ? { review: { state: 'approved' } }
+              ? {
+                  review: { state: 'approved' },
+                  pull_request: { state: 'open' },
+                }
               : {},
           ),
           needs: { scope: { outputs: { tier } } },
@@ -359,7 +362,10 @@ describe('Managed Agent gate required check', () => {
     'a %s review starts no job',
     (state) => {
       const context = {
-        github: github('pull_request_review', { review: { state } }),
+        github: github('pull_request_review', {
+          review: { state },
+          pull_request: { state: 'open' },
+        }),
         needs: { scope: { outputs: {} } },
       };
       expect(evaluate(gate.jobs.scope.if, context)).toBe(false);
@@ -369,11 +375,29 @@ describe('Managed Agent gate required check', () => {
 
   it('an approval still runs both jobs', () => {
     const context = {
-      github: github('pull_request_review', { review: { state: 'approved' } }),
+      github: github('pull_request_review', {
+        review: { state: 'approved' },
+        pull_request: { state: 'open' },
+      }),
       needs: { scope: { outputs: { tier: 'none' } } },
     };
     expect(evaluate(gate.jobs.scope.if, context)).toBe(true);
     expect(evaluate(gate.jobs.gate.if, context)).toBe(true);
+  });
+
+  // Branch protection no longer reads the check once a PR closes, and an
+  // automated reviewer can approve after merge (#14774). Starting the run
+  // would take two runners and publish a check nothing reads.
+  it('an approval on a closed pull request starts no job', () => {
+    const context = {
+      github: github('pull_request_review', {
+        review: { state: 'approved' },
+        pull_request: { state: 'closed' },
+      }),
+      needs: { scope: { outputs: {} } },
+    };
+    expect(evaluate(gate.jobs.scope.if, context)).toBe(false);
+    expect(evaluate(gate.jobs.gate.if, context)).toBe(false);
   });
 
   it.each(['pull_request', 'push', 'merge_group'])(
