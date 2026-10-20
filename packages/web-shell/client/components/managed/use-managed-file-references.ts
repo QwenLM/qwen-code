@@ -21,6 +21,18 @@ function object(value: unknown): Record<string, unknown> {
     : {};
 }
 
+// Some deployments cannot serve Workspace file references at all: the runtime
+// broker's CLI predates the workspaceFiles handshake, or the storage kind does
+// not support references. The composer then has no file actions either way; a
+// standing alert for a capability no user action can change is noise.
+function isFileAccessUnsupported(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'workspace_files_unsupported'
+  );
+}
+
 export function useManagedFileReferences(
   provider: ManagedAgentProvider,
   clientId: string,
@@ -63,7 +75,11 @@ export function useManagedFileReferences(
       return undefined;
     let revision: string | undefined;
     function report(error: unknown): never {
-      if (active.current && currentSource.current === source)
+      if (
+        active.current &&
+        currentSource.current === source &&
+        !isFileAccessUnsupported(error)
+      )
         setFailure({
           source,
           message: error instanceof Error ? error.message : String(error),

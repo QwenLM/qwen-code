@@ -104,6 +104,32 @@ describe('Managed file reference snapshots', () => {
     expect(current.error).toBeUndefined();
   });
 
+  it('treats an unsupported file-access capability as absent actions, not an error', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(
+        new Error('Workspace file access requires an updated CLI.'),
+        { status: 409, code: 'workspace_files_unsupported' },
+      ),
+    );
+    await render();
+    // The composer simply has no file actions; the refusal must not become a
+    // standing alert above the editor.
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBeUndefined();
+  });
+
+  it('still reports a Workspace probe failure that is not a capability refusal', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(new Error('Workspace storage is unavailable.'), {
+        status: 503,
+        code: 'workspace_files_busy',
+      }),
+    );
+    await render();
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBe('Workspace storage is unavailable.');
+  });
+
   it('stores exact contents in the chip, survives JSON draft persistence and submits without rereading', async () => {
     await render();
     const saved = JSON.parse(
