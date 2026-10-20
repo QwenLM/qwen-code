@@ -743,17 +743,18 @@ jobs:
     # 150 s, moving the fork to 9915 s and Verify to 176 minutes; the FG13b
     # Hook plan-result store-rejection cell adds 150 s, moving the fork to
     # 10065 s and Verify to 178 minutes; the FG11d cancel cell adds 15 s,
-    # moving the fork to 10080 s and Verify to 179 minutes; the FG12f
-    # delivery entry moves from 30 s to 50 s, moving the fork to 10100 s; the
-    # FG11d retire-at-intent cell adds 18 s, moving the fork to 10118 s; the
-    # FG13e Hook stream-gap cell adds 150 s, moving the fork to 10268 s and
-    # Verify to 182 minutes, wrapping fork + 600 s plus margin (10868 s of
-    # fork plus wrap);
+    # moving the fork to 10080 s and Verify to 179 minutes; the FG12f delivery
+    # entry moves from 30 s to 50 s, moving the fork to 10100 s; the FG11d
+    # retire-at-intent cell adds 18 s, moving the fork to 10118 s;
+    # Class-boundary cleanup and its regression add 60 s, moving the fork to
+    # 10178 s and Verify to 180 minutes; the FG13e Hook stream-gap cell adds
+    # 150 s, moving the fork to 10328 s and Verify to 183 minutes, wrapping
+    # fork + 600 s plus margin (10928 s of fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 272 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 285
+    # checks): 273 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 286
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -853,8 +854,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 10268 s, so the step wraps to fork + 600 s plus margin (182 min).
-        timeout-minutes: 182
+        # 10328 s, so the step wraps to fork + 600 s plus margin (183 min).
+        timeout-minutes: 183
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

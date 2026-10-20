@@ -189,6 +189,7 @@ describe('createJavaManagedAgentProvider', () => {
       approvalRevision: 0,
       availableApprovalModes: ['default', 'auto-edit', 'yolo'],
       supported: true,
+      liveSupported: true,
     };
     const receipt = {
       sessionId: 's',
