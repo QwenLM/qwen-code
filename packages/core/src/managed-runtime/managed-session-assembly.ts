@@ -13,9 +13,10 @@ import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-sess
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
-import type {
-  ManagedSessionJournalStore,
-  ManagedSessionResourceStore,
+import {
+  ManagedSessionCommitRejectedError,
+  type ManagedSessionJournalStore,
+  type ManagedSessionResourceStore,
 } from './managed-session-storage.js';
 import type {
   ManagedSessionDurableRef,
@@ -41,11 +42,13 @@ const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
  *
  * A stopped writer cannot renew again, and a persistent non-recoverable
  * failure repeats the same rejection every interval for the rest of the
- * process's life, so both end the loop. An unsettled append is recoverable:
- * the store may settle it later, so it keeps retrying instead. Three
- * consecutive non-recoverable failures span one full lease
- * (`leaseDurationMs / 3` per attempt), which is the point at which the
- * activation can no longer be kept ahead of a reader anyway.
+ * process's life, so both end the loop. Two refusals are recoverable and keep
+ * retrying instead: an unsettled append (the store may settle it later) and a
+ * rejected commit (the store rolled the attempt back and the authority does
+ * not latch a write failure behind it). Both clear the count, so the cap
+ * measures consecutive refusals; three of them span one full lease
+ * (`leaseDurationMs / 3` per attempt), past which the activation cannot be
+ * kept ahead of a reader anyway.
  */
 const MAX_RENEWAL_FAILURES = 3;
 
@@ -67,10 +70,17 @@ function startActivationRenewal(
       })
       .catch((error: unknown) => {
         if (stopped) return;
-        if (error instanceof ManagedSessionAppendUnsettledError) {
-          // The store may still settle this append. A later tick can renew
-          // once it recovers, so this must not count toward the permanent
-          // stop; only errors that fence the writer end the loop.
+        if (
+          error instanceof ManagedSessionAppendUnsettledError ||
+          error instanceof ManagedSessionCommitRejectedError
+        ) {
+          // Both are recoverable: the store may still settle the append, and a
+          // rollbackable commit rejection leaves the writer writable (the
+          // authority rethrows it before latching a write failure). A later
+          // tick can renew once the store recovers, so neither may count
+          // toward the permanent stop. Clearing the count keeps the cap
+          // measuring consecutive refusals rather than a process lifetime.
+          failures = 0;
           debugLogger.debug(
             'Managed Session activation renewal deferred',
             describeRenewalError(error),
