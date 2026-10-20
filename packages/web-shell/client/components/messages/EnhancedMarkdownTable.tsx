@@ -21,6 +21,7 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { useInteractionBlocker } from '../../interactionBlockContext';
+import { useWebShellPortalRoot } from '../../portalRoot';
 import { getShadowAwareActiveElement } from '../../utils/dom';
 import {
   warnClipboardWriteFailure,
@@ -36,6 +37,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import {
@@ -53,11 +62,12 @@ import {
   SelectValue,
 } from '../ui/select';
 import {
-  ArrowDownIcon,
   ArrowDownUpIcon,
-  ArrowUpIcon,
   BoltIcon,
   CheckIcon,
+  ChevronDownIcon,
+  ChevronsDownUpIcon,
+  ChevronsUpDownIcon,
   CopyIcon,
   FilterIcon,
   GripVerticalIcon,
@@ -207,6 +217,20 @@ const ACTION_COLUMN_STYLE: CSSProperties = {
   minWidth: ACTION_COLUMN_WIDTH,
   maxWidth: ACTION_COLUMN_WIDTH,
 };
+const AUTO_SCROLL_EDGE = 24;
+const AUTO_SCROLL_MIN_STEP = 4;
+const AUTO_SCROLL_MAX_STEP = 24;
+
+function autoScrollStep(distanceIntoEdge: number): number {
+  const ratio = Math.min(
+    1,
+    Math.max(0, 1 - distanceIntoEdge / AUTO_SCROLL_EDGE),
+  );
+  return Math.max(
+    AUTO_SCROLL_MIN_STEP,
+    Math.round(ratio * AUTO_SCROLL_MAX_STEP),
+  );
+}
 
 function clampColumnWidth(width: number): number {
   return Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, width));
@@ -221,6 +245,40 @@ function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
       ),
     )
   );
+}
+
+function handleShadowToolbarMenuKeyDown(
+  event: ReactKeyboardEvent<HTMLDivElement>,
+) {
+  const menu = event.currentTarget;
+  if (
+    event.defaultPrevented ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.shiftKey ||
+    !(menu.getRootNode() instanceof ShadowRoot) ||
+    !['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageUp', 'PageDown'].includes(
+      event.key,
+    )
+  )
+    return;
+  // Radix's focus search skips items because document.activeElement stays the host.
+  const items = Array.from(
+    menu.querySelectorAll<HTMLElement>('[role^="menuitem"]'),
+  );
+  const current = items.findIndex(
+    (item) => item === getShadowAwareActiveElement(menu),
+  );
+  const next =
+    event.key === 'Home' || event.key === 'PageUp'
+      ? 0
+      : event.key === 'End' || event.key === 'PageDown'
+        ? items.length - 1
+        : current + (event.key === 'ArrowDown' ? 1 : -1);
+  event.preventDefault();
+  event.stopPropagation();
+  items[Math.max(0, Math.min(items.length - 1, next))]?.focus();
 }
 
 function handleShadowDialogTab(event: ReactKeyboardEvent<HTMLDivElement>) {
@@ -551,6 +609,40 @@ function getVisibleTableText(
     ),
   ];
   return lines.join('\n');
+}
+
+function markdownCellText(cell: EnhancedTableCell | undefined): string {
+  return (cell?.rawText ?? cell?.text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/([\\`*_[\]|~$])/g, '\\$1')
+    .replace(/\r\n?|\n/g, '<br>')
+    .trim();
+}
+
+function getVisibleTableMarkdown(
+  headers: EnhancedTableCell[],
+  rows: EnhancedTableRow[],
+  visibleColumnIndexes: number[],
+): string {
+  if (visibleColumnIndexes.length === 0) return '';
+  const renderRow = (cells: string[]) => `| ${cells.join(' | ')} |`;
+  return [
+    renderRow(
+      visibleColumnIndexes.map((columnIndex) =>
+        markdownCellText(headers[columnIndex]),
+      ),
+    ),
+    renderRow(visibleColumnIndexes.map(() => '---')),
+    ...rows.map((row) =>
+      renderRow(
+        visibleColumnIndexes.map((columnIndex) =>
+          markdownCellText(row.cells[columnIndex]),
+        ),
+      ),
+    ),
+  ].join('\n');
 }
 
 function getSelectionStatistics(
@@ -1506,6 +1598,7 @@ export function EnhancedTable({
 }) {
   const { language, t } = useI18n();
   const registerInteractionBlocker = useInteractionBlocker();
+  const portalRoot = useWebShellPortalRoot();
   const tableId = useId();
   const [fullscreen, setFullscreen] = useState(false);
   const [sort, setSort] = useState<SortState | null>(null);
@@ -1582,6 +1675,8 @@ export function EnhancedTable({
     columnIndex: number;
   } | null>(null);
   const selectionFrameRef = useRef(0);
+  const autoScrollFrameRef = useRef(0);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const resizeFrameRef = useRef(0);
   const pendingResizeWidthRef = useRef<number | null>(null);
   const draggingColumnRef = useRef<number | null>(null);
@@ -1666,6 +1761,128 @@ export function EnhancedTable({
     setCopiedCellDialog(false);
   }, []);
 
+  const extendSelection = useCallback(
+    (rowIndex: number, columnIndex: number) => {
+      if (!draggingRef.current) return;
+      setIsDragging(true);
+      pendingSelectionRef.current = { rowIndex, columnIndex };
+      if (selectionFrameRef.current) return;
+      selectionFrameRef.current = requestAnimationFrame(() => {
+        selectionFrameRef.current = 0;
+        const pendingSelection = pendingSelectionRef.current;
+        pendingSelectionRef.current = null;
+        if (!pendingSelection) return;
+        setSelection((current) =>
+          current
+            ? {
+                ...current,
+                focusRow: pendingSelection.rowIndex,
+                focusCol: pendingSelection.columnIndex,
+              }
+            : current,
+        );
+      });
+    },
+    [],
+  );
+
+  const findCellAtPoint = useCallback(
+    (clientX: number, clientY: number) => {
+      const scroller = containerRef.current;
+      if (!scroller) return null;
+      const rect = scroller.getBoundingClientRect();
+      const headerHeight =
+        scroller.querySelector('thead')?.getBoundingClientRect().height ?? 0;
+      const firstCell = scroller.querySelector<HTMLTableCellElement>(
+        'tbody [data-row-index][data-column-index]',
+      );
+      if (!firstCell) return null;
+      const cells =
+        firstCell.parentElement!.querySelectorAll<HTMLTableCellElement>(
+          '[data-column-index]',
+        );
+      const left = Math.max(
+        0,
+        rect.left + 1,
+        firstCell.getBoundingClientRect().left + 1,
+      );
+      const right = Math.min(
+        window.innerWidth - 1,
+        rect.right - 1,
+        rect.left + (scroller.clientWidth || rect.width) - 1,
+        cells[cells.length - 1]!.getBoundingClientRect().right - 1,
+      );
+      const bottom = Math.min(
+        window.innerHeight - 1,
+        rect.bottom - 1,
+        rect.top + (scroller.clientHeight || rect.height) - 1,
+      );
+      const top = Math.max(0, rect.top + headerHeight + 1);
+      if (left > right || top > bottom) return null;
+      const x = Math.min(Math.max(clientX, left), right);
+      const y = Math.min(Math.max(clientY, top), bottom);
+      const root = shell?.getRootNode();
+      const hitTestRoot = root instanceof ShadowRoot ? root : document;
+      const cell = hitTestRoot
+        .elementFromPoint?.(x, y)
+        ?.closest<HTMLTableCellElement>('[data-row-index][data-column-index]');
+      if (!cell || !scroller.contains(cell)) return null;
+      return {
+        rowIndex: Number(cell.dataset.rowIndex),
+        columnIndex: Number(cell.dataset.columnIndex),
+      };
+    },
+    [shell],
+  );
+
+  const runAutoScroll = useCallback(() => {
+    autoScrollFrameRef.current = 0;
+    if (!draggingRef.current) return;
+    const scroller = containerRef.current;
+    const pointer = pointerRef.current;
+    if (scroller && pointer) {
+      const rect = scroller.getBoundingClientRect();
+      let dx = 0;
+      let dy = 0;
+      if (pointer.y < rect.top + AUTO_SCROLL_EDGE) {
+        dy = -autoScrollStep(pointer.y - rect.top);
+      } else if (pointer.y > rect.bottom - AUTO_SCROLL_EDGE) {
+        dy = autoScrollStep(rect.bottom - pointer.y);
+      }
+      if (pointer.x < rect.left + AUTO_SCROLL_EDGE) {
+        dx = -autoScrollStep(pointer.x - rect.left);
+      } else if (pointer.x > rect.right - AUTO_SCROLL_EDGE) {
+        dx = autoScrollStep(rect.right - pointer.x);
+      }
+      if (dx !== 0 || dy !== 0) {
+        const previousTop = scroller.scrollTop;
+        const previousLeft = scroller.scrollLeft;
+        scroller.scrollTop += dy;
+        scroller.scrollLeft += dx;
+        if (
+          scroller.scrollTop !== previousTop ||
+          scroller.scrollLeft !== previousLeft
+        ) {
+          const cell = findCellAtPoint(pointer.x, pointer.y);
+          if (cell) extendSelection(cell.rowIndex, cell.columnIndex);
+          autoScrollFrameRef.current = requestAnimationFrame(runAutoScroll);
+        }
+      }
+    }
+  }, [extendSelection, findCellAtPoint]);
+
+  const startAutoScroll = useCallback(() => {
+    if (autoScrollFrameRef.current) return;
+    autoScrollFrameRef.current = requestAnimationFrame(runAutoScroll);
+  }, [runAutoScroll]);
+
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollFrameRef.current) {
+      cancelAnimationFrame(autoScrollFrameRef.current);
+      autoScrollFrameRef.current = 0;
+    }
+  }, []);
+
   const flushPendingSelection = useCallback(() => {
     if (selectionFrameRef.current) {
       cancelAnimationFrame(selectionFrameRef.current);
@@ -1687,9 +1904,10 @@ export function EnhancedTable({
 
   const stopDragging = useCallback(() => {
     flushPendingSelection();
+    stopAutoScroll();
     draggingRef.current = false;
     setIsDragging(false);
-  }, [flushPendingSelection]);
+  }, [flushPendingSelection, stopAutoScroll]);
 
   useEffect(() => {
     const stopDraggingWhenHidden = () => {
@@ -1702,11 +1920,33 @@ export function EnhancedTable({
       window.removeEventListener('mouseup', stopDragging);
       window.removeEventListener('blur', stopDragging);
       document.removeEventListener('visibilitychange', stopDraggingWhenHidden);
+      stopAutoScroll();
       if (selectionFrameRef.current) {
         cancelAnimationFrame(selectionFrameRef.current);
       }
     };
-  }, [stopDragging]);
+  }, [stopAutoScroll, stopDragging]);
+
+  useEffect(() => {
+    if (!isDragging) return;
+    const trackMouse = (event: MouseEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY };
+      startAutoScroll();
+    };
+    const trackTouch = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (touch) {
+        pointerRef.current = { x: touch.clientX, y: touch.clientY };
+        startAutoScroll();
+      }
+    };
+    window.addEventListener('mousemove', trackMouse);
+    window.addEventListener('touchmove', trackTouch, { passive: true });
+    return () => {
+      window.removeEventListener('mousemove', trackMouse);
+      window.removeEventListener('touchmove', trackTouch);
+    };
+  }, [isDragging, startAutoScroll]);
 
   useEffect(() => {
     if (tableStructureKeyRef.current === tableStructureKey) return;
@@ -1730,6 +1970,7 @@ export function EnhancedTable({
     resetCopiedVisible();
     resetCopiedSelection();
     resetCopiedCellDialog();
+    stopAutoScroll();
     draggingRef.current = false;
     draggingColumnRef.current = null;
     setIsDragging(false);
@@ -1737,6 +1978,7 @@ export function EnhancedTable({
     resetCopiedSelection,
     resetCopiedCellDialog,
     resetCopiedVisible,
+    stopAutoScroll,
     table.columnCount,
     tableStructureKey,
   ]);
@@ -1851,7 +2093,12 @@ export function EnhancedTable({
   useEffect(() => {
     if (!selection) return;
     const clearSelectionOnOutsideMouseDown = (event: MouseEvent) => {
-      if (shell && !event.composedPath().includes(shell)) {
+      const path = event.composedPath();
+      const isCopyMenuClick = path.some(
+        (node) =>
+          node instanceof Element && node.hasAttribute('data-copy-menu'),
+      );
+      if (shell && !path.includes(shell) && !isCopyMenuClick) {
         stopDragging();
         setSelection(null);
       }
@@ -2385,12 +2632,19 @@ export function EnhancedTable({
     );
   };
 
-  const startSelectionAtCell = (rowIndex: number, columnIndex: number) => {
+  const startSelectionAtCell = (
+    rowIndex: number,
+    columnIndex: number,
+    pointer: { x: number; y: number },
+  ) => {
     if (openFilterMenu !== null) {
       setOpenFilterMenu(null);
     }
     setActiveColumn(null);
     draggingRef.current = true;
+    setIsDragging(true);
+    pointerRef.current = pointer;
+    startAutoScroll();
     setSelection({
       anchorRow: rowIndex,
       anchorCol: columnIndex,
@@ -2407,29 +2661,14 @@ export function EnhancedTable({
     if (event.button !== 0 || isInteractiveSelectionTarget(event.target))
       return;
     event.preventDefault();
-    containerRef.current?.focus({ preventScroll: true });
-    startSelectionAtCell(rowIndex, columnIndex);
-  };
-
-  const extendSelection = (rowIndex: number, columnIndex: number) => {
-    if (!draggingRef.current) return;
-    setIsDragging(true);
-    pendingSelectionRef.current = { rowIndex, columnIndex };
-    if (selectionFrameRef.current) return;
-    selectionFrameRef.current = requestAnimationFrame(() => {
-      selectionFrameRef.current = 0;
-      const pendingSelection = pendingSelectionRef.current;
-      pendingSelectionRef.current = null;
-      if (!pendingSelection) return;
-      setSelection((current) =>
-        current
-          ? {
-              ...current,
-              focusRow: pendingSelection.rowIndex,
-              focusCol: pendingSelection.columnIndex,
-            }
-          : current,
-      );
+    const scroller = containerRef.current;
+    if (scroller) {
+      scroller.focus({ preventScroll: true });
+      scroller.dataset.pointerFocus = 'true';
+    }
+    startSelectionAtCell(rowIndex, columnIndex, {
+      x: event.clientX,
+      y: event.clientY,
     });
   };
 
@@ -2462,7 +2701,11 @@ export function EnhancedTable({
     ) {
       return;
     }
-    startSelectionAtCell(rowIndex, columnIndex);
+    const touch = event.touches[0]!;
+    startSelectionAtCell(rowIndex, columnIndex, {
+      x: touch.clientX,
+      y: touch.clientY,
+    });
   };
 
   const extendTouchSelection = (
@@ -2501,12 +2744,7 @@ export function EnhancedTable({
       .catch(warnClipboardWriteFailure);
   };
 
-  const copyVisibleTable = () => {
-    const text = getVisibleTableText(
-      table.headers,
-      visibleRows,
-      orderedVisibleColumnIndexes,
-    );
+  const copyVisible = (text: string) => {
     if (!text) return;
     const copyGeneration = copiedVisibleGenRef.current;
     void writeClipboardText(text)
@@ -2523,6 +2761,38 @@ export function EnhancedTable({
         );
       })
       .catch(warnClipboardWriteFailure);
+  };
+
+  const copyVisibleTable = () => {
+    copyVisible(
+      getVisibleTableText(
+        table.headers,
+        visibleRows,
+        orderedVisibleColumnIndexes,
+      ),
+    );
+  };
+
+  const copyVisibleTableMarkdown = () => {
+    copyVisible(
+      getVisibleTableMarkdown(
+        table.headers,
+        visibleRows,
+        orderedVisibleColumnIndexes,
+      ),
+    );
+  };
+
+  const focusToolbarMenu = (open: boolean, menu: 'copy' | 'density') => {
+    if (!open || !(portalRoot?.getRootNode() instanceof ShadowRoot)) return;
+    // Run after portal entry, including reopening during its close animation.
+    requestAnimationFrame(() => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          `[data-${menu}-menu="${tableId}"][data-state="open"] [role^="menuitem"]`,
+        )
+        ?.focus();
+    });
   };
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -2740,32 +3010,54 @@ export function EnhancedTable({
             </div>
           )}
           <span className={styles.toolbarSpacer} />
-          <Select
-            value={density}
-            onValueChange={(value) => setDensity(value as TableDensity)}
+          <DropdownMenu
+            onOpenChange={(open) => focusToolbarMenu(open, 'density')}
           >
-            <SelectTrigger
-              size="sm"
-              className={styles.densityTrigger}
-              aria-label={t('markdownTable.densityLabel')}
-            >
-              <Rows3Icon className="size-4" />
-              <SelectValue>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className={`${styles.toolbarControl} ${styles.toolbarMenuTrigger} ${styles.compactToolbarControl}`}
+                type="button"
+                aria-label={t('markdownTable.densityLabel')}
+              >
+                <Rows3Icon aria-hidden="true" />
                 <span className={styles.compactToolbarLabel}>
                   {t('markdownTable.densityCurrent', {
                     density: t(`markdownTable.density.${density}`),
                   })}
                 </span>
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent className={styles.densityMenu}>
-              {DENSITY_OPTIONS.map((option) => (
-                <SelectItem key={option} value={option} data-value={option}>
-                  {t(`markdownTable.density.${option}`)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+                <ChevronDownIcon
+                  className={styles.toolbarChevron}
+                  aria-hidden="true"
+                />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              sideOffset={2}
+              collisionPadding={6}
+              className={styles.toolbarMenu}
+              data-density-menu={tableId}
+              aria-label={t('markdownTable.densityLabel')}
+              onKeyDownCapture={handleShadowToolbarMenuKeyDown}
+            >
+              <DropdownMenuRadioGroup
+                value={density}
+                onValueChange={(value) => setDensity(value as TableDensity)}
+              >
+                {DENSITY_OPTIONS.map((option) => (
+                  <DropdownMenuRadioItem
+                    key={option}
+                    value={option}
+                    data-value={option}
+                  >
+                    {t(`markdownTable.density.${option}`)}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <CustomColumnsPopover
             headers={table.headers}
             columnOrder={columnOrder}
@@ -2785,44 +3077,72 @@ export function EnhancedTable({
             <Button
               variant="ghost"
               size="sm"
-              className={styles.toolbarControl}
+              className={`${styles.toolbarControl} ${styles.compactToolbarControl}`}
               type="button"
+              aria-label={
+                longTextExpanded
+                  ? t('markdownTable.collapseLongText')
+                  : t('markdownTable.expandLongText')
+              }
               onClick={() => setLongTextExpanded((current) => !current)}
             >
-              {longTextExpanded
-                ? t('markdownTable.collapseLongText')
-                : t('markdownTable.expandLongText')}
+              {longTextExpanded ? (
+                <ChevronsDownUpIcon aria-hidden="true" />
+              ) : (
+                <ChevronsUpDownIcon aria-hidden="true" />
+              )}
+              <span className={styles.compactToolbarLabel}>
+                {longTextExpanded
+                  ? t('markdownTable.collapseLongText')
+                  : t('markdownTable.expandLongText')}
+              </span>
             </Button>
           )}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                className={styles.iconButton}
+          <DropdownMenu onOpenChange={(open) => focusToolbarMenu(open, 'copy')}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className={`${styles.toolbarControl} ${styles.toolbarMenuTrigger} ${styles.compactToolbarControl}`}
                 type="button"
-                onClick={copyVisibleTable}
                 aria-label={t('markdownTable.copyVisible')}
               >
                 {copiedVisible ? (
-                  <>
-                    <CheckIcon aria-hidden="true" />
-                    <span className="sr-only">✓</span>
-                  </>
+                  <CheckIcon aria-hidden="true" />
                 ) : (
                   <CopyIcon aria-hidden="true" />
                 )}
-                <span className="sr-only">
+                <span className={styles.compactToolbarLabel}>
                   {copiedVisible
                     ? t('code.copied')
                     : t('markdownTable.copyVisible')}
                 </span>
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="top">
-              {copiedVisible
-                ? t('code.copied')
-                : t('markdownTable.copyVisible')}
-            </TooltipContent>
-          </Tooltip>
+                <ChevronDownIcon
+                  className={styles.toolbarChevron}
+                  aria-hidden="true"
+                />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              sideOffset={2}
+              collisionPadding={6}
+              className={styles.toolbarMenu}
+              data-copy-menu={tableId}
+              aria-label={t('markdownTable.copyVisible')}
+              onKeyDownCapture={handleShadowToolbarMenuKeyDown}
+            >
+              <DropdownMenuItem onSelect={() => copyVisibleTable()}>
+                {t('markdownTable.copyTsv')}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => copyVisibleTableMarkdown()}>
+                {t('markdownTable.copyMarkdown')}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <span className="sr-only" role="status" aria-live="polite">
+            {copiedVisible ? t('code.copied') : ''}
+          </span>
           {toolbarExtra}
         </div>
       </TooltipProvider>
@@ -2830,6 +3150,9 @@ export function EnhancedTable({
         ref={attachScroller}
         className={styles.scroller}
         tabIndex={0}
+        onBlur={(event) => {
+          delete event.currentTarget.dataset.pointerFocus;
+        }}
         onCopy={handleCopy}
       >
         <table className={styles.table}>
@@ -2898,7 +3221,11 @@ export function EnhancedTable({
                     <div className={styles.headerControls}>
                       <span
                         className={styles.headerText}
-                        style={headerAlignStyle}
+                        style={
+                          headerAlignStyle
+                            ? { ...headerAlignStyle, flex: '1 1 auto' }
+                            : undefined
+                        }
                       >
                         {header.content}
                       </span>
@@ -2939,22 +3266,13 @@ export function EnhancedTable({
                         )}
                       </Popover>
                       <button
-                        className={`${styles.sortTrigger} ${
-                          isSorted ? styles.sortTriggerActive : ''
-                        }`}
+                        className={styles.sortTrigger}
                         type="button"
                         onClick={() => toggleSort(columnIndex)}
                         aria-label={sortAriaLabel}
+                        data-sort-direction={isSorted ? sort.direction : 'none'}
                       >
-                        {isSorted ? (
-                          sort.direction === 'asc' ? (
-                            <ArrowUpIcon aria-hidden="true" />
-                          ) : (
-                            <ArrowDownIcon aria-hidden="true" />
-                          )
-                        ) : (
-                          <ArrowDownUpIcon aria-hidden="true" />
-                        )}
+                        <ArrowDownUpIcon aria-hidden="true" />
                       </button>
                     </div>
                     <button
