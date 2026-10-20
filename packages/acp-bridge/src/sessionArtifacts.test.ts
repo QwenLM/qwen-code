@@ -46,6 +46,65 @@ describe('SessionArtifactStore', () => {
     await fs.rm(workspace, { recursive: true, force: true });
   });
 
+  it('projects persisted library metadata without snapshot/file mutations or exposing client identity', async () => {
+    const sessionId = 'library-read';
+    const persisted = {
+      ...persistedWorkspaceFile(sessionId, 'report.md'),
+      clientId: 'private-client',
+    };
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const before = await fs.readdir(workspace);
+    const result = await store.readPersistedLibrary({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [persisted],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    expect(result.artifacts).toHaveLength(1);
+    expect(result.artifacts[0]).toMatchObject({
+      id: persisted.id,
+      workspacePath: 'report.md',
+      restoreState: 'restored',
+    });
+    expect(result.artifacts[0]).not.toHaveProperty('clientId');
+    expect(await fs.readdir(workspace)).toEqual(before);
+    expect((await store.list()).artifacts).toEqual([]);
+  });
+
+  it('keeps client ownership checks while accepting explicit workspace owner deletion', async () => {
+    const sessionId = 'library-owner';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const registered = await store.upsertMany([
+      {
+        title: 'Client link',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/report',
+        source: 'client',
+        clientId: 'owner',
+      },
+    ]);
+    const id = registered.changes[0].artifactId;
+    await expect(
+      store.remove(id, { clientId: 'other' }),
+    ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+    await expect(
+      store.remove(id, { workspaceOwner: true }),
+    ).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId: id }],
+    });
+    expect((await store.list()).artifacts).toEqual([]);
+  });
+
   function managedIdForWorkspacePath(workspacePath: string): string {
     return createHash('sha1')
       .update(path.resolve(workspace, workspacePath))

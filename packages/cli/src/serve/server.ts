@@ -3461,6 +3461,8 @@ export function createServeApp(
 
   registerSessionCatalogRoutes(app, workspaceRegistry);
   const { resolveSubagentSessionRuntime } = registerSessionRoutes(app, {
+    sessionArtifactsPersistenceAvailable:
+      deps.sessionArtifactsPersistenceAvailable !== false,
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspaceRegistry,

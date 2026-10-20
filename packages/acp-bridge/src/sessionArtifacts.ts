@@ -741,9 +741,60 @@ export class SessionArtifactStore {
     return undefined;
   }
 
+  async readPersistedLibrary(
+    snapshot: RebuiltSessionArtifactSnapshot,
+  ): Promise<SessionArtifactsEnvelope> {
+    const artifacts: DaemonSessionArtifact[] = [];
+    const warnings = [...snapshot.warnings];
+    for (const artifact of snapshot.artifacts) {
+      if (this.dropLegacyLocalPublished(artifact)) continue;
+      try {
+        const normalized = await this.normalizeInput(
+          {
+            ...persistedArtifactToInput(artifact),
+            retention:
+              artifact.retention === 'pinned'
+                ? 'restorable'
+                : artifact.retention,
+          },
+          0,
+          artifact.storage === 'published' &&
+            !isNonSnapshotFileLocator(artifact),
+          {
+            metadataBudget: 'persisted',
+            workspaceAccess: 'metadata-only',
+            workspaceStatus: artifact.status,
+            hashWorkspaceContent: false,
+          },
+        );
+        if (normalized.id !== artifact.id)
+          throw new Error('Artifact identity mismatch');
+        artifacts.push(
+          toPublicArtifact({
+            ...normalized,
+            createdAt: artifact.createdAt,
+            updatedAt: artifact.updatedAt,
+            persistedAt: artifact.persistedAt,
+            restoreState: 'restored',
+          }),
+        );
+      } catch {
+        warnings.push(`artifact ${artifact.id} is unavailable`);
+      }
+    }
+    return {
+      v: 1,
+      sessionId: this.sessionId,
+      artifacts,
+      generatedAt: new Date().toISOString(),
+      limits: { maxArtifacts: this.maxArtifacts },
+      ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
   async remove(
     artifactId: string,
-    options?: { clientId?: string },
+    options?: { clientId?: string; workspaceOwner?: boolean },
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const existing = this.artifacts.get(artifactId);
@@ -753,7 +804,9 @@ export class SessionArtifactStore {
       // Client-created artifacts with an owner require the same client id.
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
-      this.denyCrossClientMutation('remove', artifactId, existing, options);
+      // 管理接口代表已认证的 workspace 所有者；旧客户端接口不能传入此权限。
+      if (!options?.workspaceOwner)
+        this.denyCrossClientMutation('remove', artifactId, existing, options);
       const removedAt = new Date().toISOString();
       const removedArtifact = isNonSnapshotPublishedFileUrl(existing)
         ? undefined
