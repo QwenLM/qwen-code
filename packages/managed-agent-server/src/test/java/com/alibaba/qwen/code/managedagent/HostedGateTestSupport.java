@@ -7,10 +7,10 @@ import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.DispatcherType;
@@ -176,8 +176,32 @@ final class HostedGateTestSupport {
     // method sets: the in-memory object arms serve the IT that really
     // publishes; a fixture that never publishes (FG8) simply never calls
     // them, and any other method still throws, naming the fixture.
+    // A publication fixture may fault the physical write. `beforePut` runs
+    // before the object is stored; `afterPut` runs after it but before the
+    // caller sees the ack, so a committed object can be paired with a lost
+    // acknowledgement without adding a second store implementation.
+    interface PublicationFaults {
+        default void beforePut(String key, byte[] bytes) {
+        }
+
+        default void afterPut(String key, byte[] bytes) {
+        }
+    }
+
     static void stubPublicationOss(ConfigurableApplicationContext context,
             Map<String, byte[]> objects, String fixtureName) {
+        stubPublicationOss(context, objects, fixtureName, null);
+    }
+
+    static void stubPublicationOss(ConfigurableApplicationContext context,
+            Map<String, byte[]> objects, String fixtureName,
+            PublicationFaults faults) {
+        stubPublicationOss(context, objects, fixtureName, faults, null);
+    }
+
+    static void stubPublicationOss(ConfigurableApplicationContext context,
+            Map<String, byte[]> objects, String fixtureName,
+            PublicationFaults faults, Map<String, Integer> putCounts) {
         var acl = new com.aliyun.oss.model.AccessControlList();
         acl.setCannedACL(com.aliyun.oss.model.CannedAccessControlList.Private);
         var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class,
@@ -189,6 +213,12 @@ final class HostedGateTestSupport {
                         var put = (com.aliyun.oss.model.PutObjectRequest)
                                 invocation.getArgument(0);
                         byte[] bytes = put.getInputStream().readAllBytes();
+                        if (putCounts != null) {
+                            putCounts.merge(put.getKey(), 1, Integer::sum);
+                        }
+                        if (faults != null) {
+                            faults.beforePut(put.getKey(), bytes);
+                        }
                         if (objects.putIfAbsent(put.getKey(), bytes)
                                 != null) {
                             throw new com.aliyun.oss.OSSException(
@@ -196,6 +226,9 @@ final class HostedGateTestSupport {
                                     "FileAlreadyExists", "request", "host",
                                     put.getBucketName(), put.getKey(),
                                     "resource");
+                        }
+                        if (faults != null) {
+                            faults.afterPut(put.getKey(), bytes);
                         }
                         yield new com.aliyun.oss.model.PutObjectResult();
                     }

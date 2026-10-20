@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -194,7 +194,10 @@ class HostedHookCancelFaultGatesIT {
     @Test
     @Timeout(300)
     void fg13dCancelWithDroppedReplySettlesThroughStatusOnMySql() throws Exception {
-        boot("60000", "-1", "hook-ignore-term");
+        // A dropped cancel reply keeps the route waiting on the Broker's
+        // request timeout; give the command enough life that only the
+        // delivered cancellation, never its own timeout, can settle it.
+        boot("180000", "-1", "hook-ignore-term");
         proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
                 (method, path, body) -> path.contains("/control") && body.contains("\"kind\":\"hook-cancel\""),
                 "hook-cancel-reply"));
@@ -214,7 +217,8 @@ class HostedHookCancelFaultGatesIT {
         cancelHook(session, executionId);
         // The cancel reply is gone, but the poll through the record's owner
         // resolves the same cancellation, and the gate drains exactly once.
-        awaitTerminalDrained(session, "cancelled", child);
+        awaitTerminalDrained(session, "cancelled", child,
+                Duration.ofSeconds(120));
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
         assertThat(hookResult(session).path("outcome").asText()).isEqualTo("cancelled");
@@ -287,7 +291,12 @@ class HostedHookCancelFaultGatesIT {
     // inspect the first observation, not a later poll, so a regression that
     // settles early while the drain continues still fails the cell.
     private void awaitTerminalDrained(String session, String state, JsonNode child) throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        awaitTerminalDrained(session, state, child, Duration.ofSeconds(60));
+    }
+
+    private void awaitTerminalDrained(String session, String state, JsonNode child,
+            Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
             JsonNode execution = hookExecution(session);
             if (state.equals(execution.at("/run/state").asText())) {

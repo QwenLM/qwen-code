@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.runtimebroker.SshRuntimeNode;
+import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeNode;
 
 import java.util.List;
 

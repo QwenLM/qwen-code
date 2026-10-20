@@ -5,6 +5,10 @@
  */
 
 import {
+  restoreLocalDeletionBlocks,
+  removeDeletedMessageBlocks,
+} from '../../utils/message-deletion.js';
+import {
   createContext,
   type Dispatch,
   useCallback,
@@ -3581,6 +3585,41 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             try {
               turnNavigationStore.handleSessionEvent(event.type);
+              if (event.type === 'session_messages_deleted') {
+                if (event.originatorClientId !== activeSession.clientId) {
+                  setConnection((current) => ({
+                    ...current,
+                    loadingTranscript: true,
+                  }));
+                  const before = store.getSnapshot().blocks;
+                  const data = event.data as {
+                    deletedGroupIds: string[];
+                    deletedPromptIds: string[];
+                  };
+                  removeDeletedMessageBlocks(
+                    store,
+                    data.deletedGroupIds,
+                    data.deletedPromptIds,
+                  );
+                  void repairReloadRef
+                    .current?.(new AbortController().signal)
+                    .finally(() => {
+                      if (
+                        sessionRef.current?.sessionId ===
+                        activeSession.sessionId
+                      )
+                        restoreLocalDeletionBlocks(store, before);
+                    })
+                    .catch((error: unknown) => {
+                      console.warn(
+                        'Failed to reload deleted message history',
+                        error,
+                      );
+                    });
+                }
+                continue;
+              }
+
               const followupSuggestion =
                 parseSidechannelFollowupSuggestion(event);
               if (followupSuggestion) {
@@ -5023,8 +5062,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             owner.sessionId,
             admission.promptId,
           );
-          if (sessionRef.current === owner)
+          if (sessionRef.current === owner) {
+            if (admission.blockId) {
+              const snapshot = store.getSnapshot();
+              store.reset({
+                ...snapshot,
+                retainedBytes: undefined,
+                blocks: snapshot.blocks.map((block) =>
+                  block.id === admission.blockId && block.kind === 'user'
+                    ? { ...block, promptId: admission.promptId }
+                    : block,
+                ),
+              });
+            }
             turnNotifications.admit(owner, admission.promptId, admission.label);
+          }
           if (
             sessionRef.current === owner &&
             turnNavigationStore.getSnapshot().sessionId === owner.sessionId

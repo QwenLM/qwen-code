@@ -1291,6 +1291,8 @@ describe('cancellation, telemetry and recording', () => {
         .mockReturnValue({
           initialize: vi.fn().mockResolvedValue(undefined),
           syncSession,
+          invalidateTools: vi.fn(),
+          restoreTools: vi.fn().mockResolvedValue(undefined),
         } as unknown as interactiveMods.InteractiveModSession);
       const host = createFakeHost();
       const dispatcher = new OpenTuiSlashDispatcher(

@@ -7,6 +7,11 @@ and JDBC implementations; and a framework-neutral service that composes
 authoritative scope resolution, Runtime provisioning, and Runtime transport
 adapters.
 
+Runtime providers and their deployment protocols are in `runtimebroker.provisioning`,
+HTTP adapters and wire protocols in `runtimebroker.transport`, and credential
+encryption in `runtimebroker.security`. The execution and repository core stays
+in the parent package; the application still builds all of them in one Maven module.
+
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
 intent, and fails ambiguous dispatch outcomes as `UNKNOWN`.
