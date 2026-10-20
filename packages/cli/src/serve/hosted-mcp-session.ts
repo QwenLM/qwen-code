@@ -536,7 +536,7 @@ export class HostedMcpSession {
       catalog.discovery.tools === 'partial'
         ? catalog.tools.map((tool) => ({
             name: this.toolName(catalog, tool.name),
-            description: tool.description,
+            description: `MCP server: ${JSON.stringify(catalog.serverId)}\nMCP tool: ${JSON.stringify(tool.name)}${tool.description ? `\n${tool.description}` : ''}`,
             parametersJsonSchema: tool.inputSchema,
           }))
         : [],

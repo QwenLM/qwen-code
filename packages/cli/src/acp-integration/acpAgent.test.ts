@@ -36768,10 +36768,186 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it.each(['settings', 'all', 'content'] as const)(
+    'keeps workspace skill status paired with its settings after a session loads (%s)',
+    async (reason) => {
+      const skillName = 'workspace-skill';
+      let diskDisabled = false;
+      const workspaceSettings = {
+        merged: { skills: { disabled: [] as string[] } },
+        forScope: vi.fn().mockReturnValue({ settings: {} }),
+        reloadScopeFromDisk: vi.fn(() => {
+          workspaceSettings.merged = {
+            skills: { disabled: diskDisabled ? [skillName] : [] },
+          };
+          return true;
+        }),
+      };
+      const sessionSettings = {
+        getSystemHooks: () => undefined,
+        getUserHooks: () => ({}),
+        getProjectHooks: () => ({}),
+        merged: { skills: { disabled: [skillName] } },
+        forScope: vi.fn().mockReturnValue({
+          settings: { skills: { disabled: [skillName] } },
+        }),
+        reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      } as unknown as LoadedSettings;
+      const refreshCache = vi.fn().mockResolvedValue(undefined);
+      const bootstrapConfig = makeConfig({
+        getDisabledSkillNames: () =>
+          new Set(workspaceSettings.merged.skills.disabled),
+        isSkillEnabled: () =>
+          !workspaceSettings.merged.skills.disabled.includes(skillName),
+        getExtensions: () => [],
+        getSkillManager: () => ({
+          refreshCache,
+          getCachedSkills: () => [
+            {
+              name: skillName,
+              description: 'Workspace skill',
+              level: 'project',
+              filePath: '/skills/.qwen/skills/workspace-skill/SKILL.md',
+            },
+          ],
+        }),
+      });
+      const sessionConfig = makeConfig({
+        getSessionId: () => 'skill-session',
+      });
+      const reloadSkillSettings = vi.fn();
+      const refreshSkillsFromSettings = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(loadSettings).mockReturnValue(sessionSettings);
+      vi.mocked(loadCliConfig).mockResolvedValue(
+        sessionConfig as unknown as Config,
+      );
+      vi.mocked(Session).mockImplementation(
+        () =>
+          ({
+            getDefaultReasoningConfig: vi.fn(),
+            getId: () => 'skill-session',
+            shouldHintAskUserQuestionRestore: () => false,
+            getConfig: () => sessionConfig,
+            reloadSkillSettings,
+            refreshSkillsFromSettings,
+            sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+            installRewriter: vi.fn(),
+            startCronScheduler: vi.fn(),
+            dispose: vi.fn(),
+          }) as unknown as InstanceType<typeof Session>,
+      );
+      const agentPromise = runAcpAgent(
+        bootstrapConfig as unknown as Config,
+        workspaceSettings as unknown as LoadedSettings,
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      });
+      try {
+        await agent.newSession({ cwd: '/skills', mcpServers: [] });
+        for (const disabled of [true, false, true]) {
+          diskDisabled = disabled;
+          if (reason === 'content') {
+            workspaceSettings.merged.skills.disabled = disabled
+              ? [skillName]
+              : [];
+          }
+          await agent.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+            {
+              reason,
+            },
+          );
+          const status = await agent.extMethod(
+            SERVE_STATUS_EXT_METHODS.workspaceSkills,
+            {},
+          );
+          expect(status).toMatchObject({
+            initialized: true,
+            skills: [
+              expect.objectContaining({
+                name: skillName,
+                status: disabled ? 'disabled' : 'ok',
+              }),
+            ],
+          });
+          const skills = status['skills'] as Array<Record<string, unknown>>;
+          expect(skills[0]).not.toHaveProperty('lockedScope');
+          expect(skills[0]?.['disabledReason']).toBe(
+            disabled ? 'hard' : undefined,
+          );
+        }
+        expect(workspaceSettings.reloadScopeFromDisk).toHaveBeenCalledTimes(
+          reason === 'content' ? 0 : 3,
+        );
+        expect(sessionSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
+        expect(reloadSkillSettings).toHaveBeenCalledTimes(
+          reason === 'content' ? 0 : 3,
+        );
+        expect(refreshCache).toHaveBeenCalledTimes(
+          reason === 'settings' ? 0 : 3,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'checks workspace settings reload without sessions (success=%s)',
+    async (success) => {
+      const settings = {
+        merged: {},
+        reloadScopeFromDisk: vi.fn().mockReturnValue(success),
+      } as unknown as LoadedSettings;
+      const agentPromise = runAcpAgent(
+        makeConfig() as unknown as Config,
+        settings,
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      });
+      try {
+        const result = agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { reason: 'settings' },
+        );
+        if (success) {
+          await expect(result).resolves.toEqual({
+            sessionsRefreshed: 0,
+            sessionsFailed: 0,
+            configsRefreshed: 0,
+            configsFailed: 0,
+            reason: 'settings',
+          });
+        } else {
+          await expect(result).rejects.toThrow(
+            'Failed to reload workspace skill settings',
+          );
+        }
+        expect(settings.reloadScopeFromDisk).toHaveBeenCalledExactlyOnceWith(
+          SettingScope.Workspace,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('refreshes busy skill sessions and reports per-session failures', async () => {
     const bootstrapSettings = {
       merged: {},
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
       getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -36854,7 +37030,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const selectedId = '550e8400-e29b-41d4-a716-446655440000';
     const settings = {
       merged: {},
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
       getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -36969,7 +37145,7 @@ describe('sessionLanguage multi-session propagation', () => {
   it('refreshes skill content once per config before publishing session updates', async () => {
     const bootstrapSettings = {
       merged: {},
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
       getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -37112,12 +37288,16 @@ describe('sessionLanguage multi-session propagation', () => {
     const reloadSkillSettings = vi.fn();
     const bootstrapSettings = {
       merged: { mcpServers: {} },
-      reloadScopeFromDisk: vi.fn(),
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
       getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
-    vi.mocked(loadSettings).mockReturnValue(bootstrapSettings);
+    const sessionSettings = {
+      ...bootstrapSettings,
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(sessionSettings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
     vi.mocked(Session).mockImplementation(
       () =>
@@ -37171,6 +37351,10 @@ describe('sessionLanguage multi-session propagation', () => {
         throwOnError: true,
       });
       expect(reloadSkillSettings).toHaveBeenCalledOnce();
+      expect(
+        bootstrapSettings.reloadScopeFromDisk,
+      ).toHaveBeenCalledExactlyOnceWith(SettingScope.Workspace);
+      expect(sessionSettings.reloadScopeFromDisk).not.toHaveBeenCalled();
       expect(refreshSkillsFromSettings).toHaveBeenCalledExactlyOnceWith({
         reloadSettings: false,
         notifyConfigChanged: false,
