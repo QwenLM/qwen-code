@@ -136,8 +136,9 @@ class WorkspaceCreationSchemaMySqlIT {
 
             ManagedSchema.validate(source);
             assertEquals(13, ManagedSchema.schemaVersion(source));
-            assertThat(jdbc.queryForMap("SELECT * FROM ma_operation"))
-                    .usingRecursiveComparison().isEqualTo(existing);
+            var upgraded = jdbc.queryForMap("SELECT * FROM ma_operation");
+            upgraded.keySet().retainAll(existing.keySet());
+            assertThat(upgraded).usingRecursiveComparison().isEqualTo(existing);
             operation(jdbc, "created", "WORKSPACE_CREATE");
             operation(jdbc, "input", "SUBMIT_INPUT");
             operation(jdbc, "cancel", "CANCEL");
@@ -179,6 +180,8 @@ class WorkspaceCreationSchemaMySqlIT {
                 statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_retry_at");
                 statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_head_revision");
                 statement.execute("ALTER TABLE ma_session_head DROP COLUMN wake_pending");
+                statement.execute("DROP INDEX ix_ma_head_session ON ma_session_head");
+                statement.execute("ALTER TABLE ma_session_head DROP COLUMN cleanup_head_revision");
                 statement.execute(
                         "ALTER TABLE ma_request_receipt DROP CONSTRAINT ck_ma_request_namespace");
                 statement.execute("ALTER TABLE ma_request_receipt ADD "
@@ -187,7 +190,28 @@ class WorkspaceCreationSchemaMySqlIT {
                 statement.execute("ALTER TABLE ma_operation DROP CONSTRAINT ck_ma_operation_kind");
                 statement.execute("ALTER TABLE ma_operation ADD "
                         + baselineCheck(baseline, "ck_ma_operation_kind"));
+                statement.execute(
+                        "ALTER TABLE ma_operation DROP CONSTRAINT uq_ma_csi_retirement_target");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN csi_retirement_target_key");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN finalize_receipt_sha256");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN finalize_receipt_bytes");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN cut_sha256");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN cut_bytes");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN frozen_request_sha256");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN frozen_request_bytes");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN settlement_deadline_ms");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN progress_stage");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN progress_version");
+                statement.execute("ALTER TABLE ma_operation DROP COLUMN progress_format");
                 statement.execute("DROP INDEX ix_ma_storage_owner_host ON ma_storage_owner");
+                statement.execute("DROP INDEX ix_ma_ref_binding ON ma_resource_ref");
+                statement.execute(
+                        "ALTER TABLE ma_resource_ref DROP CONSTRAINT ck_ma_ref_binding");
+                statement.execute(
+                        "ALTER TABLE ma_resource_ref DROP CONSTRAINT ck_ma_ref_owner");
+                statement.execute("ALTER TABLE ma_resource_ref ADD "
+                        + baselineCheck(baseline, "ck_ma_ref_owner"));
+                statement.execute("ALTER TABLE ma_resource_ref DROP COLUMN runtime_binding_key");
                 statement.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_session_plan");
                 statement.execute("ALTER TABLE ma_turn DROP CONSTRAINT ck_ma_turn_plan");
                 statement.execute("ALTER TABLE ma_session DROP COLUMN plan_enabled");
