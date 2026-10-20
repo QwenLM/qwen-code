@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -290,11 +291,15 @@ class HostedChannelGateSupport {
         Map<String, Object> projection = deliveryProjection(tenant, sessionId,
                 deliveryId);
         assertThat(projection).as("delivery record " + deliveryId).isNotNull();
+        // Led by the indexed session scope key, as in HostedGateTestSupport: the
+        // raw tenant+session form scans the lane's accumulated ma_resource rows.
         var resources = jdbc.queryForList(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) AS body FROM"
-                        + " ma_resource WHERE tenant_id = ?"
-                        + " AND session_id = ? AND resource_id = ?", tenant,
-                sessionId, projection.get("record_resource_id"));
+                        + " ma_resource WHERE session_scope_key = ?"
+                        + " AND resource_id = ? AND tenant_id = ?"
+                        + " AND session_id = ?",
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                projection.get("record_resource_id"), tenant, sessionId);
         assertThat(resources).hasSize(1);
         return JSON.readTree(resources.getFirst().get("body").toString());
     }

@@ -313,6 +313,7 @@ vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
 vi.mock('../config/settings.js', () => ({
+  getOperatorTrustSettings: vi.fn(() => ({})),
   SettingScope: {},
   loadSettings: vi.fn(),
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),

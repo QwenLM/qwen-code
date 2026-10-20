@@ -164,6 +164,10 @@ function injectCssModules(): Plugin {
 const TRANSCRIPT_STUBS = new Map(
   [
     [
+      './client/components/message-deletion-messages.ts',
+      './client/components/message-deletion-messages.transcript-stub.ts',
+    ],
+    [
       './client/trajectory/execution-messages.ts',
       './client/trajectory/execution-messages.transcript-stub.ts',
     ],

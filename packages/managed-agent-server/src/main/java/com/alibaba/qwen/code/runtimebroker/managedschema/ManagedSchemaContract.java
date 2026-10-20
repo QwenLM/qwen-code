@@ -106,7 +106,8 @@ public final class ManagedSchemaContract {
         EVENT_STREAM,
         OPERATION,
         OPERATION_WORK,
-        RECOVERY
+        RECOVERY,
+        HOSTED_CLEANUP
     }
 
     public enum DeliveryKind {

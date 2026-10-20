@@ -1,29 +1,29 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiSessionMain;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitResource;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiSessionMain;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
@@ -253,7 +253,7 @@ class ToolPublicationLockOrderMySqlIT {
             var source = new OwnerPauseDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
             Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            var jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+            var jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
             var manager = new DataSourceTransactionManager(source);
             var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns",
                     "pvc", "pvc-uid", "pv", "pv-uid", "disk.csi.example.com", "volume", "backend",
@@ -326,13 +326,13 @@ class ToolPublicationLockOrderMySqlIT {
                 assertThatThrownBy(() -> owner.get(30, TimeUnit.SECONDS))
                         .as("The retention owner is the deadlock victim at its root wait")
                         .isInstanceOf(ExecutionException.class)
-                        .cause().isInstanceOfSatisfying(ApiException.class, error -> {
+                        .cause().isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                             assertThat(error.getStatus().value()).isEqualTo(503);
                             assertThat(error.getCode()).isEqualTo("tenant_guard_contended");
                         });
                 assertThatThrownBy(() -> subject.get(30, TimeUnit.SECONDS))
                         .isInstanceOf(ExecutionException.class)
-                        .cause().isInstanceOfSatisfying(ApiException.class, error ->
+                        .cause().isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getCode()).isEqualTo("csi_finalize_required"));
                 assertThat(source.subjectPlacementLocks.get())
                         .as("Sealed CSI writer walked root → placement → retention"

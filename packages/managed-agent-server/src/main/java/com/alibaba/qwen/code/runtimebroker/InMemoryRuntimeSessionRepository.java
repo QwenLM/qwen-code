@@ -6,7 +6,7 @@ import java.util.Comparator;
 import java.util.Map;
 
 /** Process-local logical Session repository for tests and single-node use. */
-public final class InMemoryRuntimeSessionRepository
+public class InMemoryRuntimeSessionRepository
         implements RuntimeSessionRepository {
     private final Map<RuntimeScope, Map<String, RuntimeSessionRecord>> records =
             new HashMap<>();
@@ -69,6 +69,42 @@ public final class InMemoryRuntimeSessionRepository
                     "Historical Runtime Session is ambiguous", false);
         }
         return matches.isEmpty() ? null : matches.getFirst();
+    }
+
+    @Override
+    public synchronized java.util.List<RuntimeSessionRecord> findHistoricalByIds(
+            String tenantId, String harnessSessionId,
+            java.util.Collection<String> runtimeSessionIds) {
+        String tenant = BrokerValues.requireId(tenantId, "tenantId");
+        String harness = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
+        for (String runtimeSessionId : runtimeSessionIds) {
+            ids.add(BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
+        }
+        java.util.Map<String, java.util.List<RuntimeSessionRecord>> matches =
+                new java.util.HashMap<>();
+        for (RuntimeSessionRecord record : records.values().stream()
+                .flatMap(scoped -> scoped.values().stream()).toList()) {
+            if (tenant.equals(record.getSession().getScope().getTenantId())
+                    && harness.equals(record.getSession().getHarnessSessionId())
+                    && ids.contains(record.getRuntimeSessionId())) {
+                matches.computeIfAbsent(record.getRuntimeSessionId(),
+                        ignored -> new java.util.ArrayList<>()).add(record);
+            }
+        }
+        java.util.List<RuntimeSessionRecord> found = new java.util.ArrayList<>();
+        for (String id : ids) {
+            java.util.List<RuntimeSessionRecord> rows = matches.get(id);
+            if (rows == null) {
+                continue;
+            }
+            if (rows.size() > 1) {
+                throw new RuntimeBrokerException(409, "runtime_session_ambiguous",
+                        "Historical Runtime Session is ambiguous", false);
+            }
+            found.add(rows.getFirst());
+        }
+        return java.util.List.copyOf(found);
     }
 
     @Override

@@ -26,7 +26,7 @@ public final class ExecutionReconciliation {
     private final Outcome outcome;
     private final String runtimeState;
 
-    ExecutionReconciliation(ToolExecutionRecord record, Outcome outcome,
+    public ExecutionReconciliation(ToolExecutionRecord record, Outcome outcome,
             String runtimeState) {
         if (record == null || outcome == null) {
             throw new IllegalArgumentException(

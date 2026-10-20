@@ -326,6 +326,26 @@ function requireManagedSessionStoreString(
 
 export type { ManagedToolV2Client } from '@qwen-code/qwen-code-core';
 
+export interface MessageGroupsSnapshot {
+  snapshot: string;
+  groups: Array<{
+    id: string;
+    promptId?: string;
+    promptIds?: string[];
+    recordIds: string[];
+  }>;
+}
+
+export interface DeleteMessageGroupsRequest {
+  snapshot: string;
+  groupIds: string[];
+}
+
+export interface DeleteMessageGroupsResponse {
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
+}
+
 export interface RewindRequest {
   promptId: string;
   rewindFiles?: boolean;
@@ -2694,12 +2714,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
-   * Broadcast extension refresh to all active sessions and emit an
-   * `extensions_changed` workspace event when complete.
+   * Refresh selected active sessions, or all when sessionIds is omitted,
+   * and emit an `extensions_changed` workspace event when complete.
    */
   refreshExtensionsForAllSessions(
     data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
-    options?: { skillsOnly?: boolean },
+    options?: { skillsOnly?: boolean; sessionIds?: readonly string[] },
   ): Promise<{
     refreshed: number;
     failed: number;
@@ -3015,11 +3035,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<ShellCommandResult>;
 
+  /** List persisted message groups after previously admitted history mutations. */
+  getMessageGroups(sessionId: string): Promise<MessageGroupsSnapshot>;
+  deleteMessageGroups(
+    sessionId: string,
+    req: DeleteMessageGroupsRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<DeleteMessageGroupsResponse>;
+
   /**
    * List rewindable snapshots for a session with per-turn diff stats.
-   * Answered only after every rewind admitted before the call has run, so
-   * the listing never describes a turn the bridge has already agreed to
-   * drop.
+   * Answered after previously admitted history mutations.
    */
   getRewindSnapshots(
     sessionId: string,

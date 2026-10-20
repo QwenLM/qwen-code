@@ -59,13 +59,44 @@ export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='sha256:<64-hex-digest>'
 bin/qwen-managed-agent-server
 ```
 
-该启动脚本使用压缩包内的 server JAR。Spring Flyway 会在服务 ready 前执行向前数据库 migration。等待：
+无法通过环境变量表达的设置（例如 Runtime 凭据密钥环）写在 `config/application.yml` 中。从随包模板复制并收紧权限：
+
+```bash
+cp config/application.example.yml config/application.yml
+chmod 600 config/application.yml
+```
+
+两个启动脚本都会在该文件存在时自动加载。该启动脚本使用压缩包内的 server JAR。Spring Flyway 会在服务 ready 前执行向前数据库 migration。等待：
 
 ```bash
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
 基础配置支持纯文本 Hosted Session。除非配置签名或认证入口，否则服务只能监听 loopback。完整认证、API 与 capability 配置随包提供于 `docs/server-reference.md`。
+
+## 生成凭据
+
+`bin/qwen-managed-agent-bootstrap` 生成共享的 Harness token 与 capability digest、broker token 以及 Runtime 凭据密钥。它写出 `config/harness.env`、`config/server.env` 与 `config/application.yml`，权限为 0600；目标文件已存在时除非传入 `--force` 否则拒绝覆盖；只打印路径，不打印 secret：
+
+```bash
+bin/qwen-managed-agent-bootstrap
+```
+
+生成的 `harness.env` 与 `server.env` 既可直接被 shell source，也可作为 systemd 的 `EnvironmentFile`。systemd 布局下传入 `--directory /etc/qwen-managed-agent`，随后填写 `SPRING_DATASOURCE_PASSWORD`，并把文件属主调整为服务账号。
+
+## 预检
+
+在首次启动前以及每次安装新产物后，用启动脚本运行 `--check`。它绑定与服务器相同的配置（`config/application.yml` 加环境变量），不启动监听，并按输入项逐行输出结果：
+
+```bash
+bin/qwen-managed-agent-server --check
+```
+
+检查范围包括 JDK、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验原生 Workspace storage 注册。
+
+## systemd
+
+分发产物包含面向既定单机拓扑的 `systemd/` unit 与环境模板。控制面 unit 使用 `KillMode=process`，使 Runtime worker 在 Broker 重启后继续存活；Harness unit 使用 `KillMode=mixed`，使其工具进程随 Harness 终止。安装步骤见 `systemd/README.zh-CN.md`。
 
 ## 开启已接受的 local-process 工具路径
 
@@ -91,7 +122,7 @@ export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 1. 下载并校验新压缩包，读取新旧两个 manifest。在改动运行中部署前，确认新的 Qwen Code/Harness、Java、协议与数据库要求。
 2. 停止新的入口准入，按照部署既有 drain 流程等待已准入工作完成结算。
 3. 备份 MySQL、`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`、完整 Runtime credential key ring 和精确旧版分发产物。分发产物升级期间不要轮换 credential key。
-4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。
+4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。随包的控制面 unit 使用 `KillMode=process`，`systemctl stop` 不会终止 Runtime worker；启动新版本前先用 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` 回收。
 5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。
 6. 使用相同数据库和 durable 配置启动新版 `bin/qwen-managed-agent-server`，由 Flyway 向前迁移 schema。
 7. 要求 actuator 健康检查通过，读取一个既有 Session 与历史，再完成一个新的无工具 Turn，之后才能恢复入口流量。任何可选工具 capability 都必须在重新验收后才能开启。
@@ -128,9 +159,11 @@ FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
 
 查询结果列出持久化记录仍需要的 key ID：预期只剩 active ID（`reference-v2`）。只要结果中仍出现 `reference-v1`，就必须继续配置该密钥。
 
-该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 只能在服务进程真正加载到的 `application.yml` 中配置：参考分发产物不含配置文件，且 Spring 是按进程工作目录（`./` 与 `./config/`）解析外部 `application.yml`，而不是按分发产物根目录解析；`bin/qwen-managed-agent-server` 会把参数透传给 JVM，因此可用 `--spring.config.additional-location=file:<绝对路径>` 固定加载位置。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。
+该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 配置在 `config/application.yml` 中。分发产物随包提供 `config/application.example.yml`，两个启动脚本都会在该文件存在时导出 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<分发产物根目录>/config/application.yml`，因此加载位置不再取决于进程工作目录，也不会向命令的位置参数注入选项。若该变量已设置，启动脚本保留原值。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。显式的 `--spring.config.additional-location` 命令行参数优先于该环境变量默认值；两者同时存在时命令行值生效，随包的 `config/application.yml` 不会被加载。
 
-`operator-recovery` 入口和 CSI/迁移维护入口仍只配置单个 credential key pair，不会读取 `previous-credential-keys`。如需对轮换前写入的 binding 执行恢复，请以对应旧密钥作为该入口的 active credential pair 启动。
+`operator-recovery` 入口与服务器读取相同的 active pair 和 `previous-credential-keys` 映射。其启动脚本同样加载 `config/application.yml`；文件位于其他位置时，设置 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<绝对路径>/application.yml`。保持新密钥为 active，并保留 binding 仍引用的每把旧密钥。CSI/迁移维护入口（含 CSI Hosted 探针）仍只读取单个 credential key pair；这些入口继续以加密目标 binding 的密钥作为 active pair 启动。
+
+密钥环配置成功后，服务器和恢复入口会为每个 protector 实例记录一次解析后的 active ID 和 configured IDs。这些 ID 是已随密文保存的非 secret 标识；诊断通过 JSON 转义控制字符与非 ASCII 字符、保留空格和大小写，绝不包含密钥材料、密文或 token。使用轮换后的部署前，应将 configured IDs 与退场查询返回的精确 ID 对照。密钥不可用错误会同时给出 requested、active 和 configured IDs，便于定位被静默规整或拼错的映射，同时避免泄露 secret。这些诊断不能证明每条持久化记录都能解密。
 
 ## 运维恢复
 
