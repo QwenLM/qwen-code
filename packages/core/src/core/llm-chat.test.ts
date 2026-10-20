@@ -4383,6 +4383,7 @@ describe('LlmChat', async () => {
       // The snapshot carries the pending turn the compression belongs to:
       // resume replaces history wholesale at the compression record, so a
       // snapshot without it would resurrect the answer with no question.
+      expect(recordPayload.summaryPrefixLength).toBe(summaryAck().length);
       expect(recordPayload.compressedHistory).toEqual([
         ...summaryAck(),
         { role: 'user', parts: [{ text: userMessage }] },
@@ -12312,6 +12313,9 @@ describe('LlmChat', async () => {
       expect(info.newTokenCount).toBeLessThan(1000);
       expect(fastChat.isLastPromptTokenCountEstimated()).toBe(true);
       expect(recordChatCompression).toHaveBeenCalledWith(checkpointWith(true));
+      expect(
+        recordChatCompression.mock.calls[0][0].summaryPrefixLength,
+      ).toBeUndefined();
     });
 
     // Issue #9309: /compress-fast then /compress banners use two scales (API
