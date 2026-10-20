@@ -1622,6 +1622,56 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
+    it.each([false, true])(
+      'saves the Mods toggle from %s and requests restart explicitly',
+      async (enabled) => {
+        const settings = createMockSettings({
+          experimental: { mods: enabled },
+        });
+        const onRestartRequest = vi.fn();
+        const { stdin, lastFrame, unmount } = render(
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <SettingsDialog
+              settings={settings}
+              onSelect={() => {}}
+              onRestartRequest={onRestartRequest}
+            />
+          </KeypressProvider>,
+        );
+
+        try {
+          for (const ch of 'experimental.mods') {
+            act(() => stdin.write(ch));
+            await wait();
+          }
+          await waitFor(() =>
+            expect(lastFrame()).toContain('Mods (Experimental)'),
+          );
+          act(() => stdin.write(TerminalKeys.DOWN_ARROW));
+          await wait();
+          act(() => stdin.write(TerminalKeys.ENTER));
+
+          await waitFor(() => {
+            expect(saveModifiedSettings).toHaveBeenCalledWith(
+              new Set(['experimental.mods']),
+              { experimental: { mods: !enabled } },
+              settings,
+              SettingScope.User,
+            );
+            expect(lastFrame()).toContain(
+              'To see changes, Qwen Code must be restarted',
+            );
+          });
+          expect(onRestartRequest).not.toHaveBeenCalled();
+
+          act(() => stdin.write('r'));
+          await waitFor(() => expect(onRestartRequest).toHaveBeenCalledOnce());
+        } finally {
+          unmount();
+        }
+      },
+    );
+
     it('shows a hint when nothing matches the query', async () => {
       const settings = createMockSettings();
       const onSelect = vi.fn();
