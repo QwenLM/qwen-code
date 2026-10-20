@@ -424,6 +424,9 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).not.toContain('Keep index entries to one line at most');
     expect(result).toContain('shortening entries cannot help');
     expect(result).toContain('prune or merge entries');
+    // The budget is a hardcoded constant with no settings surface, so the
+    // advice must not send the reader after a lever they cannot pull.
+    expect(result).not.toContain('raise the budget');
   });
 
   it('names what the budget evicted instead of only saying part was loaded', () => {
@@ -433,7 +436,7 @@ describe('managed auto-memory prompt helpers', () => {
     );
 
     expect(result).toContain(
-      'Dropped 5 entries: "Topic 165", "Topic 166", "Topic 167", +2 more.',
+      'Dropped 5 of 170 entries: "Topic 165", "Topic 166", "Topic 167", +2 more.',
     );
     expect(result).toContain('- [Topic 164](');
     expect(result).not.toContain('- [Topic 165](');
@@ -448,7 +451,7 @@ describe('managed auto-memory prompt helpers', () => {
       `Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units`,
     );
     expect(result).not.toContain('shortening entries cannot help');
-    expect(result).toContain('Dropped 1 entry: "Oversized".');
+    expect(result).toContain('Dropped 1 of 2 entries: "Oversized".');
   });
 
   it('emits full prompt when at least one index has content', () => {

@@ -174,17 +174,20 @@ function droppedEntryName(line: string): string {
     : text;
 }
 
-function describeDroppedEntries(dropped: readonly string[]): string {
-  const entries = dropped.filter((line) => line.trim().length > 0);
-  if (entries.length === 0) {
+function describeDroppedEntries(
+  dropped: readonly string[],
+  total: number,
+): string {
+  const removed = dropped.filter((line) => line.trim().length > 0);
+  if (removed.length === 0) {
     return '';
   }
-  const names = entries
+  const names = removed
     .slice(0, MAX_NAMED_DROPPED_ENTRIES)
     .map((line) => `"${droppedEntryName(line)}"`)
     .join(', ');
-  const rest = entries.length - MAX_NAMED_DROPPED_ENTRIES;
-  return ` Dropped ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'}: ${names}${
+  const rest = removed.length - MAX_NAMED_DROPPED_ENTRIES;
+  return ` Dropped ${removed.length} of ${total} entries: ${names}${
     rest > 0 ? `, +${rest} more` : ''
   }.`;
 }
@@ -206,14 +209,14 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length).split('\n')
     : lines;
   const { content, dropped } = trimIndexToBudgetDetailed(entries);
-  const overlongCount = entries.filter(
+  const hasOverlongEntry = entries.some(
     (line) => line.length > MAX_INDEX_LINE_CHARS,
-  ).length;
+  );
 
   const reason =
     wasCharTruncated && !wasLineTruncated
       ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
-          overlongCount > 0
+          hasOverlongEntry
             ? 'index entries are too long'
             : `too many index entries (${entries.length})`
         }`
@@ -224,13 +227,13 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   // Name a lever that can actually move the number. Shortening entries only
   // helps when one is over the per-line limit; with every entry legal the
   // overflow is the entry COUNT, and no amount of rewording clears it.
-  const lever =
-    overlongCount > 0
-      ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
-      : ` No entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries, or raise the budget.`;
+  const lever = hasOverlongEntry
+    ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
+    : ` No entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries.`;
 
   return `${content}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedEntries(
     dropped,
+    entries.length,
   )}${lever}`;
 }
 
