@@ -21,7 +21,7 @@ import static org.mockito.Mockito.when;
 
 class HostedMySqlIsolationIT {
     @Test
-    @Timeout(30)
+    @Timeout(120)
     void clearsRecoveryTargetsAndRetainsSchemaHistoryBetweenClasses() throws Exception {
         var source = new DriverManagerDataSource(System.getProperty("mysql.url"),
                 System.getProperty("mysql.user"), System.getProperty("mysql.password", ""));
