@@ -4,11 +4,15 @@
 # waiter can lose every release and die at its wait budget (qwen-code#14743).
 # This helper turns the shared sdk-java-tests.lock into a ticketed queue —
 # every acquirer takes the next sequence number atomically and only the
-# smallest live number even touches the lock, so the wait is bounded by
-# position instead of luck. Tickets belong to `${lock}.queue/` and carry
-# their owner's PID; the queue and the PID namespace are both per-host, so a
-# cancelled or killed step's orphaned ticket is reaped by the next head-of-line
-# check.
+# smallest live number even tries the lock, so the wait is bounded by
+# position instead of luck. The head retries with a blocking `flock --wait`
+# slice, not a --nonblock poll: a mixed fleet still holds legacy inline
+# `flock --wait` waiters, and a polled head loses every release to the kernel
+# wakeups those legacy waiters get — this PR's first live run starved the
+# full 5400 s budget as queue ticket 1 behind exactly those holders. Tickets
+# belong to `${lock}.queue/` and carry their owner's PID; the queue and the
+# PID namespace are both per-host, so a cancelled or killed step's orphaned
+# ticket is reaped by the next head-of-line check.
 #
 # Source this file from the locking step and call
 # `sdk_java_lock_acquire <wait-seconds>`. On success the lock stays on fd 9 in
@@ -81,7 +85,13 @@ sdk_java_lock_acquire() {
     # sed -n 1p consumes every line: head -n 1 would close the pipe early
     # and pipefail would then fail the assignment with a SIGPIPE status.
     head=$(printf '%s\n' "${queue}/"*.ticket | sort | sed -n '1p')
-    if [[ ${head} == "${ticket}" ]] && flock --nonblock 9; then
+    # Head of line: block inside the kernel's wake race like every legacy
+    # inline `flock --wait` waiter that main and older branches still run,
+    # in five-second slices so the shared budget below stays sharp.
+    remaining=$((wait_seconds - (SECONDS - start)))
+    ((remaining < 0)) && remaining=0
+    if [[ ${head} == "${ticket}" && ${remaining} -gt 0 ]] \
+      && flock --wait "$((remaining < 5 ? remaining : 5))" 9; then
       sdk_java_lock_ticket=${ticket}
       sdk_java_lock_release() { [[ -n ${sdk_java_lock_ticket} ]] && rm -f "${sdk_java_lock_ticket}"; sdk_java_lock_ticket=; }
       trap 'sdk_java_lock_release' EXIT

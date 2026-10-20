@@ -20,10 +20,11 @@ import { describe, expect, it } from 'vitest';
 
 // The helper's queue lives under $HOME, so every case gets a private HOME.
 // flock itself is stubbed on PATH: the production command line is unchanged,
-// and the stub answers --nonblock from a fixture flag file so a test can hold
-// or release the imaginary lock mid-run without a privileged filesystem. The
-// shell flags mirror a GitHub Actions step (`-eo pipefail`): an early-closing
-// consumer or a failed `[[ ]] &&` list would only surface under them.
+// and the stub answers --wait from a fixture flag file (held => brief sleep,
+// then timeout, like a busy holder) so a test can hold or release the
+// imaginary lock mid-run without a privileged filesystem. The shell flags
+// mirror a GitHub Actions step (`-eo pipefail`): an early-closing consumer
+// or a failed `[[ ]] &&` list would only surface under them.
 const script = '.github/scripts/sdk-java-lock.sh';
 const queueDir = (home) =>
   join(home, '.cache/qwen-code-ci/sdk-java-tests.lock.queue');
@@ -34,7 +35,13 @@ const flockStub = (behavior) => {
   return stubDir;
 };
 const freeFlock = '#!/bin/sh\nexit 0';
-const heldFlock = (held) => `#!/bin/sh\n[ -f "${held}" ] && exit 1\nexit 0`;
+const heldFlock = (held) => `#!/bin/sh
+if [ -f "${held}" ]; then
+  sleep 0.2
+  exit 1
+fi
+exit 0
+`;
 
 const acquire = (home, wait, stubDir, extra = '') =>
   new Promise((resolve) => {

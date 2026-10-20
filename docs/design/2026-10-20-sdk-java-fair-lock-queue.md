@@ -42,9 +42,15 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   number from a counter protected by a counter-lock directory (`mkdir` is
   the atomic enter; a holder dying inside the section is aged out after one
   minute).
-- Only the holder of the smallest live sequence number tries
-  `flock --nonblock`. Everyone behind it sleeps and polls, so the wake order
-  is position, not luck.
+- Only the holder of the smallest live sequence number tries the lock —
+  as a blocking `flock --wait` call sliced at five seconds, not a
+  `--nonblock` poll. The fleet is mixed: main and older branches still run
+  the raw `flock --wait`, and a polled head loses every release to the
+  kernel wakeups those legacy waiters get (this PR's first live run starved
+  its full 5400 s budget as queue ticket 1 for exactly that reason). The
+  blocked head rejoins the same wake race on even terms; waiters ordering
+  applies between runs that use this helper, which becomes everyone once it
+  merges.
 - Tickets carry their owner's PID. A cancelled or killed step leaves an
   orphaned ticket; the next head-of-line check reaps any ticket whose owner
   PID is dead and whose mtime is older than 10 seconds (a live waiter touches
