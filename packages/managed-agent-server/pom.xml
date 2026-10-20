@@ -506,8 +506,11 @@
                                  intent store-rejection cell adds 150 s: the
                                  healthy sum becomes 8595 s, so the fork moves
                                  to 9195 s and the Verify step to 164
-                                 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9195</forkedProcessTimeoutInSeconds>
+                                 minutes. The FG13b Hook dispatch
+                                 store-rejection cell adds 150 s: the healthy
+                                 sum becomes 8745 s, so the fork moves to
+                                 9345 s and the Verify step to 166 minutes. -->
+                            <forkedProcessTimeoutInSeconds>9345</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

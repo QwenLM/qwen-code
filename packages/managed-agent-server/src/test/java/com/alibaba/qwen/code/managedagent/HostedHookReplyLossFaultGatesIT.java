@@ -541,6 +541,24 @@ class HostedHookReplyLossFaultGatesIT {
         StoreFaultGate.INSTANCE.clear();
     }
 
+    @Test
+    @Timeout(300)
+    void fg13bHookDispatchStoreRejectionKeepsTheIntentRetryableOnMySql() throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_DISPATCH_STARTED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        submit(session, "FG13_STORE_DISPATCH");
+        // The dispatch commit is refused before the worker is reached, so the
+        // command never runs and the intent stays retryable.
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
+        await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
+                .until(() -> true);
+        assertThat(events("hook.call")).isEmpty();
+        StoreFaultGate.INSTANCE.clear();
+    }
+
     // The Harness status route identifies the caller by the client id its
     // attach minted and the process generation it attached to; the connector
     // keeps both on the private attachment ref.
