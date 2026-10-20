@@ -415,6 +415,15 @@ it.skipIf(process.platform === 'win32').each(['per-pty', 'process'])(
       pty.write(Buffer.alloc(4096));
       expect(pty.stats.writeQueuedBytes).toBe(4096);
       expect(fake.writeCallback).toBeTypeOf('function');
+      pty.pause();
+      const readBuffer = fake.read.mock.calls.at(-1)![1] as Buffer;
+      Buffer.from('held').copy(readBuffer);
+      fake.readCallback!(null, 4);
+      expect(getPtyBudgetStats()).toEqual({
+        activePtys: 1,
+        pausedHoldBytes: 4,
+        writeQueueBytes: 4096,
+      });
       fake.nativeExit!(3, 0);
       pty.write('x');
       expect(errors).toHaveLength(1);
@@ -428,6 +437,11 @@ it.skipIf(process.platform === 'win32').each(['per-pty', 'process'])(
       expect(errors[0]!.message).not.toContain('undelivered output');
       expect(pty.stats.writeQueuedBytes).toBe(0);
       expect(fake.write).toHaveBeenCalledTimes(1);
+      expect(getPtyBudgetStats()).toEqual({
+        activePtys: 0,
+        pausedHoldBytes: 0,
+        writeQueueBytes: 0,
+      });
     } finally {
       processPtyBudget.totalWriteQueueBytes = original;
       fake.writeCallback?.(
