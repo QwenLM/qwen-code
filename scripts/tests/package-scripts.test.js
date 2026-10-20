@@ -1776,6 +1776,11 @@ describe('package scripts', () => {
       ],
       [
         '.github/workflows/cd-cua-driver.yml',
+        'publish-browser',
+        'Publish immutable Browser SDK tarball',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
         'publish-sdk',
         'Publish immutable SDK tarball',
       ],

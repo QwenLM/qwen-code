@@ -792,7 +792,7 @@ describe('package asset scripts', () => {
     },
   );
 
-  it('copies Computer Use platform references to both CLI and core distributions', () => {
+  it('copies bundled skill references to both CLI and core distributions', () => {
     const rootDir = createFixtureRoot();
     const coreDir = path.join(rootDir, 'packages', 'core');
     const resources = [
@@ -803,7 +803,7 @@ describe('package asset scripts', () => {
     for (const resource of resources) {
       writeFile(
         rootDir,
-        `packages/core/src/skills/bundled/computer-use/${resource}`,
+        `packages/core/src/skills/bundled/fixture-skill/${resource}`,
         resource,
       );
     }
@@ -813,13 +813,13 @@ describe('package asset scripts', () => {
     for (const resource of resources) {
       expect(
         readFileSync(
-          path.join(rootDir, 'dist/bundled/computer-use', resource),
+          path.join(rootDir, 'dist/bundled/fixture-skill', resource),
           'utf8',
         ),
       ).toBe(resource);
       expect(
         readFileSync(
-          path.join(coreDir, 'dist/src/skills/bundled/computer-use', resource),
+          path.join(coreDir, 'dist/src/skills/bundled/fixture-skill', resource),
           'utf8',
         ),
       ).toBe(resource);
