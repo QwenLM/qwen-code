@@ -15,10 +15,12 @@ export type LoopDetectionConfirmationResult = {
 };
 
 interface LoopDetectionConfirmationProps {
+  cause?: string;
   onComplete: (result: LoopDetectionConfirmationResult) => void;
 }
 
 export function LoopDetectionConfirmation({
+  cause,
   onComplete,
 }: LoopDetectionConfirmationProps) {
   useKeypress(
@@ -31,6 +33,10 @@ export function LoopDetectionConfirmation({
     },
     { isActive: true },
   );
+
+  // The cause is shared with the headless text, which marks setting names as
+  // code; quote them like the note below.
+  const quotedCause = cause?.replace(/`([^`]+)`/g, '"$1"');
 
   const OPTIONS: Array<RadioSelectItem<LoopDetectionConfirmationResult>> = [
     {
@@ -74,6 +80,9 @@ export function LoopDetectionConfirmation({
         </Box>
         <Box width="100%" marginTop={1}>
           <Box flexDirection="column">
+            {quotedCause && (
+              <Text color={theme.text.primary}>Cause: {quotedCause}.</Text>
+            )}
             <Text color={theme.text.secondary}>
               This can happen due to repetitive tool calls or other model
               behavior. Do you want to keep loop detection enabled or disable it
