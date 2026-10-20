@@ -311,6 +311,10 @@ async function transcript() {
   }
 }
 
+function terminalsOf<T extends { type: string }>(events: T[]) {
+  return events.filter((event) => event.type.startsWith('turn_'));
+}
+
 async function start() {
   await cli.start(model.baseUrl, {
     extraArgs: [
@@ -341,24 +345,35 @@ try {
     );
     assert.equal(current.faults, 3, `${current.fault}: retries not exhausted`);
     // A reply-lost commit landed durably before its answer was dropped. The
-    // settle (#14570) applies it once: a result reply becomes the one
-    // committed tool_result while the Turn stays blocked, and a turn reply
-    // settles the Turn itself, so it completes without a cold load.
+    // settle (#14570) applies it once, on its own retry rather than before
+    // the fault loop returns: a result reply becomes the one committed
+    // tool_result while the Turn stays blocked, and a turn reply settles the
+    // Turn itself, so it completes without a cold load. Wait for either
+    // shape instead of pinning the settle's timing.
+    const settles = [
+      'result-checkpoint',
+      'result-reply',
+      'turn-reply',
+    ].includes(current.fault);
     const settled = current.fault === 'turn-reply';
-    if (settled)
+    if (settles)
+      // 30 s keeps the three marked faults (at most 90 s) inside the
+      // method's @Timeout(180) with room for the harness boots either side.
       await waitUntil(async () => {
         const status = await json(`${route}/status`);
         const applied = await transcript();
         return (
           !status.hasActivePrompt &&
-          !status.recoveryBlocked &&
-          applied.some((event) => event.type.startsWith('turn_'))
+          applied.filter((event) => event.data.record?.type === 'tool_result')
+            .length === 1 &&
+          terminalsOf(applied).length === (settled ? 1 : 0) &&
+          (settled ? !status.recoveryBlocked : status.recoveryBlocked)
         );
-      });
+      }, 30_000);
     assert.equal((await json(`${route}/status`)).recoveryBlocked, !settled);
     assert.equal(current.modelCalls, settled ? 2 : 1);
     const records = await transcript();
-    const terminals = records.filter((event) => event.type.startsWith('turn_'));
+    const terminals = terminalsOf(records);
     assert.equal(terminals.length, settled ? 1 : 0);
     if (settled) {
       assert.equal(terminals[0].type, 'turn_complete');
@@ -367,11 +382,7 @@ try {
     assert.equal(
       records.filter((event) => event.data.record?.type === 'tool_result')
         .length,
-      ['result-checkpoint', 'result-reply', 'turn-reply'].includes(
-        current.fault,
-      )
-        ? 1
-        : 0,
+      settles ? 1 : 0,
     );
     const started = current.fault.startsWith('result-') || settled;
     for (const [operation, count] of [

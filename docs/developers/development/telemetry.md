@@ -776,7 +776,8 @@ The following events are logged:
   - **Attributes**: `prompt_id` (string), `finish_reason` (string), `result` (string)
 
 - `loop_detected`: Loop detected during agent execution. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
-  - **Attributes**: `loop_type` (string), `prompt_id` (string)
+  - **Attributes**: `loop_type` (string), `prompt_id` (string), `loop_reason` (string, optional), `tool_call_count` (int, optional), `tool_call_limit` (int, optional)
+  - `loop_reason` names the cause when one loop type covers several: `explicit_cap`, `backstop` or `stuck_repetition` for `turn_tool_call_cap`, and `repeated_call` or `provider_duplicate_id` for `global_tool_call_duplicate`. `tool_call_count` and `tool_call_limit` are set for `turn_tool_call_cap` only. `tool_call_count` is the count the cap compared with the limit; daemon/ACP sessions check the cap per batch before running it, so their count includes the whole skipped batch.
 
 - `kitty_sequence_overflow`: Kitty graphics protocol sequence exceeded buffer size. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
   - **Attributes**: `sequence_length` (int), `truncated_sequence` (string, first 20 chars)
