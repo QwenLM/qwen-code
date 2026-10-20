@@ -21,7 +21,7 @@ Issue #14447 的 FG12f 行要求四种投递行为：在 Broker 或 Runtime 不�
 4. **列表变更只钉当前实现确有的行为。** 夹具在回答读取之前发出 `notifications/tools/list_changed`；用例断言恰好一次 invoke、一次副作用，以及该调用保持启动时的 `catalogRevision`。issue 里「产生新配置代际」这一条不断言，因为本树的通知不会回写配置记录，断言它等于钉一个并不存在的行为。
 5. **迟到应答在连接存活时即可结算。** 夹具先回一个无法解析的结果，`receive()` 记 `outcome_unknown` 但保留 pending；随后同 id 的合法应答由 `settled()` 结算原操作，不需要生产改动。
 6. **连接已关闭的形态不进入本切片。** 连接消失后应答没有接收方，该形态仍作为缺口记录在 #14880。
-7. **预算按实测重钉。** 四格在 JDK 21 + MySQL 8.0.46 上实测 24.16 s（含冷启动建表），按 2 倍计给健康总和加 50 s。健康的绝对值、fork、Verify 与 job 上限均钉在 `scripts/tests/hosted-process-ci.test.js`，本文不再复述：main 每落一个 Hosted 类它们就会变，而正文里抄写的字面值在评审中已漂移两次。
+7. **预算按实测重钉。** 四格在 JDK 21 + MySQL 8.0.46 上实测 24.16 s（含冷启动建表），按 2 倍计把该类由 40 s 抬到 50 s，即健康总和加 10 s——`main` 已含该类的 40 s。健康的绝对值、fork、Verify 与 job 上限均钉在 `scripts/tests/hosted-process-ci.test.js`，本文不再复述：main 每落一个 Hosted 类它们就会变，而正文里抄写的字面值在评审中已漂移两次。
 
 ## 验收
 

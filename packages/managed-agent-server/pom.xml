@@ -532,7 +532,7 @@
                                  store-rejection cell adds 150 s: the healthy
                                  sum becomes 9465 s, so the fork moves to
                                  10065 s and the Verify step to 178 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10115</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>10075</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
