@@ -407,11 +407,17 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
   };
   afterEach(async () => {
     for (const pty of live.splice(0)) pty.kill();
-    await waitFor(
-      () =>
-        getPtyBudgetStats().activePtys === 0 &&
-        getPtyBudgetStats().pausedHoldBytes === 0,
-    );
+    expect(
+      await waitFor(() => {
+        const stats = getPtyBudgetStats();
+        return (
+          stats.activePtys === 0 &&
+          stats.pausedHoldBytes === 0 &&
+          stats.writeQueueBytes === 0
+        );
+      }, 5_000),
+      'PTY budgets did not drain after cleanup',
+    ).toBe(true);
   });
 
   const nextError = (pty: Spawned): { errors: PtyLimitError[] } => {
