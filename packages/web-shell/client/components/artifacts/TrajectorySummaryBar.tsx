@@ -194,7 +194,9 @@ export function TrajectorySummaryBar({
             </PopoverContent>
           </Popover>
         )}
-        {failures > 0 && (
+        {/* Kept while the filter is on, so a window without failures still
+            shows the control that turns it off. */}
+        {(failures > 0 || failuresOn) && (
           <button
             type="button"
             className={`${styles.chip} ${styles.failed}`}

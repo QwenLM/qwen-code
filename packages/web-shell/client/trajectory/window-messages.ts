@@ -4,14 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { plural } from '../utils/plural.js';
+
 type WindowMessage =
   | string
   | ((vars?: Record<string, string | number>) => string);
-
-function plural(count: string | number | undefined, noun: string): string {
-  const n = Number(count ?? 0);
-  return `${n} ${noun}${n === 1 ? '' : 's'}`;
-}
 
 export const TRAJECTORY_WINDOW_MESSAGES_EN: Record<string, WindowMessage> = {
   'trajectory.summary.elapsed': 'elapsed',
@@ -49,6 +46,7 @@ export const TRAJECTORY_WINDOW_MESSAGES_EN: Record<string, WindowMessage> = {
   'trajectory.window.return': 'Back to latest',
   'trajectory.window.released':
     'Newer navigation bookmarks were released. Return to latest to read newer records.',
+  'trajectory.window.changed': 'Window changed. Select a record to inspect it.',
   'trajectory.window.failed':
     'Navigation failed; the displayed window is retained.',
   'trajectory.window.expired':
@@ -92,6 +90,7 @@ export const TRAJECTORY_WINDOW_MESSAGES_ZH: Record<string, WindowMessage> = {
   'trajectory.window.return': '回到最新',
   'trajectory.window.released':
     '较新历史导航记录已释放，可回到最新读取较新记录。',
+  'trajectory.window.changed': '已切换窗口，请重新选择记录查看详情。',
   'trajectory.window.failed': '导航失败，当前窗口仍可阅读。',
   'trajectory.window.expired': '历史快照已不可用，请回到最新。',
   'trajectory.window.protocol':

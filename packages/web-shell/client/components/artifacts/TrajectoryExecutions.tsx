@@ -145,9 +145,12 @@ export function TrajectoryExecutions({
     document.addEventListener('visibilitychange', update);
     return () => document.removeEventListener('visibilitychange', update);
   }, []);
+  // The strip renders nothing until the first execution arrives, so the panel
+  // can only be observed from then on.
+  const present = rows.length > 0;
   useEffect(() => {
     const panel = rootRef.current?.parentElement;
-    if (!panel) return;
+    if (!present || !panel) return;
     let frame = 0;
     const observer = new ResizeObserver(([entry]) => {
       if (entry) setCompact(entry.contentRect.height < 480);
@@ -161,7 +164,7 @@ export function TrajectoryExecutions({
       observer.disconnect();
       cancelAnimationFrame(frame);
     };
-  }, []);
+  }, [present]);
   useEffect(() => {
     if (!open || !visible || !running) return;
     setNow(Date.now());

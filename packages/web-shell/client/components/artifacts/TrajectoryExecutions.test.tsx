@@ -317,6 +317,22 @@ it('opens in one click after manual collapse and a compact viewport resize', asy
   expect(vi.getTimerCount()).toBe(1);
 });
 
+it('watches the panel height once the first execution arrives', async () => {
+  resize = undefined as unknown as ResizeObserverCallback;
+  const { container, update } = await mount([]);
+  expect(resize).toBeUndefined();
+  await update([running()]);
+  act(() =>
+    resize(
+      [{ contentRect: { height: 400 } } as ResizeObserverEntry],
+      {} as ResizeObserver,
+    ),
+  );
+  expect(container.querySelector('button')!.getAttribute('aria-expanded')).toBe(
+    'false',
+  );
+});
+
 it('anchors a paused reader across insertion, reordering, collapse and eviction', async () => {
   const rows = Array.from({ length: 40 }, (_, index) => running(String(index)));
   const { container, update, onPause } = await mount(rows);

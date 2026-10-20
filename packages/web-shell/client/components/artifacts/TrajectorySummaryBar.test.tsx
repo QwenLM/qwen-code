@@ -111,6 +111,18 @@ it('hides the failure chip when nothing failed', async () => {
   expect(byTestId('trajectory-failures')).toBeNull();
 });
 
+it('keeps the failure chip while its filter is on, so it can be turned off', async () => {
+  const { props } = await mount({
+    summary: { ...SUMMARY, requestFailures: 0, toolFailures: 0 },
+    failuresOn: true,
+  });
+  const chip = byTestId('trajectory-failures')!;
+  expect(chip.textContent).toBe('0 failed');
+  expect(chip.getAttribute('aria-pressed')).toBe('true');
+  await act(async () => chip.click());
+  expect(props.onToggleFailures).toHaveBeenCalledTimes(1);
+});
+
 it.each([
   ['live', 'Live', 'Pause following'],
   ['connecting', 'Connecting…', 'Pause following'],

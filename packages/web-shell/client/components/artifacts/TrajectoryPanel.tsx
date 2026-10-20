@@ -48,11 +48,7 @@ import {
   type TimelineRange,
 } from '../../trajectory/timelineRange';
 import { summarizeTrajectory } from '../../trajectory/summarizeTrajectory';
-import {
-  formatClockTime,
-  formatWindowTime,
-  TrajectoryOverview,
-} from './TrajectoryOverview';
+import { formatTimelinePoint, TrajectoryOverview } from './TrajectoryOverview';
 import { TrajectoryInspector } from './TrajectoryInspector';
 import { TrajectoryExecutions } from './TrajectoryExecutions';
 import { projectTrajectoryExecutions } from '../../trajectory/project-trajectory-executions';
@@ -440,6 +436,7 @@ export function TrajectoryPanel({
   const [windowScope, setWindowScope] = useState({
     loader: loadPage,
     version: navigationVersion,
+    selectionLost: false,
   });
   const [executionsUpdated, setExecutionsUpdated] = useState(false);
   // Jump to latest floats over the rows, so it only appears once the reader
@@ -746,10 +743,12 @@ export function TrajectoryPanel({
       pauseFollowing();
       const element = scrollRef.current;
       if (element) {
-        const top = Math.max(0, element.scrollTop - ROW_HEIGHT);
-        const index = Math.min(
-          visualRows.length - 1,
-          Math.floor(top / ROW_HEIGHT),
+        // Negative while the top boundary is in view, so restoring the anchor
+        // keeps that boundary where it was rather than scrolling past it.
+        const top = element.scrollTop - ROW_HEIGHT;
+        const index = Math.max(
+          0,
+          Math.min(visualRows.length - 1, Math.floor(top / ROW_HEIGHT)),
         );
         const entry = visualRows[index];
         if (entry)
@@ -922,14 +921,18 @@ export function TrajectoryPanel({
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       // Keys pressed on a control inside the grid, such as a boundary row's
-      // button, belong to that control. A row's own buttons are out of the tab
-      // order and only hold focus because they were clicked; the grid keeps
-      // their keys.
+      // button, belong to that control, except the ones that move through the
+      // records: those hand focus back to the grid. A row's own buttons are out
+      // of the tab order and only hold focus because they were clicked; the
+      // grid keeps their keys.
       if (
         event.target !== event.currentTarget &&
         (event.target as HTMLElement).tabIndex >= 0
-      )
-        return;
+      ) {
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key))
+          return;
+        event.currentTarget.focus({ preventScroll: true });
+      }
       if (event.key === 'Escape') {
         // Only claimed when there is a selection to drop; otherwise Escape is
         // left to whatever encloses the panel.
@@ -1056,7 +1059,11 @@ export function TrajectoryPanel({
   ) {
     const changedSession = windowScope.loader !== loadPage;
     pendingWindowScrollRef.current = !changedSession;
-    setWindowScope({ loader: loadPage, version: navigationVersion });
+    setWindowScope({
+      loader: loadPage,
+      version: navigationVersion,
+      selectionLost: !changedSession && selectedKey !== undefined,
+    });
     setSelectedKey(undefined);
     setInspectorSelection(undefined);
     setInspectorOpen(false);
@@ -1136,6 +1143,23 @@ export function TrajectoryPanel({
       scrollRef.current
     )?.focus({ preventScroll: true });
   }, [navigationVersion, status, hasRows]);
+
+  // Measured again whenever the rows grow or the grid comes and goes, since
+  // neither fires a scroll event: rows added below a paused reader move the
+  // tail away, and a grid replaced by a placeholder has no tail at all.
+  const measureTail = useCallback(() => {
+    const element = scrollRef.current;
+    setAwayFromTail(
+      !!element &&
+        element.scrollHeight - element.clientHeight - element.scrollTop >
+          ROW_HEIGHT,
+    );
+  }, []);
+  const totalSize = virtualizer.getTotalSize();
+  const gridShown = visualRows.length > 0;
+  useLayoutEffect(() => {
+    measureTail();
+  }, [measureTail, totalSize, gridShown]);
 
   /** A span stands for one row: select it and bring it into view. */
   const selectSpan = useCallback(
@@ -1314,9 +1338,7 @@ export function TrajectoryPanel({
   });
   const rangeLabel =
     range && timeline
-      ? timeline.mode === 'clock'
-        ? `${formatClockTime(timeline.originMs + range.start, range.end - range.start, language)} – ${formatClockTime(timeline.originMs + range.end, range.end - range.start, language)}`
-        : `${formatWindowTime(range.start, range.end - range.start)} – ${formatWindowTime(range.end, range.end - range.start)}`
+      ? `${formatTimelinePoint(timeline, range.start, range.end - range.start, language)} – ${formatTimelinePoint(timeline, range.end, range.end - range.start, language)}`
       : undefined;
   const boundaryRow = (
     // A live region rather than role="status": inside the grid, a role other
@@ -1523,6 +1545,18 @@ export function TrajectoryPanel({
       <div
         className={`${styles.tableWrap} ${inspectorOpen || selectedExecution ? styles.tableWrapWithInspector : ''}`}
       >
+        {/* Moving the window drops the selection and closes its details; a
+            reader who cannot see that happen is told here. Outside the grid,
+            which a filter can replace with a placeholder. */}
+        <span
+          className={styles.srOnly}
+          role="status"
+          data-testid="trajectory-window-changed"
+        >
+          {windowScope.selectionLost && !selectedKey
+            ? t('trajectory.window.changed')
+            : ''}
+        </span>
         {visualRows.length === 0 ? (
           <>
             {trajectory && boundaryRow}
@@ -1600,14 +1634,8 @@ export function TrajectoryPanel({
             onWheel={pauseFollowing}
             onPointerDown={pauseFollowing}
             onScroll={(event) => {
-              const element = event.currentTarget;
-              scrollTopRef.current = element.scrollTop;
-              setAwayFromTail(
-                element.scrollHeight -
-                  element.clientHeight -
-                  element.scrollTop >
-                  ROW_HEIGHT,
-              );
+              scrollTopRef.current = event.currentTarget.scrollTop;
+              measureTail();
             }}
             data-testid="trajectory-rows"
           >

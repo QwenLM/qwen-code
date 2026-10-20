@@ -599,6 +599,103 @@ describe('execution following', () => {
     expect(followStatus(container)).toBe('Paused');
   });
 
+  it('drops Jump to latest when a filter replaces the rows with a placeholder', async () => {
+    const { container } = await setup();
+    const jump = () =>
+      container.querySelector('[data-testid="trajectory-jump-latest"]');
+    await pause(container);
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    await act(async () => {
+      grid.scrollTop = 0;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(jump()).not.toBeNull();
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'no such record anywhere');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(
+      container.querySelector('[data-testid="trajectory-filter-empty"]'),
+    ).not.toBeNull();
+    expect(jump()).toBeNull();
+  });
+
+  it('says the window changed when moving it drops the selection', async () => {
+    const loadPage: TrajectoryPageLoader = async ({ cursor }) => {
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `page-${index}`)], {
+        hasMore: true,
+        nextCursor: String(index + 1),
+      });
+    };
+    const container = await render(loadPage);
+    const notice = () =>
+      container.querySelector('[data-testid="trajectory-window-changed"]')!;
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(notice().textContent).toBe('');
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-older"]',
+        )!
+        .click(),
+    );
+    expect(notice().textContent).toBe(
+      'Window changed. Select a record to inspect it.',
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
+        .click(),
+    );
+    expect(notice().textContent).toBe('');
+  });
+
+  it('moves through the records from a boundary button with the arrow keys', async () => {
+    const loadPage: TrajectoryPageLoader = async ({ cursor }) => {
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `page-${index}`)], {
+        hasMore: true,
+        nextCursor: String(index + 1),
+      });
+    };
+    const container = await render(loadPage);
+    const older = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-window-older"]',
+      )!;
+    await act(async () => older().click());
+    expect(document.activeElement).toBe(older());
+    await act(async () =>
+      older().dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      ),
+    );
+    expect(container.querySelector('[data-selected="true"]')).toBeNull();
+    await act(async () =>
+      older().dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="trajectory-rows"]'),
+    );
+    expect(container.querySelector('[data-selected="true"]')).not.toBeNull();
+  });
+
   it('returns from a historical window to the latest end without requiring live support', async () => {
     const loadPage: TrajectoryPageLoader = async ({ cursor }) => {
       const index = Number(cursor ?? 0);
@@ -2455,6 +2552,17 @@ describe('collapsible trajectory', () => {
     requestRow(container).querySelector<HTMLButtonElement>('button')!;
   const grid = (container: HTMLElement) =>
     container.querySelector<HTMLElement>('[role="grid"]')!;
+
+  it('leaves the top boundary in view when folding at the top', async () => {
+    const container = await render(async () => page(events()));
+    grid(container).scrollTop = 0;
+    await act(async () => fold(container).click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    expect(grid(container).scrollTop).toBe(0);
+    grid(container).scrollTop = 34 + 10;
+    await act(async () => fold(container).click());
+    expect(grid(container).scrollTop).toBe(34 + 10);
+  });
 
   it('folds without replacing the selected record or inspector, then reveals it', async () => {
     const container = await render(async () => page(events()));
