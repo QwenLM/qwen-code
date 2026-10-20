@@ -15,6 +15,7 @@ import {
   isDownloadOnlyWorkspaceArtifact,
   isOfficeDocumentPath,
   isExcelFile,
+  isDocxFile,
   isPdfArtifact,
   normalizePath,
   readWorkspaceFileAsBlob,
@@ -157,7 +158,7 @@ describe('artifactUtils', () => {
     ).toBe(false);
   });
 
-  it.each(['reports/report.pdf#final.svg', 'reports/report.pdf?final.docx'])(
+  it.each(['reports/report.pdf#final.svg', 'reports/report.pdf?final.docm'])(
     'keeps the actual non-PDF suffix download-only: %s',
     (workspacePath) => {
       expect(isPdfArtifact({ workspacePath })).toBe(false);
@@ -175,6 +176,62 @@ describe('artifactUtils', () => {
     expect(isPdfArtifact({ workspacePath })).toBe(false);
     expect(isExcelFile(workspacePath)).toBe(true);
     expect(isDownloadOnlyWorkspaceArtifact({ workspacePath })).toBe(false);
+  });
+
+  it.each([
+    ['reports/Report.DOCX', 'application/octet-stream'],
+    ['reports/Q3#final.docx', undefined],
+    ['reports/Q3?final.docx', undefined],
+    ['reports.xlsx#approved/report.docx', undefined],
+    ['reports/report.svg#final.docx', undefined],
+    [
+      'attachment-id',
+      'APPLICATION/VND.OPENXMLFORMATS-OFFICEDOCUMENT.WORDPROCESSINGML.DOCUMENT; charset=binary',
+    ],
+  ])('previews the literal DOCX file %s', (workspacePath, mimeType) => {
+    expect(isDocxFile(workspacePath, mimeType)).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'document',
+        workspacePath,
+        mimeType,
+      }),
+    ).toBe(false);
+  });
+
+  it.each([
+    'report.doc',
+    'report.docm',
+    'report.dotx',
+    'report.pdf',
+    'report.docx#final.svg',
+    'report.docx?final.doc',
+  ])(
+    'does not override the actual suffix of %s with DOCX MIME',
+    (workspacePath) => {
+      expect(
+        isDocxFile(
+          workspacePath,
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('keeps SVG metadata and generic document kinds outside DOCX preview', () => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        workspacePath: 'report.docx',
+        mimeType: 'image/svg+xml',
+      }),
+    ).toBe(true);
+    expect(isDocxFile('attachment-id', 'application/octet-stream')).toBe(false);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'document',
+        workspacePath: 'attachment-id',
+      }),
+    ).toBe(true);
   });
 
   it('prefers recognized file types before the artifact kind', () => {
@@ -223,8 +280,8 @@ describe('artifactUtils', () => {
   });
 
   it.each([
-    ['report.docx', 'text/html'],
-    ['report.docx', 'application/pdf'],
+    ['report.doc', 'text/html'],
+    ['report.docm', 'application/pdf'],
     ['graphic.svg', 'application/pdf'],
     ['report.xls', 'image/png'],
     ['clip.mp4', 'image/png'],

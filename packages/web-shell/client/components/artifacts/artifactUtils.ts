@@ -92,6 +92,7 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
 
 const AUDIO_EXTENSIONS = new Set(['.m4a', '.mp3', '.ogg', '.wav']);
 
+// Previewable Office types are allowed before this shared fallback is checked.
 const DOWNLOAD_ONLY_EXTENSIONS = new Set([
   ...OFFICE_DOCUMENT_EXTENSIONS,
   ...AUDIO_EXTENSIONS,
@@ -115,6 +116,16 @@ export function isExcelFile(
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 }
 
+export const DOCX_MIME_TYPE =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+export function isDocxFile(workspacePath?: string, mimeType?: string): boolean {
+  const extension = workspaceFileExtension(workspacePath);
+  return extension
+    ? extension === '.docx'
+    : normalizeArtifactMimeType(mimeType) === DOCX_MIME_TYPE;
+}
+
 export function isPdfArtifact(artifact: {
   kind?: string;
   workspacePath?: string;
@@ -135,13 +146,11 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   if (isExcelFile(artifact.workspacePath, artifact.mimeType)) return false;
   const extension = workspaceFileExtension(artifact.workspacePath);
   const mimeType = normalizeArtifactMimeType(artifact.mimeType);
-  if (
-    extension === '.svg' ||
-    mimeType === 'image/svg+xml' ||
-    DOWNLOAD_ONLY_EXTENSIONS.has(extension)
-  ) {
+  if (extension === '.svg' || mimeType === 'image/svg+xml') {
     return true;
   }
+  if (isDocxFile(artifact.workspacePath, artifact.mimeType)) return false;
+  if (DOWNLOAD_ONLY_EXTENSIONS.has(extension)) return true;
   if (
     isPdfArtifact(artifact) ||
     getArtifactImageMimeType(artifact) ||
