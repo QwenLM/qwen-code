@@ -907,6 +907,14 @@ describe('getNpmCliPath', () => {
 
   it('returns win32 npm-cli.js path on Windows', () => {
     const nodePath = 'C:\\Program Files\\nodejs\\node.exe';
+    // Pin the fallback instead of relying on vi.fn()'s undefined default: with
+    // APPDATA set (as on CI Windows runners) the resolver probes
+    // %APPDATA%\npm\node_modules\npm\bin\npm-cli.js, so the miss has to be
+    // explicit for this assertion to mean what it says.
+    vi.stubEnv('APPDATA', 'C:\\Users\\dev\\AppData\\Roaming');
+    vi.stubEnv('npm_config_global_prefix', '');
+    vi.stubEnv('npm_config_prefix', '');
+    mockedExistsSync.mockReturnValue(false);
 
     const result = getNpmCliPath(nodePath, 'win32');
 
