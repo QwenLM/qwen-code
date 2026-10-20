@@ -902,20 +902,22 @@ and visual baselines, and attaches before/after screenshots.
   filtering is kept because it is tested and works for long sessions; only the
   "Context" tags go.
 - **Search that highlights in place without filtering**, as LangSmith and
-  Perfetto do. This is open question 5.
+  Perfetto do. Rejected for now: see resolved question 5.
 - **Two-line rows**, as Langfuse uses. Rejected: one line holds about 21 rows
   instead of about 13 at the docked size.
 
-## Open questions
+## Resolved questions
 
-1. Should Recent executions stay behind "View all", or be removed once
-   automatic history sync exists?
-2. Should a single click open details in the docked panel (proposed), or only
-   Enter and double-click?
-3. Token totals: main session only (proposed), or including subagents?
-4. Micro-bar scale: per turn (proposed) or per window?
-5. Should text search filter, as today and as proposed, or highlight in place
-   and step through matches?
+Decided on 2026-10-20; each takes the proposed option.
+
+1. **Recent executions** stays reachable behind the running footer's "View
+   all". Removing it is reconsidered once automatic history sync exists.
+2. **A single click opens details** in the docked panel (drill-in). Enter
+   also opens; arrow keys only move the selection.
+3. **Token totals** count the main session only.
+4. **Micro-bars** scale against the longest timed row in the same turn.
+5. **Text search filters** to matches and their ancestors, as today; it does
+   not switch to highlight-in-place.
 
 ## Follow-ups
 
