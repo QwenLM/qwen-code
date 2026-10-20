@@ -4770,6 +4770,7 @@ class QwenAgent implements Agent {
       projection: SessionLiveRestoreProjection | undefined,
     ) => Promise<T>,
   ): Promise<T> {
+    await session.recoverMessageDeletionContext();
     await session.assertCanStartTurn();
     const config = session.getConfig();
     const releaseGate = session.beginClose();
@@ -10634,6 +10635,33 @@ class QwenAgent implements Agent {
           unknown
         >;
       }
+      case SERVE_STATUS_EXT_METHODS.sessionMessageGroups: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId))
+          throw RequestError.invalidParams(undefined, 'Invalid sessionId');
+        const session = this.sessions.get(sessionId);
+        if (!session)
+          throw RequestError.resourceNotFound(`session:${sessionId}`);
+        if (this.hostExecutionEngine === 'managed')
+          throw new RequestError(
+            -32602,
+            'Message deletion is unavailable for Managed sessions',
+            { errorKind: 'session_message_deletion_unsupported' },
+          );
+        const recording = session.getConfig().getChatRecordingService();
+        if (!recording?.supportsMessageGroupDeletion())
+          throw new RequestError(-32602, 'History recording is unavailable', {
+            errorKind: 'session_message_deletion_unsupported',
+          });
+        return await this.runExclusiveHistoryMutation(
+          sessionId,
+          async () =>
+            (await recording.getMessageGroups()) as unknown as Record<
+              string,
+              unknown
+            >,
+        );
+      }
       case SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
@@ -13109,6 +13137,7 @@ class QwenAgent implements Agent {
         }
         debugLogger.debug(`recap ext-method received for session=${sessionId}`);
         const session = this.sessionOrThrow(sessionId);
+        session.assertHistoryContextAvailable();
         const config = session.getConfig();
         // v1: no cross-process abort plumbing. The bridge does not listen
         // for HTTP client disconnect and no AbortSignal is threaded through
@@ -14212,6 +14241,63 @@ class QwenAgent implements Agent {
           },
         );
         return { success };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete: {
+        const sessionId = params['sessionId'];
+        const snapshot = params['snapshot'];
+        const groupIds = params['groupIds'];
+        if (
+          typeof sessionId !== 'string' ||
+          !SESSION_ID_RE.test(sessionId) ||
+          typeof snapshot !== 'string' ||
+          snapshot.length === 0 ||
+          !Array.isArray(groupIds) ||
+          groupIds.length === 0 ||
+          !groupIds.every((id) => typeof id === 'string' && id.length > 0) ||
+          new Set(groupIds).size !== groupIds.length
+        )
+          throw new RequestError(-32602, 'Invalid message group selection', {
+            errorKind: 'invalid_message_groups',
+          });
+        const session = this.sessions.get(sessionId);
+        if (!session)
+          throw RequestError.resourceNotFound(`session:${sessionId}`);
+        if (this.hostExecutionEngine === 'managed')
+          throw new RequestError(
+            -32602,
+            'Message deletion is unavailable for Managed sessions',
+            { errorKind: 'session_message_deletion_unsupported' },
+          );
+        session.assertHistoryContextAvailable();
+        if (!session.isTurnIdle())
+          throw new RequestError(-32602, 'Session is busy processing a turn', {
+            errorKind: 'session_busy',
+          });
+        return await this.runExclusiveHistoryMutation(sessionId, async () => {
+          try {
+            return await session.deleteMessageGroups({ snapshot, groupIds });
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              'code' in error &&
+              (error.code === 'conflict' ||
+                error.code === 'invalid_groups' ||
+                error.code === 'invalid_history' ||
+                error.code === 'unsupported')
+            )
+              throw new RequestError(-32602, error.message, {
+                errorKind:
+                  error.code === 'conflict'
+                    ? 'message_groups_conflict'
+                    : error.code === 'unsupported'
+                      ? 'session_message_deletion_unsupported'
+                      : error.code === 'invalid_history'
+                        ? 'message_history_invalid'
+                        : 'invalid_message_groups',
+              });
+            throw error;
+          }
+        });
       }
       case 'rewindSession':
       case SERVE_CONTROL_EXT_METHODS.sessionRewind: {

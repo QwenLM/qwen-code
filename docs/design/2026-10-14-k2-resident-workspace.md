@@ -4,11 +4,11 @@
 
 ## Status and scope
 
-This change extracts the resident Workspace first release from the cumulative
-K2 proposal in PR #13526 onto the current main baseline. It adds public file
-execution and logical Session handoff. Private retirement, physical release,
-node collectors and cross-Workspace volume reuse are not included in this diff.
-Existing main implementations of private CSI behavior remain unchanged.
+As of 2026-10-20, PR #14340 has implemented the resident Workspace file runtime
+on main. This remains the first delivery path for public file execution and
+logical Session handoff. PR #14758 now documents this existing path and its
+acceptance requirements, withdrawing its node-evidence increment. Existing
+main implementations of private CSI behavior remain unchanged.
 
 Each configured tenant/Workspace owns one original resident Pod and one fixed
 CSI PVC. The public Read/Write/Edit profile permits one unfinished Session and
@@ -18,15 +18,36 @@ Session uses the same original runtime and files.
 
 ## Problem and existing implementation
 
-Public Workspace execution currently resolves a local directory and uses
-Session isolation. Close drains bindings and requires runtime stop. Keeping a
-Pod alive alone would not prevent overlapping Sessions or reuse of old authority.
+The resident integration must settle one Session without draining the shared
+binding or stopping its worker. Keeping a Pod alive alone would not prevent
+overlapping Sessions or reuse of old authority.
 
 Main already supplies CSI registration, protected storage reservation, the
 Workspace-scoped fixed-PVC provisioner, boot-3 managed-context workers, file
 tools, durable Runtime Sessions and logical context release. The resident path
 connects those existing components to public Workspace admission and close; it
 does not need the cumulative branch's private native-history or retirement work.
+
+## Trust boundary and platform contract
+
+This delivery trusts the administrator, Kubernetes control plane, host and
+qualified CSI driver. It protects admission, execution and logical handoff from
+tenant requests using the existing grants, durable ownership and original
+runtime checks. It does not independently prove continuous host confinement or
+qualify a compromised host. Kubernetes object observations and artifact hashes
+do not supply that stronger proof.
+
+The supported storage contract is ACK Disk CSI
+(`diskplugin.csi.alibabacloud.com`), `ReadWriteOncePod`, `Filesystem` and `ext4`.
+The registered disk serial must match the worker's actual mounted device.
+PVC/PV identities, their binding, the namespace and the installed protection
+policy/binding remain pinned and checked. Another driver or access mode requires
+separate design and qualification; this path is not generic CSI support.
+
+All existing actor, Workspace generation, lease, mount and physical-volume alias
+checks remain mandatory. Platform trust does not permit expiry-based ownership
+transfer. RWOP admission and a missing Pod are not physical stop or volume-release
+evidence.
 
 ## Configuration and ownership
 
@@ -53,9 +74,10 @@ physical owner. Logical release changes only the Runtime Session ownership:
 reservation identity remain. An expiry, failed RPC or missing Pod cannot transfer
 storage to another Workspace or tenant.
 
-This change adds no database migration or schema extension. It uses main's
-canonical V1–V5 catalog and millisecond timestamps. Existing refusal of legacy,
-partial and foreign catalogs remains; it does not rewrite old persisted evidence.
+This documentation revision adds no database migration or schema extension. The
+runtime continues to use main's published canonical catalog and millisecond
+timestamps. Existing refusal of legacy, partial and foreign catalogs remains;
+old persisted evidence is not rewritten.
 
 ## Admission and execution
 
@@ -91,11 +113,16 @@ completed cleanup replays without another worker release. Main's legacy
 Session-isolated tombstone path remains unchanged.
 
 An uncertain release leaves the Session unfinished and storage claimed, blocking
-the next admission. A normal application/Broker restart loads the original saved
-runtime identity against the retained database. Worker or Pod replacement,
-container restart, changed mount, missing resources or ambiguous recovery keeps
-the Workspace unavailable. Automatic replacement and ownership transfer are
-outside this release.
+the next admission. At an idle boundary, a normal application/Broker restart
+loads the original saved runtime identity against the retained database and
+worker. This is not recovery of an interrupted Turn or expired Harness writer.
+An unresolved execution is never authorized for replay by this handoff.
+
+Worker or Pod replacement, container restart, changed mount, missing resources
+or ambiguous recovery keeps the Workspace unavailable. The reservation remains
+held; lease expiry does not authorize a replacement generation, another Pod or
+volume transfer. Operator inspection does not clear that hold. Automatic
+replacement and physical ownership transfer require a separate design.
 
 ## Kubernetes admission and deployment
 
@@ -119,24 +146,54 @@ does not require a privileged node collector.
 ## Changes and split boundary
 
 The application and embedded Broker remain in `packages/managed-agent-server`.
-The change adds explicit configuration, a resident adapter/profile and ownership
+PR #14340 supplies explicit configuration, a resident adapter/profile and ownership
 checks; connects public creation, resolution and logical close; carries the
 resolved capability into Hosted; and enforces exclusive, revocable file contexts
 in the existing CLI worker.
 
-No Core source, Go module, collector deployment, new public API route, new tool
-parameter or migration is introduced. Private boot/history/finalization,
-application retirement and physical-release extensions stay in PR #13526. The
-existing main code for those areas is not deleted or weakened.
+This revision changes documentation only relative to main. Existing public
+Session APIs, tool parameters, worker protocols, configuration and schema remain
+the implementation contract. No Go module, custom containerd/shim, node collector
+or cold-bootstrap installation is required by the resident path.
+
+The former node-evidence candidate in PR #14758 at `1656cf02` is retained in
+commit history and withdrawn from its current tree. The installation/cold-boot
+proposal #14761 and physical-retirement proposal #14765 were stacked on that
+candidate. Their code and Draft state remain unchanged, but the simplified
+#14758 no longer supplies their node-evidence prerequisite. They require
+independent dependency redesign before landing; they are not first-release
+dependencies. Main's already merged private boot/history/finalization, recovery
+and application-retirement implementations are retained.
 
 ## Validation and acceptance
 
-The split must be built and tested independently. Required checks cover Node
-build/typecheck/bundle, focused worker/Hosted consumers, Java admission/ownership,
-configuration, transport, lifecycle, lock ordering and static checks. Tests must
-show two sequential Sessions retaining exact file bytes, original identity and
-storage reservation; concurrent admission and same-key replay; old-context and
-foreign/uncertain-owner refusal; and logical-only close/retry.
+The documentation-only revision requires formatting, relative-reference and
+bilingual consistency checks, plus verification that its final diff contains no
+production, workflow or schema changes relative to main. Runtime changes require
+their own Node build/typecheck/bundle, focused worker/Hosted tests and applicable
+Java/database checks. Earlier candidate results are not acceptance of this
+revision or of a deployment.
+
+Existing `ResidentWorkspacesTest` covers admission, same-key replay, physical
+alias refusal, close fences, logical release and uncertain handoff.
+`ResidentWorkspaceProvisionerTest` covers original-seed delegation and scope
+selection. Reuse this coverage instead of adding duplicate tests. Their H2 and
+controlled-peer fixtures do not establish MySQL races or a real CSI mount.
+
+| Scenario                                                              | Required acceptance observation                                                                                                                |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| A writes/edits/reads, closes, then B reads                            | Exact final file bytes and the same Pod/container, binding generation, PVC/PV and reservation; binding stays READY and storage stays RESERVED. |
+| Concurrent creation and retries                                       | Different keys admit one unfinished Session; the same key returns the original admission, including across independent MySQL connections.      |
+| Old authority after close                                             | The original context cannot reactivate or dispatch, including a request paused before the durable close fence.                                 |
+| Idle control-plane restart                                            | Fresh application/Broker processes use the retained database and original worker; no replacement Pod or storage owner is created.              |
+| Lost release response or UNKNOWN execution                            | The Session remains unfinished, the reservation remains held and B is refused; no uncertain tool effect is replayed.                           |
+| Missing/replaced Pod, restarted container or changed storage identity | Execution and handoff refuse without clearing the reservation or transferring the volume.                                                      |
+
+For each future acceptance run, record the exact source commit, environment,
+identity tuple and observed result. Keep component/H2, real MySQL, independent
+process and target ACK results separate. The first deployment milestone is
+A→close→B file handoff on the original Pod. MySQL, independent-process and ACK
+qualification are not executed by this documentation revision and remain pending.
 
 The ordinary public integration fixture uses real Spring HTTP, H2, Hosted,
 journal writers and worker/provider processes. Its test-only provider declares

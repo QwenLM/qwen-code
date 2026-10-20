@@ -4,6 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  attachToolOutputProvenance,
+  getToolOutputProvenance,
+  measureToolOutput,
+  type ToolOutputProvenance,
+} from '../tools/tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
 import { createHash } from 'node:crypto';
 
 // DISCLAIMER: This is a copied version of https://github.com/googleapis/js-genai/blob/main/src/chats.ts with the intention of working around a key bug
@@ -2292,6 +2300,8 @@ export class LlmChat {
    */
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountIsEstimated = false;
+  /** Provenances already reported at dispatch, so a retry is not recounted. */
+  private readonly injectedToolResults = new WeakSet<ToolOutputProvenance>();
 
   /**
    * Per-chat output-token count from the previous model response. The
@@ -2480,6 +2490,23 @@ export class LlmChat {
   ) {
     validateHistory(history);
     this.redactApprovedPlansFromLoadedHistory();
+    this.markToolResultsInjected(this.history);
+  }
+
+  /**
+   * Marks every provenance in `contents` as already reported, so the next
+   * dispatch does not re-emit its `tool_result_injected` event. Callers hand
+   * this only parts another chat already reported — loaded/restored history
+   * and the speculation-accept replay. Results parked through `addHistory`
+   * for a later turn have NOT been submitted yet and must stay unmarked, or
+   * their one owed injection event is suppressed permanently.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    for (const content of contents)
+      for (const part of content.parts ?? []) {
+        const provenance = getToolOutputProvenance(part);
+        if (provenance) this.injectedToolResults.add(provenance);
+      }
   }
 
   enableManualPlanExitNotices(): void {
@@ -2867,6 +2894,7 @@ export class LlmChat {
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
             : newHistory,
+          summaryPrefixLength: newHistory.length,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3254,6 +3282,22 @@ export class LlmChat {
         // gap where `lastPromptTokenCount === 0` and the gate would otherwise
         // see only the stale prior-turn count (0).
         let userContent = createUserContent(params.message);
+        // Restored responses have no original-size provenance. Never infer it from a preview.
+        userContent = {
+          ...userContent,
+          parts: userContent.parts?.map((part) =>
+            part.functionResponse && !getToolOutputProvenance(part)
+              ? attachToolOutputProvenance([part], {
+                  callId: part.functionResponse.id ?? '',
+                  toolName: part.functionResponse.name ?? '',
+                  promptId: prompt_id,
+                  toolType: part.functionResponse.name?.startsWith('mcp__')
+                    ? 'mcp'
+                    : 'native',
+                })[0]
+              : part,
+          ),
+        };
         const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
         if (
           toolOutputBudget !== undefined &&
@@ -3488,6 +3532,7 @@ export class LlmChat {
           this.chatRecordingService?.recordChatCompression({
             info: compressionInfo,
             compressedHistory: [...this.getHistoryShallow(), userContent],
+            summaryPrefixLength: this.getHistoryShallow().length,
             completedToolCallIds: this.completedToolCallIds,
           });
         }
@@ -5458,7 +5503,48 @@ export class LlmChat {
       }
     }
     params.config?.abortSignal?.throwIfAborted();
-    const apiCall = () => generator.generateContentStream(request, prompt_id);
+    const apiCall = () => {
+      params.config?.abortSignal?.throwIfAborted();
+      const groups = new Map<ToolOutputProvenance, Part[]>();
+      for (const content of requestContents)
+        for (const part of content.parts ?? []) {
+          const provenance = getToolOutputProvenance(part);
+          if (!provenance || this.injectedToolResults.has(provenance)) continue;
+          const parts = groups.get(provenance) ?? [];
+          parts.push(part);
+          groups.set(provenance, parts);
+        }
+      for (const [provenance, parts] of groups) {
+        // Observation only: mark first so a measurement or logging throw
+        // neither fails the model request nor re-emits on the retry.
+        this.injectedToolResults.add(provenance);
+        try {
+          const injected = measureToolOutput(parts, this.config);
+          logToolResultSize(
+            this.config,
+            new ToolResultSizeEvent(
+              provenance.toolName,
+              provenance.toolType,
+              'injection',
+              provenance.rawSize?.chars,
+              injected.chars,
+              provenance.rawSize?.estimatedTokens,
+              injected.estimatedTokens,
+              provenance.truncated,
+              Number.isFinite(provenance.budget)
+                ? provenance.budget
+                : undefined,
+              provenance.budgetSource,
+              provenance.callId,
+              provenance.promptId || prompt_id,
+            ),
+          );
+        } catch {
+          /* Telemetry is observational. */
+        }
+      }
+      return generator.generateContentStream(request, prompt_id);
+    };
     const cgConfig = this.config.getContentGeneratorConfig();
     const authType = overrides?.retryAuthType ?? cgConfig?.authType;
     const extraRetryErrorCodes =
@@ -5958,6 +6044,7 @@ export class LlmChat {
     completedToolCallIds?: readonly string[],
   ): void {
     this.history = history;
+    this.markToolResultsInjected(this.history);
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The

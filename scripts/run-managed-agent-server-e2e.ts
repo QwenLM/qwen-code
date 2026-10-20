@@ -76,6 +76,7 @@ let g3VerifyArgument: string | undefined;
 const approvalFaults = [
   'after-decision',
   'after-prepare',
+  'after-result',
   'decision-reply-lost',
   'admission-reply-lost',
 ] as const;
@@ -1164,6 +1165,10 @@ let releaseContinuationHold = () => {};
 const continuationHold = new Promise<void>((resolve) => {
   releaseContinuationHold = resolve;
 });
+// after-result arms a fresh hold after the decision: the continuation hold
+// above is already released by the time the approved call runs.
+let approvalResultHold: Promise<void> | undefined;
+let releaseApprovalResultHold = () => {};
 const modelRoundMarker = 'MANAGED_SESSION_MODEL_ROUND_FAILOVER';
 const modelRoundResponse = 'MODEL_ROUND_TURN_RECOVERED';
 const modelRoundNextMarker = 'MANAGED_SESSION_MODEL_ROUND_NEXT_TURN';
@@ -1263,7 +1268,19 @@ try {
             ],
           };
         }
-        if (approvalRecovery) return { content: continuationResponse };
+        if (approvalRecovery) {
+          if (approvalFault === 'after-result' && approvalResultHold) {
+            // Publish a prefix and park the round so the crash lands after
+            // the execution result commits but before the assistant output
+            // commits; the reissue must reuse this exact saved request.
+            return {
+              contentChunks: [continuationPartial],
+              holdAfterChunks: 1,
+              holdUntil: approvalResultHold,
+            };
+          }
+          return { content: continuationResponse };
+        }
         if (!acceptReplacementContinuation) {
           return {
             contentChunks: [continuationPartial],
@@ -2092,12 +2109,12 @@ try {
       replacementSpring = spring;
       replacementSpringUrl = springUrl;
       replacementHarnessPort = harnessPort;
-      // Both crash barriers hold the approved execution's :start before the
-      // Broker sees it: after-prepare waits for the durable PREPARED row,
-      // while after-decision only needs the decision to commit and must not
-      // let that generation reach dispatch or result commit before the
-      // crash. Without the hold a fast Harness could make the arm prove a
-      // later barrier while still calling itself "after decision".
+      // The two pre-dispatch crash barriers hold the approved execution's
+      // :start before the Broker sees it: after-prepare waits for the
+      // durable PREPARED row, while after-decision only needs the decision
+      // to commit. after-result must NOT be held here: its barrier is the
+      // committed result, so holding :start would keep the execution at
+      // PREPARED and its own wait for SETTLED could never succeed.
       if (
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare'
@@ -2336,6 +2353,11 @@ try {
           policy_revision: originalApprovalOptions!.policyRevision,
           option_id: verificationMode,
         });
+        if (approvalFault === 'after-result') {
+          approvalResultHold = new Promise<void>((resolve) => {
+            releaseApprovalResultHold = resolve;
+          });
+        }
         if (approvalFault === 'decision-reply-lost') {
           await postAndDropReply(decisionUrl, decisionBody, decisionHeaders);
         }
@@ -2380,13 +2402,16 @@ try {
             `Original Turn cancel returned ${response.status}: ${await response.text()}`,
           );
       }
+      let publishedPrefixSequences: number[] = [];
       if (
         approvalFault === 'after-decision' ||
-        approvalFault === 'after-prepare'
+        approvalFault === 'after-prepare' ||
+        approvalFault === 'after-result'
       ) {
-        // A5/A5a: kill the generation that holds the committed decision (and,
-        // for after-prepare, the durable PREPARED execution) so the next
-        // generation must resume the stage instead of replaying the approval.
+        // A5/A5a: kill the generation that holds the committed decision (or,
+        // for after-result, the committed result with its model round still
+        // open) so the next generation must resume the stage instead of
+        // replaying the approval.
         const crashedBootId = runMysql(
           mysqlPort,
           `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
@@ -2403,6 +2428,39 @@ try {
                 execution === 'PREPARED\t0' &&
                 replacementBrokerProxy?.heldPath() !== undefined
               );
+            },
+            120_000,
+            replacementHarness,
+          );
+        } else if (approvalFault === 'after-result') {
+          await waitUntil(
+            'Approved result committed and its prefix published',
+            async () => {
+              const execution = runMysql(
+                mysqlPort,
+                'SELECT execution_state, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.ma_tool_execution',
+              );
+              const heldResultRequest = (fake?.requests ?? []).some(
+                ({ body }) => {
+                  const messages = JSON.stringify(body['messages']);
+                  return (
+                    messages.includes(continuationMarker) &&
+                    messages.includes('"role":"tool"')
+                  );
+                },
+              );
+              if (execution !== 'SETTLED\t1' || !heldResultRequest)
+                return false;
+              // The request log is written before the fake server sends its
+              // response, so it alone does not prove the Harness consumed and
+              // published the held prefix. Require the public feed to carry
+              // it; otherwise a no-op retraction would pass vacuously.
+              const view = await publicTranscript(
+                replacementSpringUrl,
+                tenant,
+                session.id,
+              );
+              return view.text.includes(continuationPartial);
             },
             120_000,
             replacementHarness,
@@ -2427,16 +2485,38 @@ try {
           mysqlPort,
           'SELECT execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution',
         );
+        const publishedPrefix =
+          approvalFault === 'after-result'
+            ? await publicTranscript(replacementSpringUrl, tenant, session.id)
+            : undefined;
+        publishedPrefixSequences = (publishedPrefix?.events ?? [])
+          .filter(
+            (event) =>
+              event.type === 'item.output_text.delta' &&
+              eventText(event).includes(continuationPartial),
+          )
+          .map((event) => event.sequence);
         saveEvidence('approval-crash-barrier.json', {
           fault: approvalFault,
           crashedHarnessBootId: crashedBootId,
           executionAtCrash,
           heldExecutionStartPath: replacementBrokerProxy?.heldPath(),
+          publishedPrefix:
+            approvalFault === 'after-result'
+              ? {
+                  sequences: publishedPrefixSequences,
+                  text: publishedPrefix?.text,
+                }
+              : undefined,
         });
         await crashChild(
           replacementHarness.child,
           'Replacement Hosted Harness (fault barrier)',
         );
+        if (approvalFault === 'after-result') {
+          releaseApprovalResultHold();
+          approvalResultHold = undefined;
+        }
         if (replacementBrokerProxy) {
           await replacementBrokerProxy.close();
           replacementBrokerProxy = undefined;
@@ -2497,6 +2577,32 @@ try {
         );
       }
       verifiedOriginalTerminal = terminals[0].type;
+      if (approvalFault === 'after-result') {
+        // The reissue must retract the held prefix: only the recovered
+        // answer may remain in the public transcript.
+        const transcript = await publicTranscript(
+          replacementSpringUrl,
+          tenant,
+          session.id,
+        );
+        if (transcript.text !== continuationResponse)
+          throw new Error(
+            `Result-commit recovery left ${JSON.stringify(transcript.text)}, not the recovered answer`,
+          );
+        if (
+          publishedPrefixSequences.length === 0 ||
+          !reconciledBetween(
+            transcript.events,
+            Math.min(...publishedPrefixSequences),
+            Math.min(
+              ...deltaSequences(transcript.events, continuationResponse),
+            ),
+          )
+        )
+          throw new Error(
+            'Result-commit recovery did not reconcile the published prefix before the recovered answer',
+          );
+      }
       const rows = runMysql(
         mysqlPort,
         `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
@@ -2606,11 +2712,12 @@ try {
       const modelAfterResults = requestBodies.filter((request) =>
         JSON.stringify(request.body.messages).includes('"role":"tool"'),
       );
-      const expectedModelsAfterResults = ['allow', 'deny'].includes(
-        verificationMode,
-      )
-        ? 1
-        : 0;
+      const expectedModelsAfterResults =
+        approvalFault === 'after-result'
+          ? 2
+          : ['allow', 'deny'].includes(verificationMode)
+            ? 1
+            : 0;
       if (
         initialRequests.length !== 1 ||
         modelAfterResults.length !== expectedModelsAfterResults
@@ -2618,6 +2725,20 @@ try {
         throw new Error(
           `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
         );
+      if (approvalFault === 'after-result') {
+        const parity = isDeepStrictEqual(
+          modelAfterResults[0]?.body,
+          modelAfterResults[1]?.body,
+        );
+        saveEvidence('model-request-parity.json', {
+          requests: modelAfterResults.map((request) => request.body),
+          equal: parity,
+        });
+        if (!parity)
+          throw new Error(
+            'Result-commit recovery changed the saved model request',
+          );
+      }
       if (responseOperation) {
         await waitUntil(
           'Approval response command completion',
