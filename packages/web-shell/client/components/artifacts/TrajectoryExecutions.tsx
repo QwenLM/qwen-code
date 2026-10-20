@@ -12,7 +12,6 @@ import {
   useState,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { PauseIcon } from 'lucide-react';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
 import type { TrajectoryLifecycleProjection } from '../../trajectory/project-trajectory-lifecycle';
 import { useI18n } from '../../i18n';
@@ -42,32 +41,23 @@ function anchoredOffset(anchor: ScrollAnchor, keys: string[]): number {
 
 export function TrajectoryExecutions({
   rows,
-  omitted,
-  incomplete,
-  outsideWindow,
   selectedKey,
   onSelect,
   following,
   liveStatus,
   historySnapshot,
   onPause,
-  onReturnToLatest,
-  canReturn,
-  returning,
+  onUpdatedChange,
 }: {
   rows: readonly TrajectoryExecutionRow[];
-  omitted: number;
-  incomplete: boolean;
-  outsideWindow: number;
   selectedKey?: string;
   onSelect: (key: string) => void;
   following: boolean;
   liveStatus: TrajectoryLifecycleProjection['status'];
   historySnapshot: object | undefined;
   onPause: () => void;
-  onReturnToLatest: () => void;
-  canReturn: boolean;
-  returning: boolean;
+  /** New executions arrived while the reader was not following. */
+  onUpdatedChange?: (updated: boolean) => void;
 }) {
   const { t, language } = useI18n();
   const [expanded, setExpanded] = useState(true);
@@ -123,6 +113,13 @@ export function TrajectoryExecutions({
       if (rows.some((row) => !keys.has(row.key))) setUpdated(true);
     }
   }, [rows, following, liveStatus, historySnapshot]);
+  const onUpdatedChangeRef = useRef(onUpdatedChange);
+  useLayoutEffect(() => {
+    onUpdatedChangeRef.current = onUpdatedChange;
+  }, [onUpdatedChange]);
+  useEffect(() => {
+    onUpdatedChangeRef.current?.(updated);
+  }, [updated]);
   const rememberScroll = (element: HTMLElement) => {
     const index = Math.floor(element.scrollTop / ROW_HEIGHT);
     anchorRef.current = {
@@ -241,65 +238,9 @@ export function TrajectoryExecutions({
         >
           {open ? '▾' : '▸'} {t('trajectory.executions.title')} ({rows.length})
         </button>
-        <div className={styles.followControls}>
-          <span role="status" data-testid="trajectory-follow-status">
-            {t(
-              returning
-                ? 'trajectory.executions.returning'
-                : !following
-                  ? 'trajectory.executions.paused'
-                  : liveStatus === 'live'
-                    ? 'trajectory.executions.following'
-                    : 'trajectory.executions.waiting',
-            )}
-            {updated && !following && (
-              <span> · {t('trajectory.executions.updated')}</span>
-            )}
-          </span>
-          <button
-            type="button"
-            aria-label={t('trajectory.executions.pause')}
-            title={t('trajectory.executions.pause')}
-            aria-disabled={!following && !returning}
-            onClick={() => {
-              if (following || returning) pause();
-            }}
-            data-testid="trajectory-follow-pause"
-          >
-            <PauseIcon size={12} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            aria-disabled={!canReturn}
-            onClick={() => {
-              if (canReturn) onReturnToLatest();
-            }}
-            data-testid="trajectory-follow-return"
-          >
-            {t('trajectory.executions.return')}
-          </button>
-        </div>
       </div>
       {open && (
         <>
-          <div className={styles.notice}>
-            {t('trajectory.executions.scope')}
-            {outsideWindow > 0 && (
-              <span>
-                {' '}
-                · {t('trajectory.executions.outside', { count: outsideWindow })}
-              </span>
-            )}
-            {omitted > 0 && (
-              <span>
-                {' '}
-                · {t('trajectory.executions.omitted', { count: omitted })}
-              </span>
-            )}
-            {incomplete && (
-              <span> · {t('trajectory.lifecycleIncomplete')}</span>
-            )}
-          </div>
           {from !== undefined && to !== undefined && (
             <div
               className={styles.axis}

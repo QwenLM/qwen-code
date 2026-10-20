@@ -99,26 +99,52 @@ function FollowHarness({
   onReturn: () => void;
 }) {
   const [following, setFollowing] = useState(true);
+  const [updated, setUpdated] = useState(false);
+  // The follow controls live in the panel's summary bar; this stands in for
+  // them, after the section so the section's toggle stays the first button.
   return (
-    <TrajectoryExecutions
-      rows={rows}
-      omitted={0}
-      incomplete={false}
-      outsideWindow={0}
-      onSelect={onSelect}
-      {...options}
-      following={following}
-      canReturn
-      returning={false}
-      onPause={() => {
-        setFollowing(false);
-        onPause();
-      }}
-      onReturnToLatest={() => {
-        setFollowing(true);
-        onReturn();
-      }}
-    />
+    <>
+      <TrajectoryExecutions
+        rows={rows}
+        onSelect={onSelect}
+        {...options}
+        following={following}
+        onPause={() => {
+          setFollowing(false);
+          onPause();
+        }}
+        onUpdatedChange={setUpdated}
+      />
+      <span>
+        {following
+          ? options.liveStatus === 'live'
+            ? 'Following'
+            : 'Waiting for live updates'
+          : 'Paused'}
+        {updated && !following ? ' · Execution list updated' : ''}
+      </span>
+      <button
+        type="button"
+        data-testid="trajectory-follow-pause"
+        onClick={() => {
+          if (!following) return;
+          setFollowing(false);
+          onPause();
+        }}
+      >
+        Pause
+      </button>
+      <button
+        type="button"
+        data-testid="trajectory-follow-return"
+        onClick={() => {
+          setFollowing(true);
+          onReturn();
+        }}
+      >
+        Return to latest
+      </button>
+    </>
   );
 }
 async function mount(rows: TrajectoryExecutionRow[], shadow = false) {

@@ -228,6 +228,33 @@ function timingFrame(
 const text = (element: Element | null) => element?.textContent ?? '';
 const rowsOf = (container: HTMLElement) =>
   Array.from(container.querySelectorAll('[role="row"]'));
+/** A button by its text or accessible name, popovers included. */
+function findButton(container: HTMLElement, name: string) {
+  const match = (root: ParentNode) =>
+    Array.from(root.querySelectorAll('button')).find(
+      (element) =>
+        element.textContent === name ||
+        element.getAttribute('aria-label') === name,
+    );
+  const found = match(container) ?? match(document.body);
+  // With only a query applied, clearing the search clears every filter; the
+  // full Clear filters lives in the Filter popover.
+  if (!found && name === 'Clear filters')
+    return findButton(container, 'Clear search');
+  return found!;
+}
+const openWarnings = async (container: HTMLElement) =>
+  act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="trajectory-warnings"]')!
+      .click(),
+  );
+const openAbout = async (container: HTMLElement) =>
+  act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="trajectory-about"]')!
+      .click(),
+  );
 const metricsOf = (container: HTMLElement) =>
   Array.from(
     container.querySelectorAll('[data-testid="trajectory-row-metrics"]'),
@@ -236,10 +263,14 @@ const metricsOf = (container: HTMLElement) =>
 describe('execution following', () => {
   const followStatus = (container: HTMLElement) =>
     text(container.querySelector('[data-testid="trajectory-follow-status"]'));
+  // The status pill returns to the latest window while paused or reading
+  // history, and keeps focus through the return.
   const returnButton = (container: HTMLElement) =>
     container.querySelector<HTMLButtonElement>(
-      '[data-testid="trajectory-follow-return"]',
+      '[data-testid="trajectory-follow-status"]',
     )!;
+  const updatedDot = (container: HTMLElement) =>
+    container.querySelector('[aria-label="New executions arrived"]');
   const event = (key: string, id: number): DaemonEvent => ({
     v: 1,
     id,
@@ -281,23 +312,22 @@ describe('execution following', () => {
     const container = await render(loader, store, 0, shadow);
     return { container, read, store, owner };
   }
+  // Reading the rows is what pauses following, whatever the pill shows.
   const pause = async (container: HTMLElement) =>
     act(async () =>
       container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-follow-pause"]',
-        )!
-        .click(),
+        .querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
+        .dispatchEvent(new WheelEvent('wheel', { bubbles: true })),
     );
 
   it.each([false, true])(
     'refreshes even the latest window before resuming, preserving return focus (shadow=%s)',
     async (shadow) => {
       const { container, read, store, owner } = await setup(shadow);
-      expect(followStatus(container)).toBe('Following');
+      expect(followStatus(container)).toBe('Live');
       await act(async () => store.ingest(owner, event('new', 2)));
       expect(read).toHaveBeenCalledTimes(1);
-      expect(followStatus(container)).toBe('Following');
+      expect(followStatus(container)).toBe('Live');
       await act(async () =>
         container
           .querySelector<HTMLElement>(
@@ -322,10 +352,10 @@ describe('execution following', () => {
         button.click();
       });
       expect(read).toHaveBeenCalledTimes(2);
-      expect(followStatus(container)).toBe('Refreshing history…');
+      expect(followStatus(container)).toBe('Updating…');
       expect(button.getAttribute('aria-disabled')).toBe('true');
       await act(async () => complete(page(REAL_EVENTS)));
-      expect(followStatus(container)).toBe('Following');
+      expect(followStatus(container)).toBe('Live');
       expect(
         container.querySelector('[data-testid="trajectory-inspector"]'),
       ).toBeNull();
@@ -358,7 +388,7 @@ describe('execution following', () => {
     expect(input.value).toBe('model');
     expect(container.textContent).toContain('offline');
     await act(async () => returnButton(container).click());
-    expect(followStatus(container)).toBe('Following');
+    expect(followStatus(container)).toBe('Live');
     expect(input.value).toBe('');
     expect(
       container.querySelector<HTMLElement>('[data-testid="trajectory-rows"]')!
@@ -416,11 +446,11 @@ describe('execution following', () => {
         }),
     );
     await act(async () => returnButton(container).click());
-    expect(followStatus(container)).toBe('Refreshing history…');
+    expect(followStatus(container)).toBe('Updating…');
     await act(async () => store.ingest(owner, event('during-return', 41)));
     expect(grid.scrollTop).toBe(634);
     await act(async () => grid.dispatchEvent(new Event('scroll')));
-    expect(followStatus(container)).toContain('Refreshing history…');
+    expect(followStatus(container)).toContain('Updating…');
     await act(async () => {
       if (deltaY !== undefined)
         grid.dispatchEvent(new WheelEvent('wheel', { deltaY, bubbles: true }));
@@ -447,12 +477,13 @@ describe('execution following', () => {
             complete = resolve;
           }),
       );
+      await pause(container);
       await act(async () => returnButton(container).click());
       await act(async () => {
         grid.scrollTop = 600;
         grid.dispatchEvent(new Event('scroll'));
       });
-      expect(followStatus(container)).toBe('Refreshing history…');
+      expect(followStatus(container)).toBe('Updating…');
       await act(async () =>
         grid.dispatchEvent(
           input === 'wheel'
@@ -468,6 +499,35 @@ describe('execution following', () => {
     },
   );
 
+  it('offers Jump to latest once paused away from the tail, and returns through it', async () => {
+    const { container, read } = await setup();
+    const jump = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-jump-latest"]',
+      );
+    expect(jump()).toBeNull();
+    await pause(container);
+    expect(followStatus(container)).toBe('Paused');
+    // Paused at the tail, it would sit under the pointer that paused.
+    const grid = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    await act(async () => {
+      grid.scrollTop = SCROLL_HEIGHT;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(jump()).toBeNull();
+    await act(async () => {
+      grid.scrollTop = 0;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    expect(jump()).not.toBeNull();
+    await act(async () => jump()!.click());
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(followStatus(container)).toBe('Live');
+    expect(jump()).toBeNull();
+  });
+
   it('pauses on connection loss and does not announce replay as newly arrived execution', async () => {
     const { container, store, owner } = await setup();
     await act(async () => store.reconnect(owner));
@@ -479,9 +539,9 @@ describe('execution following', () => {
     expect(followStatus(container)).toBe('Paused');
     expect(container.querySelector('[data-status="running"]')).toBeNull();
     await act(async () => store.ingest(owner, event('live', 3)));
-    expect(followStatus(container)).toContain('Execution list updated');
+    expect(updatedDot(container)).not.toBeNull();
     await act(async () => returnButton(container).click());
-    expect(followStatus(container)).toBe('Following');
+    expect(followStatus(container)).toBe('Live');
   });
 
   it('discards an old loader return when switching sessions', async () => {
@@ -493,6 +553,7 @@ describe('execution following', () => {
           complete = resolve;
         }),
     );
+    await pause(container);
     await act(async () => returnButton(container).click());
     const loader = createTrajectoryPageLoader(
       {
@@ -529,6 +590,7 @@ describe('execution following', () => {
           complete = resolve;
         }),
     );
+    await pause(container);
     await act(async () => returnButton(container).click());
     await act(async () => {
       store.reconnect(owner);
@@ -553,16 +615,16 @@ describe('execution following', () => {
         )!
         .click(),
     );
-    expect(followStatus(container)).toBe('Paused');
+    expect(followStatus(container)).toBe('Earlier window');
     expect(container.textContent).toContain('page-7');
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-window-latest"]',
+          '[data-testid="trajectory-follow-status"]',
         )!
         .click(),
     );
-    expect(followStatus(container)).toBe('Waiting for live updates');
+    expect(followStatus(container)).toBe('');
     expect(container.textContent).toContain('page-0');
     expect(container.textContent).not.toContain('page-7');
     expect(
@@ -667,10 +729,9 @@ describe('TrajectoryPanel', () => {
       'scope',
     );
     const container = await render(loader, store);
-    expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).toContain(
+    expect(container.textContent).not.toContain('Lifecycle details may be');
+    await openWarnings(container);
+    expect(document.body.textContent).toContain(
       'Lifecycle details may be incomplete or outside the retained limit.',
     );
   });
@@ -1065,13 +1126,7 @@ describe('TrajectoryPanel', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
         .click(),
     );
-    await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-selected"] + button',
-        )!
-        .click(),
-    );
+    await act(async () => findButton(container, 'View details').click());
     const details = container.querySelector(
       '[data-testid="trajectory-inspector"] pre',
     );
@@ -1096,10 +1151,10 @@ describe('TrajectoryPanel', () => {
         .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
         .click(),
     );
-    expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).toContain('History may have changed while disconnected');
+    await openWarnings(container);
+    expect(document.body.textContent).toContain(
+      'History may have changed while disconnected',
+    );
     failLatest = false;
     await act(async () =>
       container
@@ -1108,9 +1163,11 @@ describe('TrajectoryPanel', () => {
     );
     expect(loader).toHaveBeenCalledTimes(9);
     expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).not.toContain('History may have changed while disconnected');
+      container.querySelector('[data-testid="trajectory-warnings"]'),
+    ).toBeNull();
+    expect(document.body.textContent).not.toContain(
+      'History may have changed while disconnected',
+    );
   });
 
   it('opens record details and invalidates them when a refreshed window reuses the key', async () => {
@@ -1127,13 +1184,7 @@ describe('TrajectoryPanel', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-user"]')!
         .click(),
     );
-    await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-selected"] + button',
-        )!
-        .click(),
-    );
+    await act(async () => findButton(container, 'View details').click());
     expect(
       container.querySelector('[data-testid="trajectory-inspector"]'),
     ).not.toBeNull();
@@ -1200,13 +1251,7 @@ describe('TrajectoryPanel', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
         .click(),
     );
-    await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-selected"] + button',
-        )!
-        .click(),
-    );
+    await act(async () => findButton(container, 'View details').click());
     const grid = container.querySelector<HTMLElement>(
       '[data-testid="trajectory-rows"]',
     )!;
@@ -1243,11 +1288,15 @@ describe('TrajectoryPanel', () => {
 
     expect(
       text(container.querySelector('[data-testid="trajectory-totals"]')),
-    ).toContain('1 turn ·');
+    ).toMatch(/^\d+ requests?\d+ tools?$/);
     expect(
       text(container.querySelector('[data-testid="trajectory-metrics"]')),
-    ).toContain('Main model total10.4s');
-    expect(container.querySelector('[data-has-failures="true"]')).toBeNull();
+    ).toContain('10.4smodel');
+    expect(
+      container.querySelector('[data-testid="trajectory-failures"]'),
+    ).toBeNull();
+    await openAbout(container);
+    expect(document.body.textContent).toContain('1 page, 1 turn.');
     expect(
       container.querySelectorAll('[data-testid="trajectory-turn"]'),
     ).toHaveLength(1);
@@ -1314,15 +1363,10 @@ describe('TrajectoryPanel', () => {
       text(container.querySelector('[data-testid="trajectory-overview"]')),
     ).toContain('Recorded durations have no start time');
     expect(
-      container
-        .querySelector('[data-testid="trajectory-metrics"] strong')
-        ?.getAttribute('aria-label'),
-    ).toBe('unrecorded');
-    expect(
-      text(
-        container.querySelector('[data-testid="trajectory-context-notice"]'),
-      ),
-    ).toContain('1 without start');
+      text(container.querySelector('[data-testid="trajectory-metrics"]')),
+    ).toMatch(/^—elapsed/);
+    await openAbout(container);
+    expect(document.body.textContent).toContain('1 without start');
   });
 
   it('shows measured zero separately from unrecorded time', async () => {
@@ -1339,17 +1383,14 @@ describe('TrajectoryPanel', () => {
     const metrics = text(
       container.querySelector('[data-testid="trajectory-metrics"]'),
     );
-    expect(metrics).toContain('Elapsed span0s');
-    expect(metrics).toContain('Active coverage0s');
-    expect(metrics).toContain('Main model total0s');
-    expect(
-      text(
-        container.querySelector('[data-testid="trajectory-context-notice"]'),
-      ),
-    ).toContain('1 without duration');
+    expect(metrics).toContain('0selapsed');
+    expect(metrics).toContain('0sactive');
+    expect(metrics).toContain('0smodel');
+    await openAbout(container);
+    expect(document.body.textContent).toContain('1 without duration');
   });
 
-  it('updates the selected timing and clears it for a prompt', async () => {
+  it('offers details only on the selected record', async () => {
     const container = await render(async () => page(REAL_EVENTS));
     const request = container.querySelector<HTMLElement>(
       '[data-testid="trajectory-row-request"]',
@@ -1357,17 +1398,16 @@ describe('TrajectoryPanel', () => {
     const user = container.querySelector<HTMLElement>(
       '[data-testid="trajectory-row-user"]',
     )!;
+    const openers = () =>
+      container.querySelectorAll('button[aria-label="View details"]');
+    expect(openers()).toHaveLength(0);
     act(() => request.click());
-    expect(
-      text(container.querySelector('[data-testid="trajectory-selected"]')),
-    ).toContain('7.8s');
+    expect(request.getAttribute('aria-selected')).toBe('true');
+    expect(openers()).toHaveLength(1);
+    expect(request.contains(openers()[0]!)).toBe(true);
     act(() => user.click());
-    expect(
-      text(container.querySelector('[data-testid="trajectory-selected"]')),
-    ).toContain('no request or tool timing');
-    expect(
-      text(container.querySelector('[data-testid="trajectory-selected"]')),
-    ).not.toContain('7.8s');
+    expect(request.getAttribute('aria-selected')).toBe('false');
+    expect(user.contains(openers()[0]!)).toBe(true);
   });
 
   it.each(['cancelled', 'canceled'])('mutes a %s tool row', async (status) => {
@@ -1405,8 +1445,32 @@ describe('TrajectoryPanel', () => {
 
     expect(container.textContent).toContain('Request failed');
     expect(
-      container.querySelector('[data-has-failures="true"]'),
-    ).not.toBeNull();
+      text(container.querySelector('[data-testid="trajectory-failures"]')),
+    ).toBe('1 failed');
+  });
+
+  it('filters to failures from the summary chip and back', async () => {
+    const container = await render(async () =>
+      page([
+        userText('go', 'rec-1'),
+        timingFrame(
+          { kind: 'request', durationMs: 400, status: 'error' },
+          'rec-2',
+        ),
+        userText('again', 'rec-3'),
+      ]),
+    );
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-failures"]',
+    )!;
+    await act(async () => chip.click());
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+    expect(text(container.querySelector('[role="grid"]'))).not.toContain(
+      'again',
+    );
+    await act(async () => chip.click());
+    expect(chip.getAttribute('aria-pressed')).toBe('false');
+    expect(text(container.querySelector('[role="grid"]'))).toContain('again');
   });
 
   it('says a request failed even when it names its model', async () => {
@@ -1696,7 +1760,7 @@ describe('TrajectoryPanel', () => {
         ).toBe('Visible records 2 / window records 5 (including context)');
         expect(
           text(container.querySelector('[data-testid="trajectory-totals"]')),
-        ).toContain('Loaded window · 2 turns · 2 requests · 1 tool');
+        ).toBe('2 requests1 tool');
       });
 
       it('keeps a turn prompt but drops what ran outside the time', async () => {
@@ -2072,7 +2136,7 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain('shell_output');
   });
 
-  it('explains a missing history cursor outside the scrolled rows', async () => {
+  it('explains a missing history cursor in the row above the records', async () => {
     const container = await render(async () =>
       page(REAL_EVENTS, { hasMore: true }),
     );
@@ -2082,10 +2146,13 @@ describe('TrajectoryPanel', () => {
     );
 
     expect(text(notice)).toContain('page cursor did not advance');
-    // Inside the scrolled box its height would offset every virtual row from
-    // the coordinates the virtualizer hands out.
-    expect(scroll.contains(notice)).toBe(false);
+    // It scrolls with the records, in the virtualizer's leading padding, so
+    // the first record starts one row down instead of under it.
+    expect(scroll.contains(notice)).toBe(true);
     expect(scroll.children).toHaveLength(1);
+    expect(
+      container.querySelector<HTMLElement>('[role="row"]')!.style.transform,
+    ).toBe('translateY(34px)');
   });
 
   it('says nothing about older history when the page is the whole session', async () => {
@@ -2094,11 +2161,10 @@ describe('TrajectoryPanel', () => {
     expect(
       container.querySelector('[data-testid="trajectory-truncated"]'),
     ).toBeNull();
-    // The bar is still there, empty: it holds its height so a refresh that
-    // changes what it says cannot move the grid under it.
+    // The row is still there: it holds its height so a refresh that changes
+    // what it says cannot move the records under it.
     const bar = container.querySelector('[data-testid="trajectory-older-bar"]');
-    expect(bar).not.toBeNull();
-    expect(text(bar)).toBe('');
+    expect(text(bar)).toBe('Start of session');
   });
 
   describe('walking back through pages', () => {
@@ -2119,9 +2185,8 @@ describe('TrajectoryPanel', () => {
       const grid = container.querySelector('[role="grid"]') as HTMLElement;
       // Five prompts, each a turn header and a user row.
       expect(grid.getAttribute('aria-rowcount')).toBe('10');
-      expect(
-        text(container.querySelector('[data-testid="trajectory-totals"]')),
-      ).toContain('5 turns');
+      await openAbout(container);
+      expect(document.body.textContent).toContain('2 pages, 5 turns.');
       expect(
         container.querySelector('[data-testid="trajectory-truncated"]'),
       ).toBeNull();
@@ -2178,7 +2243,7 @@ describe('TrajectoryPanel', () => {
       // The newest page read fine, so nothing is raised as an alert.
       expect(container.querySelector('[role="alert"]')).toBeNull();
       expect(grid().children).toHaveLength(1);
-      expect(grid().contains(failed)).toBe(false);
+      expect(grid().contains(failed)).toBe(true);
 
       olderFails = false;
       const retry = container.querySelector(
@@ -2308,11 +2373,7 @@ describe('collapsible trajectory', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
         .click(),
     );
-    await act(async () =>
-      Array.from(container.querySelectorAll('button'))
-        .find((button) => button.textContent?.includes('View details'))!
-        .click(),
-    );
+    await act(async () => findButton(container, 'View details').click());
     const inspector = () =>
       container.querySelector('[data-testid="trajectory-inspector"]')!;
     expect(text(inspector())).toContain('Keep this detail');
@@ -2321,9 +2382,6 @@ describe('collapsible trajectory', () => {
     expect(
       container.querySelector('[data-testid="trajectory-row-tool"]'),
     ).toBeNull();
-    expect(
-      text(container.querySelector('[data-testid="trajectory-selected"]')),
-    ).toContain('Keep this detail');
     expect(text(inspector())).toContain(
       'The group containing this record is collapsed.',
     );
@@ -2362,9 +2420,6 @@ describe('collapsible trajectory', () => {
     );
     expect(
       text(container.querySelector('[data-testid="trajectory-inspector"]')),
-    ).toContain('fold-model');
-    expect(
-      text(container.querySelector('[data-testid="trajectory-selected"]')),
     ).toContain('fold-model');
     await act(async () =>
       grid(container).dispatchEvent(
@@ -2536,10 +2591,7 @@ describe('trajectory diagnostic filters', () => {
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
   };
-  const button = (container: HTMLElement, name: string) =>
-    Array.from(container.querySelectorAll('button')).find(
-      (element) => element.textContent === name,
-    )!;
+  const button = findButton;
   const fold = (container: HTMLElement) =>
     container.querySelector<HTMLButtonElement>(
       '[data-testid="trajectory-row-request"] button',
@@ -2549,12 +2601,11 @@ describe('trajectory diagnostic filters', () => {
     const container = await render(async () => page(events()));
     await act(async () => fold(container).click());
     const filters = container.querySelector('[data-trajectory-filters]')!;
-    expect(filters.textContent).not.toContain('matching records');
-    expect(button(container, 'Next').disabled).toBe(true);
-    expect(button(container, 'Previous').disabled).toBe(true);
+    expect(filters.textContent).not.toContain('match');
+    expect(button(container, 'Next')).toBeUndefined();
+    expect(button(container, 'Previous')).toBeUndefined();
     const input = inputOf(container);
     await act(async () => {
-      button(container, 'Next').click();
       input.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
       );
@@ -2674,19 +2725,19 @@ describe('trajectory diagnostic filters', () => {
     );
     await typeQuery(container, 'needle');
     await act(async () => button(container, 'Next').click());
-    expect(container.textContent).toContain('Result 1 / 2');
+    expect(container.textContent).toContain('1 of 2');
     await act(async () => fold(container).click());
     await act(async () => button(container, 'Next').click());
-    expect(container.textContent).toContain('Result 2 / 2');
+    expect(container.textContent).toContain('2 of 2');
     expect(fold(container).getAttribute('aria-expanded')).toBe('false');
     await act(async () => button(container, 'Next').click());
-    expect(container.textContent).toContain('Result 1 / 2');
+    expect(container.textContent).toContain('1 of 2');
     expect(fold(container).getAttribute('aria-expanded')).toBe('true');
     await act(async () => button(container, 'Previous').click());
-    expect(container.textContent).toContain('Result 2 / 2');
+    expect(container.textContent).toContain('2 of 2');
   });
 
-  it('keeps a coverage slot mounted when refresh crosses the body budget', async () => {
+  it('marks search coverage inside the search field when refresh crosses the body budget', async () => {
     let large = false;
     const container = await render(async () =>
       page([
@@ -2695,16 +2746,18 @@ describe('trajectory diagnostic filters', () => {
       ]),
     );
     const filters = container.querySelector('[data-trajectory-filters]')!;
-    const children = filters.children.length;
-    expect(filters.textContent).not.toContain('excluded from search');
+    const coverage = () =>
+      filters.querySelector('[aria-label*="excluded from search"]');
+    expect(coverage()).toBeNull();
     large = true;
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
         .click(),
     );
-    expect(filters.children.length).toBe(children);
-    expect(filters.textContent).toContain('excluded from search (1 record)');
+    expect(coverage()?.getAttribute('aria-label')).toContain(
+      'excluded from search (1 record)',
+    );
   });
 
   it('keeps request context, restores base folding and does not resurrect temporary overrides', async () => {
@@ -2722,12 +2775,12 @@ describe('trajectory diagnostic filters', () => {
         .querySelector('[data-testid="trajectory-row-request"]')
         ?.getAttribute('data-context'),
     ).toBe('true');
-    expect(container.textContent).toContain('1 matching record');
+    expect(container.textContent).toContain('1 match');
     await act(async () => fold(container).click());
     expect(
       container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
     ).toHaveLength(0);
-    expect(container.textContent).toContain('1 matching record');
+    expect(container.textContent).toContain('1 match');
     await act(async () => button(container, 'Clear filters').click());
     expect(fold(container).getAttribute('aria-expanded')).toBe('false');
     await typeQuery(container, 'needle');
@@ -2800,7 +2853,7 @@ describe('trajectory diagnostic filters', () => {
     expect(
       container.querySelector('[data-testid="trajectory-inspector"]'),
     ).toBeNull();
-    expect(container.textContent).toContain('Result 1 / 1');
+    expect(container.textContent).toContain('1 of 1');
     await typeQuery(container, 'no such text');
     expect(
       container.querySelector('[data-testid="trajectory-filter-empty"]'),
@@ -2883,11 +2936,7 @@ it('reveals a request when its independent filter and time contexts have an empt
       .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
       .click(),
   );
-  await act(async () =>
-    [...container.querySelectorAll('button')]
-      .find((button) => button.textContent === 'View details')!
-      .click(),
-  );
+  await act(async () => findButton(container, 'View details').click());
   const input = container.querySelector<HTMLInputElement>(
     'input[type="search"]',
   )!;
@@ -2920,12 +2969,8 @@ it('reveals a request when its independent filter and time contexts have an empt
   ).not.toBeNull();
   expect(
     container.querySelector('[data-trajectory-filters]')?.textContent,
-  ).toContain('0 matching records');
-  expect(
-    [...container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Next',
-    )?.disabled,
-  ).toBe(true);
+  ).toContain('0 matches');
+  expect(findButton(container, 'Next').disabled).toBe(true);
   const inspector = container.querySelector(
     '[data-testid="trajectory-inspector"]',
   )!;
@@ -2941,7 +2986,7 @@ it('reveals a request when its independent filter and time contexts have an empt
   expect(
     container.querySelector('[data-trajectory-filters] [role="status"]')
       ?.textContent,
-  ).toBe('Result 1 / 1');
+  ).toBe('1 of 1');
   await act(async () => {
     Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,

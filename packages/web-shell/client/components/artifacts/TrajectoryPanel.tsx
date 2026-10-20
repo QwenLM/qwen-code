@@ -14,11 +14,10 @@ import {
   useState,
 } from 'react';
 import {
+  ArrowDownIcon,
   ChevronRightIcon,
   ChevronDownIcon,
   CornerDownRightIcon,
-  RefreshCwIcon,
-  XIcon,
 } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
@@ -26,6 +25,7 @@ import type {
   DaemonTurnUsage,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { isFocusUnclaimed } from '../../utils/dom';
 import { formatDuration } from '../messages/StatsMessage';
 import {
   useTrajectoryWindow,
@@ -48,7 +48,11 @@ import {
   type TimelineRange,
 } from '../../trajectory/timelineRange';
 import { summarizeTrajectory } from '../../trajectory/summarizeTrajectory';
-import { TrajectoryOverview } from './TrajectoryOverview';
+import {
+  formatClockTime,
+  formatWindowTime,
+  TrajectoryOverview,
+} from './TrajectoryOverview';
 import { TrajectoryInspector } from './TrajectoryInspector';
 import { TrajectoryExecutions } from './TrajectoryExecutions';
 import { projectTrajectoryExecutions } from '../../trajectory/project-trajectory-executions';
@@ -63,7 +67,14 @@ import {
 } from '../../trajectory/buildTrajectoryLayout';
 import { useTimelineViewport } from '../../trajectory/useTimelineViewport';
 import { TrajectoryWaterfallCell } from './TrajectoryWaterfallCell';
-import { TrajectoryFilters } from './TrajectoryFilters';
+import { TrajectoryToolbar } from './TrajectoryToolbar';
+import { TrajectorySummaryBar } from './TrajectorySummaryBar';
+import {
+  isRetryableFailure,
+  trajectoryPillState,
+  trajectoryTopBoundary,
+  trajectoryWarnings,
+} from '../../trajectory/trajectory-status';
 import {
   buildTrajectorySearchIndex,
   filterTrajectory,
@@ -324,7 +335,7 @@ export function TrajectoryPanel({
   loadPage,
   historyGapRevision = 0,
 }: TrajectoryPanelProps) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const panelRef = useRef<HTMLDivElement>(null);
   const committedLoaderRef = useRef(loadPage);
   useLayoutEffect(() => {
@@ -360,7 +371,6 @@ export function TrajectoryPanel({
     canOlder,
     canNewer,
     historyReleased,
-    bookmarks,
   } = useTrajectoryWindow(loadPage);
   const [followState, setFollowState] = useState<{
     loader: typeof loadPage;
@@ -431,14 +441,16 @@ export function TrajectoryPanel({
   const historyStale =
     historyGapRevision >
     (refreshedGap.loader === loadPage ? refreshedGap.revision : 0);
-  const windowNavigationRef = useRef<HTMLDivElement | null>(null);
-  const pendingWindowFocusRef = useRef(false);
   const pendingWindowScrollRef = useRef(false);
   const [windowScope, setWindowScope] = useState({
     loader: loadPage,
     version: navigationVersion,
-    selectionLost: false,
   });
+  const [executionsUpdated, setExecutionsUpdated] = useState(false);
+  // Jump to latest floats over the rows, so it only appears once the reader
+  // has moved away from the tail: shown at the tail, it would land under the
+  // very click that paused following.
+  const [awayFromTail, setAwayFromTail] = useState(false);
 
   const [filterState, setFilterState] = useState({
     loader: loadPage,
@@ -710,11 +722,17 @@ export function TrajectoryPanel({
     return counts;
   }, [layout, rangeRows]);
 
+  // The boundary rows sit in the virtualizer's padding rather than in its
+  // items, so keyboard selection and the grid's row indices skip them. The top
+  // one is always there while records are, so its height never moves a row.
+  const bottomBoundary = windowMode === 'history';
   const virtualizer = useVirtualizer({
     count: visualRows.length,
     getScrollElement: () => scrollRef.current,
     getItemKey: (index) => visualRows[index]?.key ?? index,
     estimateSize: () => ROW_HEIGHT,
+    paddingStart: ROW_HEIGHT,
+    paddingEnd: bottomBoundary ? ROW_HEIGHT : 0,
     overscan: 12,
   });
 
@@ -724,15 +742,16 @@ export function TrajectoryPanel({
       pauseFollowing();
       const element = scrollRef.current;
       if (element) {
+        const top = Math.max(0, element.scrollTop - ROW_HEIGHT);
         const index = Math.min(
           visualRows.length - 1,
-          Math.floor(element.scrollTop / ROW_HEIGHT),
+          Math.floor(top / ROW_HEIGHT),
         );
         const entry = visualRows[index];
         if (entry)
           pendingAnchorRef.current = {
             key: entry.key,
-            offset: element.scrollTop - index * ROW_HEIGHT,
+            offset: top - index * ROW_HEIGHT,
           };
       }
       const keys = new Set(collapsed);
@@ -770,7 +789,7 @@ export function TrajectoryPanel({
     const key = visibleTrajectoryAncestor(layout, anchor.key, visibleKeys);
     const index = visualRows.findIndex((entry) => entry.key === key);
     if (index >= 0)
-      scrollTo(scrollRef.current, index * ROW_HEIGHT + anchor.offset);
+      scrollTo(scrollRef.current, (index + 1) * ROW_HEIGHT + anchor.offset);
   }, [layout, visualRows, visibleKeys, scrollTo]);
 
   // Hiding an element resets its scroll offset to zero without a scroll event,
@@ -898,6 +917,9 @@ export function TrajectoryPanel({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
+      // Keys pressed on a control inside the grid, such as a boundary row's
+      // button, belong to that control.
+      if (event.target !== event.currentTarget) return;
       if (event.key === 'Escape') {
         // Only claimed when there is a selection to drop; otherwise Escape is
         // left to whatever encloses the panel.
@@ -981,36 +1003,6 @@ export function TrajectoryPanel({
     : undefined;
   const inspectorRow =
     inspectorIndex === undefined ? undefined : trajectory?.rows[inspectorIndex];
-  const selectedTitle = selectedEntry
-    ? selectedEntry.kind === 'turn'
-      ? t('trajectory.turn', { index: selectedEntry.turn.index })
-      : labelOf(selectedEntry.row, t).text
-    : t('trajectory.selected.none');
-  const selectedTiming =
-    selectedEntry?.kind === 'row' &&
-    (selectedEntry.row.kind === 'request' || selectedEntry.row.kind === 'tool')
-      ? selectedEntry.row.timing
-      : undefined;
-  const selectedTtft =
-    selectedEntry?.kind === 'row' && selectedEntry.row.kind === 'request'
-      ? selectedTiming?.ttftMs
-      : undefined;
-  const selectedMeta = selectedEntry
-    ? selectedEntry.kind === 'turn'
-      ? t('trajectory.turnSummary', {
-          requests: selectedEntry.turn.requestCount,
-          tools: selectedEntry.turn.toolCount,
-          duration:
-            selectedEntry.turn.requestCount > 0
-              ? formatDuration(selectedEntry.turn.requestMs)
-              : t('trajectory.unrecorded'),
-        })
-      : selectedEntry.row.kind === 'request' ||
-          selectedEntry.row.kind === 'tool'
-        ? `${selectedTiming === undefined ? t('trajectory.unrecorded') : formatDuration(selectedTiming.durationMs)}${selectedTtft === undefined ? '' : ` · ${t('trajectory.ttft', { duration: formatDuration(selectedTtft) })}`}`
-        : t('trajectory.selected.noTiming')
-    : undefined;
-
   const empty = status === 'ready' && visualRows.length === 0;
   const timingAbsent =
     trajectory !== undefined &&
@@ -1050,18 +1042,7 @@ export function TrajectoryPanel({
   ) {
     const changedSession = windowScope.loader !== loadPage;
     pendingWindowScrollRef.current = !changedSession;
-    const focused = document.activeElement;
-    pendingWindowFocusRef.current = Boolean(
-      !changedSession &&
-        windowNavigationRef.current?.contains(focused) &&
-        focused?.getAttribute('data-testid') !== 'trajectory-window-older' &&
-        focused?.getAttribute('data-testid') !== 'trajectory-window-newer',
-    );
-    setWindowScope({
-      loader: loadPage,
-      version: navigationVersion,
-      selectionLost: !changedSession && selectedKey !== undefined,
-    });
+    setWindowScope({ loader: loadPage, version: navigationVersion });
     setSelectedKey(undefined);
     setInspectorSelection(undefined);
     setInspectorOpen(false);
@@ -1079,10 +1060,6 @@ export function TrajectoryPanel({
       pendingWindowScrollRef.current = false;
       virtualizer.scrollToOffset(0);
       scrollTo(scrollRef.current, 0);
-    }
-    if (pendingWindowFocusRef.current) {
-      pendingWindowFocusRef.current = false;
-      windowNavigationRef.current?.focus({ preventScroll: true });
     }
   }, [navigationVersion, hasRows, virtualizer, scrollTo]);
 
@@ -1120,9 +1097,31 @@ export function TrajectoryPanel({
   useLayoutEffect(() => {
     if (!pendingLatestScroll.current) return;
     pendingLatestScroll.current = false;
-    if (scrollRef.current)
-      scrollTo(scrollRef.current, scrollRef.current.scrollHeight);
+    const element = scrollRef.current;
+    if (!element) return;
+    scrollTo(element, element.scrollHeight);
+    // The control that asked for the return may be gone with the state it
+    // showed; the records are where the reader lands.
+    if (isFocusUnclaimed(element.getRootNode()))
+      element.focus({ preventScroll: true });
   }, [following, visualRows, scrollTo]);
+
+  // Moving the window re-renders the boundary rows, and when a filter empties
+  // the list they move out of the grid; focus follows the button pressed.
+  const pendingBoundaryFocusRef = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    const testId = pendingBoundaryFocusRef.current;
+    const panel = panelRef.current;
+    if (!testId || !panel || status === 'loading') return;
+    pendingBoundaryFocusRef.current = undefined;
+    if (!isFocusUnclaimed(panel.getRootNode())) return;
+    // At the start of the session there is nothing earlier to load, and the
+    // button is gone; the records take focus instead.
+    (
+      panel.querySelector<HTMLElement>(`[data-testid="${testId}"]`) ??
+      scrollRef.current
+    )?.focus({ preventScroll: true });
+  }, [navigationVersion, status, hasRows]);
 
   /** A span stands for one row: select it and bring it into view. */
   const selectSpan = useCallback(
@@ -1271,122 +1270,164 @@ export function TrajectoryPanel({
     [t],
   );
 
+  const pill = trajectoryPillState({
+    windowMode,
+    following,
+    returning,
+    liveStatus: lifecycle.status,
+  });
+  const warnings = trajectoryWarnings({
+    hasTrajectory: trajectory !== undefined,
+    error,
+    navigationError,
+    historyStale,
+    // Without a live stream there is no lifecycle to be incomplete: the
+    // projection reports that case as incomplete, and saying so on every
+    // finished session would be noise.
+    lifecycleIncomplete:
+      (lifecycle.incomplete && lifecycle.status !== 'unavailable') ||
+      lifecycle.truncated,
+  });
+  const topBoundary = trajectoryTopBoundary({
+    truncated,
+    loading: status === 'loading',
+    olderFailure,
+  });
+  const rangeLabel =
+    range && timeline
+      ? timeline.mode === 'clock'
+        ? `${formatClockTime(timeline.originMs + range.start, range.end - range.start, language)} – ${formatClockTime(timeline.originMs + range.end, range.end - range.start, language)}`
+        : `${formatWindowTime(range.start, range.end - range.start)} – ${formatWindowTime(range.end, range.end - range.start)}`
+      : undefined;
+  const boundaryRow = (
+    // A live region rather than role="status": inside the grid, a role other
+    // than row would break the grid's ownership rules.
+    <div
+      className={styles.boundary}
+      aria-live="polite"
+      data-testid="trajectory-older-bar"
+      data-state={topBoundary}
+    >
+      {topBoundary === 'failed' ? (
+        <>
+          <span
+            className={`${styles.boundaryText} ${styles.toneError}`}
+            data-testid="trajectory-older-failed"
+            title={olderFailureText}
+          >
+            {olderFailureText}
+          </span>
+          <button
+            type="button"
+            className={styles.boundaryButton}
+            onClick={() => {
+              if (status !== 'loading') retry();
+            }}
+            // Not `disabled`: a disabled button drops the focus of a reader
+            // who just pressed it, and this one goes busy as it is pressed.
+            aria-disabled={
+              status === 'loading' ||
+              (olderFailure !== undefined && !isRetryableFailure(olderFailure))
+            }
+            data-testid="trajectory-older-retry"
+          >
+            {t('common.retry')}
+          </button>
+        </>
+      ) : topBoundary === 'loading' || topBoundary === 'earlier' ? (
+        <>
+          <span
+            className={styles.boundaryText}
+            {...(topBoundary === 'earlier'
+              ? { 'data-testid': 'trajectory-truncated' }
+              : {})}
+          >
+            {topBoundary === 'loading'
+              ? t('trajectory.loadingPages', { pages: loadedPages })
+              : windowMode === 'history'
+                ? t('trajectory.window.outside')
+                : t('trajectory.boundary.earlier')}
+          </span>
+          {truncated && (
+            <button
+              type="button"
+              className={styles.boundaryButton}
+              aria-disabled={!canOlder}
+              onClick={() => {
+                if (!canOlder) return;
+                pauseFollowing();
+                pendingBoundaryFocusRef.current = 'trajectory-window-older';
+                older();
+              }}
+              data-testid="trajectory-window-older"
+            >
+              {t('trajectory.boundary.loadEarlier')}
+            </button>
+          )}
+        </>
+      ) : (
+        <span className={styles.boundaryText}>
+          {t('trajectory.boundary.start')}
+        </span>
+      )}
+    </div>
+  );
+
+  const newerRow = (
+    <div className={styles.boundary}>
+      <button
+        type="button"
+        className={styles.boundaryButton}
+        aria-disabled={!canNewer}
+        onClick={() => {
+          if (!canNewer) return;
+          pauseFollowing();
+          pendingBoundaryFocusRef.current = 'trajectory-window-newer';
+          newer();
+        }}
+        data-testid="trajectory-window-newer"
+      >
+        {t('trajectory.boundary.newer')}
+      </button>
+      {historyReleased && !canNewer && (
+        <span className={styles.boundaryText}>
+          {t('trajectory.window.released')}
+        </span>
+      )}
+    </div>
+  );
+
   return (
     <div ref={panelRef} className={styles.panel} data-testid="trajectory-panel">
-      <TrajectoryExecutions
-        key={`executions-${filterState.scope}`}
-        rows={executions.rows}
-        omitted={executions.omitted}
-        incomplete={lifecycle.incomplete || lifecycle.truncated}
-        outsideWindow={lifecycle.outsideWindow.length}
-        selectedKey={selectedExecution?.key}
-        following={following}
-        liveStatus={lifecycle.status}
-        historySnapshot={trajectory}
-        onPause={pauseFollowing}
-        onReturnToLatest={returnToLatest}
-        canReturn={canRefresh}
-        returning={returning}
-        onSelect={(key) => {
+      <TrajectorySummaryBar
+        summary={summary}
+        pill={pill}
+        onPill={() => {
+          if (pill === 'live') pauseFollowing();
+          else returnToLatest();
+        }}
+        warnings={warnings}
+        onRetry={retry}
+        onRefresh={() => {
           pauseFollowing();
-          setSelectedKey(undefined);
-          setInspectorOpen(false);
-          setExecutionSelection({ loader: loadPage, key });
+          refresh();
+        }}
+        onReturnToLatest={returnToLatest}
+        canRefresh={canRefresh && windowMode === 'latest'}
+        failuresOn={filter.status === 'error'}
+        onToggleFailures={() =>
+          changeFilter({
+            ...filter,
+            status: filter.status === 'error' ? 'all' : 'error',
+          })
+        }
+        about={{
+          pages: windowPages,
+          searchExcluded: searchIndex?.truncatedCount ?? 0,
+          executionsOmitted: executions.omitted,
+          executionsOutside: lifecycle.outsideWindow.length,
         }}
       />
-      <div className={styles.header}>
-        <div className={styles.summary}>
-          {summary ? (
-            <span data-testid="trajectory-totals">
-              {t('trajectory.totals', {
-                turns: summary.turnCount,
-                requests: summary.requestCount,
-                tools: summary.toolCount,
-              })}
-            </span>
-          ) : (
-            <span>{t('trajectory.title')}</span>
-          )}
-        </div>
-        <div className={styles.headerActions}>
-          {range !== undefined && (
-            <button
-              type="button"
-              className={styles.iconButton}
-              onClick={() => setRange(undefined)}
-              title={t('trajectory.range.clear')}
-              aria-label={t('trajectory.range.clear')}
-              data-testid="trajectory-range-clear"
-            >
-              <XIcon size={14} strokeWidth={1.6} />
-            </button>
-          )}
-          {windowMode === 'latest' && (
-            <button
-              type="button"
-              className={styles.iconButton}
-              onClick={() => {
-                pauseFollowing();
-                refresh();
-              }}
-              disabled={!canRefresh}
-              title={t('common.refresh')}
-              aria-label={t('common.refresh')}
-            >
-              <RefreshCwIcon size={14} strokeWidth={1.6} />
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className={styles.overviewMetrics} data-testid="trajectory-metrics">
-        {(
-          [
-            ['elapsed', summary?.elapsedMs],
-            ['active', summary?.activeMs],
-            ['main', summary?.mainRequestMs],
-          ] as const
-        ).map(([key, value]) => (
-          <div className={styles.metric} key={key}>
-            <span>{t(`trajectory.metric.${key}`)}</span>
-            <strong
-              aria-label={
-                value === undefined ? t('trajectory.unrecorded') : undefined
-              }
-              title={
-                value === undefined ? t('trajectory.unrecorded') : undefined
-              }
-            >
-              {value === undefined ? '—' : formatDuration(value)}
-            </strong>
-          </div>
-        ))}
-        <div
-          className={styles.failureCounts}
-          data-has-failures={
-            summary && summary.requestFailures + summary.toolFailures > 0
-              ? 'true'
-              : undefined
-          }
-        >
-          {summary
-            ? t('trajectory.failures', {
-                requests: summary.requestFailures,
-                tools: summary.toolFailures,
-              })
-            : '—'}
-        </div>
-        <details className={styles.metricHelp}>
-          <summary>{t('trajectory.metric.help')}</summary>
-          <div className={styles.metricHelpContent}>
-            <p>{t('trajectory.metric.scope')}</p>
-            <p>{t('trajectory.metric.elapsed.help')}</p>
-            <p>{t('trajectory.metric.active.help')}</p>
-            <p>{t('trajectory.metric.main.help')}</p>
-            <p>{t('trajectory.metric.missing.help')}</p>
-          </div>
-        </details>
-      </div>
 
       {/* Mounted from the start at a fixed height, whatever it holds: it is a
           flex sibling of the scrolled rows, so a box that appeared or grew
@@ -1419,256 +1460,8 @@ export function TrajectoryPanel({
         }}
       />
 
-      <div className={styles.context}>
-        <div className={styles.selectedLine}>
-          <div
-            className={styles.selectedInfo}
-            data-testid="trajectory-selected"
-            aria-live="polite"
-          >
-            <span className={styles.selectedLabel}>
-              {t('trajectory.selected.label')}
-            </span>
-            <span className={styles.selectedName} title={selectedTitle}>
-              {selectedTitle}
-            </span>
-            {selectedMeta && (
-              <span className={styles.selectedMeta} title={selectedMeta}>
-                {selectedMeta}
-              </span>
-            )}
-          </div>
-          <button
-            type="button"
-            className={styles.detailsButton}
-            onClick={() => openInspector()}
-            disabled={
-              !trajectory ||
-              !loadPage ||
-              !selectedKey ||
-              !trajectory.rowIndexByKey.has(selectedKey)
-            }
-          >
-            {t('trajectory.inspector.open')}
-            <ChevronRightIcon size={13} aria-hidden="true" />
-          </button>
-        </div>
-        <div
-          className={styles.contextNotice}
-          data-testid="trajectory-context-notice"
-          title={[
-            summary?.missingStartCount
-              ? t('trajectory.missingStart', {
-                  count: summary.missingStartCount,
-                })
-              : '',
-            summary?.missingTimingCount
-              ? t('trajectory.missingTiming', {
-                  count: summary.missingTimingCount,
-                })
-              : '',
-            truncated
-              ? t(
-                  windowMode === 'history'
-                    ? 'trajectory.window.outside'
-                    : 'trajectory.truncated',
-                )
-              : '',
-            historyStale ? t('trajectory.historyGap') : '',
-            lifecycle.incomplete || lifecycle.truncated
-              ? t('trajectory.lifecycleIncomplete')
-              : '',
-            error && trajectory ? t('trajectory.refreshStale') : '',
-          ]
-            .filter(Boolean)
-            .join(' · ')}
-        >
-          {rangeCounts && (
-            <span data-testid="trajectory-range-status" role="status">
-              {t('trajectory.range.status', rangeCounts)}
-            </span>
-          )}
-          {rangeCounts ? ' · ' : ''}
-          {[
-            olderFailureText,
-            historyStale ? t('trajectory.historyGap') : '',
-            lifecycle.incomplete || lifecycle.truncated
-              ? t('trajectory.lifecycleIncomplete')
-              : '',
-            error && trajectory ? t('trajectory.refreshStale') : '',
-            truncated && !olderFailureText
-              ? t(
-                  windowMode === 'history'
-                    ? 'trajectory.window.outside'
-                    : 'trajectory.truncated',
-                )
-              : '',
-            summary &&
-            (summary.missingStartCount > 0 || summary.missingTimingCount > 0)
-              ? t('trajectory.unplotted', {
-                  starts: summary.missingStartCount,
-                  timing: summary.missingTimingCount,
-                })
-              : '',
-          ]
-            .filter(Boolean)
-            .join(' · ') || (rangeCounts ? '' : '\u00a0')}
-        </div>
-      </div>
-      <div className={styles.errorSlot}>
-        {error !== undefined && (
-          <div className={styles.error} role="alert">
-            <span>
-              {trajectory ? `${t('trajectory.refreshStale')} · ` : ''}
-              {error.kind === 'partial'
-                ? t('trajectory.partial')
-                : error.kind === 'unreadable'
-                  ? t('trajectory.loadFailed', { message: error.message })
-                  : t(`trajectory.window.${error.kind}`)}
-            </span>
-            <button
-              type="button"
-              className={styles.headerButton}
-              onClick={retry}
-              disabled={
-                status === 'loading' ||
-                (error.kind !== 'partial' && error.kind !== 'unreadable')
-              }
-            >
-              {t('common.retry')}
-            </button>
-          </div>
-        )}
-      </div>
-
-      {trajectory && (
-        <div
-          className={styles.windowNavigation}
-          ref={windowNavigationRef}
-          tabIndex={-1}
-          role="group"
-          aria-label={t('trajectory.window.navigation')}
-          data-testid="trajectory-window-navigation"
-          data-bookmarks={bookmarks}
-        >
-          <div
-            className={styles.windowStatus}
-            role="status"
-            aria-live="polite"
-            data-testid="trajectory-window-status"
-          >
-            {t(`trajectory.window.${windowMode}`)} ·{' '}
-            {t('trajectory.window.pages', { pages: windowPages })}
-            <span>{t('trajectory.window.scope')}</span>
-            <span className={styles.windowNotice}>
-              {[
-                status === 'loading'
-                  ? t('trajectory.loadingPages', { pages: loadedPages })
-                  : !truncated
-                    ? t('trajectory.window.start')
-                    : '',
-                historyReleased &&
-                !canNewer &&
-                status !== 'loading' &&
-                !navigationError &&
-                !error &&
-                !olderFailure
-                  ? t('trajectory.window.released')
-                  : '',
-                windowScope.selectionLost && !selectedKey
-                  ? t('trajectory.window.changed')
-                  : '',
-              ]
-                .filter(Boolean)
-                .join(' · ') || '\u00a0'}
-            </span>
-          </div>
-          <div className={styles.windowButtons}>
-            <button
-              type="button"
-              className={styles.headerButton}
-              aria-disabled={!canOlder}
-              onClick={() => {
-                if (!canOlder) return;
-                pauseFollowing();
-                older();
-              }}
-              data-testid="trajectory-window-older"
-            >
-              {t('trajectory.window.older')}
-            </button>
-            <button
-              type="button"
-              className={styles.headerButton}
-              aria-disabled={!canNewer}
-              onClick={() => {
-                if (!canNewer) return;
-                pauseFollowing();
-                newer();
-              }}
-              data-testid="trajectory-window-newer"
-            >
-              {t('trajectory.window.newer')}
-            </button>
-            {olderFailure && !hasRows && (
-              <button
-                type="button"
-                className={styles.headerButton}
-                data-testid="trajectory-older-retry"
-                onClick={retry}
-                aria-disabled={
-                  status === 'loading' ||
-                  (olderFailure.kind !== 'partial' &&
-                    olderFailure.kind !== 'unreadable')
-                }
-              >
-                {t('common.retry')}
-              </button>
-            )}
-            {windowMode === 'history' && (
-              <button
-                type="button"
-                className={styles.headerButton}
-                onClick={() => {
-                  returnToLatest();
-                }}
-                aria-disabled={!canRefresh}
-                data-testid="trajectory-window-latest"
-              >
-                {t('trajectory.window.return')}
-              </button>
-            )}
-          </div>
-          {navigationError && (
-            <div className={styles.windowFailure} role="alert">
-              <span>
-                {t('trajectory.window.failed')}{' '}
-                {navigationError.kind === 'partial'
-                  ? t('trajectory.partial')
-                  : navigationError.kind === 'unreadable'
-                    ? t('trajectory.loadFailed', {
-                        message: navigationError.message,
-                      })
-                    : t(`trajectory.window.${navigationError.kind}`)}
-              </span>
-              {(navigationError.kind === 'partial' ||
-                navigationError.kind === 'unreadable') && (
-                <button
-                  type="button"
-                  className={styles.headerButton}
-                  onClick={retry}
-                  aria-disabled={status === 'loading'}
-                >
-                  {t('common.retry')}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
       {trajectory && trajectory.rows.length > 0 && (
-        <TrajectoryFilters
+        <TrajectoryToolbar
           key={filterState.scope}
           value={filter}
           onChange={changeFilter}
@@ -1681,202 +1474,236 @@ export function TrajectoryPanel({
               : 0
           }
           truncatedCount={searchIndex?.truncatedCount ?? 0}
+          {...(rangeLabel !== undefined ? { range: rangeLabel } : {})}
+          onClearRange={() => setRange(undefined)}
+          {...(rangeCounts
+            ? { status: t('trajectory.range.status', rangeCounts) }
+            : {})}
         />
       )}
+
+      {executions.rows.length > 0 && (
+        <TrajectoryExecutions
+          key={`executions-${filterState.scope}`}
+          rows={executions.rows}
+          selectedKey={selectedExecution?.key}
+          following={following}
+          liveStatus={lifecycle.status}
+          historySnapshot={trajectory}
+          onPause={pauseFollowing}
+          onUpdatedChange={setExecutionsUpdated}
+          onSelect={(key) => {
+            pauseFollowing();
+            setSelectedKey(undefined);
+            setInspectorOpen(false);
+            setExecutionSelection({ loader: loadPage, key });
+          }}
+        />
+      )}
+
       <div
         className={`${styles.tableWrap} ${inspectorOpen || selectedExecution ? styles.tableWrapWithInspector : ''}`}
       >
         {visualRows.length === 0 ? (
-          // An error with nothing folded is already stated by the alert above;
-          // repeating it here as a placeholder would say it twice.
-          status === 'error' ? null : filterActive ? (
-            <div
-              className={styles.placeholder}
-              data-testid="trajectory-filter-empty"
-            >
-              <span>{t('trajectory.filter.empty')}</span>{' '}
-              <button
-                type="button"
-                className={styles.headerButton}
-                onClick={clearFilter}
-              >
-                {t('trajectory.filter.clear')}
-              </button>
-            </div>
-          ) : range !== undefined ? (
-            // Real time keeps the gaps between turns on the axis, and a
-            // stretch dragged inside one has nothing in it. Said here, with
-            // the way back beside it, rather than left as a blank table. Not
-            // a live region: the header's row count, which changes in the
-            // same render, already says it, and two would say it twice.
-            <div
-              className={styles.placeholder}
-              data-testid="trajectory-range-empty"
-            >
-              <span>{t('trajectory.range.empty')}</span>{' '}
-              <button
-                type="button"
-                className={styles.headerButton}
-                onClick={() => setRange(undefined)}
-              >
-                {t('trajectory.range.clear')}
-              </button>
-            </div>
-          ) : (
-            <div className={styles.placeholder} role="status">
-              {empty
-                ? t('trajectory.empty')
-                : loadedPages > 0
-                  ? t('trajectory.loadingPages', { pages: loadedPages })
-                  : t('common.loading')}
-            </div>
-          )
-        ) : (
           <>
-            {/* Outside the scrolled box on purpose: inside it, its height
-                would offset every virtual row from the coordinates the
-                virtualizer computes. And always here, at one fixed height,
-                whatever it says: it is a flex sibling of the scrolled box, so
-                a bar that came and went with `truncated` would move every row
-                the moment a refresh changed its answer. */}
-            <div
-              className={styles.olderBar}
-              role="status"
-              data-testid="trajectory-older-bar"
-            >
-              {olderFailure !== undefined ? (
-                <>
-                  <span
-                    className={`${styles.olderNotice} ${styles.toneError}`}
-                    data-testid="trajectory-older-failed"
-                    title={olderFailureText}
-                  >
-                    {olderFailureText}
-                  </span>
+            {trajectory && boundaryRow}
+            {status === 'error' && error ? (
+              <div className={styles.placeholder} role="alert">
+                <span>
+                  {error.kind === 'partial'
+                    ? t('trajectory.partial')
+                    : error.kind === 'unreadable'
+                      ? t('trajectory.loadFailed', { message: error.message })
+                      : t(`trajectory.window.${error.kind}`)}
+                </span>{' '}
+                {isRetryableFailure(error) && (
                   <button
                     type="button"
                     className={styles.headerButton}
-                    onClick={() => {
-                      if (status !== 'loading') retry();
-                    }}
-                    // Not `disabled`: a disabled button drops the focus of a
-                    // reader who just pressed it, and this one is pressed
-                    // exactly when it is about to go busy.
-                    aria-disabled={
-                      status === 'loading' ||
-                      (olderFailure.kind !== 'partial' &&
-                        olderFailure.kind !== 'unreadable')
-                    }
-                    data-testid="trajectory-older-retry"
+                    onClick={retry}
                   >
                     {t('common.retry')}
                   </button>
-                </>
-              ) : truncated ? (
-                <span
-                  className={styles.olderNotice}
-                  data-testid="trajectory-truncated"
-                >
-                  {t(
-                    windowMode === 'history'
-                      ? 'trajectory.window.outside'
-                      : 'trajectory.truncated',
-                  )}
-                </span>
-              ) : null}
-            </div>
-            <div
-              ref={scrollRef}
-              className={styles.scroll}
-              role="grid"
-              tabIndex={0}
-              aria-label={t('trajectory.title')}
-              aria-rowcount={visualRows.length}
-              aria-activedescendant={
-                virtualizer
-                  .getVirtualItems()
-                  .some((item) => item.index === selectedIndex)
-                  ? rowDomId(selectedIndex)
-                  : undefined
-              }
-              onKeyDown={handleKeyDown}
-              onWheel={pauseFollowing}
-              onPointerDown={pauseFollowing}
-              onScroll={(event) => {
-                scrollTopRef.current = event.currentTarget.scrollTop;
-              }}
-              data-testid="trajectory-rows"
-            >
-              <div
-                className={styles.virtualBody}
-                style={{ height: `${virtualizer.getTotalSize()}px` }}
-              >
-                {virtualizer.getVirtualItems().map((item) => {
-                  const entry = visualRows[item.index]!;
-                  return (
-                    <div
-                      key={item.key}
-                      id={rowDomId(item.index)}
-                      className={styles.virtualRow}
-                      style={{
-                        height: `${ROW_HEIGHT}px`,
-                        transform: `translateY(${item.start}px)`,
-                      }}
-                      role="row"
-                      aria-rowindex={item.index + 1}
-                    >
-                      {entry.kind === 'turn' ? (
-                        <TurnHeaderRow
-                          turn={entry.turn}
-                          prompt={
-                            entry.turn.userRowKey
-                              ? trajectory?.rows[
-                                  trajectory.rowIndexByKey.get(
-                                    entry.turn.userRowKey,
-                                  ) ?? -1
-                                ]
-                              : undefined
-                          }
-                          collapsed={collapsed.has(entry.key)}
-                          hiddenCount={hiddenCounts.get(entry.key) ?? 0}
-                          onToggle={() => toggleGroup(entry.key)}
-                          selected={entry.key === activeVisualKey}
-                          onSelect={() => selectRow(entry.key)}
-                        />
-                      ) : (
-                        <RecordRow
-                          row={entry.row}
-                          grouped={
-                            (layout?.ancestors.get(entry.key)?.length ?? 0) > 1
-                          }
-                          unresolvedParent={
-                            layout?.unresolvedParents.has(entry.key) ?? false
-                          }
-                          fold={
-                            layout?.groups.has(entry.key) &&
-                            (hiddenCounts.get(entry.key) ?? 0) > 0
-                              ? {
-                                  collapsed: collapsed.has(entry.key),
-                                  hiddenCount: hiddenCounts.get(entry.key) ?? 0,
-                                  onToggle: () => toggleGroup(entry.key),
-                                }
-                              : undefined
-                          }
-                          span={spansByKey.get(entry.key)}
-                          total={timeline?.total ?? 0}
-                          viewport={viewportControl.viewport}
-                          range={range}
-                          context={!!hits && !hits.has(entry.key)}
-                          selected={entry.key === activeVisualKey}
-                          onSelect={() => selectRow(entry.key)}
-                        />
-                      )}
-                    </div>
-                  );
-                })}
+                )}
               </div>
-            </div>
+            ) : filterActive ? (
+              <div
+                className={styles.placeholder}
+                data-testid="trajectory-filter-empty"
+              >
+                <span>{t('trajectory.filter.empty')}</span>{' '}
+                <button
+                  type="button"
+                  className={styles.headerButton}
+                  onClick={clearFilter}
+                >
+                  {t('trajectory.filter.clear')}
+                </button>
+              </div>
+            ) : range !== undefined ? (
+              // Real time keeps the gaps between turns on the axis, and a
+              // stretch dragged inside one has nothing in it. Said here, with
+              // the way back beside it, rather than left as a blank table.
+              <div
+                className={styles.placeholder}
+                data-testid="trajectory-range-empty"
+              >
+                <span>{t('trajectory.range.empty')}</span>{' '}
+                <button
+                  type="button"
+                  className={styles.headerButton}
+                  onClick={() => setRange(undefined)}
+                >
+                  {t('trajectory.range.clear')}
+                </button>
+              </div>
+            ) : (
+              <div className={styles.placeholder} role="status">
+                {empty
+                  ? t('trajectory.empty')
+                  : loadedPages > 0
+                    ? t('trajectory.loadingPages', { pages: loadedPages })
+                    : t('common.loading')}
+              </div>
+            )}
+            {trajectory && bottomBoundary && newerRow}
           </>
+        ) : (
+          <div
+            ref={scrollRef}
+            className={styles.scroll}
+            role="grid"
+            tabIndex={0}
+            aria-label={t('trajectory.title')}
+            aria-rowcount={visualRows.length}
+            aria-activedescendant={
+              virtualizer
+                .getVirtualItems()
+                .some((item) => item.index === selectedIndex)
+                ? rowDomId(selectedIndex)
+                : undefined
+            }
+            onKeyDown={handleKeyDown}
+            onWheel={pauseFollowing}
+            onPointerDown={pauseFollowing}
+            onScroll={(event) => {
+              const element = event.currentTarget;
+              scrollTopRef.current = element.scrollTop;
+              setAwayFromTail(
+                element.scrollHeight -
+                  element.clientHeight -
+                  element.scrollTop >
+                  ROW_HEIGHT,
+              );
+            }}
+            data-testid="trajectory-rows"
+          >
+            <div
+              className={styles.virtualBody}
+              style={{ height: `${virtualizer.getTotalSize()}px` }}
+            >
+              <div className={styles.virtualBoundary}>{boundaryRow}</div>
+              {virtualizer.getVirtualItems().map((item) => {
+                const entry = visualRows[item.index]!;
+                return (
+                  <div
+                    key={item.key}
+                    id={rowDomId(item.index)}
+                    className={styles.virtualRow}
+                    style={{
+                      height: `${ROW_HEIGHT}px`,
+                      transform: `translateY(${item.start}px)`,
+                    }}
+                    role="row"
+                    aria-rowindex={item.index + 1}
+                  >
+                    {entry.kind === 'turn' ? (
+                      <TurnHeaderRow
+                        turn={entry.turn}
+                        prompt={
+                          entry.turn.userRowKey
+                            ? trajectory?.rows[
+                                trajectory.rowIndexByKey.get(
+                                  entry.turn.userRowKey,
+                                ) ?? -1
+                              ]
+                            : undefined
+                        }
+                        collapsed={collapsed.has(entry.key)}
+                        hiddenCount={hiddenCounts.get(entry.key) ?? 0}
+                        onToggle={() => toggleGroup(entry.key)}
+                        selected={entry.key === activeVisualKey}
+                        onSelect={() => selectRow(entry.key)}
+                      />
+                    ) : (
+                      <RecordRow
+                        row={entry.row}
+                        grouped={
+                          (layout?.ancestors.get(entry.key)?.length ?? 0) > 1
+                        }
+                        unresolvedParent={
+                          layout?.unresolvedParents.has(entry.key) ?? false
+                        }
+                        fold={
+                          layout?.groups.has(entry.key) &&
+                          (hiddenCounts.get(entry.key) ?? 0) > 0
+                            ? {
+                                collapsed: collapsed.has(entry.key),
+                                hiddenCount: hiddenCounts.get(entry.key) ?? 0,
+                                onToggle: () => toggleGroup(entry.key),
+                              }
+                            : undefined
+                        }
+                        span={spansByKey.get(entry.key)}
+                        total={timeline?.total ?? 0}
+                        viewport={viewportControl.viewport}
+                        range={range}
+                        context={!!hits && !hits.has(entry.key)}
+                        selected={entry.key === activeVisualKey}
+                        onSelect={() => selectRow(entry.key)}
+                        onOpen={
+                          entry.key === activeVisualKey && loadPage
+                            ? () => openInspector(entry.key)
+                            : undefined
+                        }
+                      />
+                    )}
+                  </div>
+                );
+              })}
+              {bottomBoundary && (
+                <div
+                  className={styles.virtualBoundary}
+                  style={{
+                    transform: `translateY(${virtualizer.getTotalSize() - ROW_HEIGHT}px)`,
+                  }}
+                >
+                  {newerRow}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {pill === 'paused' && (awayFromTail || executionsUpdated) && (
+          <button
+            type="button"
+            className={styles.jumpLatest}
+            aria-disabled={!canRefresh}
+            onClick={() => {
+              if (canRefresh) returnToLatest();
+            }}
+            data-testid="trajectory-jump-latest"
+          >
+            <ArrowDownIcon size={13} aria-hidden="true" />
+            {t('trajectory.jumpLatest')}
+            {executionsUpdated && (
+              <span
+                className={styles.updatedDot}
+                role="img"
+                aria-label={t('trajectory.jumpLatest.updated')}
+              />
+            )}
+          </button>
         )}
       </div>
       {selectedExecution && (
@@ -2031,6 +1858,7 @@ function RecordRow({
   context,
   selected,
   onSelect,
+  onOpen,
 }: {
   row: TrajectoryRow;
   grouped: boolean;
@@ -2043,6 +1871,8 @@ function RecordRow({
   context: boolean;
   selected: boolean;
   onSelect: () => void;
+  /** Present on the selected row: opens its details. */
+  onOpen?: () => void;
 }) {
   const { t } = useI18n();
   const label = labelOf(row, t);
@@ -2115,6 +1945,23 @@ function RecordRow({
       >
         {metrics.length > 0 ? metrics.join(' · ') : '—'}
       </span>
+      {onOpen && (
+        // Not a tab stop: the grid keeps the only one, and Enter opens the
+        // selected row from the keyboard.
+        <button
+          type="button"
+          tabIndex={-1}
+          className={styles.openButton}
+          aria-label={t('trajectory.inspector.open')}
+          title={t('trajectory.inspector.open')}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen();
+          }}
+        >
+          <ChevronRightIcon size={14} aria-hidden="true" />
+        </button>
+      )}
     </div>
   );
 }
