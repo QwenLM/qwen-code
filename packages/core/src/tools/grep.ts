@@ -289,7 +289,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         // the full render to count it is the allocation the limit avoids;
         // declare it unknown instead (#13652 R2-5).
         ...(truncatedByLineLimit || truncatedByCharLimit
-          ? { rawOutputSize: null }
+          ? { rawOutputSize: null, truncatedByProducer: true }
           : {}),
       };
     } catch (error) {

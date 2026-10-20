@@ -232,6 +232,8 @@ import type {
   SessionSourceUpsertResult,
   SessionSourceRemoveResult,
   DaemonRewindSnapshotInfo,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   ForkSessionRequest,
   DaemonSessionHooksStatus,
@@ -4318,6 +4320,48 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonApprovalModeResult;
       },
+    );
+  }
+
+  async getMessageGroups(
+    sessionId: string,
+  ): Promise<DaemonMessageGroupsSnapshot> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/message-groups`,
+      { method: 'GET', headers: this.headers() },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /session/:id/message-groups');
+        return (await res.json()) as DaemonMessageGroupsSnapshot;
+      },
+      undefined,
+      'rest',
+    );
+  }
+
+  async deleteMessageGroups(
+    sessionId: string,
+    snapshot: string,
+    groupIds: string[],
+    clientId?: string,
+  ): Promise<DaemonDeleteMessageGroupsResult> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/messages/delete`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ snapshot, groupIds }),
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/messages/delete',
+          );
+        return (await res.json()) as DaemonDeleteMessageGroupsResult;
+      },
+      undefined,
+      'rest',
     );
   }
 
