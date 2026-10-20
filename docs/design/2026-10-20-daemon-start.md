@@ -1,0 +1,87 @@
+# Background daemon start
+
+[English](2026-10-20-daemon-start.md) | [简体中文](2026-10-20-daemon-start.zh-CN.md)
+
+## Status
+
+Implemented in this change. `qwen daemon start` is local process management; it
+does not change the serve protocol, authentication, or workspace isolation.
+
+## Problem
+
+Starting a local daemon required a service manager, tmux, or `nohup`. The
+discovery record and `qwen daemon stop` already made a running daemon
+inspectable, but there was no supported way to start one and return to the
+shell.
+
+## Behavior
+
+`qwen daemon start` spawns `qwen serve` as a detached child, waits for the
+child to publish its discovery record, then prints the bound URL, PID, log
+path, and stop command. The child keeps running after the parent exits.
+
+Supported inputs: `--port`, `--hostname`, `--workspace` (repeatable),
+`--no-web`, `--require-auth`, and `--token`. The child is always started with
+`--no-token-qr` so the startup log cannot contain a token QR.
+
+## Environment isolation
+
+The child is a new daemon, not a worker of the session that launched it. The
+start command removes the parent's session and worker bindings before spawn:
+`QWEN_CODE_SESSION_ID`, `QWEN_CODE_PROMPT_ID`, `QWEN_CODE_PROJECT_DIR`,
+`QWEN_CODE_SERVE`, `QWEN_CODE_AGENT_ID`, `QWEN_DAEMON_TOKEN`,
+`QWEN_CODE_MESSAGING_TOKEN`, `QWEN_CODE_MESSAGING_SOCKET`,
+`QWEN_CODE_CLI`, `QWEN_CODE_NO_RELAUNCH`, and the `QWEN_CODE_PRIVATE_*`
+capability/guard/provenance keys. The operator's model and auth environment is
+kept.
+
+A supplied token is passed through `QWEN_SERVER_TOKEN`, never as a child
+argument. `--token` is visible in the launching shell's process list, so the
+command warns and recommends the environment variable.
+
+## Logging and security
+
+Startup stdout and stderr go to a `0600` file in the runtime daemon directory.
+The file is removed after a successful start; on failure it is kept and its
+tail is printed. A non-loopback bind requires `QWEN_SERVER_TOKEN`: the command
+refuses to let the child generate an ephemeral token that would otherwise be
+written to the startup log.
+
+## Failure handling
+
+- An existing live daemon for the same primary workspace is refused unless
+  `--port` is supplied.
+- A missing workspace, missing `--require-auth` token, or missing
+  non-loopback token fails before spawning.
+- If the child exits or does not publish a record within 30 seconds, the
+  command exits non-zero and prints the startup log path and tail.
+
+## Non-goals
+
+- No supervision, crash restart, or service installation.
+- No Windows service wrapper.
+- No ephemeral-token mode on a non-loopback bind; use `qwen serve` directly.
+
+## Validation
+
+- 18 daemon command tests cover argument construction, summary formatting,
+  environment isolation, record selection, and the existing status/log/stop
+  behavior.
+- Full workspace typecheck and ESLint pass.
+- Local E2E: `daemon start --port 0 --no-web --json` published a record,
+  `daemon status --json` reported it running, `daemon stop --port <port>`
+  terminated it, and the record directory was empty afterwards.
+
+## Acceptance criteria
+
+- A second terminal can start a daemon and return to the shell without a
+  service manager.
+- The printed stop command terminates the child.
+- The child does not inherit the launching session's identifiers or private
+  capabilities.
+- No startup artifact contains a bearer token.
+
+## Follow-ups
+
+- Optional restart (`stop` + `start` with the recorded workspace).
+- Windows service integration.

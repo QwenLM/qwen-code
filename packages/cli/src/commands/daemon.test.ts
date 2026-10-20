@@ -27,8 +27,11 @@ vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
 });
 
 import {
+  buildDaemonStartArgs,
+  buildDaemonStartEnv,
   daemonCommand,
   formatDaemonAge,
+  formatDaemonStartSummary,
   followFile,
   pidResolvableHere,
   probeHealth,
@@ -64,7 +67,7 @@ describe('qwen daemon command', () => {
     expect(typeof daemonCommand.handler).toBe('function');
   });
 
-  it('registers status, logs and stop subcommands', () => {
+  it('registers start, status, logs and stop subcommands', () => {
     const mockYargs = {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
@@ -77,8 +80,83 @@ describe('qwen daemon command', () => {
     builder(mockYargs as unknown as Argv);
 
     expect(mockYargs.command.mock.calls.map((call) => call[0].command)).toEqual(
-      ['status', 'logs', 'stop'],
+      ['start', 'status', 'logs', 'stop'],
     );
+  });
+
+  it('builds a detached serve invocation for a JavaScript entry', () => {
+    const { command, args } = buildDaemonStartArgs({
+      entry: '/opt/qwen/index.js',
+      port: 4171,
+      hostname: '127.0.0.1',
+      workspaces: ['/repo'],
+      web: false,
+      requireAuth: true,
+    });
+    expect(command).toBe(process.execPath);
+    expect(args).toEqual([
+      ...process.execArgv,
+      '/opt/qwen/index.js',
+      'serve',
+      '--port',
+      '4171',
+      '--hostname',
+      '127.0.0.1',
+      '--no-token-qr',
+      '--no-web',
+      '--require-auth',
+      '--workspace',
+      '/repo',
+    ]);
+  });
+
+  it('spawns a non-JavaScript entry directly', () => {
+    const { command, args } = buildDaemonStartArgs({
+      entry: '/usr/local/bin/qwen',
+      port: 4170,
+      hostname: '127.0.0.1',
+      workspaces: ['/repo'],
+      web: true,
+      requireAuth: false,
+    });
+    expect(command).toBe('/usr/local/bin/qwen');
+    expect(args).toEqual([
+      'serve',
+      '--port',
+      '4170',
+      '--hostname',
+      '127.0.0.1',
+      '--no-token-qr',
+      '--workspace',
+      '/repo',
+    ]);
+  });
+
+  it('formats a start summary with the bound port', () => {
+    const summary = formatDaemonStartSummary(entry(4170).record);
+    expect(summary).toContain('started pid');
+    expect(summary).toContain('http://127.0.0.1:4170');
+    expect(summary).toContain('qwen daemon stop --port 4170');
+  });
+
+  it('drops parent session bindings from the child environment', () => {
+    const env = buildDaemonStartEnv(
+      {
+        PATH: '/bin',
+        QWEN_SERVER_TOKEN: 'old',
+        QWEN_CODE_SESSION_ID: 'sid',
+        QWEN_CODE_SERVE: '1',
+        QWEN_DAEMON_TOKEN: 'daemon',
+        QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'capability',
+      },
+      'new-token',
+    );
+    expect(env['PATH']).toBe('/bin');
+    expect(env['QWEN_SERVER_TOKEN']).toBe('new-token');
+    expect(env['QWEN_CODE_SESSION_ID']).toBeUndefined();
+    expect(env['QWEN_CODE_SERVE']).toBeUndefined();
+    expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+    expect(env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
   });
 
   it('selects exactly one daemon only when the choice is unambiguous', () => {
