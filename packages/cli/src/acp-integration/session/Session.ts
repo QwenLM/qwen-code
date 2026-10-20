@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
@@ -279,6 +280,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  buildSessionHistoryFromConversation,
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
@@ -1410,7 +1412,11 @@ function truncateTurnText(text: string): {
   if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
     return { text, truncated: false };
   }
-  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+  const end =
+    (text.codePointAt(TURN_RESULT_TEXT_MAX_CHARS - 1) ?? 0) > 0xffff
+      ? TURN_RESULT_TEXT_MAX_CHARS - 1
+      : TURN_RESULT_TEXT_MAX_CHARS;
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function stripReferencedAttachmentDataParts(
@@ -2381,6 +2387,7 @@ export class Session implements SessionContext {
   private closing = false;
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
+  private pendingDeletedApiPromptIds: Set<string> | undefined;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
@@ -4435,6 +4442,7 @@ export class Session implements SessionContext {
   }
 
   async assertCanStartTurn(): Promise<void> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -4498,6 +4506,18 @@ export class Session implements SessionContext {
       this.channelTaskCaptures.size === 0 &&
       !this.#hasActiveTurn()
     );
+  }
+
+  assertHistoryContextAvailable(): void {
+    if (this.pendingDeletedApiPromptIds) {
+      throw new RequestError(
+        -32000,
+        'Reload the session before using its history',
+        {
+          errorKind: 'session_history_context_unavailable',
+        },
+      );
+    }
   }
 
   isIdle(): boolean {
@@ -4931,6 +4951,7 @@ export class Session implements SessionContext {
     targetTurnIndex: number;
     apiTruncateIndex: number;
   } {
+    this.assertHistoryContextAvailable();
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
@@ -5020,6 +5041,71 @@ export class Session implements SessionContext {
     }
 
     return { targetTurnIndex, apiTruncateIndex };
+  }
+
+  async deleteMessageGroups(request: { snapshot: string; groupIds: string[] }) {
+    this.assertHistoryContextAvailable();
+    const release = this.beginHistoryMutation();
+    let persisted = false;
+    let deletedGroupIds: string[] = [];
+    let deletedPromptIds: string[] = [];
+    try {
+      const recording = this.config.getChatRecordingService();
+      if (!recording?.supportsMessageGroupDeletion())
+        throw new RequestError(-32602, 'History recording is unavailable', {
+          errorKind: 'session_message_deletion_unsupported',
+        });
+      const result = await recording.deleteMessageGroups(request);
+      persisted = true;
+      deletedGroupIds = result.deletedGroupIds;
+      deletedPromptIds = result.deletedPromptIds;
+      this.pendingDeletedApiPromptIds = new Set(result.removedApiPromptIds);
+      await this.installDeletedMessageHistory();
+      return { deletedGroupIds, deletedPromptIds };
+    } catch (error) {
+      if (persisted) {
+        throw new RequestError(
+          -32000,
+          'Messages were deleted, but the session must be reopened before sending another message',
+          {
+            errorKind: 'message_deletion_context_unavailable',
+            deletedGroupIds,
+            deletedPromptIds,
+          },
+        );
+      }
+      throw error;
+    } finally {
+      release();
+    }
+  }
+
+  async recoverMessageDeletionContext(): Promise<void> {
+    if (!this.pendingDeletedApiPromptIds) return;
+    const release = this.beginHistoryMutation();
+    try {
+      await this.installDeletedMessageHistory();
+    } finally {
+      release();
+    }
+  }
+
+  private async installDeletedMessageHistory(): Promise<void> {
+    const removed = this.pendingDeletedApiPromptIds!;
+    const records = await this.config
+      .getChatRecordingService()!
+      .readActiveTranscriptChain();
+    const restored = buildSessionHistoryFromConversation({ messages: records });
+    const current = this.captureHistorySnapshot();
+    const prelude = current.slice(0, getStartupContextLength(current));
+    const llmClient = this.config.getLlmClient()!;
+    llmClient.setHistory([...prelude, ...restored.apiHistory]);
+    llmClient.getChat().setCompletedToolCallIds(restored.completedToolCallIds);
+    const fileHistory = this.config.getFileHistoryService();
+    fileHistory.restoreFromSnapshots(
+      removeFileHistorySnapshots(fileHistory.getSnapshots(), removed),
+    );
+    this.pendingDeletedApiPromptIds = undefined;
   }
 
   captureHistorySnapshot(): Content[] {
@@ -5451,6 +5537,7 @@ export class Session implements SessionContext {
     turnRecording: InFlightTurnRecording | null,
     channelTask?: ChannelTaskResponseCapture,
   ): Promise<PromptResponse> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -10767,6 +10854,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
@@ -10783,6 +10871,7 @@ export class Session implements SessionContext {
 
   async #drainCronQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
@@ -12036,6 +12125,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.notificationProcessing) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
@@ -12058,6 +12148,7 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
@@ -16939,11 +17030,14 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
+                  this.config,
                 )
               : convertToFunctionResponse(
                   modelFacingToolName,
                   callId,
                   toolResult.llmContent,
+                  toolResult,
+                  this.config,
                 );
 
           // A tool can fail "softly" by returning toolResult.error without

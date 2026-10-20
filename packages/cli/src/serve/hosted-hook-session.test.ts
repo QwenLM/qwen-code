@@ -1990,12 +1990,13 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
   );
   try {
     const abort = new AbortController();
-    const fired = hooks.fire(
-      HookEventName.PreToolUse,
-      'call-1',
-      {},
-      abort.signal,
-    );
+    // Observe rejection before waiting for dispatch on a busy test host.
+    const outcome = hooks
+      .fire(HookEventName.PreToolUse, 'call-1', {}, abort.signal)
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
     await vi.waitFor(
       () =>
         expect(
@@ -2004,7 +2005,7 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
       { timeout: isSlowTestHost() ? 30_000 : 1_000 },
     );
     abort.abort();
-    await expect(fired).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+    expect(await outcome).toBeInstanceOf(HostedHookRecoveryRequiredError);
     const child = session.authority
       .extensionRecordsInDomain('hook_execution')
       .find(

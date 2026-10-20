@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
@@ -39,8 +40,41 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                             + " target_revision = ? LIMIT 1",
                         identity(binding.getBindingId()),
                         binding.getGeneration())
+                || hostedCleanupOwed(connection, binding)
+                || unverifiedCleanupHistory(connection, binding)
                 || childRunUnsettled(connection, binding)
                 || backgroundRunUnsettled(connection, binding);
+    }
+
+    private static boolean hostedCleanupOwed(Connection connection, RuntimeBindingRecord binding)
+            throws SQLException {
+        var scope = binding.getRequest().getScope();
+        return exists(connection, "SELECT 1 FROM ma_resource_ref WHERE owner_kind = 'HOSTED_CLEANUP'"
+                        + " AND runtime_binding_key = ? AND owner_revision = ? AND tenant_id = ?"
+                        + " AND workspace_id = ? LIMIT 1", HostedCleanupReferences.bindingKey(
+                                scope.getTenantId(), scope.getWorkspaceId(), binding.getBindingId()),
+                binding.getGeneration(), identity(scope.getTenantId()), identity(scope.getWorkspaceId()));
+    }
+
+    private static boolean unverifiedCleanupHistory(Connection connection, RuntimeBindingRecord binding)
+            throws SQLException {
+        var request = binding.getRequest();
+        String stale = " AND h.head_kind = 'MANAGED_SESSION'"
+                + " AND (h.cleanup_head_revision IS NULL OR h.cleanup_head_revision <> h.journal_revision)"
+                + " AND (h.state <> 'DELETED' OR h.compacted_through_revision < h.journal_revision)";
+        if (request.getIsolationKey() != null) {
+            return exists(connection, "SELECT 1 FROM ma_session_head h WHERE h.tenant_key = ?"
+                            + " AND h.harness_key = ? AND h.tenant_id = ? AND h.session_id = ?"
+                            + stale + " LIMIT 1", JdbcRuntimeBindingRepository.harnessDrainKey(
+                                    request.getScope().getTenantId()),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(request.getIsolationKey()),
+                    identity(request.getScope().getTenantId()), identity(request.getIsolationKey()));
+        }
+        return exists(connection, "SELECT 1 FROM ma_runtime_session s JOIN ma_session_head h"
+                        + " ON h.tenant_key = ? AND h.tenant_id = s.tenant_id AND h.session_id = s.harness_session_id"
+                        + " WHERE s.binding_id = ? AND s.runtime_generation = ?" + stale + " LIMIT 1",
+                JdbcRuntimeBindingRepository.harnessDrainKey(request.getScope().getTenantId()),
+                identity(binding.getBindingId()), binding.getGeneration());
     }
 
     private static boolean backgroundRunUnsettled(
