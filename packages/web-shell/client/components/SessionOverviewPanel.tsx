@@ -763,8 +763,15 @@ function SessionOverviewPanelInner({
             }
           }
         } catch (error) {
-          firstError ??=
+          const requestError =
             error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete' && firstError) {
+            firstError = new Error(
+              `${firstError.message}; ${requestError.message}`,
+            );
+          } else {
+            firstError ??= requestError;
+          }
         } finally {
           if (ownerCwd) {
             sessionCatalogController.refreshWorkspace(ownerCwd);

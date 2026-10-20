@@ -69,6 +69,10 @@ the selection by owning workspace and sends sequential requests of at most
 accounted for if a later request fails, including cleanup of a deleted current
 session, while the failure is shown in the overview.
 
+The batch size follows the daemon's shared 100-ID request validation for
+session deletion and archiving, including workspace-qualified routes. During
+deletion, an earlier per-session error does not hide a later request failure.
+
 ### Removing composer attachments
 
 In the desktop Web Shell composer, when the text body is empty and the caret

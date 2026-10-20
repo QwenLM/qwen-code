@@ -2742,9 +2742,11 @@ describe('SessionOverviewPanel', () => {
         session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
       );
       sessionsState.sessions = many;
+      const completeBatches: Array<() => void> = [];
       workspaceClient.deleteSessionsData.mockImplementation(
         async (ids: string[]) => {
           if (ids.length > 100) throw new Error('max 100 session IDs');
+          await new Promise<void>((resolve) => completeBatches.push(resolve));
           return { removed: ids, notFound: [], errors: [] };
         },
       );
@@ -2757,6 +2759,15 @@ describe('SessionOverviewPanel', () => {
       ) as HTMLElement;
       act(() => click(confirm));
       await flushAsync();
+
+      for (let index = 0; index < batchSizes.length; index += 1) {
+        expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(
+          index + 1,
+        );
+        expect(completeBatches).toHaveLength(index + 1);
+        await act(async () => completeBatches[index]!());
+        await flushAsync();
+      }
 
       const batches = workspaceClient.deleteSessionsData.mock.calls.map(
         ([ids]) => ids as string[],
@@ -2880,6 +2891,46 @@ describe('SessionOverviewPanel', () => {
       '/w',
     );
     expect(sessionsReload).toHaveBeenCalled();
+  });
+
+  it('reports a later delete request failure after a per-session error', async () => {
+    const many = Array.from({ length: 201 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[0]!.sessionId;
+    workspaceClient.deleteSessionsData
+      .mockResolvedValueOnce({
+        removed: many.slice(0, 99).map((item) => item.sessionId),
+        notFound: [],
+        errors: [{ sessionId: many[99]!.sessionId, error: 'locked' }],
+      })
+      .mockRejectedValueOnce(new Error('live_session_active'));
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.deleteSessionsData).toHaveBeenNthCalledWith(
+      2,
+      many.slice(100, 200).map((item) => item.sessionId),
+    );
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(onCurrentSessionRemoved).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: many[0]!.sessionId }),
+    );
+    expect(container!.textContent).toContain(
+      'Failed to delete session: locked',
+    );
+    expect(container!.textContent).toContain('live_session_active');
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
   });
 
   it('clears a deleted current session after a partial batch failure', async () => {
