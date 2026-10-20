@@ -105,6 +105,7 @@ class HostedAutomationFaultGatesIT {
     // whatever the store accepted, so the assertions read the same bytes.
     private HostedGateTestSupport.PublicationFaults publicationFaults;
     private final Map<String, byte[]> publicationObjects = new ConcurrentHashMap<>();
+    private final Map<String, Integer> physicalPuts = new ConcurrentHashMap<>();
     private final AtomicInteger publicationFaultsSeen = new AtomicInteger();
     private final AtomicInteger shellSteps = new AtomicInteger();
     // Fronts the Session Store for the Harness when a test asks for it before booting, and
@@ -1184,6 +1185,8 @@ class HostedAutomationFaultGatesIT {
             // object back and settles the put exactly once.
             assertThat(puts).as("the lost ack reconciles to settled puts").isNotEmpty()
                     .allMatch("RETURNED"::equals);
+            assertThat(physicalPuts).as("each object was written exactly once").isNotEmpty()
+                    .allSatisfy((key, count) -> assertThat(count).as(key).isEqualTo(1));
             assertThat(publicationObjects).as("the committed object is kept").isNotEmpty();
             // The Shell writes 2 MiB of "a" against a 4 MiB publication limit,
             // so the retained chunks must add up to exactly that and hold the
@@ -1444,7 +1447,7 @@ class HostedAutomationFaultGatesIT {
                     context.getBeanFactory().registerSingleton("fg11Authentication", authentication());
                     if (publicationFaults != null) {
                         HostedGateTestSupport.stubPublicationOss(context, publicationObjects, "fg11f-oss",
-                                publicationFaults);
+                                publicationFaults, physicalPuts);
                     }
                 })
                 .run(arguments.toArray(String[]::new));

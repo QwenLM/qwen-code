@@ -196,6 +196,12 @@ final class HostedGateTestSupport {
     static void stubPublicationOss(ConfigurableApplicationContext context,
             Map<String, byte[]> objects, String fixtureName,
             PublicationFaults faults) {
+        stubPublicationOss(context, objects, fixtureName, faults, null);
+    }
+
+    static void stubPublicationOss(ConfigurableApplicationContext context,
+            Map<String, byte[]> objects, String fixtureName,
+            PublicationFaults faults, Map<String, Integer> putCounts) {
         var acl = new com.aliyun.oss.model.AccessControlList();
         acl.setCannedACL(com.aliyun.oss.model.CannedAccessControlList.Private);
         var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class,
@@ -207,6 +213,9 @@ final class HostedGateTestSupport {
                         var put = (com.aliyun.oss.model.PutObjectRequest)
                                 invocation.getArgument(0);
                         byte[] bytes = put.getInputStream().readAllBytes();
+                        if (putCounts != null) {
+                            putCounts.merge(put.getKey(), 1, Integer::sum);
+                        }
                         if (faults != null) {
                             faults.beforePut(put.getKey(), bytes);
                         }
