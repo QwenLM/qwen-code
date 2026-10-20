@@ -18,6 +18,7 @@
 import * as fs from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_CONCURRENT_WEB_TERMINALS } from '../services/web-terminal-registry.js';
+import { cleanupPtys, waitFor } from './bun-pty-test-utils.js';
 import {
   getPtyBudgetStats,
   processPtyBudget,
@@ -105,18 +106,6 @@ const expectFdClosed = (pty: unknown): void => {
     expect((error as NodeJS.ErrnoException).code).toBe('EBADF');
   }
 };
-
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 10_000,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  return predicate();
-}
 
 describe.skipIf(!POSIX)('BunPtyProcess', () => {
   it('streams child output through onData and reports the exit', async () => {
@@ -405,20 +394,7 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     live.push(pty);
     return pty;
   };
-  afterEach(async () => {
-    for (const pty of live.splice(0)) pty.kill();
-    expect(
-      await waitFor(() => {
-        const stats = getPtyBudgetStats();
-        return (
-          stats.activePtys === 0 &&
-          stats.pausedHoldBytes === 0 &&
-          stats.writeQueueBytes === 0
-        );
-      }, 5_000),
-      'PTY budgets did not drain after cleanup',
-    ).toBe(true);
-  });
+  afterEach(() => cleanupPtys(live));
 
   const nextError = (pty: Spawned): { errors: PtyLimitError[] } => {
     const errors: PtyLimitError[] = [];

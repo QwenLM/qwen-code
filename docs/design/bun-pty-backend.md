@@ -35,10 +35,18 @@ New backend `packages/core/src/utils/bun-pty.ts`, selected only under Bun:
   gate stays (ConPTY under Bun is unvalidated) with an honest `loadError`.
   The **Node path is byte-identical** to before: `@lydell/node-pty`, then
   `node-pty`, unchanged, so Node behaviour has no new code on it.
-- The backend drives the **same pinned native addon** directly:
-  `require('@lydell/node-pty-<platform>-<arch>')` → `pty.fork` / `pty.resize`
-  / `pty.process`. No patched fork of `@lydell/node-pty`, no new native
-  artifact, no extra ABI surface.
+- The backend reuses the **same pinned native artifact**, but loads its
+  private addon by path. It uses
+  `require.resolve('@lydell/node-pty-<platform>-<arch>')` to locate the package
+  entry, takes `dirname(dirname(entry))`, then loads
+  `prebuilds/<platform>-<arch>/pty.node` rather than requiring the package entry.
+  On macOS it also checks for the adjacent `spawn-helper`; its path is passed
+  to `pty.fork`. There is no patched fork or new native artifact, but the
+  backend now depends directly on the pinned addon's private
+  `fork` / `resize` / `process` API and prebuild directory layout. Resolving the
+  package alone does not establish prebuild availability or ABI compatibility;
+  installed and staged layouts and each supported runtime/platform still need
+  validation.
 - Output is pumped by **main-thread async `fs.read` calls** on the master fd.
   The fd the native fork returns is already non-blocking, so an idle read
   fails with `EAGAIN` and is retried on a short (4 ms) timer; a read that
