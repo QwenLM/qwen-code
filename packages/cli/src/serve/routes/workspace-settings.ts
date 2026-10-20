@@ -45,6 +45,7 @@ import {
 } from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
+  'experimental.mods',
   'general.vimMode',
   'general.terminalBell',
   'general.notificationMode',
