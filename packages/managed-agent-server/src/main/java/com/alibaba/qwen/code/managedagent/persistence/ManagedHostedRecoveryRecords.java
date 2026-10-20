@@ -245,6 +245,11 @@ public final class ManagedHostedRecoveryRecords {
                 preparedKeys.add("allowPersistentRetry");
                 require(prepared.get("allowPersistentRetry").isBoolean(), "Invalid model retry policy.");
             }
+            if (prepared.has("contextPrefixLength")) {
+                preparedKeys.add("contextPrefixLength");
+                ManagedExtensionRecords.count(prepared.get("contextPrefixLength"), 0,
+                        Math.min(5, prepared.path("history").size()), "contextPrefixLength");
+            }
             ManagedExtensionRecords.closed(prepared, preparedKeys, "prepared model request");
             ManagedExtensionRecords.closed(prepared.get("request"), Set.of("model", "contents", "config"), "model request");
             ManagedExtensionRecords.id(prepared.get("routeSelector"), "routeSelector");

@@ -950,19 +950,6 @@ describe('getStartupContextLength', () => {
     },
   );
 
-  it('recognizes saved combined-context checkpoints without changing them', () => {
-    const history = [
-      summary(),
-      modelText('Context restored. Ready to continue.'),
-      userText('<background-tasks>\nExplain this tag.'),
-    ];
-    const before = JSON.stringify(history);
-    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
-      2,
-    );
-    expect(JSON.stringify(history)).toBe(before);
-  });
-
   it.each([
     '<background-tasks>\nExplain this tag.',
     'Recently accessed file (full current content embedded):',
@@ -1095,6 +1082,10 @@ describe('getStartupContextLength', () => {
       2,
     ],
   ])('%s', (_title, history, expected) => {
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      expected,
+    );
+    markCompressedHistory(history);
     expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
       expected,
     );

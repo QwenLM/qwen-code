@@ -21,7 +21,10 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
-import { markCompressedHistory } from '@qwen-code/qwen-code-core/core/environmentContext.js';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { DaemonToolLoopState } from './Session.js';
@@ -9404,6 +9407,10 @@ describe('Session', () => {
         history.push(input);
         vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
         const snapshot = session.captureHistorySnapshot();
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+          history.slice(0, -1),
+        );
+        expect(session.getRewindableUserTurnCount()).toBe(0);
         session.restoreHistory(JSON.parse(JSON.stringify(snapshot)));
         const restored = vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0];
         expect(detectTurnInterruption(restored)).toEqual({
@@ -9411,6 +9418,24 @@ describe('Session', () => {
           parts: input.parts,
         });
         expect(JSON.stringify(restored)).toBe(JSON.stringify(snapshot));
+
+        const older: Content[] = JSON.parse(JSON.stringify(history));
+        older[older.length - 1] = {
+          role: 'user',
+          parts: [{ text: 'Real input.' }],
+        };
+        // A later capture detects the attachment shape as a longer prefix.
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+          JSON.parse(JSON.stringify(history)),
+        );
+        session.captureHistorySnapshot();
+        session.restoreHistory(older);
+        expect(
+          getStartupContextLength(
+            vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0],
+            { includeCompressed: true },
+          ),
+        ).toBe(startup ? 3 : 2);
       },
     );
 

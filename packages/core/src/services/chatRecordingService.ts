@@ -70,7 +70,7 @@ import {
   type SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
-import { getApiHistoryPromptId } from './session-api-history.js';
+import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
 import type {
   AgentMentionRecordPayload,

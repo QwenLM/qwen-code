@@ -7,7 +7,7 @@
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { getApiHistoryPromptId } from '../services/session-api-history.js';
+import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
 import type {
   DeferredToolSummary,
   ToolRegistry,
@@ -719,13 +719,10 @@ function detectCompressedPrefixLength(
     typeof firstText !== 'string' ||
     !firstText.includes('Resume the prior task') ||
     history[offset + 1]?.role !== 'model' ||
-    (ackText !== 'Got it. Thanks for the additional context!' &&
-      ackText !== 'Context restored. Ready to continue.')
+    ackText !== 'Got it. Thanks for the additional context!'
   ) {
     return 0;
   }
-  // Combined-context checkpoints have no separate restoration entry.
-  if (ackText === 'Context restored. Ready to continue.') return 2;
   const remembered = (firstEntry as CompressedSummary)[
     COMPRESSED_PREFIX_LENGTH
   ];

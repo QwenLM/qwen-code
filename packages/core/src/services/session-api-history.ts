@@ -15,33 +15,16 @@ import type {
 } from './chatRecordingService.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
+import {
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 
-const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
-
-type IdentifiedContent = Content & {
-  [API_HISTORY_PROMPT_ID]?: string;
-};
-
-export function cloneApiHistory(history: Content[]): Content[] {
-  // structuredClone drops the non-serialized prompt and context boundaries.
-  return history.map((content) => ({
-    ...content,
-    ...structuredClone(content),
-  }));
-}
-
-export function markApiHistoryPrompt(
-  content: Content,
-  promptId: unknown,
-): void {
-  if (typeof promptId === 'string' && promptId.length > 0) {
-    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
-  }
-}
-
-export function getApiHistoryPromptId(content: Content): string | undefined {
-  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
-}
+export {
+  cloneApiHistory,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 
 /** Returns the unique matching entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(

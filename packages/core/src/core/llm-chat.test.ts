@@ -10419,7 +10419,7 @@ describe('LlmChat', async () => {
     );
 
     it.each([0, 48, 49, 60, 200])(
-      'keeps bounded recovery consistent with full history around %s notifications and agent replies',
+      'keeps recovery consistent with full history and retains all %s notifications and agent replies',
       async (count) => {
         const compacted = await compressedWithImage();
         const notifications = Array.from({ length: count }, () =>
@@ -10452,9 +10452,9 @@ describe('LlmChat', async () => {
         for (const [index, tail] of tails.entries()) {
           chat.setHistory([...compacted, ...tail]);
           const full = detectTurnInterruption(chat.getHistory());
-          const bounded = detectTurnInterruption(
-            chat.getHistoryForRecovery(50),
-          );
+          const window = chat.getHistoryForRecovery(50);
+          expect(window).toHaveLength(tail.length);
+          const bounded = detectTurnInterruption(window);
           expect(full.kind).toBe(expectedKinds[index]);
           expect(bounded.kind).toBe(full.kind);
           expect(bounded).toEqual(full);

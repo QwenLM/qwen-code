@@ -5961,9 +5961,8 @@ export class Session implements SessionContext {
       return undefined;
     }
 
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
+    // Limit meaningful history while retaining trailing notifications for replay.
+    // The authoritative re-detection inside prompt() uses full history to strip.
     const chat = this.#getCurrentChat();
     // A trailing restorable ask_user_question is awaiting its restore
     // prompt, not an interruption to close: `interrupted_turn` would answer

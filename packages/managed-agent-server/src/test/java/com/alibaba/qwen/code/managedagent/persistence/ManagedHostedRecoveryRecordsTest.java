@@ -170,6 +170,37 @@ class ManagedHostedRecoveryRecordsTest {
     }
 
     @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2, 3, 4, 5})
+    void acceptsOptionalPreparedContextBoundaries(int prefixLength) {
+        for (boolean allow : new boolean[] {true, false}) {
+            ObjectNode body = modelRequest();
+            ObjectNode prepared = (ObjectNode) body.get("prepared");
+            prepared.put("allowPersistentRetry", allow).put("contextPrefixLength", prefixLength);
+            for (int i = 0; i < prefixLength; i++) {
+                prepared.withArray("history").addObject().put("role", "user").putArray("parts");
+            }
+            assertThatCode(() -> validateModel(body)).doesNotThrowAnyException();
+            prepared.put("unexpected", true);
+            assertThatThrownBy(() -> validateModel(body)).hasMessageContaining("exactly");
+        }
+    }
+
+    @Test
+    void rejectsInvalidPreparedContextBoundaries() {
+        for (var value : java.util.List.of(json.getNodeFactory().numberNode(-1),
+                json.getNodeFactory().numberNode(6), json.getNodeFactory().numberNode(0.5),
+                json.getNodeFactory().textNode("0"), json.getNodeFactory().booleanNode(false),
+                json.getNodeFactory().nullNode(), json.createObjectNode(), json.createArrayNode())) {
+            ObjectNode body = modelRequest();
+            ((ObjectNode) body.get("prepared")).set("contextPrefixLength", value);
+            assertThatThrownBy(() -> validateModel(body)).hasMessageContaining("contextPrefixLength");
+        }
+        ObjectNode shortHistory = modelRequest();
+        ((ObjectNode) shortHistory.get("prepared")).put("contextPrefixLength", 1);
+        assertThatThrownBy(() -> validateModel(shortHistory)).hasMessageContaining("contextPrefixLength");
+    }
+
+    @ParameterizedTest
     @ValueSource(longs = {0, 15, 16, 20, ManagedSessionStoreModels.MAX_SAFE_COUNTER})
     void acceptsNonnegativeSafeModelRoundCounters(long round) {
         assertThatCode(() -> validateModel(modelRequest().put("round", round))).doesNotThrowAnyException();

@@ -798,7 +798,14 @@ it.each(
       {
         ...prepared,
         ...(allowPersistentRetry === undefined ? {} : { allowPersistentRetry }),
-        ...(allowPersistentRetry === true ? { contextPrefixLength: 0 } : {}),
+        ...(allowPersistentRetry === undefined
+          ? {}
+          : {
+              contextPrefixLength: allowPersistentRetry ? 5 : 0,
+              history: allowPersistentRetry
+                ? Array.from({ length: 5 }, () => prepared.history[0]!)
+                : prepared.history,
+            }),
       },
       round,
       false,

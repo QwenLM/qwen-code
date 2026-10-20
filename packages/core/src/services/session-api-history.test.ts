@@ -17,6 +17,7 @@ import type { Config } from '../config/config.js';
 import { LlmChat } from '../core/llm-chat.js';
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { buildSessionRecoveryPlanFromApiHistory } from '../core/session-recovery.js';
 import {
   buildApiHistoryFromConversation,
   buildSessionHistoryFromConversation,
@@ -226,7 +227,15 @@ describe('compressed recovery boundaries', () => {
           const restored = buildApiHistoryFromConversation({
             messages: [checkpoint(compacted), record],
           });
-          for (const copy of [restored, cloneApiHistory(restored)]) {
+          for (const copy of [
+            restored,
+            cloneApiHistory(restored),
+            selectForkHistory(restored, 'all'),
+            buildSessionRecoveryPlanFromApiHistory({
+              sessionId: 'session',
+              apiHistory: restored,
+            }).apiHistory,
+          ]) {
             expect(JSON.stringify(copy)).toBe(
               JSON.stringify([...compacted, request]),
             );

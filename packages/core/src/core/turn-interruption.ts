@@ -49,8 +49,8 @@ export type TurnInterruption =
     };
 
 // Continue detection only walks the final run of trailing user/model entries.
-// A bounded tail avoids deep-cloning long daemon histories for each probe while
-// still leaving ample room for repeated failed sends and tool-result retries.
+// Limit meaningful recovery history copied per probe; trailing notifications
+// and agent envelopes are retained separately so retry cannot discard them.
 export const TURN_INTERRUPTION_HISTORY_TAIL_COUNT = 50;
 
 export function completedToolCallBoundary(

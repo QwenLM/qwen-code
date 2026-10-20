@@ -4,7 +4,7 @@ import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { ToolNames } from '../tool-names.js';
-import { cloneApiHistory } from '../../services/session-api-history.js';
+import { cloneApiHistory } from '../../utils/api-history-metadata.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,

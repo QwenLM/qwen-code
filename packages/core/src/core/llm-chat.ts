@@ -2431,16 +2431,16 @@ export class LlmChat {
       this.history,
       this.completedToolCallIds,
     );
-    const end =
+    const countAnchor =
       count === undefined
         ? this.history.length
         : effectiveHistoryEnd(this.history);
     const start =
       count === undefined
         ? boundary
-        : Math.max(boundary, end - Math.max(0, count));
-    // Window from meaningful history; retain notifications and agent barriers
-    // that the retry pop would otherwise remove without replaying.
+        : Math.max(boundary, countAnchor - Math.max(0, count));
+    // count limits meaningful history, not the notification/agent suffix.
+    // Keep the full suffix: retry may pop it, so truncation would lose replay.
     return this.history.slice(start).map(copyContentContainer);
   }
 
