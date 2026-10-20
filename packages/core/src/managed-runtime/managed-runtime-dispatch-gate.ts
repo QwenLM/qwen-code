@@ -20,9 +20,12 @@ export const MANAGED_RUNTIME_DISPATCH_SETTLED_LIMIT = 1024;
 
 /**
  * Process-local coordinator gate: one executionCallId is dispatched at most
- * once. Handoff keeps the original invocation after Harness detach; settle
- * is the only legal end. Worker loss across process restart is recovery
- * blocked, not a second dispatch.
+ * once while its state is retained; settled states past
+ * MANAGED_RUNTIME_DISPATCH_SETTLED_LIMIT are pruned, so the in-process
+ * refusal is a bounded window, not a durable fence. Handoff keeps the
+ * original invocation after Harness detach; settle is the only legal end.
+ * Worker loss across process restart is recovery blocked, not a second
+ * dispatch.
  */
 export class ManagedRuntimeDispatchGate {
   private readonly states = new Map<string, ManagedRuntimeDispatchState>();
