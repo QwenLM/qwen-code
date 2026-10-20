@@ -7,6 +7,7 @@
 import type { MockInstance } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pkg from '@xterm/headless';
+import * as conptyHost from './conpty-host.js';
 
 const { Terminal } = pkg;
 const { warn } = vi.hoisted(() => ({ warn: vi.fn() }));
@@ -528,6 +529,8 @@ describe('WebTerminalRegistry', () => {
     'marks the session failed and frees the pty when the backend reports a resource limit (%s)',
     async (code) => {
       const errorListeners: Array<(err: Error) => void> = [];
+      const disposeError = vi.fn();
+      const releaseHost = vi.spyOn(conptyHost, 'releaseConPtyHost');
       spawn.mockReturnValueOnce({
         pid: 42,
         write,
@@ -545,34 +548,60 @@ describe('WebTerminalRegistry', () => {
         ),
         on: vi.fn((event: string, listener: (err: Error) => void) => {
           if (event === 'error') errorListeners.push(listener);
-          return { dispose: vi.fn() };
+          return { dispose: disposeError };
         }),
       });
       const registry = await start('terminal:limit');
       const failures: string[] = [];
+      const throwingClient = vi.fn(() => {
+        throw new Error('injected disconnected client');
+      });
+      registry.addFailureListener('terminal:limit', throwingClient);
       registry.addFailureListener('terminal:limit', (message) => {
         failures.push(message);
       });
       expect(registry.readSnapshot('terminal:limit')?.failed).toBeUndefined();
 
-      errorListeners[0]!(
-        Object.assign(new Error('qwen-bun-pty resource limit reached'), {
-          code,
-        }),
-      );
+      expect(() =>
+        errorListeners[0]!(
+          Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+            code,
+          }),
+        ),
+      ).not.toThrow();
       await new Promise<void>((resolve) => setImmediate(resolve));
 
+      expect(throwingClient).toHaveBeenCalledTimes(1);
       expect(failures).toHaveLength(1);
+      for (const dispose of [
+        disposeData,
+        disposeExit,
+        disposeError,
+        releaseHost,
+      ]) {
+        expect(dispose).toHaveBeenCalledTimes(1);
+      }
       const snapshot = registry.readSnapshot('terminal:limit');
       expect(snapshot?.failed).toBe(true);
       expect(snapshot?.failureMessage).toContain('resource limit');
-      // A failed session accepts no more input, and the backend already
-      // killed the tree — the registry must not signal the pid again.
+      // Logical failure rejects new I/O; release must not signal a pid that
+      // may already have exited. Deferred disposal happened BEFORE release.
       registry.write('terminal:limit', 'nope');
       registry.resize('terminal:limit', 100, 40);
       expect(write).not.toHaveBeenCalled();
       expect(resize).not.toHaveBeenCalled();
+      registry.release('terminal:limit');
+      registry.release('terminal:limit');
+      for (const dispose of [
+        disposeData,
+        disposeExit,
+        disposeError,
+        releaseHost,
+      ]) {
+        expect(dispose).toHaveBeenCalledTimes(1);
+      }
       expect(kill).not.toHaveBeenCalled();
+      expect(process.kill).not.toHaveBeenCalled();
     },
   );
 

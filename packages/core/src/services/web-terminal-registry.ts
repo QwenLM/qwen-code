@@ -367,10 +367,17 @@ export class WebTerminalRegistry {
       // Failure remains exclusive even if a real exit was observed first.
       session.exited = false;
       delete session.exitCode;
-      // The backend already killed the child and closed the master fd; free
-      // the session's pty-side listeners the same way the exit path does.
+      // Logical failure stops further I/O. Release the session's resources
+      // without signalling a pid whose native exit may already be recorded.
       setImmediate(() => this.releasePtyResources(session));
-      for (const listener of [...session.failureListeners]) listener(message);
+      for (const listener of [...session.failureListeners]) {
+        try {
+          listener(message);
+        } catch {
+          // One disconnected client must not suppress other clients' failure
+          // notifications or the already scheduled resource release.
+        }
+      }
     };
     const handleData = (data: string) => {
       const session = sessionRef.current;

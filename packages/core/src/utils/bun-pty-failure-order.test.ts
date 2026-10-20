@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { errorMonitor } from 'node:events';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const fake = vi.hoisted(() => {
@@ -15,6 +16,10 @@ const fake = vi.hoisted(() => {
     pid: 987654321,
     fd: 987654322,
     retryWrites: false,
+    captureWrite: false,
+    writeCallback: undefined as
+      | undefined
+      | ((error: NodeJS.ErrnoException | null, bytes: number) => void),
     nativeExit: undefined as
       | undefined
       | ((code: number, signal: number) => void),
@@ -84,7 +89,13 @@ vi.mock('node:fs', async (importOriginal) => {
       const callback = args[3];
       if (typeof callback !== 'function')
         throw new Error('Missing write callback');
-      callback(Object.assign(new Error('mock EAGAIN'), { code: 'EAGAIN' }), 0);
+      if (fake.captureWrite)
+        fake.writeCallback = callback as typeof fake.writeCallback;
+      else
+        callback(
+          Object.assign(new Error('mock EAGAIN'), { code: 'EAGAIN' }),
+          0,
+        );
     },
     closeSync: (fd: number) => {
       fake.close(fd);
@@ -99,6 +110,8 @@ beforeEach(() => {
   fake.nativeExit = undefined;
   fake.readCallback = undefined;
   fake.retryWrites = false;
+  fake.captureWrite = false;
+  fake.writeCallback = undefined;
 });
 
 afterEach(() => {
@@ -151,11 +164,7 @@ it.skipIf(process.platform === 'win32').each([false, true])(
       fake.nativeExit!(3, 0);
       expect(order).toEqual([]);
       expect(vi.getTimerCount()).toBe(1);
-      if (throwingSubscriber) {
-        expect(() => pty.write(Buffer.alloc(8192))).toThrow(subscriberError);
-      } else {
-        pty.write(Buffer.alloc(8192));
-      }
+      expect(() => pty.write(Buffer.alloc(8192))).not.toThrow();
       expect(order).toEqual(['error', 'exit']);
       expect(errors).toHaveLength(1);
       expect(errors[0]).toMatchObject({
@@ -250,5 +259,126 @@ it.skipIf(process.platform === 'win32').each(['end-pump', 'resource-failure'])(
         0,
       );
     }
+  },
+);
+
+it
+  .skipIf(process.platform === 'win32')
+  .each(['parked-write-limit', 'write-callback-error'])(
+  'contains throwing subscriber and delivers original error to later/once subscribers on %s',
+  async (mode) => {
+    vi.useFakeTimers();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('Blocked process.kill');
+    });
+    const { spawn, getPtyBudgetStats } = await import('./bun-pty.js');
+    const pty = spawn('mock-command-never-executed', [], {
+      env: {},
+      limits: { writeQueueBytes: 4096 },
+    });
+    const original: Array<Error & { code?: string }> = [],
+      thrown: unknown[] = [];
+    const second = vi.fn(),
+      once = vi.fn();
+    const monitor = vi.fn();
+    pty.on(errorMonitor, () => {
+      throw new Error('injected monitor');
+    });
+    pty.on(errorMonitor, monitor);
+    const sentinel = new Error('injected first subscriber throws');
+    pty.on('error', (error) => {
+      original.push(error);
+      throw sentinel;
+    });
+    pty.on('error', second);
+    pty.once('error', once);
+    try {
+      if (mode === 'parked-write-limit') {
+        fake.nativeExit!(3, 0);
+        try {
+          pty.write(Buffer.alloc(8192));
+        } catch (e) {
+          thrown.push(e);
+        }
+      } else {
+        fake.retryWrites = true;
+        fake.captureWrite = true;
+        for (let i = 0; i < 2; i++) {
+          pty.write('input');
+          expect(fake.writeCallback).toBeTypeOf('function');
+          try {
+            fake.writeCallback!(
+              Object.assign(new Error('injected ENOSPC'), { code: 'ENOSPC' }),
+              0,
+            );
+          } catch (e) {
+            thrown.push(e);
+          }
+        }
+      }
+    } finally {
+      fake.readCallback?.(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      fake.readCallback = undefined;
+      expect(kill).not.toHaveBeenCalled();
+      expect(getPtyBudgetStats()).toEqual({
+        activePtys: 0,
+        pausedHoldBytes: 0,
+        writeQueueBytes: 0,
+      });
+    }
+    expect(thrown).toEqual([]);
+    expect(original).toHaveLength(mode === 'parked-write-limit' ? 1 : 2);
+    expect(second).toHaveBeenCalledTimes(original.length);
+    for (const [index, error] of original.entries()) {
+      expect(second.mock.calls[index]![0]).toBe(error);
+      expect(monitor.mock.calls[index]![0]).toBe(error);
+    }
+    expect(monitor).toHaveBeenCalledTimes(original.length);
+    expect(once).toHaveBeenCalledExactlyOnceWith(original[0]);
+    expect(pty.listenerCount('error')).toBe(2);
+  },
+);
+
+it.skipIf(process.platform === 'win32')(
+  'contains a failing console fallback without skipping parked exit or cleanup',
+  async () => {
+    vi.useFakeTimers();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('Blocked process.kill');
+    });
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {
+      throw new Error('injected diagnostic sink');
+    });
+    const { spawn, getPtyBudgetStats } = await import('./bun-pty.js');
+    const pty = spawn('mock-command-never-executed', [], {
+      env: {},
+      limits: { writeQueueBytes: 4096 },
+    });
+    const exit = vi.fn();
+    pty.onExit(exit);
+    try {
+      fake.nativeExit!(3, 0);
+      expect(() => pty.write(Buffer.alloc(8192))).not.toThrow();
+      expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ code: 'QWEN_PTY_WRITE_LIMIT' }),
+      );
+      expect(exit).toHaveBeenCalledExactlyOnceWith({ exitCode: 3, signal: 0 });
+    } finally {
+      fake.readCallback?.(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      fake.readCallback = undefined;
+    }
+    expect(fake.close).toHaveBeenCalledExactlyOnceWith(fake.fd);
+    expect(kill).not.toHaveBeenCalled();
+    expect(getPtyBudgetStats()).toEqual({
+      activePtys: 0,
+      pausedHoldBytes: 0,
+      writeQueueBytes: 0,
+    });
   },
 );

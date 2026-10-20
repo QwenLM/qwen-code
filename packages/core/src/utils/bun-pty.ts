@@ -55,7 +55,7 @@
  * validated under Bun.
  */
 
-import { EventEmitter } from 'node:events';
+import { EventEmitter, errorMonitor } from 'node:events';
 import * as fs from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
@@ -657,12 +657,27 @@ export class BunPtyProcess extends EventEmitter {
   }
 
   private reportError(error: Error): void {
-    if (this.listenerCount('error') > 0) {
-      this.emit('error', error);
-    } else {
-      // Same fallback as the @lydell/node-pty wrapper for unhandled errors.
-      // eslint-disable-next-line no-console
-      console.error(error);
+    // A consumer exception must not escape an I/O callback or prevent other
+    // consumers from seeing the original structured error. rawListeners keeps
+    // EventEmitter's once wrappers and their receiver intact.
+    for (const event of [errorMonitor, 'error'] as const) {
+      const listeners = this.rawListeners(event);
+      if (event === 'error' && listeners.length === 0) {
+        try {
+          // Same fallback as the @lydell/node-pty wrapper for unhandled errors.
+          // eslint-disable-next-line no-console
+          console.error(error);
+        } catch {
+          // A failing diagnostic sink must not interrupt resource cleanup.
+        }
+      }
+      for (const listener of listeners) {
+        try {
+          listener.call(this, error);
+        } catch {
+          // Keep notifying the remaining consumers; do not recursively emit.
+        }
+      }
     }
   }
 
