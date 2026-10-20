@@ -1406,22 +1406,22 @@ function handleMultilineHistoryBoundary(
   direction: 'up' | 'down',
 ): MultilineHistoryBoundary {
   const doc = view.state.doc;
-  if (doc.lines <= 1) return 'history';
-
   const selection = view.state.selection.main;
   if (!selection.empty) return 'editor';
 
   const head = selection.head;
-  const line = doc.lineAt(head);
+  const from = view.moveToLineBoundary(selection, false).head;
+  const to = view.moveToLineBoundary(selection, true).head;
+  if (doc.lines === 1 && from === 0 && to === doc.length) return 'history';
 
-  // Let CodeMirror handle normal multi-line cursor movement first. Once the
-  // cursor is on the edge line, one more arrow key snaps to the true edge;
+  // Let CodeMirror move between visual rows, including soft wraps. Once the
+  // cursor is on the edge row, one more arrow key snaps to the true edge;
   // the next press can browse prompt history instead of feeling stuck.
   if (direction === 'up') {
-    if (line.number > 1) return 'editor';
-    if (head > line.from) {
+    if (from > 0) return 'editor';
+    if (head > 0) {
       view.dispatch({
-        selection: { anchor: line.from },
+        selection: { anchor: 0 },
         scrollIntoView: true,
       });
       return 'handled';
@@ -1429,10 +1429,10 @@ function handleMultilineHistoryBoundary(
     return 'history';
   }
 
-  if (line.number < doc.lines) return 'editor';
-  if (head < line.to) {
+  if (to < doc.length) return 'editor';
+  if (head < doc.length) {
     view.dispatch({
-      selection: { anchor: line.to },
+      selection: { anchor: doc.length },
       scrollIntoView: true,
     });
     return 'handled';
@@ -3418,7 +3418,9 @@ export function useComposerCore(
             closeSlashMenu();
             closeAtMenu();
           }
-          const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
+          const multilineBoundary = isBrowsingHistory
+            ? 'history'
+            : handleMultilineHistoryBoundary(view, 'up');
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
@@ -3473,10 +3475,9 @@ export function useComposerCore(
             closeSlashMenu();
             closeAtMenu();
           }
-          const multilineBoundary = handleMultilineHistoryBoundary(
-            view,
-            'down',
-          );
+          const multilineBoundary = isBrowsingHistory
+            ? 'history'
+            : handleMultilineHistoryBoundary(view, 'down');
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
