@@ -543,7 +543,7 @@ class HostedHookReplyLossFaultGatesIT {
 
     @Test
     @Timeout(300)
-    void fg13bHookDispatchStoreRejectionKeepsTheIntentRetryableOnMySql() throws Exception {
+    void fg13bHookDispatchStoreRejectionDispatchesNothingOnMySql() throws Exception {
         boot("60000", "1000", "hook-solo");
         StoreFaultGate.INSTANCE.clear();
         StoreFaultGate.INSTANCE.arm(StoreFaultGate.Phase.HOOK_DISPATCH_STARTED, null);
@@ -734,6 +734,7 @@ class HostedHookReplyLossFaultGatesIT {
 
     @AfterEach
     void stop() {
+        StoreFaultGate.INSTANCE.clear();
         assertAll(this::saveEvidence,
                 () -> { if (model != null) {
                     model.stop(0);
