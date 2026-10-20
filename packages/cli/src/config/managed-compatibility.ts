@@ -12,6 +12,7 @@ import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-st
 import { HOOKS_CONFIG_FIELDS } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseApprovalModeValue } from './approval-mode-value.js';
+import { isLspOptedIn } from './lsp-opt-in.js';
 import { loadProjectMcpServers } from './mcpJson.js';
 import {
   readSettingsSnapshot,
@@ -44,20 +45,6 @@ export interface ManagedCompatibilityRuntime {
   readonly environment: Readonly<NodeJS.ProcessEnv>;
   /** Arguments the daemon forwards to every session host. */
   readonly forwardedArgs: readonly string[];
-  /**
-   * Whether this runtime's sessions resolve LSP on, from the flag, the
-   * user/system-scope setting or the env pair. This is a conservative
-   * runtime-level over-approximation: the daemon does not know each host's
-   * own host-mode terms (read-only agent host, SSH workspace, provisional
-   * workspace, bare and safe mode), so a runtime that would refuse LSP there
-   * still reports on. Over-reporting is the fail-safe direction — it defers a
-   * session that could have run rather than certifying one that starts
-   * language servers. `forwardedArgs` cannot carry the answer either: a host
-   * that builds its own argv (the Desktop client) never passes the flag, and a
-   * child inherits the daemon's environment, so the language servers spawn
-   * under the user's permissions either way.
-   */
-  readonly lspEnabledForSessions: boolean;
   /**
    * Whether the running workspace holds MCP servers outside its files: added
    * at runtime or registered by a client.
@@ -100,15 +87,12 @@ export async function evaluateManagedCompatibility(
   if (!sameWorkspace) {
     return deferredResult('the session directory is not the runtime workspace');
   }
-  if (runtime.lspEnabledForSessions) {
-    return deferredResult('the daemon enables LSP for its sessions');
-  }
   if (runtime.forwardedArgs.includes('--restore-ask-user-question')) {
     return deferredResult('the daemon restores unanswered user questions');
   }
-  // A forwarded `--experimental-lsp` is already accounted for above: it feeds
-  // `lspEnabledForSessions`, which also applies the kill switch, so the flag
-  // is a known argument rather than an unclassifiable one.
+  // A forwarded `--experimental-lsp` feeds the LSP decision below together
+  // with the operator kill switch, so it is a known argument rather than an
+  // unclassifiable one.
   if (
     runtime.forwardedArgs.filter((arg) => arg !== '--experimental-lsp').length >
     0
@@ -156,6 +140,20 @@ export async function evaluateManagedCompatibility(
     return unknownResult('the settings could not be read');
   }
   const merged = settings.merged;
+  // Resolve LSP where the decision applies, from the same snapshot and
+  // environment a spawned session host reads. Nothing is cached between
+  // evaluations, so neither a settings write nor a runtime-env swap can leave
+  // this answer stale. The forwarded flag is the argv entrance that child
+  // receives, and `isLspOptedIn` applies the operator kill switch first.
+  if (
+    isLspOptedIn(
+      runtime.forwardedArgs.includes('--experimental-lsp') ? true : undefined,
+      merged,
+      environment,
+    )
+  ) {
+    return deferredResult('the daemon enables LSP for its sessions');
+  }
   if (Object.keys(merged.mcpServers ?? {}).length > 0) {
     return deferredResult('MCP servers are configured in settings');
   }

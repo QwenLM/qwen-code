@@ -20,7 +20,6 @@ export interface WorkspaceRuntimeEnvMetadata {
   readonly overlayKeys: readonly string[];
   readonly effectiveEnv?: Readonly<NodeJS.ProcessEnv>;
   readonly workflowsEnabledBySettings?: boolean;
-  readonly lspEnabledForSessions?: boolean;
   readonly envFilePaths?: readonly string[];
   readonly envFileReadFailed?: boolean;
   readonly envFileReadFailures?: ReadonlyArray<{

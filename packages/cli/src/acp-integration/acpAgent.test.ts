@@ -4770,6 +4770,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(hostPolicy?.executionEngine).toBe(engine);
         // Legacy sessions run their tools in this process.
         expect(hostPolicy?.managedRuntimeEnvironment).toBeUndefined();
+        // The session Config must keep LSP available; only helper Configs
+        // refuse it.
+        expect(hostPolicy?.lspDisabled).toBeUndefined();
         expect(response._meta).toEqual(
           engine ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine } : undefined,
         );

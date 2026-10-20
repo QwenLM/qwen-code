@@ -129,7 +129,6 @@ import {
   tokenQrNoEffectReason,
 } from './remote-quickstart.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
-import { isLspOptedIn } from '../config/lsp-opt-in.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -5463,7 +5462,6 @@ async function runQwenServeImpl(
       envFilePaths: string[];
       effectiveEnv: NodeJS.ProcessEnv;
       workflowsEnabledBySettings: boolean;
-      lspEnabledForSessions: boolean;
       envFileReadFailed: boolean;
       envFileReadFailures: Array<{ path: string; error: string }>;
       fallbackReason?: string;
@@ -5473,11 +5471,6 @@ async function runQwenServeImpl(
       effectiveEnv: runtimeEffectiveEnv,
       workflowsEnabledBySettings:
         runtimeBootSettings?.merged.tools?.workflowsEnabled === true,
-      lspEnabledForSessions: isLspOptedIn(
-        opts.experimentalLsp,
-        runtimeBootSettings?.merged,
-        runtimeEffectiveEnv,
-      ),
       envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
       envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
       envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
@@ -6349,9 +6342,6 @@ async function runQwenServeImpl(
                     workspaceTrusted: trustedWorkspace,
                     environment: runtimeEffectiveEnv,
                     forwardedArgs: acpChildExtraArgs(opts) ?? [],
-                    get lspEnabledForSessions() {
-                      return primaryRuntimeEnv.lspEnabledForSessions;
-                    },
                     hasLiveMcpServers: () =>
                       bridgeRef?.hasRuntimeMcpServers() === true,
                   },
@@ -6463,11 +6453,6 @@ async function runQwenServeImpl(
         replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
         primaryRuntimeEnv.workflowsEnabledBySettings =
           fresh.merged.tools?.workflowsEnabled === true;
-        primaryRuntimeEnv.lspEnabledForSessions = isLspOptedIn(
-          opts.experimentalLsp,
-          fresh.merged,
-          refreshedRuntimeEnv.effectiveEnv,
-        );
         delete primaryRuntimeEnv.fallbackReason;
         primaryRuntimeEnv.envFileReadFailed =
           refreshedRuntimeEnv.envFileReadFailed;
@@ -6586,7 +6571,6 @@ async function runQwenServeImpl(
         envFilePaths: string[];
         effectiveEnv: NodeJS.ProcessEnv;
         workflowsEnabledBySettings: boolean;
-        lspEnabledForSessions: boolean;
         envFileReadFailed: boolean;
         envFileReadFailures: Array<{ path: string; error: string }>;
         fallbackReason?: string;
@@ -6625,7 +6609,6 @@ async function runQwenServeImpl(
         envFilePaths: string[];
         effectiveEnv: NodeJS.ProcessEnv;
         workflowsEnabledBySettings: boolean;
-        lspEnabledForSessions: boolean;
         envFileReadFailed: boolean;
         envFileReadFailures: Array<{ path: string; error: string }>;
         fallbackReason?: string;
@@ -6635,11 +6618,6 @@ async function runQwenServeImpl(
         effectiveEnv,
         workflowsEnabledBySettings:
           settings?.merged.tools?.workflowsEnabled === true,
-        lspEnabledForSessions: isLspOptedIn(
-          opts.experimentalLsp,
-          settings?.merged,
-          effectiveEnv,
-        ),
         envFilePaths: [...snapshot.envFilePaths],
         envFileReadFailed: snapshot.envFileReadFailed,
         envFileReadFailures: [...snapshot.envFileReadFailures],
@@ -7006,9 +6984,6 @@ async function runQwenServeImpl(
                     workspaceTrusted: secondaryTrusted,
                     environment: secondaryEnv.effectiveEnv,
                     forwardedArgs: acpChildExtraArgs(opts) ?? [],
-                    get lspEnabledForSessions() {
-                      return secondaryEnv.metadata.lspEnabledForSessions;
-                    },
                     hasLiveMcpServers: () =>
                       secondaryBridgeRef?.hasRuntimeMcpServers() === true,
                   },
@@ -7146,11 +7121,6 @@ async function runQwenServeImpl(
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
               secondaryEnv.metadata.workflowsEnabledBySettings =
                 fresh.merged.tools?.workflowsEnabled === true;
-              secondaryEnv.metadata.lspEnabledForSessions = isLspOptedIn(
-                opts.experimentalLsp,
-                fresh.merged,
-                refreshedRuntimeEnv.effectiveEnv,
-              );
               secondaryEnv.metadata.envFileReadFailed =
                 refreshedRuntimeEnv.envFileReadFailed;
               secondaryEnv.metadata.envFileReadFailures.splice(
@@ -7763,9 +7733,6 @@ async function runQwenServeImpl(
                       workspaceTrusted: trusted,
                       environment: wsEnv.effectiveEnv,
                       forwardedArgs: acpChildExtraArgs(opts) ?? [],
-                      get lspEnabledForSessions() {
-                        return wsEnv.metadata.lspEnabledForSessions;
-                      },
                       hasLiveMcpServers: () =>
                         wsBridgeRef?.hasRuntimeMcpServers() === true,
                     },
@@ -7914,11 +7881,6 @@ async function runQwenServeImpl(
                 wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
                 wsEnv.metadata.workflowsEnabledBySettings =
                   fresh.merged.tools?.workflowsEnabled === true;
-                wsEnv.metadata.lspEnabledForSessions = isLspOptedIn(
-                  opts.experimentalLsp,
-                  fresh.merged,
-                  refreshedRuntimeEnv.effectiveEnv,
-                );
                 wsEnv.metadata.envFileReadFailed =
                   refreshedRuntimeEnv.envFileReadFailed;
                 wsEnv.metadata.envFileReadFailures.splice(

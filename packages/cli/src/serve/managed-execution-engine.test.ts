@@ -25,7 +25,6 @@ describe('createManagedExecutionEngine', () => {
         workspaceTrusted: false,
         environment: {},
         forwardedArgs: [],
-        lspEnabledForSessions: false,
         hasLiveMcpServers: () => false,
       },
     });
@@ -46,7 +45,6 @@ describe('createManagedExecutionEngine', () => {
         workspaceTrusted: true,
         environment: {},
         forwardedArgs: [],
-        lspEnabledForSessions: false,
         hasLiveMcpServers: () => true,
       },
     });

@@ -303,7 +303,7 @@ describe('runHostedWorkflowTurn', () => {
         ?.skipStartupContext,
     ).toBe(true);
     expect(loadCalls[0]![8]).toBe(true);
-    expect(loadCalls[0]![9]).toMatchObject({ lspDisabled: true });
+    expect(loadCalls[0]![9]).toEqual({ lspDisabled: true });
     expect(vi.mocked(loadSettings).mock.calls[0]![1]).toMatchObject({
       workspaceTrusted: false,
     });

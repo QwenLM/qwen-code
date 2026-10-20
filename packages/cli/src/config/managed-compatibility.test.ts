@@ -45,7 +45,6 @@ describe('evaluateManagedCompatibility', () => {
     workspaceCwd: string;
     workspaceTrusted: boolean;
     forwardedArgs: string[];
-    lspEnabledForSessions: boolean;
     liveMcpServers: boolean;
   };
 
@@ -77,7 +76,6 @@ describe('evaluateManagedCompatibility', () => {
         ),
       },
       forwardedArgs: [],
-      lspEnabledForSessions: false,
       liveMcpServers: false,
       hasLiveMcpServers() {
         return this.liveMcpServers;
@@ -148,13 +146,6 @@ describe('evaluateManagedCompatibility', () => {
         runtime.workspaceTrusted = false;
       },
       'the workspace is not trusted',
-    ],
-    [
-      'LSP enabled from the user-scoped setting',
-      () => {
-        runtime.lspEnabledForSessions = true;
-      },
-      'the daemon enables LSP for its sessions',
     ],
     [
       'restored user questions',
@@ -310,8 +301,53 @@ describe('evaluateManagedCompatibility', () => {
     // QWEN_CODE_DISABLE_LSP and resolves LSP off, so deferring would strand
     // the session for a capability that will not start.
     runtime.forwardedArgs = ['--experimental-lsp'];
+    runtime = {
+      ...runtime,
+      environment: {
+        ...runtime.environment,
+        QWEN_CODE_DISABLE_LSP: '1',
+      },
+    };
 
     await expect(evaluate()).resolves.toEqual({ status: 'compatible' });
+  });
+
+  it('defers when a user-scoped setting enables LSP', async () => {
+    writeJson(userSettings(), { tools: { lspEnabled: true } });
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'the daemon enables LSP for its sessions',
+    });
+  });
+
+  it('defers when the runtime environment enables LSP', async () => {
+    runtime = {
+      ...runtime,
+      environment: {
+        ...runtime.environment,
+        QWEN_CODE_ENABLE_LSP: '1',
+      },
+    };
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'the daemon enables LSP for its sessions',
+    });
+  });
+
+  it('re-reads LSP enablement after the settings file changes', async () => {
+    // A daemon caches nothing between evaluations: a settings write that
+    // arrives after the runtime was constructed must be seen by the next
+    // selection, not only by the next process.
+    await expect(evaluate()).resolves.toEqual({ status: 'compatible' });
+
+    writeJson(userSettings(), { tools: { lspEnabled: true } });
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'the daemon enables LSP for its sessions',
+    });
   });
 
   it('defers plan mode requested by the session', async () => {
