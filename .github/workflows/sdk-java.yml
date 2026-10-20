@@ -276,6 +276,17 @@ jobs:
             mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
           fi
 
+      - name: 'Upload Maven test reports on failure'
+        if: 'failure()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'sdk-java-test-reports-${{ matrix.os }}-java-${{ matrix.java }}'
+          path: |
+            packages/sdk-java/qwencode/target/surefire-reports/*.txt
+            packages/managed-agent-server/target/surefire-reports/*.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'

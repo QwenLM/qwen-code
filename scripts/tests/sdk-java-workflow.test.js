@@ -151,6 +151,27 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
+  it('uploads Maven text reports when the SDK Java test job fails', () => {
+    const steps = parse(workflow).jobs.test.steps;
+    const upload = steps.find(
+      (s) => s.name === 'Upload Maven test reports on failure',
+    );
+    expect(upload.if).toBe('failure()');
+    expect(upload.uses).toBe(
+      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+    );
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/surefire-reports/*.txt',
+    );
+    expect(upload.with.path).toContain(
+      'packages/sdk-java/qwencode/target/surefire-reports/*.txt',
+    );
+    expect(upload.with['if-no-files-found']).toBe('ignore');
+    expect(steps.indexOf(upload)).toBeGreaterThan(
+      steps.findIndex((s) => s.name === 'Run Runtime Broker state tests'),
+    );
+  });
+
   it('builds the JavaScript the full module suite loads before the fast tier runs it', () => {
     const steps = parse(workflow).jobs.test.steps;
     const names = steps.map((candidate) => candidate.name);
