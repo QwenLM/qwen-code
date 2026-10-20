@@ -155,6 +155,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'user_shell_result',
   'turn_complete',
   'turn_error',
+  'session_messages_deleted',
   'session_rewound',
   'session_branched',
   // A5 (#4511): synthetic side-channel snapshot yielded after
@@ -862,7 +863,20 @@ export interface DaemonTurnErrorData {
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
   loopType?: string;
+  /** Which cause stopped the turn when `loopType` covers several. */
+  loopReason?: string;
+  /** For `turn_tool_call_cap`: calls counted when the cap fired. */
+  toolCallCount?: number;
+  /** For `turn_tool_call_cap`: the limit that applied. */
+  toolCallLimit?: number;
   promptId?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonSessionMessagesDeletedData {
+  sessionId: string;
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
   [key: string]: unknown;
 }
 
@@ -1191,6 +1205,10 @@ export type DaemonTurnErrorEvent = DaemonEventEnvelope<
   'turn_error',
   DaemonTurnErrorData
 >;
+export type DaemonSessionMessagesDeletedEvent = DaemonEventEnvelope<
+  'session_messages_deleted',
+  DaemonSessionMessagesDeletedData
+>;
 export type DaemonSessionRewoundEvent = DaemonEventEnvelope<
   'session_rewound',
   DaemonSessionRewoundData
@@ -1245,6 +1263,7 @@ export type DaemonControlEvent =
   | DaemonSettingsReloadedEvent
   | DaemonMcpServerAddedEvent
   | DaemonMcpServerRemovedEvent
+  | DaemonSessionMessagesDeletedEvent
   | DaemonSessionRewoundEvent;
 
 export type DaemonStreamLifecycleEvent =
@@ -1851,6 +1870,10 @@ export function asKnownDaemonEvent(
       return isTurnErrorData(event.data)
         ? (event as DaemonTurnErrorEvent)
         : undefined;
+    case 'session_messages_deleted':
+      return isSessionMessagesDeletedData(event.data)
+        ? (event as DaemonSessionMessagesDeletedEvent)
+        : undefined;
     case 'session_rewound':
       return isSessionRewoundData(event.data)
         ? (event as DaemonSessionRewoundEvent)
@@ -1866,6 +1889,19 @@ export function asKnownDaemonEvent(
     default:
       return undefined;
   }
+}
+
+function isSessionMessagesDeletedData(
+  value: unknown,
+): value is DaemonSessionMessagesDeletedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    Array.isArray(value['deletedGroupIds']) &&
+    value['deletedGroupIds'].every((id) => typeof id === 'string') &&
+    Array.isArray(value['deletedPromptIds']) &&
+    value['deletedPromptIds'].every((id) => typeof id === 'string')
+  );
 }
 
 function isSessionRewoundData(
@@ -2243,6 +2279,7 @@ export function reduceDaemonSessionEvent(
     // `mid_turn_message_injected` is a transient UX signal (the browser dedupes
     // its own pending queue); like these mcp/settings notices it carries no
     // reduced session-view state.
+    case 'session_messages_deleted':
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'mcp_server_changed':
