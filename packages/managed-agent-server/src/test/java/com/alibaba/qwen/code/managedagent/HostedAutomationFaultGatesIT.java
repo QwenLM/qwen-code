@@ -1251,6 +1251,35 @@ class HostedAutomationFaultGatesIT {
         };
     }
 
+    // FG11d slice 2: a public TASK_CANCEL stops only the run it names; the
+    // definition and its future slots survive.
+    @Test
+    @Timeout(600)
+    void fg11dCancelStopsOnlyTheTargetRunOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("cancel");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-cancel-base", 202).path("id").asText();
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-cancel-run", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-cancel-run")));
+        // The public task id is the projection's, not the run record id.
+        JsonNode tasks = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200);
+        String taskId = tasks.path("data").path(0).path("id").asText();
+        assertThat(taskId).as("the run projects a public task").isNotEmpty();
+        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel", null,
+                "fg11d-cancel-task", 202);
+        // The parked model is the hold point: the turn cannot run, so the cancel
+        // wins and the run settles cancelled before the model is released.
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(run))
+                .as("the target run is cancelled").isEqualTo("cancelled"));
+        assertThat(request("GET", "/v1/agent-automations/" + id, null, null, 200).path("state").asText())
+                .as("the schedule survives its run's cancel").isEqualTo("live");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-cancel-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;

@@ -699,7 +699,7 @@ describe('Hosted real-process gates', () => {
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10065);
+        expect(forkSeconds).toBe(10080);
       }
     },
   );
@@ -772,13 +772,14 @@ describe('Hosted real-process gates', () => {
   // 8893s; the FG12f delivery cell adds 30s, so it becomes 8923s; the FG11f
   // refusing-arms cells add 242s, so it becomes 9165s; the FG13b Hook result
   // store-rejection cell adds 150s, so it becomes 9315s; the FG13b Hook
-  // plan-result store-rejection cell adds 150s, so it becomes 9465s. The
+  // plan-result store-rejection cell adds 150s, so it becomes 9465s; the FG11d
+  // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9465;
+  const hostedForkHealthySeconds = 9480;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
