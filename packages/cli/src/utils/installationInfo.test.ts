@@ -806,11 +806,8 @@ describe('getNpmCliPath', () => {
     vi.unstubAllEnvs();
   });
 
-  it('prefers the npm in the global prefix npm exports to its children', () => {
-    vi.stubEnv(
-      'npm_config_global_prefix',
-      'C:\\Users\\dev\\AppData\\Roaming\\npm',
-    );
+  it("prefers npm in npm's default %APPDATA%\\npm prefix when it exists", () => {
+    vi.stubEnv('APPDATA', 'C:\\Users\\dev\\AppData\\Roaming');
     const userNpm =
       'C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\npm\\bin\\npm-cli.js';
     mockedExistsSync.mockImplementation(
@@ -829,27 +826,8 @@ describe('getNpmCliPath', () => {
     expect(mockedRealPathSync).not.toHaveBeenCalled();
   });
 
-  it("prefers npm in npm's default %APPDATA%\\npm prefix when npm exports none", () => {
-    vi.stubEnv('npm_config_global_prefix', '');
-    vi.stubEnv('npm_config_prefix', '');
-    vi.stubEnv('APPDATA', 'C:\\Users\\dev\\AppData\\Roaming');
-    const userNpm =
-      'C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\npm\\bin\\npm-cli.js';
-    mockedExistsSync.mockImplementation(
-      (candidate) => String(candidate) === userNpm,
-    );
-
-    const result = getNpmCliPath(
-      'C:\\Program Files\\nodejs\\node.exe',
-      'win32',
-    );
-
-    expect(result).toBe(userNpm);
-  });
-
-  it('keeps the bundled npm when no global prefix holds an npm-cli.js', () => {
-    vi.stubEnv('npm_config_global_prefix', 'C:\\custom\\prefix');
-    mockedExistsSync.mockReturnValue(false);
+  it('keeps the bundled npm without probing the filesystem when APPDATA is unset', () => {
+    vi.stubEnv('APPDATA', '');
 
     const result = getNpmCliPath(
       'C:\\Program Files\\nodejs\\node.exe',
@@ -859,7 +837,26 @@ describe('getNpmCliPath', () => {
     expect(result).toBe(
       'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js',
     );
-    expect(mockedRealPathSync).not.toHaveBeenCalled();
+    expect(mockedExistsSync).not.toHaveBeenCalled();
+  });
+
+  it('ignores npm_config_prefix and npm_config_global_prefix from the environment', () => {
+    // A repository-controlled .env can set both; honouring them here would let
+    // it pick the script qwen hands to process.execPath.
+    vi.stubEnv('npm_config_global_prefix', 'C:\\repo\\chosen\\prefix');
+    vi.stubEnv('npm_config_prefix', 'C:\\repo\\chosen\\prefix');
+    vi.stubEnv('APPDATA', '');
+    mockedExistsSync.mockReturnValue(true);
+
+    const result = getNpmCliPath(
+      'C:\\Program Files\\nodejs\\node.exe',
+      'win32',
+    );
+
+    expect(result).toBe(
+      'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js',
+    );
+    expect(mockedExistsSync).not.toHaveBeenCalled();
   });
 
   it('returns the resolved path when adjacent npm is a .js file', () => {
@@ -912,8 +909,6 @@ describe('getNpmCliPath', () => {
     // %APPDATA%\npm\node_modules\npm\bin\npm-cli.js, so the miss has to be
     // explicit for this assertion to mean what it says.
     vi.stubEnv('APPDATA', 'C:\\Users\\dev\\AppData\\Roaming');
-    vi.stubEnv('npm_config_global_prefix', '');
-    vi.stubEnv('npm_config_prefix', '');
     mockedExistsSync.mockReturnValue(false);
 
     const result = getNpmCliPath(nodePath, 'win32');

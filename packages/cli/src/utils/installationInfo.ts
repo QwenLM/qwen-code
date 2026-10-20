@@ -23,65 +23,51 @@ export enum PackageManager {
   UNKNOWN = 'unknown',
 }
 
-/**
- * Global prefix candidates that may hold a user-installed npm on Windows, most
- * specific first. npm exports the prefix it resolved to its child processes as
- * `npm_config_prefix` (also `npm_config_global_prefix`), so a qwen started
- * through npm honours a configured non-default prefix. `%APPDATA%\npm` is
- * npm's default global prefix on Windows — where `npm install -g npm` writes on
- * a machine that never changed it — and is the only candidate available when
- * qwen is launched straight from a terminal, which exports neither variable.
- *
- * A prefix here is only a guess: every candidate is existence-checked before
- * use, because on Windows the global prefix is disjoint from the Node install
- * directory (unlike posix, where `<prefix>/lib/node_modules` is the fallback
- * tree). Only a candidate that actually holds an npm-cli.js may win.
- */
-function getWin32GlobalPrefixCandidates(): string[] {
-  const candidates: string[] = [];
-  for (const key of ['npm_config_global_prefix', 'npm_config_prefix']) {
-    const value = process.env[key];
-    if (value) candidates.push(value);
-  }
-  const appData = process.env['APPDATA'];
-  if (appData) candidates.push(path.win32.join(appData, 'npm'));
-  return candidates;
-}
-
 export function getNpmCliPath(
   nodePath = process.execPath,
   platform = process.platform,
 ): string {
-  const win32BundledNpmCliJs = path.win32.join(
-    path.win32.dirname(nodePath),
-    'node_modules',
-    'npm',
-    'bin',
-    'npm-cli.js',
-  );
   if (platform === 'win32') {
+    const bundledNpmCliJs = path.win32.join(
+      path.win32.dirname(nodePath),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    );
     // Prefer the npm the user actually runs over the copy bundled with Node.
-    // `npm install -g npm` installs into the global prefix, which on Windows is
-    // disjoint from the Node install directory, so the bundled copy can lag
-    // major versions behind `npm --version` forever. The npm.cmd shim next to
-    // node.exe resolves the prefix and prefers the same file; mirror that
-    // preference in-process, without a shell and without a subprocess, because
-    // getNpmCliPath is also called from non-async paths (handleAutoUpdate,
-    // managed-npm-update) that must stay cheap.
+    // `npm install -g npm` installs into npm's global prefix, which on Windows
+    // is disjoint from the Node install directory (%APPDATA%\npm by default),
+    // so the bundled copy can lag major versions behind `npm --version`
+    // forever. The npm.cmd shim next to node.exe resolves that prefix and
+    // prefers the same file; mirror that preference in-process, without a shell
+    // and without a subprocess, because getNpmCliPath also runs on non-async
+    // paths (handleAutoUpdate, managed-npm-update).
     //
-    // A machine that never self-updated npm has no such file, so the candidate
-    // checks fall through to the bundled copy and behaviour is unchanged.
-    for (const prefix of getWin32GlobalPrefixCandidates()) {
-      const candidate = path.win32.join(
-        prefix,
+    // Only the default prefix is consulted, deliberately. npm itself honours
+    // `npm_config_prefix` / `npm_config_global_prefix`, but reading either from
+    // process.env here would let a repository that ships a .env choose the
+    // script qwen hands to `process.execPath` — `npm_config_prefix` is already
+    // in INHERITED_LOADER_ENV_KEYS for exactly that reason, and this resolver
+    // must not reopen the same channel under a different name. It matters more
+    // here than for a plain lookup because the chosen npm also runs
+    // `npm install -g`, not just a read-only `npm view`.
+    //
+    // A machine that never self-updated npm has no such file, so the probe falls
+    // through to the bundled copy and behaviour is unchanged.
+    const appData = process.env['APPDATA'];
+    if (appData) {
+      const userNpmCliJs = path.win32.join(
+        appData,
+        'npm',
         'node_modules',
         'npm',
         'bin',
         'npm-cli.js',
       );
-      if (fs.existsSync(candidate)) return candidate;
+      if (fs.existsSync(userNpmCliJs)) return userNpmCliJs;
     }
-    return win32BundledNpmCliJs;
+    return bundledNpmCliJs;
   }
   // Prefer the npm symlink that sits next to the node binary and resolve it to
   // the real npm-cli.js. On split layouts where npm is not adjacent to node,
