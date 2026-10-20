@@ -165,6 +165,137 @@ function mountedRows(page: Page): Locator {
 }
 
 test.describe('trajectory panel', () => {
+  test('preserves a paused execution anchor through live updates and collapse @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    const scenario = createWebShellDaemonScenario({
+      transcriptPage: { events: transcriptEvents(TURNS) },
+    });
+    const execution = (index: number): DaemonEvent => ({
+      v: 1,
+      id: index + 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: {
+          executionLifecycle: {
+            v: 1,
+            kind: 'request',
+            phase: 'started',
+            executionId: `request-${index}`,
+            sessionId: scenario.sessionId,
+            promptId: 'p',
+            model: `model-${index}`,
+            startedAt: SESSION_START + index,
+          },
+        },
+      },
+    });
+    scenario.events = Array.from({ length: 40 }, (_, index) =>
+      execution(index),
+    );
+    const daemon = await installMockDaemon(page, scenario, {
+      baseURL: String(testInfo.project.use.baseURL),
+    });
+    await page.route(`**/session/${scenario.sessionId}/load`, (route) =>
+      route.fulfill({
+        json: {
+          sessionId: scenario.sessionId,
+          workspaceCwd: scenario.workspaceCwd,
+          clientId: scenario.clientId,
+          attached: true,
+          createdAt: Date.now(),
+          hasActivePrompt: false,
+          state: scenario.state,
+          compactedReplay: scenario.events,
+          liveJournal: [],
+          lastEventId: 40,
+          eventEpoch: 'trajectory-follow-test',
+        },
+      }),
+    );
+    await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+    await daemon.sse.waitForConnection(scenario.sessionId);
+    await daemon.sendEvent({ v: 1, type: 'replay_complete', data: {} });
+    await page
+      .getByRole('button', { name: /Toggle right panel|切换右侧扩展区/ })
+      .click();
+    await page.getByTestId('right-panel-open-trajectory').click();
+    const section = page.getByTestId('trajectory-executions');
+    const grid = section.getByRole('grid');
+    await expect(page.getByTestId('trajectory-follow-status')).toHaveText(
+      'Following',
+    );
+    await expect(grid).toHaveAttribute('aria-rowcount', '40');
+    expect(await grid.getByRole('row').count()).toBeLessThan(40);
+    await grid.focus();
+    await grid.press('End');
+    await expect(page.getByTestId('trajectory-follow-status')).toHaveText(
+      'Paused',
+    );
+    await expect(grid.locator('[data-active="true"]')).toBeInViewport();
+    await expect(grid).toHaveAttribute('aria-activedescendant', /.+/);
+    await page.getByTestId('trajectory-follow-return').click();
+    await expect(page.getByTestId('trajectory-follow-status')).toHaveText(
+      'Following',
+    );
+    const historyReads = () =>
+      daemon.requests.filter((request) => /\/transcript$/.test(request.path))
+        .length;
+    const beforeReads = historyReads();
+    const anchor = () =>
+      grid.evaluate((element) => {
+        const top = element.getBoundingClientRect().top;
+        const row = Array.from(
+          element.querySelectorAll<HTMLElement>('[role="row"]'),
+        ).find((row) => row.getBoundingClientRect().bottom > top);
+        return {
+          key: row?.dataset.executionKey,
+          offset: row
+            ? Math.round(row.getBoundingClientRect().top - top)
+            : undefined,
+        };
+      });
+    await grid.evaluate((element) => {
+      element.scrollTop = 347;
+    });
+    await expect(page.getByTestId('trajectory-follow-status')).toHaveText(
+      'Paused',
+    );
+    const held = await anchor();
+    expect(held.key).toBeTruthy();
+    await daemon.sendEvent(execution(40));
+    await expect(grid).toHaveAttribute('aria-rowcount', '41');
+    await expect.poll(anchor).toEqual(held);
+    await expect(page.getByTestId('trajectory-follow-status')).toContainText(
+      'Execution list updated',
+    );
+    await page.getByRole('button', { name: 'Fullscreen' }).click();
+    await expect.poll(anchor).toEqual(held);
+    await page.getByRole('button', { name: 'Exit fullscreen' }).click();
+    await expect.poll(anchor).toEqual(held);
+    await section.getByRole('button', { name: /Recent executions/ }).click();
+    await daemon.sendEvent(execution(41));
+    await expect(
+      section.getByRole('button', { name: /Recent executions/ }),
+    ).toContainText('(42)');
+    await expect(grid).toHaveCount(0);
+    await section.getByRole('button', { name: /Recent executions/ }).click();
+    await expect.poll(anchor).toEqual(held);
+    expect(historyReads()).toBe(beforeReads);
+    const button = page.getByTestId('trajectory-follow-return');
+    await button.click();
+    await expect(page.getByTestId('trajectory-follow-status')).toHaveText(
+      'Following',
+    );
+    await expect
+      .poll(() => grid.evaluate((element) => element.scrollTop))
+      .toBe(0);
+    await expect(button).toBeFocused();
+    expect(historyReads()).toBe(beforeReads + 1);
+  });
+
   test('keeps inspector content and copy reachable in a short window @smoke', async ({
     page,
   }, testInfo) => {
