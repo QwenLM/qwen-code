@@ -368,7 +368,9 @@ function hasBalancedQuotedCalls(value: string): boolean {
  * value merely mentioning the tag shape does not make the region behind it
  * unrescannable.
  */
-function closedParameterSpans(text: string): Array<[number, number]> {
+function closedParameterSpans(
+  text: string,
+): [Array<[number, number]>, number[]] {
   const spans: Array<[number, number]> = [];
   const openStarts: number[] = [];
   PARAMETER_TAG_PATTERN.lastIndex = 0;
@@ -383,7 +385,11 @@ function closedParameterSpans(text: string): Array<[number, number]> {
       openStarts.push(tagMatch.index);
     }
   }
-  return spans;
+  // Whatever is left on the stack is an element the stream never closed. Its
+  // interior is still value data, so the comment scan must treat it as opaque
+  // exactly like a closed span; without it a `<!--` in a truncated value opens
+  // a comment region that runs to end of turn and vetoes genuine siblings.
+  return [spans, openStarts];
 }
 
 /**
@@ -391,14 +397,17 @@ function closedParameterSpans(text: string): Array<[number, number]> {
  * comments and CommonMark indented code blocks. A call there is shown to the
  * model, not emitted by it, so it must not dispatch. See #13492.
  *
- * Comments only open at the start of a line, so a prose mention of the
- * sequence stays prose; an opener inside a closed parameter value is data.
- * Indented code cannot interrupt a paragraph or a list item, so it starts
- * only after a blank line.
+ * Comments only open at the start of a line outside a fence, so a prose
+ * mention of the sequence stays prose and an opener a value owns is data —
+ * whether or not the stream ever closed that value. Indented code cannot
+ * interrupt a paragraph or a list item, so it starts only after a blank line
+ * and, inside a list item, only past that item's content column.
  */
 function hiddenDocumentationRanges(
   text: string,
   valueSpans: ReadonlyArray<readonly [number, number]>,
+  parameterRanges: Array<[number, number]>,
+  unclosedParameterStarts: readonly number[],
 ): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   let lineStart = 0;
@@ -406,8 +415,10 @@ function hiddenDocumentationRanges(
   let inComment = false;
   let previousBlank = true;
   let inIndentedCode = false;
+  let listContentIndent = -1;
   for (const line of text.split('\n')) {
     const blank = line.trim() === '';
+    const indent = line.length - line.trimStart().length;
     if (inComment) {
       const close = line.indexOf('-->');
       if (close !== -1) {
@@ -415,18 +426,51 @@ function hiddenDocumentationRanges(
         inComment = false;
       }
     } else {
+      const listItem = /^( {0,3})(?:[-*+]|\d{1,9}[.)])(\s+)/.exec(line);
+      if (listItem) {
+        const markerEnd = listItem[0].length - listItem[2].length;
+        listContentIndent =
+          markerEnd + (listItem[2].length >= 5 ? 1 : listItem[2].length);
+      } else if (!blank && indent < listContentIndent) {
+        listContentIndent = -1;
+      }
       const open = /^ {0,3}<!--/.exec(line);
-      if (open && !rangeContains(valueSpans, lineStart + open[0].length - 4)) {
-        const close = text.indexOf('-->', lineStart + open[0].length);
-        if (close === -1) {
+      const openerStart = open ? lineStart + open[0].length - 4 : -1;
+      if (
+        open &&
+        !rangeContains(valueSpans, openerStart) &&
+        !positionInsideFence(text, openerStart, parameterRanges)
+      ) {
+        // The scan starts at the opener itself so the abrupt-close forms
+        // `<!-->` and `<!--->` — complete empty comments, whose terminator
+        // overlaps the opener — close here instead of masking the whole
+        // remainder of the turn. A terminator inside a value is data, not the
+        // end of the comment.
+        let close = text.indexOf('-->', openerStart);
+        while (close !== -1 && rangeContains(valueSpans, close)) {
+          close = text.indexOf('-->', close + 3);
+        }
+        if (close !== -1) {
+          ranges.push([openerStart, close + 3]);
+        } else if (
+          // Unterminated, the region runs to end of turn. When the opener sits
+          // in a value the stream never closed, that value is data, and
+          // masking the remainder would veto genuine siblings in exactly the
+          // truncated streams this fallback exists for. A terminated comment
+          // stays masked whichever value owns it.
+          !unclosedParameterStarts.some((start) => start <= openerStart)
+        ) {
           inComment = true;
-          commentStart = lineStart + open[0].length - 4;
-        } else {
-          ranges.push([lineStart + open[0].length - 4, close + 3]);
+          commentStart = openerStart;
         }
       } else if (
         /^(?: {4,}|\t)\S/.test(line) &&
-        (inIndentedCode || previousBlank)
+        (inIndentedCode || previousBlank) &&
+        // A list item's lazy continuation is indented below its content column
+        // + 4, which makes it a paragraph rather than an indented code block.
+        (listContentIndent < 0 ||
+          /^\t/.test(line) ||
+          indent >= listContentIndent + 4)
       ) {
         ranges.push([lineStart, lineStart + line.length]);
         inIndentedCode = true;
@@ -469,9 +513,10 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   // emitted, so it must not be dispatched; the flat match of a block quoting
   // such a value also ends inside one, so the value is what tells the scan
   // where that block really ends. See #13492.
+  const [closedSpans, unclosedParameterStarts] = closedParameterSpans(text);
   const valueSpans: Array<[number, number]> = [];
   let valueEnd = 0;
-  for (const span of closedParameterSpans(text).sort(
+  for (const span of closedSpans.sort(
     ([startA], [startB]) => startA - startB,
   )) {
     if (span[0] < valueEnd) continue;
@@ -488,7 +533,12 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     ownedValueRanges.push([start, end]);
     if (hasBalancedQuotedCalls(value)) quotedValueRanges.push([start, end]);
   }
-  const hiddenDocs = hiddenDocumentationRanges(text, valueSpans);
+  const hiddenDocs = hiddenDocumentationRanges(
+    text,
+    valueSpans,
+    parameterRanges,
+    unclosedParameterStarts,
+  );
   const tagPositions = exampleTagPositions(text, parameterRanges);
   const exampleRanges = computeExampleRanges(
     text,

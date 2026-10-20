@@ -984,6 +984,62 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     }
   });
 
+  it('does not let a comment opener inside a fence mask the rest of the turn', () => {
+    // The opener is code the model can see, not a comment, so it must not open
+    // an unterminated region that swallows every later call.
+    const call = invoke('bash', param('command', 'echo real'));
+    expect(extractXmlToolCalls('```md\n<!--\n```\n\n' + call)).toEqual([
+      { name: 'bash', args: { command: 'echo real' } },
+    ]);
+  });
+
+  it('does not read a list item lazy continuation as indented code', () => {
+    const call = invoke('read_file', param('file_path', 'real.ts'));
+    const text = `Steps:\n\n- Read the config\n\n    ${call}`;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'real.ts' } },
+    ]);
+  });
+
+  it('closes an abrupt empty comment instead of masking the turn', () => {
+    const call = invoke('read_file', param('file_path', 'real.ts'));
+    for (const opener of ['<!-->', '<!--->']) {
+      expect(extractXmlToolCalls(`${opener}\n\n${call}`)).toEqual([
+        { name: 'read_file', args: { file_path: 'real.ts' } },
+      ]);
+    }
+  });
+
+  it('does not let a comment opener in a truncated value hide a sibling call', () => {
+    // The stream never closed the value, so its markup is data all the same.
+    const truncated =
+      '<invoke name="write_file">' +
+      PARAM_OPEN +
+      ' name="content">' +
+      '<body>\n<!-- footer goes here\n</body>';
+    const call = invoke('read_file', param('file_path', 'real.ts'));
+    expect(extractXmlToolCalls(`${truncated}\n${call}`)).toEqual([
+      { name: 'read_file', args: { file_path: 'real.ts' } },
+    ]);
+  });
+
+  it('does not dispatch a documented call behind a value-borne terminator', () => {
+    // A `-->` inside a value is data, so it cannot end the comment early and
+    // expose the documented call that follows it.
+    const text =
+      'Docs:\n\n<!--\n' +
+      invoke('a', param('p', 'x --> y')) +
+      '\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n-->\n\nend.';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
   it('rejects a block whose parameter names repeat', () => {
     // The advance can pull a stray element behind a quoted value into the
     // block; a duplicate name would silently overwrite the argument.
