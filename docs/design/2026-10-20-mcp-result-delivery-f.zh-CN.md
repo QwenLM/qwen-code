@@ -20,7 +20,7 @@ Issue #14447 的 FG12f 行要求四种投递行为：在 Broker 或 Runtime 不�
 3. **输出上限通过落库记录取证。** 61 KiB 的资源读取结算为 `managed_mcp_output_limit`，落库记录为 `failed`/`settled`，夹具恰好记录一次副作用，随后的关闭到达 `released` 且不再补发 invoke，因此没有留下 hold。
 4. **列表变更只钉当前实现确有的行为。** 夹具在回答读取之前发出 `notifications/tools/list_changed`；用例断言恰好一次 invoke、一次副作用，以及该调用保持启动时的 `catalogRevision`。issue 里「产生新配置代际」这一条不断言，因为本树的通知不会回写配置记录，断言它等于钉一个并不存在的行为。
 5. **迟到应答不进入本切片。** `outcome_unknown` 之后的结算需要 Broker 或 Harness 的迟到结算路径，目前不存在；补它是生产改动，不是门禁，仍记为缺口。
-6. **预算按实测重钉。** 三格在 JDK 21 + MySQL 8.0.46 上实测 14.08 s，按 2 倍计 30 s；健康总和由 8451 s 变为 8481 s，fork 由 9051 s 变为 9081 s，Verify 步由 161 分钟变为 162 分钟；job 上限由 264 分钟变为 265 分钟，仍能盖住步进和。
+6. **预算按实测重钉。** 三格在 JDK 21 + MySQL 8.0.46 上多轮实测 13.98-16.01 s，按 2 倍计给健康总和加 30 s。健康的绝对值、fork、Verify 与 job 上限均钉在 `scripts/tests/hosted-process-ci.test.js`，本文不再复述：main 每落一个 Hosted 类它们就会变，而正文里抄写的字面值在评审中已漂移两次。
 
 ## 验收
 
