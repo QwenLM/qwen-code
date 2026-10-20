@@ -3762,7 +3762,28 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [historyManager, remountStaticHistory]);
 
-  const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
+  // Vim's Enter bypasses the composer, so route it through the submit path
+  // the composer registers: large-paste expansion, the submit epoch and the
+  // stash cleanup all live there.
+  const promptSubmitRef = useRef<((value: string) => void) | null>(null);
+  const registerPromptSubmit = useCallback(
+    (handler: ((value: string) => void) | null) => {
+      promptSubmitRef.current = handler;
+    },
+    [],
+  );
+  const handleVimSubmit = useCallback(
+    (value: string) => {
+      const submit = promptSubmitRef.current;
+      if (submit) {
+        submit(value);
+        return;
+      }
+      handleFinalSubmit(value);
+    },
+    [handleFinalSubmit],
+  );
+  const { handleInput: vimHandleInput } = useVim(buffer, handleVimSubmit);
 
   /**
    * Determines if the input prompt should be active and accept user input.
@@ -5511,6 +5532,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,
@@ -5603,6 +5625,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,

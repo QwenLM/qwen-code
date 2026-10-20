@@ -872,6 +872,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Tap-mode voice dictation submits the prompt after the transcript lands.
   voiceSubmitRef.current = (text) => handleSubmitAndClear(text);
 
+  // Vim's Enter submits without passing through this component, so it uses
+  // the handler registered here: the same place that expands large-paste
+  // placeholders, bumps the submit epoch and clears the stash.
+  useEffect(() => {
+    uiActions.registerPromptSubmit?.((value) => handleSubmitAndClear(value));
+    return () => uiActions.registerPromptSubmit?.(null);
+  }, [uiActions, handleSubmitAndClear]);
+
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
       uiActions.invalidateSubmittedPromptProvenance();
