@@ -55,7 +55,10 @@ vi.mock('../utils/debugLogger.js', () => ({
 }));
 vi.mock('fs');
 vi.mock('os');
-vi.mock('crypto');
+vi.mock('crypto', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:crypto')>()),
+  randomBytes: vi.fn(),
+}));
 vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<
     typeof import('../services/session-pr-service.js')
@@ -1364,6 +1367,22 @@ describe('ShellTool', () => {
       });
       return () => captured;
     };
+
+    it('declares the raw size unknown when the capture bound discarded output', async () => {
+      const output = 'o'.repeat(5_000);
+      const clipped = await runFg('yes', {
+        output,
+        outputCaptureLimitExceeded: true,
+      });
+      expect(clipped.rawOutputSize).toBeNull();
+      expect(clipped.truncatedByProducer).toBe(true);
+
+      // Control: the same body without a discard is still measured, so the
+      // null above is the capture bound and not "shell never declares".
+      const whole = await runFg('yes', { output });
+      expect(whole.rawOutputSize).not.toBeNull();
+      expect(whole.truncatedByProducer).toBeUndefined();
+    });
 
     describe('simulated sed edit', () => {
       const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');

@@ -1,3 +1,8 @@
+import { plural } from './utils/plural.js';
+import {
+  MESSAGE_DELETION_MESSAGES_EN,
+  MESSAGE_DELETION_MESSAGES_ZH,
+} from './components/message-deletion-messages.js';
 import {
   TRAJECTORY_EXECUTION_MESSAGES_EN,
   TRAJECTORY_EXECUTION_MESSAGES_ZH,
@@ -6,6 +11,10 @@ import {
   FILES_MESSAGES_EN,
   FILES_MESSAGES_ZH,
 } from './components/artifacts/files-messages.js';
+import {
+  TOKEN_USAGE_MESSAGES_EN,
+  TOKEN_USAGE_MESSAGES_ZH,
+} from './components/artifacts/token-usage-messages.js';
 import {
   createContext,
   useContext,
@@ -57,13 +66,6 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
-
-/** English count plus its noun, pluralised the regular way. */
-function plural(count: string | number | undefined, noun: string): string {
-  const value = typeof count === 'number' ? count : Number(count ?? 0);
-  const safe = Number.isFinite(value) ? value : 0;
-  return `${safe} ${noun}${safe === 1 ? '' : 's'}`;
-}
 
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
@@ -1190,9 +1192,10 @@ const EN: Messages = {
   'markdownTable.selection.average': 'Average',
   'markdownTable.selection.min': 'Min',
   'markdownTable.selection.max': 'Max',
-  'markdownTable.copyTsv': 'Copy TSV',
-  'markdownTable.copyTsvHint': 'Copy as TSV for pasting into spreadsheet apps',
-  'markdownTable.copyVisible': 'Copy table',
+  'markdownTable.copyTsv': 'Copy text',
+  'markdownTable.copyTsvHint': 'Copy text for pasting into spreadsheet apps',
+  'markdownTable.copyVisible': 'Copy',
+  'markdownTable.copyMarkdown': 'Copy Markdown',
   'markdownTable.customColumns': 'Custom columns',
   'markdownTable.customColumns.tableSection': 'Columns shown in the table',
   'markdownTable.customColumns.detailSection': 'Fields shown in expanded rows',
@@ -3403,31 +3406,7 @@ const EN: Messages = {
   'contextUsage.unavailable': 'Context usage is unavailable for this session.',
   'contextUsage.unknown':
     'Context usage has not been observed for this session yet.',
-  'tokenUsage.avgLatency': 'Avg latency',
-  'tokenUsage.cached': 'Cached input',
-  'tokenUsage.firstTokenLatency': (v) =>
-    `First-token latency ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `Generation ${v?.duration ?? ''}`,
-  'tokenUsage.input': 'Input',
-  'tokenUsage.loadError': 'Failed to load token usage.',
-  'tokenUsage.models': 'By model',
-  'tokenUsage.noData': 'No API calls in this session yet.',
-  'tokenUsage.noSubagents': 'No subagent calls in this session yet.',
-  'tokenUsage.noTools': 'No tool calls in this session yet.',
-  'tokenUsage.open': 'Session token usage',
-  'tokenUsage.output': 'Total output',
-  'tokenUsage.outputSpeed': (v) => `Output speed ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.refresh': 'Refresh',
-  'tokenUsage.requests': 'Requests',
-  'tokenUsage.retry': 'Retry',
-  'tokenUsage.subagents': 'Subagents',
-  'tokenUsage.thoughts': 'Reasoning (included in total output)',
-  'tokenUsage.title': 'Token Usage',
-  'tokenUsage.toolRow': (v) =>
-    `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
-  'tokenUsage.tools': 'Tools',
-  'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
-  'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
+  ...TOKEN_USAGE_MESSAGES_EN,
   'trajectory.title': 'Trajectory',
   'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
@@ -3764,6 +3743,8 @@ const EN: Messages = {
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
+  'message.moreActions': 'More message actions',
+  ...MESSAGE_DELETION_MESSAGES_EN,
   'userMessage.editSubmit': 'Send',
   'userMessage.editSending': 'Sending…',
   'userMessage.editBusy': 'Wait for the current turn to finish before editing.',
@@ -3901,6 +3882,21 @@ const EN: Messages = {
   'tasks.shortcut.cancelConfirm': 'Esc cancel',
   'tasks.detail.workingDir': 'Working dir',
   'tasks.detail.outputFile': 'Output file',
+  'tasks.detail.startedAt': 'Started',
+  'tasks.detail.endedAt': 'Ended',
+  'tasks.detail.totalDuration': 'Total duration',
+  'tasks.detail.residentMemory': 'Resident memory',
+  'tasks.detail.output': 'Output',
+  'tasks.detail.outputSize': (v) => `: ${v?.size ?? ''}`,
+  'tasks.detail.outputEmpty': 'No output yet',
+  'tasks.detail.outputNone': 'No output',
+  'tasks.detail.runtimeUnavailable': 'Task details are no longer available',
+  'tasks.detail.outputPartial':
+    'Output is available, but file details could not be read',
+  'tasks.detail.outputRefreshFailed': 'Could not refresh output. ',
+  'tasks.detail.outputTruncated': 'Showing the end only',
+  'tasks.detail.outputUnavailable': 'Output unavailable',
+  'tasks.detail.lastWrite': 'Last write',
   'tasks.detail.command': 'Command',
   'tasks.detail.events': (v) => `${v?.count ?? 0} events`,
   'tasks.detail.exit': (v) => `exit ${v?.exitCode ?? ''}`,
@@ -5602,9 +5598,10 @@ const ZH: Messages = {
   'markdownTable.selection.average': '平均',
   'markdownTable.selection.min': '最小',
   'markdownTable.selection.max': '最大',
-  'markdownTable.copyTsv': '复制 TSV',
-  'markdownTable.copyTsvHint': '复制为 TSV，可粘贴到 Excel 等表格应用',
-  'markdownTable.copyVisible': '复制表格',
+  'markdownTable.copyTsv': '复制文本',
+  'markdownTable.copyTsvHint': '复制文本，可粘贴到 Excel 等表格应用',
+  'markdownTable.copyVisible': '复制',
+  'markdownTable.copyMarkdown': '复制 Markdown',
   'markdownTable.customColumns': '自定义列',
   'markdownTable.customColumns.tableSection': '显示在表格列的信息',
   'markdownTable.customColumns.detailSection': '显示在折叠面板的信息',
@@ -7642,30 +7639,7 @@ const ZH: Messages = {
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
-  'tokenUsage.avgLatency': '平均延迟',
-  'tokenUsage.cached': '缓存输入',
-  'tokenUsage.firstTokenLatency': (v) => `首 token 延迟 ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `生成 ${v?.duration ?? ''}`,
-  'tokenUsage.input': '输入',
-  'tokenUsage.loadError': 'Token 消耗加载失败。',
-  'tokenUsage.models': '按模型',
-  'tokenUsage.noData': '本会话还没有 API 调用。',
-  'tokenUsage.noSubagents': '本会话还没有子 agent 调用。',
-  'tokenUsage.noTools': '本会话还没有工具调用。',
-  'tokenUsage.open': '会话 Token 消耗',
-  'tokenUsage.output': '总输出',
-  'tokenUsage.outputSpeed': (v) => `输出速度 ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.refresh': '刷新',
-  'tokenUsage.requests': '请求',
-  'tokenUsage.retry': '重试',
-  'tokenUsage.subagents': '子agent',
-  'tokenUsage.thoughts': '思考（包含在总输出中）',
-  'tokenUsage.title': 'Token 消耗',
-  'tokenUsage.toolRow': (v) =>
-    `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
-  'tokenUsage.tools': '工具',
-  'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
-  'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
+  ...TOKEN_USAGE_MESSAGES_ZH,
   'trajectory.title': '轨迹',
   'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
@@ -7974,6 +7948,8 @@ const ZH: Messages = {
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
+  'message.moreActions': '更多操作',
+  ...MESSAGE_DELETION_MESSAGES_ZH,
   'userMessage.editSubmit': '发送',
   'userMessage.editSending': '发送中…',
   'userMessage.editBusy': '请先等待当前轮次结束再编辑。',
@@ -8092,6 +8068,20 @@ const ZH: Messages = {
   'tasks.shortcut.cancelConfirm': 'Esc 取消',
   'tasks.detail.workingDir': '工作目录',
   'tasks.detail.outputFile': '输出文件',
+  'tasks.detail.startedAt': '开始时间',
+  'tasks.detail.endedAt': '结束时间',
+  'tasks.detail.totalDuration': '总时长',
+  'tasks.detail.residentMemory': '常驻内存',
+  'tasks.detail.output': '输出',
+  'tasks.detail.outputSize': (v) => `：${v?.size ?? ''}`,
+  'tasks.detail.outputEmpty': '暂无输出',
+  'tasks.detail.outputNone': '无输出',
+  'tasks.detail.runtimeUnavailable': '任务详情已不可用',
+  'tasks.detail.outputPartial': '输出可用，但无法读取文件信息',
+  'tasks.detail.outputRefreshFailed': '无法刷新输出。',
+  'tasks.detail.outputTruncated': '仅显示末尾',
+  'tasks.detail.outputUnavailable': '无法读取输出',
+  'tasks.detail.lastWrite': '最后写入',
   'tasks.detail.command': '命令',
   'tasks.detail.events': (v) => `${v?.count ?? 0} 个事件`,
   'tasks.detail.exit': (v) => `退出码 ${v?.exitCode ?? ''}`,

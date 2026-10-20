@@ -1450,13 +1450,15 @@ it('cancels a detached child after its async marker has admitted it', async () =
     true,
   );
   await hooks.status('call-1', true);
-  await vi.waitFor(() =>
-    expect(
-      session.authority
-        .extensionRecordsInDomain('hook_execution')
-        .filter((record) => !record.recordId.startsWith('hook-plan-'))
-        .map((record) => record.run.state),
-    ).toEqual(['cancelled']),
+  await vi.waitFor(
+    () =>
+      expect(
+        session.authority
+          .extensionRecordsInDomain('hook_execution')
+          .filter((record) => !record.recordId.startsWith('hook-plan-'))
+          .map((record) => record.run.state),
+      ).toEqual(['cancelled']),
+    { timeout: isSlowTestHost() ? 30_000 : 1_000 },
   );
   expect(
     requests.filter((request) => request.kind === 'hook-cancel').length,
@@ -1988,19 +1990,22 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
   );
   try {
     const abort = new AbortController();
-    const fired = hooks.fire(
-      HookEventName.PreToolUse,
-      'call-1',
-      {},
-      abort.signal,
-    );
-    await vi.waitFor(() =>
-      expect(
-        requests.filter((request) => request.kind === 'hook-execute'),
-      ).toHaveLength(1),
+    // Observe rejection before waiting for dispatch on a busy test host.
+    const outcome = hooks
+      .fire(HookEventName.PreToolUse, 'call-1', {}, abort.signal)
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
+    await vi.waitFor(
+      () =>
+        expect(
+          requests.filter((request) => request.kind === 'hook-execute'),
+        ).toHaveLength(1),
+      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
     );
     abort.abort();
-    await expect(fired).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+    expect(await outcome).toBeInstanceOf(HostedHookRecoveryRequiredError);
     const child = session.authority
       .extensionRecordsInDomain('hook_execution')
       .find(

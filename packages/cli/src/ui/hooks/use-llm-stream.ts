@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   useState,
   useRef,
@@ -101,7 +102,10 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
-import { findLastUserItemIndex } from '../utils/historyUtils.js';
+import {
+  findLastUserItemIndex,
+  stripLeadingSystemReminders,
+} from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -521,6 +525,8 @@ export interface CancelSubmitInfo {
     id: number;
     text: string;
     submittedPrompt?: string;
+    /** Prompt as sent to the model, when it differed from `text`. */
+    modelText?: string;
   } | null;
   /**
    * Whether removing the Logger's latest USER entry can only target
@@ -826,6 +832,8 @@ export const useLlmStream = (
     id: number;
     text: string;
     submittedPrompt?: string;
+    /** Prompt as sent to the model, when it differed from `text`. */
+    modelText?: string;
   } | null>(null);
   const canUndoLastLoggedUserMessageRef = useRef(false);
   // Set to true the first time a content event lands this turn — even
@@ -1154,6 +1162,12 @@ export const useLlmStream = (
       getPreferredEditor,
       onEditorClose,
       canUseToolResultFullTurnModel,
+      (call) =>
+        observeInteractiveModTool(
+          config,
+          call,
+          refreshContextFilesOnWriteRef.current,
+        ),
     );
 
   const pendingToolCallGroupDisplay = useMemo(() => {
@@ -1642,12 +1656,23 @@ export const useLlmStream = (
         }
 
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
-        await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+        // Handle UI-only commands first
+        const isSlash = isSlashCommand(trimmedQuery);
+        // One-shot notices the TUI folded into this prompt stay on the model
+        // side only: the recall log, the transcript row and the cancel-restore
+        // buffer use the composer's projection (#11553), since reverse-parsing
+        // cannot tell an injected envelope from one the user typed. The strip
+        // is the fallback for producers outside this process; slash commands
+        // keep their own text. Logged before the slash and shell arms can
+        // return, so handled commands stay recallable.
+        const userText =
+          submittedPrompt ??
+          (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
+        await logger?.logMessage(MessageSenderType.USER, userText);
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
-        // Handle UI-only commands first
-        const slashCommandResult = isSlashCommand(trimmedQuery)
+        const slashCommandResult = isSlash
           ? await handleSlashCommand(
               trimmedQuery,
               undefined,
@@ -1763,8 +1788,11 @@ export const useLlmStream = (
           const insertedId = addItem(
             {
               type: MessageType.USER,
-              text: trimmedQuery,
+              text: userText,
               promptId: prompt_id,
+              // The envelope masked a leading `?` from the lexical fallback in
+              // isRealUserTurn; an un-noticed prompt keeps that fallback.
+              ...(userText === trimmedQuery ? {} : { sentToModel: true }),
             } as HistoryItemWithoutId,
             userMessageTimestamp,
           );
@@ -1776,8 +1804,11 @@ export const useLlmStream = (
           if (!preserveTurnOwnership) {
             lastTurnUserItemRef.current = {
               id: insertedId,
-              text: trimmedQuery,
+              text: userText,
               ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+              // What the model actually read, so a cancel + resubmit does not
+              // drop the one-shot notice this turn consumed.
+              ...(userText === trimmedQuery ? {} : { modelText: trimmedQuery }),
             };
           }
 
@@ -4949,7 +4980,7 @@ export const useLlmStream = (
         // never-executed skill-write).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled') continue;
+          if (tc.status === 'cancelled' || tc.nativeAttemptsObserved) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -5039,6 +5070,7 @@ export const useLlmStream = (
       // Identify new, successful save_memory calls that we haven't processed yet.
       const newSuccessfulMemorySaves = completedAndReadyToSubmitTools.filter(
         (t) =>
+          !t.nativeAttemptsObserved &&
           t.request.name === 'save_memory' &&
           t.status === 'success' &&
           !processedMemoryToolsRef.current.has(t.request.callId),
@@ -5105,7 +5137,10 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (toolCall.status !== 'cancelled') {
+        if (
+          toolCall.status !== 'cancelled' &&
+          !toolCall.nativeAttemptsObserved
+        ) {
           llmClient?.recordCompletedToolCall(
             toolCall.request.name,
             toolCall.request.args as Record<string, unknown>,
@@ -5317,13 +5352,13 @@ export const useLlmStream = (
             'runtime',
           );
       }
-      const memoryWriteCandidates = completedAndReadyToSubmitTools.map(
-        (toolCall) => ({
+      const memoryWriteCandidates = completedAndReadyToSubmitTools
+        .filter((call) => !call.nativeAttemptsObserved)
+        .map((toolCall) => ({
           toolName: toolCall.request.name,
           args: toolCall.request.args as Record<string, unknown>,
           status: toolCall.status,
-        }),
-      );
+        }));
       const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
         config,
         memoryWriteCandidates,
@@ -5393,6 +5428,7 @@ export const useLlmStream = (
       }
 
       for (const toolCall of llmTools) {
+        if (toolCall.nativeAttemptsObserved) continue;
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,

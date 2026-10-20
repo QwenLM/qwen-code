@@ -7052,6 +7052,25 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/tasks/:taskId/runtime',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/runtime',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionTaskRuntime(sessionId, taskId));
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/agents',
     withOwnerReadSession(
       'GET /session/:id/agents',
@@ -10279,6 +10298,54 @@ export function registerSessionRoutes(
         }
       },
       { cwdBound: 'always' },
+    ),
+  );
+
+  app.get(
+    '/session/:id/message-groups',
+    withOwnerReadSession(
+      'GET /session/:id/message-groups',
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.getMessageGroups(sessionId));
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/messages/delete',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/messages/delete',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const snapshot = body['snapshot'];
+        const groupIds = body['groupIds'];
+        if (
+          typeof snapshot !== 'string' ||
+          snapshot.length === 0 ||
+          !Array.isArray(groupIds) ||
+          groupIds.length === 0 ||
+          !groupIds.every((id) => typeof id === 'string' && id.length > 0) ||
+          new Set(groupIds).size !== groupIds.length
+        ) {
+          res.status(400).json({
+            error: 'A snapshot and distinct non-empty groupIds are required',
+            code: 'invalid_message_groups',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.deleteMessageGroups(
+              sessionId,
+              { snapshot, groupIds },
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
     ),
   );
 

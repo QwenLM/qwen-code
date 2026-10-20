@@ -747,6 +747,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'permission_mediation',
   'non_blocking_prompt',
   'session_language',
+  'session_message_deletion',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -841,6 +842,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
       f !== 'session_language' &&
+      f !== 'session_message_deletion' &&
       f !== 'session_rewind' &&
       f !== 'workspace_hooks' &&
       f !== 'session_hooks' &&
@@ -895,6 +897,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'non_blocking_prompt',
   'session_language',
   'user_language_sync',
+  'session_message_deletion',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -2696,6 +2699,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTasksOptions.push(opts);
       return sessionTasksImpl(sessionId, opts);
     },
+    async getSessionTaskRuntime(sessionId, taskId) {
+      return { v: 1, sessionId, taskId, runtime: { outputTail: 'ready' } };
+    },
     async getSessionAgentsStatus(sessionId) {
       sessionAgentsCalls.push(sessionId);
       return sessionAgentsImpl(sessionId);
@@ -3523,6 +3529,15 @@ describe('createServeApp', () => {
       // predicate must be false, otherwise the tag would fail the
       // "default-off" property baseline tags get for free.
       for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
+        if (feature === 'session_message_deletion') {
+          expect(predicate({ hostedHarness: true })).toBe(false);
+          expect(predicate({})).toBe(true);
+          expect(
+            getAdvertisedServeFeatures(undefined, { hostedHarness: true }),
+          ).not.toContain(feature);
+          expect(getAdvertisedServeFeatures()).toContain(feature);
+          continue;
+        }
         if (
           feature === 'hosted_harness_private_v1' ||
           feature === 'managed_session_journal_delta_v1'
@@ -11440,13 +11455,17 @@ describe('createServeApp', () => {
     it('dispatches read-only session snapshots through the live owner runtime', async () => {
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge({
-        summaryImpl: (sessionId) => ({
-          sessionId,
-          workspaceCwd: WS_DIFFERENT,
-          createdAt: '2026-05-17T12:00:00.000Z',
-          clientCount: 1,
-          hasActivePrompt: false,
-        }),
+        summaryImpl: (sessionId) => {
+          if (sessionId !== 's-secondary')
+            throw new SessionNotFoundError(sessionId);
+          return {
+            sessionId,
+            workspaceCwd: WS_DIFFERENT,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          };
+        },
         sessionContextImpl: async (sessionId) => ({
           v: 1,
           sessionId,
@@ -11485,6 +11504,14 @@ describe('createServeApp', () => {
           bridge: secondaryBridge,
         }),
       ]);
+      const primaryRuntimeRead = vi.spyOn(
+        primaryBridge,
+        'getSessionTaskRuntime',
+      );
+      const secondaryRuntimeRead = vi.spyOn(
+        secondaryBridge,
+        'getSessionTaskRuntime',
+      );
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
@@ -11498,6 +11525,24 @@ describe('createServeApp', () => {
         .get('/session/s-secondary/resources')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
+      const runtimeRes = await request(app)
+        .get('/session/s-secondary/tasks/bg_1/runtime')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(runtimeRes.status).toBe(200);
+      expect(runtimeRes.body).toEqual({
+        v: 1,
+        sessionId: 's-secondary',
+        taskId: 'bg_1',
+        runtime: { outputTail: 'ready' },
+      });
+      expect(secondaryRuntimeRead).toHaveBeenCalledWith('s-secondary', 'bg_1');
+      expect(primaryRuntimeRead).not.toHaveBeenCalled();
+      const missingRes = await request(app)
+        .get('/session/missing/tasks/bg_1/runtime')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingRes.status).toBe(404);
+      expect(secondaryRuntimeRead).toHaveBeenCalledTimes(1);
+      expect(primaryRuntimeRead).not.toHaveBeenCalled();
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
         sessionId: 's-secondary',

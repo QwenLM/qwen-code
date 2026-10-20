@@ -30,12 +30,12 @@ original owner and settle honestly; a worker loss cannot, and must stay
    dedicated proxies. #13129's "Broker/Runtime-owner" wording is satisfied
    by the worker-loss cells here; a standalone-broker restart rig is a
    separate topology and a separate round.
-2. **The orphaned Hook unit is asserted, not cleaned up by the platform.**
-   After a worker SIGKILL the command and its descendant keep the unit
-   populated with no owner, receipt or timer. The worker-kill cell asserts
-   that state before teardown, then teardown kills the unit. This pins the
-   accepted H2 limit exactly as observed; it does not ask the product to
-   reclaim the unit, which would be #13133 work.
+2. **The worker-kill cell pins the reaper contract, not an orphaned unit.**
+   After a worker SIGKILL no survivor can settle the record, so it stays
+   `recovery_blocked` / `outcome_unknown`; the command and its descendant are
+   reaped with the worker (#14502), and the unit reaches `populated 0`. The
+   cell asserts both halves, so a reaper regression that leaves the orphan
+   populated turns it red.
 
 ## Rig
 
@@ -63,7 +63,7 @@ is physical evidence, not a status read.
 | Case                          | Inject                                                                                              | Expect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ----------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `harness-kill-during-command` | A `PreToolUse` command Hook holds with a live descendant; SIGKILL the Harness; start a replacement. | Exactly one physical call. The replacement load answers the interrupted call; while the command still holds, a new prompt is refused with 409. The Session is then re-attached to the replacement (the passive recovery load) and the operation is read through the authenticated Harness status route, which asks the record's original `runtimeSessionId` and settles it from the worker's receipt. The record settles `settled` with a result; the unit reaches `populated 0`, and the worker and generation were unchanged at settlement. |
-| `worker-kill-during-command`  | The same held Hook; SIGKILL the durable worker.                                                     | The record becomes `recovery_blocked` / `outcome_unknown`; never `settled` or `cancelled`. Exactly one physical call. The command and descendant survive as an ownerless populated unit. Close is refused (409 `turn_active` or 503) and the Session stays open. The generation is not re-minted.                                                                                                                                                                                                                                             |
+| `worker-kill-during-command`  | The same held Hook; SIGKILL the durable worker.                                                     | The record becomes `recovery_blocked` / `outcome_unknown`; never `settled` or `cancelled`. Exactly one physical call. The parent-death reaper kills the command and descendant and empties the unit (`populated 0`). Close is refused (409 `turn_active` or 503) and the Session stays open. The generation is not re-minted.                                                                                                                                                                                                                 |
 | `command-kill`                | SIGKILL the Hook command while it runs, with no descendant.                                         | `non_blocking_error` under the saved `failClosed` policy: the record settles, the read never returns the file body, and the model sees the Hook's block. The unit is empty.                                                                                                                                                                                                                                                                                                                                                                   |
 
 ## Mutation witnesses
@@ -79,6 +79,9 @@ Each witness must turn its case red before the slice merges.
   record then stays `running`, so the state assertion fails. (A deleted
   owner check is masked here because any lookup failure already answers
   `outcome_unknown`; the witness has to remove the honest commit instead.)
+- `worker-kill-during-command` reaper half: remove `reapOnParentExit: true`
+  from the managed command launch. The unit keeps the command and its
+  descendant populated, so the `running` and `populated 0` assertions fail.
 - `command-kill`: make `failClosed` pass a non-success outcome through. The
   block assertion fails.
 

@@ -58,19 +58,22 @@ Issue #14446 是 #12380 F 阶段的 FG11 轮。FG11b 覆盖存储故障。第 1 
   15 s，所以死掉的 writer 的 lease 很快过期。下一个到达这个 Session 的请求会重新加载它，可能是
   用例自己的重试，也可能是扫描器的重驱。用例会检查已有新的 writer generation 持有这个 Session。
 - **重试直到被接受。** 重启后，用例用同一个 key 重试同一个请求，直到它回答 `202`。在 lease 过期
-  之前，冷 Harness 的加载会被拒绝，公开路由把它原样传成 `409 managed_session_writer_conflict`
-  （见"发现"）。其他任何拒绝都会让用例失败。
+  之前，冷 Harness 的加载会被拒绝，公开路由把它回答为可重试的
+  `503 managed_session_writer_conflict`（见"发现"）。其他任何拒绝，包括裸的 409，都会让用例失败。
 - **teardown。** 逐个删除 trigger，一个删除失败不会让其他 trigger 留在共享 fork 的 schema 上。
   然后删除拒绝计数表。
 
 ## 发现
 
-- **暂时性的 writer 冲突以 409 到达公开调用方。** Harness 重启后，在死掉的 writer 的 lease 过期
-  之前，公开的手动 run 路由回答了 `409 managed_session_writer_conflict`。更新路由经过同一个转换
-  （`ManagedAutomationService.translate`，Harness 的 409 仍是 409）。扫描器会重驱这种情况，因为这个
-  错误码不在它的终局拒绝之列，所以手动 run 不会丢。但公开应答是一个客户端不太会重试的 4xx 冲突，
-  而定义更新没有别的东西会重驱。用同一个 key 重试确实能恢复，因为回执保持已占用、未作答。本切片
-  记录这一行为，门禁会重试越过它，而不把它钉住。
+- **会自愈的 Harness 冲突以可重试的 503 越过。** Harness 重启后，公开的手动 run 路由曾经在死掉的
+  writer 的 lease 过期之前回答 `409 managed_session_writer_conflict`。更新路由经过同一个转换
+  （`ManagedAutomationService.translate`）。扫描器会重驱这种情况，因为这个错误码不在它的终局拒绝
+  之列，所以手动 run 不会丢；但把 409 当作终局的客户端会就此停手，而定义更新没有别的东西会重驱。
+  现在，公开的 automation 路由把会自愈的 Harness 冲突——死掉的前任 writer 的 lease、繁忙或短暂
+  不可用的 Workspace、正在关闭的 Session——回答为保留原错误码的可重试 503，与 channel 路由的回答
+  一致。其他所有 409 保持原有的分类。门禁把这一应答钉住：只接受 `202` 或 `503`。
+
+  失败后的第一次同 key 重试被消耗后，defer 窗口内再次重试会回答上次失败所对应的类别——暂时性或丢失应答回答可重试的 `503`，终局拒答回答同样的 `409`——且不消耗尝试次数；下一次 fire 由扫描器拥有。丢失应答后的第一次重试仍会立即重驱，因此门禁的第二次发送会得到 `202`。
 
 ## 变异见证
 
@@ -100,7 +103,5 @@ Issue #14446 是 #12380 F 阶段的 FG11 轮。FG11b 覆盖存储故障。第 1 
 
 ## 未决问题
 
-- 公开的 automation 路由是否应当把 writer 冲突回答为可重试的 `503`，就像它回答其他所有结果不明
-  的情况那样。见"发现"。
 - store 在看到提交之前、每次尝试都发生的传输故障，表现与 `revision-1` 相同：什么都不提交，Session
   被锁存。本切片只覆盖应答丢失这一变体，也就是 store client 自己的重试能吸收的那种。

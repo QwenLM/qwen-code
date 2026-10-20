@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, StrictMode, useEffect } from 'react';
 import { Blob as NodeBlob } from 'node:buffer';
 import { createRoot, type Root } from 'react-dom/client';
@@ -49,6 +49,7 @@ const {
     mockActions: {
       cancelTask: vi.fn(),
       getTasks: vi.fn(),
+      getTaskRuntime: vi.fn(),
     },
     mockWorkspaceActions: {
       readFileBytes: vi.fn(),
@@ -453,6 +454,10 @@ afterEach(() => {
   }
   mockActions.cancelTask.mockReset();
   mockActions.getTasks.mockReset();
+  mockActions.getTaskRuntime.mockReset();
+  // The shell detail effect fetches once on mount. Keep it pending so the
+  // synchronous assertions never race a post-render state update.
+  mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
   mockWorkspaceActions.readFileBytes.mockReset();
   mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.stat.mockReset();
@@ -1797,56 +1802,61 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(revoke).toHaveBeenCalledWith('blob:source-binary');
   });
 
-  it('opens PDF attachments in the browser PDF preview', async () => {
-    Object.defineProperty(URL, 'createObjectURL', {
-      configurable: true,
-      value: vi.fn(() => 'blob:attachment-pdf'),
-    });
-    Object.defineProperty(URL, 'revokeObjectURL', {
-      configurable: true,
-      value: vi.fn(),
-    });
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    mounted.push({ root, container });
+  it.each(['application/pdf', 'application/octet-stream'])(
+    'opens PDF attachments in the browser PDF preview with %s',
+    async (mimeType) => {
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: vi.fn(() => 'blob:attachment-pdf'),
+      });
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: vi.fn(),
+      });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
 
-    act(() =>
-      root.render(
-        <I18nProvider language="en">
-          <ArtifactPanel
-            artifacts={[]}
-            tabs={[
-              {
-                id: 'attachment:report.pdf',
-                kind: 'file',
-                title: 'report.pdf',
-                workspacePath: 'report.pdf',
-                previewData: new Blob(['%PDF-1.7'], {
-                  type: 'application/pdf',
-                }),
-                previewMimeType: 'application/pdf',
-                previewOnly: true,
-              },
-            ]}
-            activeTabId="attachment:report.pdf"
-            reviewChanges={[]}
-            selectedReviewPath={null}
-            onSelectTab={() => {}}
-            onCloseTab={() => {}}
-            onOpenFilePreview={() => {}}
-            onClose={() => {}}
-          />
-        </I18nProvider>,
-      ),
-    );
-    await flush();
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'attachment:report.pdf',
+                  kind: 'file',
+                  title: 'report.pdf',
+                  workspacePath: 'report.pdf',
+                  previewData: new Blob(['%PDF-1.7'], {
+                    type: mimeType,
+                  }),
+                  previewMimeType: mimeType,
+                  previewOnly: true,
+                },
+              ]}
+              activeTabId="attachment:report.pdf"
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      await flush();
 
-    expect(container.querySelector<HTMLIFrameElement>('iframe')?.src).toContain(
-      'blob:attachment-pdf',
-    );
-    expect(container.querySelector('.cm-content')).toBeNull();
-  });
+      expect(
+        container.querySelector<HTMLIFrameElement>('iframe')?.src,
+      ).toContain('blob:attachment-pdf');
+      expect(container.querySelector('.cm-content')).toBeNull();
+      expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    },
+  );
 
   it('dispatches an available workspace artifact to the dedicated renderer', async () => {
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
@@ -4228,6 +4238,7 @@ describe('ArtifactPanel shell tab', () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     mounted.push({ root, container });
+    mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
 
     act(() => {
       root.render(shellPanel(task));
@@ -5336,5 +5347,185 @@ describe('ArtifactPanel trajectory entry', () => {
     expect(
       container.querySelector('[data-testid="trajectory-panel"]'),
     ).not.toBeNull();
+  });
+});
+
+describe('ArtifactPanel native PDF previews', () => {
+  const bytes = Buffer.from('%PDF-1.7');
+  function pdfArtifact(patch: Partial<DaemonSessionArtifact> = {}) {
+    return {
+      ...codeReviewArtifact(),
+      kind: 'pdf',
+      metadata: undefined,
+      workspacePath: 'reports/Report.PDF',
+      ...patch,
+    };
+  }
+  function mountPdf() {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    return { root, container };
+  }
+  beforeEach(() => {
+    vi.stubGlobal('Blob', NodeBlob);
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:pdf-preview'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: bytes.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readFileBytes.mockResolvedValue({
+      contentBase64: bytes.toString('base64'),
+      offset: 0,
+      returnedBytes: bytes.length,
+      sizeBytes: bytes.length,
+    });
+  });
+
+  it.each([
+    {
+      kind: 'document',
+      workspacePath: 'reports/Report.PDF',
+      mimeType: 'text/markdown',
+    },
+    { workspacePath: 'report', mimeType: 'APPLICATION/PDF; charset=binary' },
+    { workspacePath: 'report' },
+    { status: 'changed' },
+  ])('loads PDF artifacts as binary: %j', async (patch) => {
+    const { root, container } = mountPdf();
+    act(() => root.render(artifactPanel(pdfArtifact(patch))));
+    await flush();
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe(
+      'blob:pdf-preview',
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledWith(
+      patch.workspacePath ?? 'reports/Report.PDF',
+      { offset: 0, maxBytes: 256 * 1024 },
+    );
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
+    expect(blob.type).toBe('application/pdf');
+    expect(Buffer.from(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it.each(['missing', 'expired'])(
+    'does not read a %s PDF artifact',
+    async (status) => {
+      const { root, container } = mountPdf();
+      act(() => root.render(artifactPanel(pdfArtifact({ status }))));
+      await flush();
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(container.textContent).toContain(status);
+      expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retries a failed read and releases URLs on version changes and unmount', async () => {
+    mockWorkspaceActions.readFileBytes.mockRejectedValueOnce(
+      new Error('Read failed'),
+    );
+    const { root, container } = mountPdf();
+    const artifact = pdfArtifact();
+    act(() => root.render(artifactPanel(artifact)));
+    await flush();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Read failed',
+    );
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Try again',
+    );
+    expect(retry).toBeDefined();
+    act(() => retry!.click());
+    await flush();
+    expect(container.querySelector('iframe')).not.toBeNull();
+    act(() =>
+      root.render(
+        artifactPanel({ ...artifact, updatedAt: '2026-10-20T00:00:00Z' }),
+      ),
+    );
+    await flush();
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(3);
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+    act(() => root.render(null));
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a pending PDF read after unmount', async () => {
+    let finish!: (value: {
+      contentBase64: string;
+      offset: number;
+      returnedBytes: number;
+      sizeBytes: number;
+    }) => void;
+    mockWorkspaceActions.readFileBytes.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { root } = mountPdf();
+    act(() => root.render(artifactPanel(pdfArtifact())));
+    await flush();
+    act(() => root.render(null));
+    await act(async () =>
+      finish({
+        contentBase64: bytes.toString('base64'),
+        offset: 0,
+        returnedBytes: bytes.length,
+        sizeBytes: bytes.length,
+      }),
+    );
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it('uses only the selected workspace for a PDF read', async () => {
+    mockWorkspace.capabilities.features = ['workspace_qualified_rest_core'];
+    mockSecondaryWorkspaceActions.fileStat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: bytes.length,
+      modifiedMs: 1,
+    });
+    mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockResolvedValue({
+      contentBase64: bytes.toString('base64'),
+      offset: 0,
+      returnedBytes: bytes.length,
+      sizeBytes: bytes.length,
+    });
+    const { root, container } = mountPdf();
+    act(() =>
+      root.render(
+        artifactPanel(pdfArtifact(), {
+          workspaceCwd: '/secondary',
+          workspaceId: 'secondary-id',
+        }),
+      ),
+    );
+    await flush();
+    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(
+      mockSecondaryWorkspaceActions.readWorkspaceFileBytes,
+    ).toHaveBeenCalled();
+    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+  });
+
+  it('keeps PDF bytes downloadable when the native viewer is unavailable', async () => {
+    vi.stubGlobal('navigator', { pdfViewerEnabled: false });
+    const { root, container } = mountPdf();
+    act(() => root.render(artifactPanel(pdfArtifact())));
+    await flush();
+    expect(container.querySelector('iframe')).toBeNull();
+    const download = container.querySelector<HTMLAnchorElement>('a[download]');
+    expect(download?.getAttribute('href')).toBe('blob:pdf-preview');
+    expect(download?.download).toBe('Report.PDF');
   });
 });

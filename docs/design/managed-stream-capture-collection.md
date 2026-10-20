@@ -2,6 +2,19 @@
 
 [English](managed-stream-capture-collection.md) | [简体中文](managed-stream-capture-collection.zh-CN.md)
 
+## Current status after schema consolidation
+
+The P1 implementation below records the original `4a3b8f3c08` baseline. On
+`06efd789b1`, the shared schema uses `ma_resource`, `ma_resource_ref`, and a
+`SESSION_RESOURCE_GC` operation. The collector now releases retired Session
+record/journal owners before collecting unreferenced `MYSQL_INLINE` bodies in
+either `PUBLISHED` or `REFERENCED` state, without a kind whitelist. The older
+claims below that MCP records and journal-referenced manifests remain pinned
+permanently no longer describe current SQL collection. See the
+[MCP lifecycle contract and witness](managed-mcp-retention-lifecycle.md).
+Private CSI Sessions remain excluded, and the physical GC default and
+deployment gates remain unchanged.
+
 ## Problem and baseline
 
 O4 (`managed-tool-output-retention.md`) made the physical collection of tool
@@ -322,7 +335,10 @@ operators ask for fleet numbers.
 - P2 (MCP result retention) and P3 (media and shared outputs) are separate
   slices of #13534 with different reference closures: the MCP records' set-once
   ref rules and the omni object store's cross-session content addressing need
-  their own designs.
+  their own designs. After schema consolidation, the current
+  [private SQL media lifecycle](managed-media-retention-boundary.md) is covered
+  by the generic retired-owner collector. Physically shared Hosted/omni media
+  and its complete reference-release lifecycle remain future work.
 - The local file runtime (`LocalToolResultSegmentStore`, filesystem layout
   under the runtime base directory) is unmanaged by this design; its retention
   is a separate host-local problem.
