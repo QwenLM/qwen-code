@@ -474,3 +474,111 @@ describe('handleBranchSession', () => {
     );
   });
 });
+
+describe('failed switch Mod ownership recovery', () => {
+  beforeEach(() => {
+    vi.spyOn(
+      SessionService.prototype,
+      'assertLegacySessionExecution',
+    ).mockImplementation(() => {});
+    vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
+      emptySession(),
+    );
+    vi.spyOn(SessionService.prototype, 'getSessionTitle').mockReturnValue(
+      'Target',
+    );
+  });
+  afterEach(() => vi.restoreAllMocks());
+  it.each(
+    ['resume', 'branch'].flatMap((direction) =>
+      [
+        'rollback-init',
+        'forward-old',
+        'forward-target',
+        'before-invalidate',
+      ].map((mode) => ({ direction, mode })),
+    ),
+  )(
+    '$direction restores eligible Mod ownership after $mode',
+    async ({ direction, mode }) => {
+      const { config } = createFakeConfig();
+      let sessionId = config.getSessionId();
+      const oldSessionId = sessionId;
+      Object.assign(config, {
+        getSessionId: () => sessionId,
+        isInteractive: () => true,
+      });
+      const owner = new ModSession(config, { emitSystemMessage: vi.fn() });
+      const old = owner.captureToolSignal();
+      const restore = vi.fn(() => owner.restoreTools());
+      const binding = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          invalidateTools: () => owner.invalidateTools(),
+          restoreTools: restore,
+          syncSession: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession);
+      const settle = vi.fn(() => {
+        expect(owner.captureToolSignal().aborted).toBe(
+          mode === 'forward-target',
+        );
+      });
+      const client = {
+        beginTelemetrySwap: () => true,
+        abortTelemetrySwap: settle,
+        commitTelemetrySwap: settle,
+        initialize: vi.fn(async () => {
+          throw new Error('init failed');
+        }),
+      };
+      vi.spyOn(config, 'startNewSession').mockImplementation((id) => {
+        if (!id) throw new Error('missing session ID');
+        if (mode === 'forward-old')
+          throw new Error('start failed before mutation');
+        sessionId = id;
+        if (mode === 'forward-target')
+          throw new Error('start failed after mutation');
+        return sessionId;
+      });
+      vi.spyOn(config, 'getLlmClient').mockReturnValue(
+        client as unknown as ReturnType<typeof config.getLlmClient>,
+      );
+      vi.spyOn(config, 'getGeminiClient').mockReturnValue(
+        client as unknown as ReturnType<typeof config.getGeminiClient>,
+      );
+      const service = config.getSessionService();
+      Object.assign(service, { findSessionTitlesByPrefix: async () => [] });
+      vi.spyOn(config, 'getSessionService').mockReturnValue(service);
+      if (mode === 'before-invalidate') {
+        if (direction === 'resume')
+          vi.mocked(SessionService.prototype.loadSession).mockRejectedValue(
+            new Error('load failed'),
+          );
+        else
+          vi.spyOn(service, 'forkSession').mockRejectedValue(
+            new Error('fork failed'),
+          );
+      }
+      try {
+        const host = createFakeHost(config);
+        if (direction === 'resume')
+          await handleResumeSession(host, 'target-session');
+        else await handleBranchSession(host, 'recovery');
+        expect(host.startNewSession).not.toHaveBeenCalled();
+        const renew = mode === 'rollback-init' || mode === 'forward-old';
+        expect(restore).toHaveBeenCalledTimes(renew ? 1 : 0);
+        expect(old.aborted).toBe(mode !== 'before-invalidate');
+        expect(owner.captureToolSignal().aborted).toBe(
+          mode === 'forward-target',
+        );
+        if (renew) expect(owner.captureToolSignal()).not.toBe(old);
+        else expect(owner.captureToolSignal()).toBe(old);
+        expect(sessionId === oldSessionId).toBe(mode !== 'forward-target');
+        expect(settle).toHaveBeenCalledOnce();
+      } finally {
+        binding.mockRestore();
+        await owner.close();
+      }
+    },
+  );
+});

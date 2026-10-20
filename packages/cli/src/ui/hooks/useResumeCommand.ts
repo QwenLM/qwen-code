@@ -156,6 +156,7 @@ export function useResumeCommand(
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
+      let toolsInvalidated = false;
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
@@ -212,7 +213,9 @@ export function useResumeCommand(
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
         resetBackgroundStateForSessionSwitch(config);
-        getInteractiveModSession(config)?.invalidateTools();
+        const modSession = getInteractiveModSession(config);
+        modSession?.invalidateTools();
+        toolsInvalidated = modSession !== undefined;
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -305,7 +308,6 @@ export function useResumeCommand(
             // throws too, sessionId + recorder are still back on the old
             // session, which is the load-bearing invariant.
             await config.getLlmClient()?.initialize?.();
-            await getInteractiveModSession(config)?.restoreTools();
             // The forward path cleared the old session's in-memory
             // background agents (resetBackgroundStateForSessionSwitch above,
             // ~L158) before swapping core. After rolling core back to the old
@@ -332,6 +334,9 @@ export function useResumeCommand(
           // replays the old session's history on top of the abandoned
           // session's replay, and restore overwrites rather than subtracts,
           // so the final state is exactly pre-swap (#9833).
+          if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.abortTelemetrySwap?.();
         } else if (swapOpened) {
           // Either the core swap never happened (nothing was replayed — the
@@ -341,6 +346,13 @@ export function useResumeCommand(
           // attempt did not open — the shared slot may hold a different
           // in-flight swap (#9844). See beginTelemetrySwap's JSDoc in core
           // client.ts.
+          if (
+            toolsInvalidated &&
+            !uiSwapped &&
+            config.getSessionId() === oldSessionId
+          ) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.commitTelemetrySwap?.();
         }
         addItem(
