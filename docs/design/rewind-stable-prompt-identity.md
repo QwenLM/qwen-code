@@ -120,8 +120,8 @@ checkpoint catalog and the rewind notification; `turnIndex` remains the raw
 snapshot position, including retry gaps and compressed prefixes. Recorder
 projections recover the association from existing records, and with recording
 disabled ACP retains it only for live file-history snapshots. Resolving that
-association in Web Shell, VS Code and the SDK is a separate change: no
-daemon-backed client behavior changes here.
+association in Web Shell, VS Code and the SDK is a separate change: this one
+changes what the daemon publishes, not how those clients resolve it.
 
 Acceptance requires the same legacy fixture to cut at its source record,
 identified turns to keep resolving, unlinked/ambiguous targets to refuse, and
