@@ -2175,6 +2175,47 @@ describe('extension tests', () => {
       expect(snapshot.extensions[extension.id]).toBeUndefined();
       expect(fs.existsSync(destination)).toBe(false);
     });
+
+    it('uninstalls by name a committed extension whose directory is gone', async () => {
+      // The directory can disappear while the store entry survives (a hand
+      // cleanup after a failed uninstall, or a directory removed on Windows).
+      // Resolving the name only through the loaded set made `uninstall <name>`
+      // refuse as "not found" while `install <same source>` refused on the name
+      // conflict, leaving no supported way to clear the entry.
+      const identity = { id: 'ab'.repeat(32), name: 'ghost-extension' };
+      const extensionStore = storeAt(userExtensionsDir);
+      await extensionStore.ensureInitialized([identity]);
+      const destination = writeTree(
+        path.join(userExtensionsDir, identity.name),
+        {
+          [EXTENSIONS_CONFIG_FILENAME]: JSON.stringify({
+            name: identity.name,
+            version: '1.0.0',
+          }),
+        },
+      );
+      const manager = createExtensionManager({ extensionStore });
+      await manager.refreshCache();
+      fs.rmSync(destination, { recursive: true, force: true });
+      await manager.refreshCache();
+
+      const snapshot = await manager.uninstallExtension(identity.name, false);
+
+      expect(snapshot.extensions[identity.id]).toBeUndefined();
+    });
+
+    it('still reports "Extension not found." for a name with no store entry', async () => {
+      const extensionStore = storeAt(userExtensionsDir);
+      await extensionStore.ensureInitialized([
+        { id: 'ac'.repeat(32), name: 'present-extension' },
+      ]);
+      const manager = createExtensionManager({ extensionStore });
+      await manager.refreshCache();
+
+      await expect(
+        manager.uninstallExtension('absent-extension', false),
+      ).rejects.toThrow('Extension not found.');
+    });
   });
 
   describe('bounded directory loading', () => {

@@ -3260,7 +3260,31 @@ export class ExtensionManager {
             extensionIdentifier.toLowerCase(),
       );
       if (!extension) {
-        throw new Error(`Extension not found.`);
+        // The directory can be gone (a hand cleanup after a failed uninstall, or
+        // a directory removed on Windows) while the store entry survives.
+        // Resolve the name from the store so the entry can still be cleared:
+        // otherwise `install` refuses on the name conflict and `uninstall`
+        // refuses as "not found", leaving the user with no supported path.
+        const snapshot = await this.extensionStore.readSnapshot();
+        const match = Object.entries(snapshot.extensions).find(
+          ([, policy]) =>
+            policy.name.toLowerCase() === extensionIdentifier.toLowerCase(),
+        );
+        if (!match) {
+          throw new Error(`Extension not found.`);
+        }
+        const [id, policy] = match;
+        if (policy.declarationOnly) return snapshot;
+        const destinationDirectory = path.join(this.configDir, policy.name);
+        return await this.uninstallExtensionPolicy(
+          { id, name: policy.name },
+          destinationDirectory,
+          isUpdate,
+          telemetryConfig,
+          onCommitted,
+          this.loadInstallMetadata(destinationDirectory)
+            ?.credentialPersistence === 'stored',
+        );
       }
       return await this.uninstallExtensionPolicy(
         { id: extension.id, name: extension.name },
