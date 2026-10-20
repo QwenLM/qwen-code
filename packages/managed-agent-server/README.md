@@ -1340,6 +1340,16 @@ mvn -Pmysql-integration \
 Use a disposable database: the integration test creates and deletes fixture
 rows within the selected schema.
 
+The `hosted-harness-mysql` profile additionally clears every `ma_` base table
+before each top-level `Hosted*IT` class, while retaining the schema and Flyway
+history. Its JUnit extension is enabled only in that profile; one fork and
+disabled JUnit parallelism keep cleanup ahead of the next class's contexts.
+Use a database exclusively owned by this test invocation. Class teardown must
+still stop all contexts and child processes. State is preserved between methods,
+nested classes, and context restarts inside one class. See the
+[isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
+([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
+
 ## Linux extension process acceptance
 
 `HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.
