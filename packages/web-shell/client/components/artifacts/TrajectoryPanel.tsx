@@ -71,6 +71,7 @@ import { TrajectoryToolbar } from './TrajectoryToolbar';
 import { TrajectorySummaryBar, compactTokens } from './TrajectorySummaryBar';
 import {
   isRetryableFailure,
+  trajectoryFailureText,
   trajectoryPillState,
   trajectoryTopBoundary,
   trajectoryWarnings,
@@ -336,9 +337,12 @@ export function TrajectoryPanel({
     const section = panelRef.current?.querySelector<HTMLElement>(
       '[data-testid="trajectory-executions"]',
     );
+    // The strip is empty once its executions are gone; the records are the
+    // nearest place left to land.
     (
       section?.querySelector<HTMLElement>('[role="grid"]') ??
-      section?.querySelector<HTMLButtonElement>('button')
+      section?.querySelector<HTMLButtonElement>('button') ??
+      scrollRef.current
     )?.focus({ preventScroll: true });
   }, [loadPage]);
   const {
@@ -726,6 +730,15 @@ export function TrajectoryPanel({
     paddingEnd: bottomBoundary ? ROW_HEIGHT : 0,
     overscan: 12,
   });
+  // The first row's start is below the top boundary, so aligning to it would
+  // scroll that boundary, and the way to earlier records, out of view.
+  const scrollRowIntoView = useCallback(
+    (index: number) => {
+      if (index === 0) virtualizer.scrollToOffset(0);
+      else virtualizer.scrollToIndex(index, { align: 'auto' });
+    },
+    [virtualizer],
+  );
 
   const toggleGroup = useCallback(
     (key: string) => {
@@ -837,10 +850,10 @@ export function TrajectoryPanel({
     const selectedIndex = activeIndexRef.current;
     if (!inspectorOpen || selectedIndex < 0) return;
     const frame = requestAnimationFrame(() => {
-      virtualizer.scrollToIndex(selectedIndex, { align: 'auto' });
+      scrollRowIntoView(selectedIndex);
     });
     return () => cancelAnimationFrame(frame);
-  }, [inspectorOpen, virtualizer]);
+  }, [inspectorOpen, scrollRowIntoView]);
 
   const moveSelection = useCallback(
     (nextIndex: number) => {
@@ -853,13 +866,13 @@ export function TrajectoryPanel({
       if (inspectorOpen && trajectory && loadPage) {
         setInspectorSelection({ of: trajectory, loader: loadPage, key });
       }
-      virtualizer.scrollToIndex(clamped, { align: 'auto' });
+      scrollRowIntoView(clamped);
     },
     [
       inspectorOpen,
       loadPage,
       trajectory,
-      virtualizer,
+      scrollRowIntoView,
       visualRows,
       pauseFollowing,
     ],
@@ -1000,7 +1013,11 @@ export function TrajectoryPanel({
     : undefined;
   const inspectorRow =
     inspectorIndex === undefined ? undefined : trajectory?.rows[inspectorIndex];
-  const empty = status === 'ready' && visualRows.length === 0;
+  // A refresh that failed keeps the window it replaced, so an empty one is
+  // still empty rather than loading.
+  const empty =
+    (status === 'ready' || (status === 'error' && trajectory !== undefined)) &&
+    visualRows.length === 0;
   const timingAbsent =
     trajectory !== undefined &&
     trajectory.rows.length > 0 &&
@@ -1157,7 +1174,7 @@ export function TrajectoryPanel({
         return;
       }
       selectRow(rowKey);
-      if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
+      if (index >= 0) scrollRowIntoView(index);
     },
     [
       trajectory,
@@ -1175,7 +1192,7 @@ export function TrajectoryPanel({
       loadPage,
       selectRow,
       setRange,
-      virtualizer,
+      scrollRowIntoView,
       visualRows,
     ],
   );
@@ -1237,8 +1254,8 @@ export function TrajectoryPanel({
     // change, long after the press that asked for it.
     pendingRevealRef.current = undefined;
     const index = visualRows.findIndex((row) => row.key === key);
-    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
-  }, [virtualizer, visualRows]);
+    if (index >= 0) scrollRowIntoView(index);
+  }, [scrollRowIntoView, visualRows]);
 
   // Named the way the row reads, which already says a failed request failed
   // in words — the red of the span is never the only signal.
@@ -1267,8 +1284,9 @@ export function TrajectoryPanel({
     [t],
   );
 
-  // The executions strip reports news only while it is mounted; once the list
-  // empties it unmounts and can no longer clear what it reported.
+  // The strip stays mounted while it has nothing to show, so the first
+  // execution of a session still counts as news; a list that has since
+  // emptied has no news left to jump to.
   const newExecutions = executionsUpdated && executions.rows.length > 0;
   const pill = trajectoryPillState({
     windowMode,
@@ -1484,24 +1502,23 @@ export function TrajectoryPanel({
         />
       )}
 
-      {executions.rows.length > 0 && (
-        <TrajectoryExecutions
-          key={`executions-${filterState.scope}`}
-          rows={executions.rows}
-          selectedKey={selectedExecution?.key}
-          following={following}
-          liveStatus={lifecycle.status}
-          historySnapshot={trajectory}
-          onPause={pauseFollowing}
-          onUpdatedChange={setExecutionsUpdated}
-          onSelect={(key) => {
-            pauseFollowing();
-            setSelectedKey(undefined);
-            setInspectorOpen(false);
-            setExecutionSelection({ loader: loadPage, key });
-          }}
-        />
-      )}
+      <TrajectoryExecutions
+        key={`executions-${filterState.scope}`}
+        rows={executions.rows}
+        selectedKey={selectedExecution?.key}
+        following={following}
+        liveStatus={lifecycle.status}
+        historySnapshot={trajectory}
+        onPause={pauseFollowing}
+        onUpdatedChange={setExecutionsUpdated}
+        onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
+        onSelect={(key) => {
+          pauseFollowing();
+          setSelectedKey(undefined);
+          setInspectorOpen(false);
+          setExecutionSelection({ loader: loadPage, key });
+        }}
+      />
 
       <div
         className={`${styles.tableWrap} ${inspectorOpen || selectedExecution ? styles.tableWrapWithInspector : ''}`}
@@ -1511,13 +1528,7 @@ export function TrajectoryPanel({
             {trajectory && boundaryRow}
             {status === 'error' && error && !trajectory ? (
               <div className={styles.placeholder} role="alert">
-                <span>
-                  {error.kind === 'partial'
-                    ? t('trajectory.partial')
-                    : error.kind === 'unreadable'
-                      ? t('trajectory.loadFailed', { message: error.message })
-                      : t(`trajectory.window.${error.kind}`)}
-                </span>{' '}
+                <span>{trajectoryFailureText(error, t)}</span>{' '}
                 {isRetryableFailure(error) && (
                   <button
                     type="button"

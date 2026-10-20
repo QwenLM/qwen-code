@@ -91,12 +91,14 @@ function FollowHarness({
   options,
   onPause,
   onReturn,
+  onFocusLost,
 }: {
   rows: TrajectoryExecutionRow[];
   onSelect: (key: string) => void;
   options: FeedOptions;
   onPause: () => void;
   onReturn: () => void;
+  onFocusLost: () => void;
 }) {
   const [following, setFollowing] = useState(true);
   const [updated, setUpdated] = useState(false);
@@ -114,6 +116,7 @@ function FollowHarness({
           onPause();
         }}
         onUpdatedChange={setUpdated}
+        onFocusLost={onFocusLost}
       />
       <span>
         {following
@@ -156,6 +159,7 @@ async function mount(rows: TrajectoryExecutionRow[], shadow = false) {
   const onSelect = vi.fn();
   const onPause = vi.fn();
   const onReturn = vi.fn();
+  const onFocusLost = vi.fn();
   let options: FeedOptions = { liveStatus: 'live', historySnapshot: undefined };
   let alive = true;
   const unmount = () => {
@@ -180,13 +184,22 @@ async function mount(rows: TrajectoryExecutionRow[], shadow = false) {
             options={options}
             onPause={onPause}
             onReturn={onReturn}
+            onFocusLost={onFocusLost}
           />
         </I18nProvider>,
       ),
     );
   };
   await update(rows);
-  return { container, onSelect, onPause, onReturn, update, unmount };
+  return {
+    container,
+    onSelect,
+    onPause,
+    onReturn,
+    onFocusLost,
+    update,
+    unmount,
+  };
 }
 it('owns one timer and stops it when collapsed, hidden, completed or unmounted', async () => {
   const { container, update, unmount } = await mount([running()]);
@@ -396,6 +409,25 @@ it('does not treat reconnect or history replacement as new live executions', asy
   expect(container.textContent).toContain('Execution list updated');
 });
 
+it('renders nothing while empty and counts the first execution as new', async () => {
+  const { container, update } = await mount([]);
+  expect(
+    container.querySelector('[data-testid="trajectory-executions"]'),
+  ).toBeNull();
+  act(() =>
+    container
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="trajectory-follow-pause"]',
+      )!
+      .click(),
+  );
+  await update([running('first')]);
+  expect(
+    container.querySelector('[data-testid="trajectory-executions"]'),
+  ).not.toBeNull();
+  expect(container.textContent).toContain('Execution list updated');
+});
+
 it('restores the paused anchor after CSS hiding resets the DOM offset', async () => {
   const { container } = await mount(
     Array.from({ length: 40 }, (_, index) => running(String(index))),
@@ -449,7 +481,10 @@ describe.each([false, true])('focus recovery (shadow=%s)', (shadow) => {
     it.each([false, true])(
       `restores focus on ${removal} only when the removed grid owns it (outside=%s)`,
       async (outside) => {
-        const { container, update } = await mount([running()], shadow);
+        const { container, update, onFocusLost } = await mount(
+          [running()],
+          shadow,
+        );
         const grid = container.querySelector<HTMLElement>('[role="grid"]')!;
         const toggle = container.querySelector<HTMLButtonElement>('button')!;
         const other = document.createElement('button');
@@ -466,9 +501,14 @@ describe.each([false, true])('focus recovery (shadow=%s)', (shadow) => {
           await update([]);
         }
         expect(container.querySelector('[role="grid"]')).toBeNull();
-        expect(
-          (container.getRootNode() as Document | ShadowRoot).activeElement,
-        ).toBe(outside ? other : toggle);
+        // An empty strip renders nothing, so its owner is asked to take focus.
+        const lost = removal === 'empty' && !outside;
+        if (!lost) {
+          expect(
+            (container.getRootNode() as Document | ShadowRoot).activeElement,
+          ).toBe(outside ? other : toggle);
+        }
+        expect(onFocusLost).toHaveBeenCalledTimes(lost ? 1 : 0);
       },
     );
   }

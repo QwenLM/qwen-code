@@ -166,13 +166,14 @@
   cursor: pointer;
 }
 
-.iconButton:hover:not(:disabled),
+.iconButton:hover:not(:disabled):not([aria-disabled='true']),
 .iconButton[data-state='open'] {
   background: var(--muted);
   color: var(--foreground);
 }
 
-.iconButton:disabled {
+.iconButton:disabled,
+.iconButton[aria-disabled='true'] {
   opacity: 0.5;
   cursor: default;
 }

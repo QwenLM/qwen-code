@@ -70,6 +70,22 @@ export function trajectoryWarnings(input: {
   return warnings;
 }
 
+type Translate = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
+
+/** What a failed read says, wherever it is shown. */
+export function trajectoryFailureText(
+  failure: TrajectoryWindowFailure,
+  t: Translate,
+): string {
+  if (failure.kind === 'partial') return t('trajectory.partial');
+  if (failure.kind === 'unreadable')
+    return t('trajectory.loadFailed', { message: failure.message });
+  return t(`trajectory.window.${failure.kind}`);
+}
+
 /** Only an unreadable or partial page can be read again with the same cursor. */
 export function isRetryableFailure(failure: TrajectoryWindowFailure): boolean {
   return failure.kind === 'partial' || failure.kind === 'unreadable';

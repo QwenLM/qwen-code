@@ -31,22 +31,6 @@
   flex: none;
 }
 
-.input {
-  flex: 1;
-  min-width: 40px;
-  height: 100%;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: var(--foreground);
-  font: inherit;
-  font-size: 13px;
-}
-
-.input::placeholder {
-  color: var(--traj-text-secondary);
-}
-
 .input::-webkit-search-cancel-button {
   display: none;
 }

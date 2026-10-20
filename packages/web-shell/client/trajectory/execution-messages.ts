@@ -18,7 +18,6 @@ export const TRAJECTORY_EXECUTION_MESSAGES_EN: Record<
   'trajectory.executions.omitted': (v) =>
     `${v?.count ?? 0} input records omitted by display limit`,
   'trajectory.executions.clock': 'Clock time',
-  'trajectory.executions.empty': 'No lifecycle records available.',
   'trajectory.executions.elapsed': (v) => `About ${v?.duration ?? ''} elapsed`,
   'trajectory.executions.uncertain': 'Elapsed unavailable',
   'trajectory.executions.metadata':
@@ -48,7 +47,6 @@ export const TRAJECTORY_EXECUTION_MESSAGES_ZH: Record<
   'trajectory.executions.omitted': (v) =>
     `展示上限省略了 ${v?.count ?? 0} 条输入记录`,
   'trajectory.executions.clock': '真实时间',
-  'trajectory.executions.empty': '暂无可用生命周期记录。',
   'trajectory.executions.elapsed': (v) => `约已运行 ${v?.duration ?? ''}`,
   'trajectory.executions.uncertain': '当前耗时不可确定',
   'trajectory.executions.metadata':

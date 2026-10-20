@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import type { TrajectoryFilter } from '../../trajectory/filterTrajectory';
+import { Input } from '../ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import styles from './TrajectoryToolbar.module.css';
@@ -86,9 +87,11 @@ export function TrajectoryToolbar({
     <div className={styles.toolbar} data-trajectory-filters="">
       <div className={styles.search}>
         <SearchIcon size={14} aria-hidden="true" className={styles.icon} />
-        <input
+        {/* The box around it draws the border and focus ring, so the field
+            itself sheds its own. */}
+        <Input
           type="search"
-          className={styles.input}
+          className={`h-full min-w-10 flex-1 rounded-none border-0 bg-transparent px-0 py-0 text-[13px] placeholder:text-[var(--traj-text-secondary)] focus-visible:ring-0 md:text-[13px] dark:bg-transparent ${styles.input}`}
           value={draft}
           maxLength={QUERY_LIMIT}
           aria-label={t('trajectory.filter.search')}

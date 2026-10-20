@@ -18,10 +18,10 @@ import { formatDuration } from '../messages/StatsMessage';
 import type { TrajectorySummary } from '../../trajectory/summarizeTrajectory';
 import {
   isRetryableFailure,
+  trajectoryFailureText,
   type TrajectoryPillState,
   type TrajectoryWarning,
 } from '../../trajectory/trajectory-status';
-import type { TrajectoryWindowFailure } from '../../trajectory/useTrajectoryWindow';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import styles from './TrajectorySummaryBar.module.css';
 
@@ -37,18 +37,6 @@ export interface TrajectoryAboutInfo {
   searchExcluded: number;
   executionsOmitted: number;
   executionsOutside: number;
-}
-
-type Translate = (
-  key: string,
-  vars?: Record<string, string | number>,
-) => string;
-
-function failureText(failure: TrajectoryWindowFailure, t: Translate): string {
-  if (failure.kind === 'partial') return t('trajectory.partial');
-  if (failure.kind === 'unreadable')
-    return t('trajectory.loadFailed', { message: failure.message });
-  return t(`trajectory.window.${failure.kind}`);
 }
 
 /**
@@ -92,7 +80,7 @@ export function TrajectorySummaryBar({
   const failureAlert = warnings
     .map((warning) =>
       warning.kind === 'refresh-failed' || warning.kind === 'navigation-failed'
-        ? failureText(warning.failure, t)
+        ? trajectoryFailureText(warning.failure, t)
         : '',
     )
     .filter(Boolean)
@@ -223,8 +211,14 @@ export function TrajectorySummaryBar({
         <button
           type="button"
           className={styles.iconButton}
-          onClick={onRefresh}
-          disabled={!canRefresh || history}
+          onClick={() => {
+            if (canRefresh) onRefresh();
+          }}
+          // A read in progress only marks it busy: `disabled` would drop the
+          // focus of a reader who just pressed it. An earlier window has
+          // nothing to refresh at all.
+          disabled={history}
+          aria-disabled={!canRefresh}
           aria-label={t('common.refresh')}
           title={t('common.refresh')}
         >
@@ -322,7 +316,7 @@ function WarningItem({
                 ? 'trajectory.refreshStale'
                 : 'trajectory.window.failed',
             )}{' '}
-            {failureText(warning.failure, t)}
+            {trajectoryFailureText(warning.failure, t)}
           </p>
           <div className={styles.popoverActions}>
             {isRetryableFailure(warning.failure) ? (

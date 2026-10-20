@@ -1582,17 +1582,67 @@ describe('TrajectoryPanel', () => {
     expect(container.querySelector('[role="grid"]')).toBeNull();
   });
 
+  it('keeps an empty session empty when its refresh fails', async () => {
+    let fail = false;
+    const container = await render(async () => {
+      if (fail) throw new Error('offline');
+      return page([]);
+    });
+    fail = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    const placeholder = container.querySelector(`.${styles.placeholder}`);
+    expect(text(placeholder)).toContain('No records');
+    expect(text(placeholder)).not.toContain('Loading');
+    expect(
+      container.querySelector('[data-testid="trajectory-failure-alert"]'),
+    ).not.toBeNull();
+  });
+
+  it('brings the top boundary back into view when Home reaches the first row', async () => {
+    const container = await render(async () =>
+      page(
+        Array.from({ length: 60 }, (_, index) =>
+          userText(`message-${index}`, `rec-${index}`),
+        ),
+      ),
+    );
+    const grid = container.querySelector<HTMLElement>('[role="grid"]')!;
+    // jsdom has no element scrolling; the virtualizer scrolls through this.
+    const scrollTo = vi.fn((options: ScrollToOptions) => {
+      grid.scrollTop = options.top ?? grid.scrollTop;
+      grid.dispatchEvent(new Event('scroll'));
+    });
+    grid.scrollTo = scrollTo as unknown as typeof grid.scrollTo;
+    await act(async () => {
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
+      );
+    });
+    expect(grid.scrollTop).toBeGreaterThan(0);
+    await act(async () => {
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Home', bubbles: true }),
+      );
+    });
+    // Row 0 starts below the boundary row; aligning to it would hide that.
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ top: 0 }),
+    );
+  });
+
   it('waits for a loader instead of fetching without one', async () => {
     const container = await render(undefined);
 
     expect(container.querySelector('[role="grid"]')).toBeNull();
     expect(
-      (
-        container.querySelector(
-          'button[aria-label="Refresh"]',
-        ) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
+      container
+        .querySelector('button[aria-label="Refresh"]')!
+        .getAttribute('aria-disabled'),
+    ).toBe('true');
   });
 
   it('moves the selection with the arrow keys', async () => {
