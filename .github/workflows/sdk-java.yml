@@ -42,8 +42,9 @@ jobs:
     # sdk-java-tests.lock in turn. Run 39239991665 waited the old 60-minute
     # budget and died before Maven started, so each acquisition now waits 90
     # minutes. Ceiling: ~11 minutes of setup + 90 of wait + the fast tier's
-    # own ~15-minute hold + margin.
-    timeout-minutes: 150
+    # own ~15-minute hold + margin. Only the ubuntu leg can reach the ECS
+    # pool; the macOS and Windows legs never take the lock, so they keep 90.
+    timeout-minutes: "${{ matrix.os == 'ubuntu-latest' && 150 || 90 }}"
     strategy:
       fail-fast: false
       matrix:
@@ -221,10 +222,12 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
+          start=$SECONDS
           if ! flock --wait 5400 9; then
             echo "::error::sdk-java host lock not acquired within 90 minutes"
             exit 1
           fi
+          echo "::notice::sdk-java host lock acquired after $((SECONDS - start))s"
           mvn --batch-mode --no-transfer-progress clean test
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
@@ -424,7 +427,7 @@ jobs:
     # run 39239991665's fast gate exhausted the old 60-minute wait before
     # Maven started. Each of these two Maven steps can now wait 90 minutes.
     # Allow both waits, 50 minutes of verification, 30 minutes of setup and
-    # 20 minutes of margin.
+    # 20 minutes for the install step.
     timeout-minutes: 280
     services:
       mariadb:
@@ -625,10 +628,12 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
+          start=$SECONDS
           if ! flock --wait 5400 9; then
             echo "::error::sdk-java host lock not acquired within 90 minutes"
             exit 1
           fi
+          echo "::notice::sdk-java host lock acquired after $((SECONDS - start))s"
           # Seed from the host-shared repo (cache-restored on hosted runners)
           # so it and the egress proxy keep paying off for the job-local copy.
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
@@ -643,10 +648,12 @@ jobs:
           set -o pipefail
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
+          start=$SECONDS
           if ! flock --wait 5400 9; then
             echo "::error::sdk-java host lock not acquired within 90 minutes"
             exit 1
           fi
+          echo "::notice::sdk-java host lock acquired after $((SECONDS - start))s"
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
             -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
             -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check

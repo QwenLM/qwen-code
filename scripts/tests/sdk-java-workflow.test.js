@@ -103,6 +103,9 @@ describe('SDK Java self-hosted workflow guards', () => {
       '::error::sdk-java host lock not acquired within 90 minutes',
     );
     expect(block).toContain(
+      'echo "::notice::sdk-java host lock acquired after $((SECONDS - start))s"',
+    );
+    expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
   });
@@ -712,24 +715,56 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       // one acquisition budget applies to every lane; run 39239991665 died at
       // the old 60-minute wait before Maven started.
       expect(seconds, s.name).toBe(90 * 60);
+      expect(s.run, s.name).toContain(
+        `::error::sdk-java host lock not acquired within ${seconds / 60} minutes`,
+      );
       return seconds;
     });
+    // One acquisition budget applies to every lane, tested rather than only
+    // stated in the comments: a fourth lock site added with a different budget
+    // must not pass green.
+    expect(
+      new Set(
+        [...workflow.matchAll(/flock --wait (\d+) 9/g)].map((match) =>
+          Number(match[1]),
+        ),
+      ),
+    ).toEqual(new Set([90 * 60]));
     // The ceiling must absorb one full lock wait per acquisition — this job
-    // takes the lock once per Maven step — plus the ~50 minutes of measured
-    // Maven work and ~30 minutes of uncapped setup. Derive it from the step
-    // count so another locked step cannot silently overdraw it.
+    // takes the lock once per Maven step — plus the ~20-minute install hold,
+    // the ~50 minutes of measured verify work and ~30 minutes of uncapped
+    // setup. Derive it from the step count so another locked step cannot
+    // silently overdraw it.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(
       lockWaits.reduce((total, seconds) => total + seconds, 0) +
+        20 * 60 +
         50 * 60 +
         30 * 60,
     );
-    // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured hold (the sdk-java suite plus
-    // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
-    expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      lockWaits[0] + 925 + 11 * 60,
+    // The sibling test job shares the same per-host lock: parse its own wait
+    // rather than borrowing the MariaDB lane's, then size its ECS ceiling from
+    // that. The ceiling is scoped to the ubuntu leg that can reach the pool;
+    // macOS and Windows never take the lock and keep the pre-contention 90.
+    const testWaits = parsed.jobs.test.steps
+      .filter(
+        (s) =>
+          typeof s.run === 'string' && s.run.includes('sdk-java-tests.lock'),
+      )
+      .map((s) => Number(s.run.match(/flock --wait (\d+) 9/)?.[1]));
+    expect(testWaits).toHaveLength(1);
+    expect(testWaits[0]).toBe(90 * 60);
+    const ceiling = String(parsed.jobs.test['timeout-minutes']).match(
+      /^\$\{\{ matrix\.os == 'ubuntu-latest' && (\d+) \|\| (\d+) \}\}$/,
+    );
+    expect(ceiling).not.toBeNull();
+    const [ecsCeilingMinutes, hostedCeilingMinutes] = ceiling
+      .slice(1)
+      .map(Number);
+    expect(hostedCeilingMinutes).toBe(90);
+    expect(ecsCeilingMinutes * 60).toBeGreaterThanOrEqual(
+      testWaits[0] + 925 + 11 * 60,
     );
   });
 
