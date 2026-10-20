@@ -1307,6 +1307,53 @@ it('renders edit and newly created file results with the message diff view', () 
   ).toHaveLength(1);
 });
 
+it('annotates a rebuilt edit diff in the turn-calls panel', () => {
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({
+      id: 'edit-rebuilt',
+      toolCallId: 'edit-rebuilt',
+      toolName: 'edit',
+      rawInput: {
+        file_path: 'edited.ts',
+        old_string: 'old value',
+        new_string: 'updated value',
+      },
+    }),
+  ];
+  const view = render(<TurnCallsPanel turnId="u1" />);
+  for (const button of view.querySelectorAll<HTMLButtonElement>('li > button'))
+    act(() => button.click());
+  expect(view.textContent).toContain('updated value');
+  expect(view.textContent).toContain(
+    'Diff rebuilt from the tool call arguments',
+  );
+});
+
+it('does not annotate a recorded diff in the turn-calls panel', () => {
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({
+      id: 'edit-recorded',
+      toolCallId: 'edit-recorded',
+      toolName: 'edit',
+      rawInput: {
+        file_path: 'edited.ts',
+        old_string: 'old value',
+        new_string: 'updated value',
+      },
+      rawOutput: { fileDiff: '@@ -1 +1 @@\n-old value\n+updated value' },
+    }),
+  ];
+  const view = render(<TurnCallsPanel turnId="u1" />);
+  for (const button of view.querySelectorAll<HTMLButtonElement>('li > button'))
+    act(() => button.click());
+  expect(view.textContent).toContain('updated value');
+  expect(view.textContent).not.toContain(
+    'Diff rebuilt from the tool call arguments',
+  );
+});
+
 it('loads historical calls by record identity with recorded timing and cancellation', async () => {
   connection.sessionId = 'session';
   transcript.blocks = [userBlock('unrelated-live-user', 1)];
