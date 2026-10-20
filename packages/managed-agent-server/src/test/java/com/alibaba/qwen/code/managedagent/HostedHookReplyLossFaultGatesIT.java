@@ -643,7 +643,8 @@ class HostedHookReplyLossFaultGatesIT {
             boolean call = results.isEmpty()
                     && List.of("FG13_EXECUTE_LOSS", "FG13_STATUS_LOSS",
                             "FG13_CATALOG_LOSS", "FG13_HTTP_LOSS",
-                            "FG13_DENY_LOSS").contains(prompt);
+                            "FG13_DENY_LOSS", "FG13_FAILCLOSED_LOSS",
+                            "FG13_STORE_INTENT", "FG13_STORE_DISPATCH").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
