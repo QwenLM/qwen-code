@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   useState,
   useRef,
@@ -1161,6 +1162,12 @@ export const useLlmStream = (
       getPreferredEditor,
       onEditorClose,
       canUseToolResultFullTurnModel,
+      (call) =>
+        observeInteractiveModTool(
+          config,
+          call,
+          refreshContextFilesOnWriteRef.current,
+        ),
     );
 
   const pendingToolCallGroupDisplay = useMemo(() => {
@@ -4973,7 +4980,7 @@ export const useLlmStream = (
         // never-executed skill-write).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled') continue;
+          if (tc.status === 'cancelled' || tc.nativeAttemptsObserved) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -5063,6 +5070,7 @@ export const useLlmStream = (
       // Identify new, successful save_memory calls that we haven't processed yet.
       const newSuccessfulMemorySaves = completedAndReadyToSubmitTools.filter(
         (t) =>
+          !t.nativeAttemptsObserved &&
           t.request.name === 'save_memory' &&
           t.status === 'success' &&
           !processedMemoryToolsRef.current.has(t.request.callId),
@@ -5129,7 +5137,10 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (toolCall.status !== 'cancelled') {
+        if (
+          toolCall.status !== 'cancelled' &&
+          !toolCall.nativeAttemptsObserved
+        ) {
           llmClient?.recordCompletedToolCall(
             toolCall.request.name,
             toolCall.request.args as Record<string, unknown>,
@@ -5341,13 +5352,13 @@ export const useLlmStream = (
             'runtime',
           );
       }
-      const memoryWriteCandidates = completedAndReadyToSubmitTools.map(
-        (toolCall) => ({
+      const memoryWriteCandidates = completedAndReadyToSubmitTools
+        .filter((call) => !call.nativeAttemptsObserved)
+        .map((toolCall) => ({
           toolName: toolCall.request.name,
           args: toolCall.request.args as Record<string, unknown>,
           status: toolCall.status,
-        }),
-      );
+        }));
       const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
         config,
         memoryWriteCandidates,
@@ -5417,6 +5428,7 @@ export const useLlmStream = (
       }
 
       for (const toolCall of llmTools) {
+        if (toolCall.nativeAttemptsObserved) continue;
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,

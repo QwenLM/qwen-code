@@ -315,6 +315,8 @@ export function useOpenTuiLiveTurn(
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
+          waitingCallsRef.current = [];
+          setWaitingCalls([]);
           setBusy(false);
           // One queued submission per chained turn: a decline (e.g. an abort
           // landing inside an @-expansion read) must consume only its own
