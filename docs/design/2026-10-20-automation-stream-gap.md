@@ -13,10 +13,13 @@ the publication gate (FG11f) exercises it.
 
 The other FG11 slices fault what an automation _does_ — a lost reply, a store
 failure, a crash, a publication. They all assume the event journal a client
-reads is contiguous. Nothing in CI answers what happens when it is not: a
-consumer that has processed sequence `N` and next receives `N + k` has lost the
-events in between, and the recovery path is the one place where a duplicated
-effect is indistinguishable from a replayed one.
+reads is contiguous. Three gates already cover that on other streams — FG6e's
+`sse-gap` driver, FG8e's abort-and-resume cases, and FG12f's
+`HostedMcpStreamGapIT` — so FG11e is the automation-journal slice they do not
+cover. What none of them answers is what happens when this journal is not
+contiguous: a consumer that has processed sequence `N` and next receives
+`N + k` has lost the events in between, and the recovery path is the one place
+where a duplicated effect is indistinguishable from a replayed one.
 
 This matters for automations specifically because their work is driven from the
 journal. A gap that is silently papered over can drop a `fire_run`, and a gap
@@ -107,11 +110,18 @@ the journal shapes above, so they are scoped here rather than dropped:
 
 ## Open questions
 
-- Which branch decides replay versus snapshot is not yet located. Reading the
-  schema says both paths exist; the code that selects between them has not been
-  traced, and until it is, a fault arm cannot be aimed at it.
-- The client-visible contract for a detected gap — an error frame, a gap marker,
-  or a silent resume — is not specified anywhere in the FG11 design set.
+- The replay-versus-snapshot branch is located: `ManagedAgentService
+.replayableEvents` throws `ReplayCursorExpired` when the cursor falls below
+  `replay_floor_sequence`, and `ManagedEventStreamService` turns that into one
+  resync frame. What is still open is narrower — which automation event types
+  reach the Session stream, and how a projection gap is told apart from a slow
+  projection sitting at the same sequence.
+- The client-visible contract exists one design document outside the FG11 set:
+  JSON reads answer `409 cursor_expired` with `replay_floor_sequence` and
+  `snapshot_through_sequence`, and streams send one
+  `agent.session.resync_required` frame carrying `reload_snapshot`, deliberately
+  without an `id` so a reconnect cannot skip what the client lacks. What is open
+  is whether automation consumers honour `reload_snapshot`.
 
 ## Limits
 
