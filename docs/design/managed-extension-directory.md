@@ -16,6 +16,12 @@ user storage. Each direct child uses the existing `qwen-extension.json` format
 and contribution loaders, so extension authors do not need a second package
 format.
 
+For direct `qwen mcp add ...` invocations, place the managed option before `add`;
+same-named tokens after `add` remain server arguments. When top-level options
+precede `mcp`, use the existing server separator for literal flags, for example
+`qwen --safe-mode mcp add fixture node -- --managed-extensions server-argument`.
+Other MCP subcommands also accept the managed option after the subcommand.
+
 The option selects one collection root at process startup. No recursive scan,
 additional public environment variable/settings option, watcher, package format,
 marketplace, state-format migration, or deployment-specific packaging is introduced.

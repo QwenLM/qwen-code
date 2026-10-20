@@ -13,6 +13,12 @@
 子目录复用现有 `qwen-extension.json` 格式及贡献加载器，扩展作者无需维护第二套
 包格式。
 
+直接调用 `qwen mcp add ...` 时，请将 managed 选项放在 `add` 之前；`add` 之后的
+同名 token 仍作为服务器参数转发。当顶层选项位于 `mcp` 之前时，请使用既有的服务器
+参数分隔符转发字面 flag，例如
+`qwen --safe-mode mcp add fixture node -- --managed-extensions server-argument`。
+其他 MCP 子命令也支持在子命令之后指定 managed 选项。
+
 该选项在进程启动时选择一个集合根目录。不增加递归扫描、公开环境变量或 settings
 入口、watcher、新包格式、商店、状态格式迁移或部署专用装配。
 

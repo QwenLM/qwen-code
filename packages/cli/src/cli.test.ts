@@ -1127,6 +1127,156 @@ describe('runCliEntry', () => {
       },
     );
 
+    it.each(
+      ['--managed-extensions', '--managedExtensions'].flatMap((flag) =>
+        [false, true].flatMap((equals) =>
+          [false, true].flatMap((delimiter) =>
+            [false, true].map((exists) => ({
+              flag,
+              equals,
+              delimiter,
+              exists,
+            })),
+          ),
+        ),
+      ),
+    )(
+      'forwards managed-looking server arguments: $flag equals=$equals delimiter=$delimiter exists=$exists',
+      async ({ flag, equals, delimiter, exists }) => {
+        const value = exists ? managedRoot : path.join(managedRoot, 'missing');
+        const serverArgs = equals ? [`${flag}=${value}`] : [flag, value];
+        await runCliEntry([
+          'mcp',
+          ...(delimiter ? ['--'] : []),
+          'add',
+          'fixture',
+          'node',
+          ...serverArgs,
+        ]);
+
+        expect(mocks.mcpAddHandler).toHaveBeenCalledTimes(1);
+        expect(mocks.mcpAddHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'fixture',
+            commandOrUrl: 'node',
+            args: serverArgs,
+          }),
+        );
+        expect(
+          mocks.mcpAddHandler.mock.calls[0][0].managedExtensions,
+        ).toBeUndefined();
+        expect(mocks.main).not.toHaveBeenCalled();
+        expect(stderr.join('')).toBe('');
+        expect(process.exitCode).toBeUndefined();
+      },
+    );
+
+    it.each([
+      '--managed-extensions',
+      '--managedExtensions',
+      '--managed-extensions=',
+      '--managedExtensions=',
+    ])(
+      'forwards a valueless managed-looking server argument: %s',
+      async (flag) => {
+        await runCliEntry(['mcp', '--', 'add', 'fixture', 'node', flag]);
+
+        expect(mocks.mcpAddHandler).toHaveBeenCalledTimes(1);
+        expect(mocks.mcpAddHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ args: [flag] }),
+        );
+        expect(stderr.join('')).toBe('');
+        expect(process.exitCode).toBeUndefined();
+      },
+    );
+
+    it.each([
+      (root: string) => ['--managed-extensions', root],
+      (root: string) => [`--managed-extensions=${root}`],
+      (root: string) => ['--managedExtensions', root],
+      (root: string) => [`--managedExtensions=${root}`],
+    ])(
+      'keeps the managed prefix separate from the server tail: %j',
+      async (prefix) => {
+        const serverArgs = ['--managed-extensions', 'server-argument'];
+        await runCliEntry([
+          'mcp',
+          ...prefix(managedRoot),
+          '--',
+          'add',
+          'fixture',
+          'node',
+          ...serverArgs,
+        ]);
+
+        expect(mocks.mcpAddHandler).toHaveBeenCalledTimes(1);
+        expect(mocks.mcpAddHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            managedExtensions: managedRoot,
+            args: serverArgs,
+          }),
+        );
+        expect(stderr.join('')).toBe('');
+        expect(process.exitCode).toBeUndefined();
+      },
+    );
+
+    it('finds add after a managed prefix whose value is also add', async () => {
+      const cwd = process.cwd();
+      const root = path.join(managedRoot, 'add');
+      mkdirSync(root);
+      try {
+        process.chdir(managedRoot);
+        await runCliEntry([
+          'mcp',
+          '--managed-extensions',
+          'add',
+          'add',
+          'fixture',
+          'node',
+        ]);
+      } finally {
+        process.chdir(cwd);
+      }
+
+      expect(mocks.mcpAddHandler).toHaveBeenCalledTimes(1);
+      expect(mocks.mcpAddHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          managedExtensions: root,
+          name: 'fixture',
+          commandOrUrl: 'node',
+        }),
+      );
+      expect(stderr.join('')).toBe('');
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it.each([
+      (root: string) => ['--managed-extensions', path.join(root, 'missing')],
+      (root: string) => [
+        '--managed-extensions',
+        root,
+        '--managedExtensions',
+        root,
+      ],
+    ])(
+      'rejects an invalid managed add prefix before invoking the handler: %j',
+      async (prefix) => {
+        await runCliEntry([
+          'mcp',
+          ...prefix(managedRoot),
+          'add',
+          'fixture',
+          'node',
+        ]);
+
+        expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+        expect(mocks.main).not.toHaveBeenCalled();
+        expect(stderr.join('')).toContain('Invalid --managed-extensions');
+        expect(process.exitCode).toBe(1);
+      },
+    );
+
     it('rejects a managed root that does not exist', async () => {
       await runCliEntry([
         'mcp',

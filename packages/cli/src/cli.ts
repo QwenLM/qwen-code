@@ -331,14 +331,14 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
   return undefined;
 }
 
-function firstMcpPositionalArg(argv: readonly string[]): string | undefined {
+function firstMcpPositionalIndex(argv: readonly string[]): number | undefined {
   const normalized = argv.map((arg) =>
     arg.replace(/^--managedExtensions(?==|$)/, '--managed-extensions'),
   );
   for (let i = 0; i < normalized.length; i++) {
     const arg = normalized[i]!;
     if (arg === '--') return undefined;
-    if (!arg.startsWith('-')) return arg;
+    if (!arg.startsWith('-')) return i;
     if (!/^--managed-extensions(?:=|$)/.test(arg)) return undefined;
     i = skipOptionValues(normalized, i);
   }
@@ -350,7 +350,7 @@ function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
   const delimiter = argv.indexOf('--', 1);
   if (
     delimiter === -1 ||
-    firstMcpPositionalArg(argv.slice(1, delimiter)) !== undefined
+    firstMcpPositionalIndex(argv.slice(1, delimiter)) !== undefined
   ) {
     return argv;
   }
@@ -455,13 +455,13 @@ async function printBootstrapVersion(): Promise<void> {
 }
 
 async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
-  const argv: readonly string[] = normalizeMcpFastPathArgv(
+  let argv: readonly string[] = normalizeMcpFastPathArgv(
     normalizeServeFastPathArgv(rawArgv),
   );
   // Only managed options may precede the subcommand: this parser does not
   // register other global flags, and add treats unknown options as arguments.
-  const subcommand = firstMcpPositionalArg(argv.slice(1));
-  if (subcommand === undefined) {
+  const subcommandIndex = firstMcpPositionalIndex(argv.slice(1));
+  if (subcommandIndex === undefined) {
     printMcpHelp();
     return;
   }
@@ -476,13 +476,13 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     import('@qwen-code/qwen-code-core/extension/managed-extension-dir.js'),
   ]);
 
+  const managedOption = {
+    ...TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
+    coerce: resolveManagedExtensionsDir,
+  };
   const parser = yargsInstance([])
     .scriptName('qwen')
     .command(mcpCommand)
-    .option('managed-extensions', {
-      ...TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
-      coerce: resolveManagedExtensionsDir,
-    })
     .version(false)
     .help()
     .alias('h', 'help')
@@ -496,9 +496,24 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     })
     .exitProcess(false);
 
-  // Preserve the server tail before the initial command-discovery parse.
-  if (subcommand === 'add') {
-    parser.parserConfiguration({ 'populate--': true });
+  if (argv[subcommandIndex + 1] === 'add') {
+    // Registering managed here would consume same-named server arguments even
+    // before add's unknown-options-as-args builder runs. Parse only its prefix.
+    const prefix = await parseYargsCommand(
+      yargsInstance([])
+        .scriptName('qwen mcp')
+        .option('managed-extensions', managedOption)
+        .exitProcess(false),
+      argv.slice(1, subcommandIndex + 1),
+    );
+    if (!prefix) return;
+    argv = ['mcp', ...argv.slice(subcommandIndex + 1)];
+    parser.parserConfiguration({ 'populate--': true }).middleware((parsed) => {
+      parsed['managedExtensions'] = prefix['managedExtensions'];
+      parsed['managed-extensions'] = prefix['managed-extensions'];
+    });
+  } else {
+    parser.option('managed-extensions', managedOption);
   }
 
   if (hasFlag(argv.slice(2), '--help', '-h')) {
@@ -533,14 +548,14 @@ async function parseYargsHelp(
 async function parseYargsCommand(
   parser: Argv,
   argv: readonly string[],
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+): Promise<ArgumentsCamelCase | undefined> {
+  return new Promise<ArgumentsCamelCase | undefined>((resolve, reject) => {
     void Promise.resolve(
       parser.parse(
         argv,
         (
           error: Error | undefined,
-          _argv: ArgumentsCamelCase,
+          parsedArgv: ArgumentsCamelCase,
           output: string,
         ) => {
           if (error instanceof FatalError) {
@@ -552,7 +567,7 @@ async function parseYargsCommand(
             writeStderrLine(error.message);
             process.exitCode = 1;
           }
-          resolve();
+          resolve(error ? undefined : parsedArgv);
         },
       ),
     ).catch(reject);
