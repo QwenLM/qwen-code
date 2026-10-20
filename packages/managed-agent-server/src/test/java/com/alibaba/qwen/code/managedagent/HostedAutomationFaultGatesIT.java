@@ -1359,6 +1359,12 @@ class HostedAutomationFaultGatesIT {
         workspaceLifecycle = true;
         boot("fg11d");
         String session = createSession("close-queued");
+        // Park the scanner until the Session has closed: a minute boundary in
+        // the setup window would otherwise let the definition fire while the
+        // Session is still active, and that prompt would outlive the close and
+        // redden the final assertion for the wrong reason.
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
         String id = request("POST", "/v1/agent-automations",
                 definition(session, "FG11D_CLOSE", "* * * * *"), "fg11d-close-base", 202).path("id").asText();
         String close = request("POST", "/v1/agents/sessions/" + session + "/close", null, "fg11d-close", 202)
@@ -1366,6 +1372,8 @@ class HostedAutomationFaultGatesIT {
         waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(request("GET",
                 "/v1/agents/sessions/" + session + "/operations/" + close, null, null, 200)
                 .path("status").asText()).as("the close completes").isEqualTo("completed"));
+        // The close is what decides the slot's fate, so the scanner starts here.
+        scannerHold.countDown();
         waiting().atMost(Duration.ofSeconds(200)).untilAsserted(() -> assertThat(jdbc.queryForList(
                 "SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND outcome = 'skipped'", String.class, tenant, id))
