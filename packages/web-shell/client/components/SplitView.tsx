@@ -71,8 +71,7 @@ function isStandaloneSessionConflictError(error: unknown): boolean {
   const body: unknown = error.body;
   if (typeof body !== 'object' || body === null) return false;
   return (
-    (body as Record<string, unknown>)['code'] ===
-    'standalone_session_conflict'
+    (body as Record<string, unknown>)['code'] === 'standalone_session_conflict'
   );
 }
 
@@ -474,10 +473,7 @@ export function SplitView({
       if (!map.has(id)) {
         const known = lastKnownById.current.get(id);
         if (known) {
-          map.set(
-            id,
-            known.displayName?.trim() || known.sessionId.slice(0, 8),
-          );
+          map.set(id, known.displayName?.trim() || known.sessionId.slice(0, 8));
         }
       }
     }

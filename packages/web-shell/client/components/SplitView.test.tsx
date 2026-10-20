@@ -65,8 +65,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   // drive the incomplete-page fallback: add the id to `terminalArchived`.
   useSession: () => {
     const sessionId = React.useContext(PaneSessionContext);
-    const archived =
-      sessionId !== undefined && terminalArchived.has(sessionId);
+    const archived = sessionId !== undefined && terminalArchived.has(sessionId);
     return {
       connection: archived
         ? {
@@ -208,9 +207,7 @@ vi.mock('../hooks/useOtherWorkspaceSessions', () => ({
   },
 }));
 
-function setOtherWorkspace(
-  partial: Partial<typeof otherWorkspaceState>,
-): void {
+function setOtherWorkspace(partial: Partial<typeof otherWorkspaceState>): void {
   Object.assign(otherWorkspaceState, partial);
   act(() => forceOtherWorkspace?.());
 }
@@ -327,7 +324,10 @@ beforeEach(() => {
     getStandaloneSession: vi.fn(async () => {
       throw new DaemonHttpError(
         404,
-        { error: 'standalone session not found', code: 'standalone_session_not_found' },
+        {
+          error: 'standalone session not found',
+          code: 'standalone_session_not_found',
+        },
         'standalone session not found',
       );
     }),
@@ -2059,14 +2059,14 @@ describe('SplitView', () => {
       // left to re-trigger the reconcile afterwards.
       let parentIds: string[] = ['stale1', 's2', 's3'];
       function Parent() {
-        const [ids, setIds] = React.useState<string[]>([
-          'stale1',
-          's2',
-          's3',
-        ]);
+        const [ids, setIds] = React.useState<string[]>(['stale1', 's2', 's3']);
         parentIds = ids;
         return (
-          <SplitView sessionIds={ids} onPanesChange={setIds} onExit={() => {}} />
+          <SplitView
+            sessionIds={ids}
+            onPanesChange={setIds}
+            onExit={() => {}}
+          />
         );
       }
       container = document.createElement('div');
@@ -2134,7 +2134,10 @@ describe('SplitView', () => {
       workspaceClient.getStandaloneSession = vi.fn(async () => {
         throw new DaemonHttpError(
           404,
-          { error: 'standalone session not found', code: 'standalone_session_not_found' },
+          {
+            error: 'standalone session not found',
+            code: 'standalone_session_not_found',
+          },
           'standalone session not found',
         );
       });
