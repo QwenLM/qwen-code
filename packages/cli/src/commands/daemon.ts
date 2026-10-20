@@ -73,6 +73,13 @@ interface StopArgs {
   force?: boolean;
 }
 
+interface RestartArgs {
+  port?: number;
+  token?: string;
+  web: boolean;
+  'require-auth': boolean;
+}
+
 interface StartArgs {
   port?: number;
   hostname: string;
@@ -1180,6 +1187,86 @@ async function handleStop(argv: StopArgs): Promise<void> {
   if (failed) process.exitCode = 1;
 }
 
+async function handleRestart(argv: RestartArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const { entries } = readDaemonDiscoveries();
+  const error = selectionError(entries, { port: argv.port });
+  if (error) {
+    writeStderrLine(`qwen daemon: ${error}`);
+    process.exitCode = 1;
+    return;
+  }
+  const selected = selectDaemonEntries(entries, { port: argv.port });
+  if (selected.length !== 1) {
+    writeStderrLine(
+      'qwen daemon: restart needs exactly one registered daemon; pass --port.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const record = selected[0]!.record;
+  const token =
+    argv.token?.trim() || process.env['QWEN_SERVER_TOKEN']?.trim() || undefined;
+  if (record.auth === 'bearer' && !token) {
+    writeStderrLine(
+      'qwen daemon: restarting a bearer daemon requires --token or QWEN_SERVER_TOKEN.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const entry = resolveCliEntry();
+  if (!entry) {
+    writeStderrLine(
+      'qwen daemon: cannot determine the CLI entry; restart requires the qwen CLI.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const javaScriptEntry = isJavaScriptEntry(entry);
+  const command = javaScriptEntry ? process.execPath : entry;
+  const prefix = javaScriptEntry ? [entry] : [];
+  const env = { ...process.env };
+  if (record.auth === 'bearer') {
+    env['QWEN_SERVER_TOKEN'] = token!;
+  } else {
+    delete env['QWEN_SERVER_TOKEN'];
+  }
+
+  const stopArgs = [...prefix, 'daemon', 'stop', '--port', String(record.port)];
+  if (process.platform === 'win32') stopArgs.push('--force');
+  const stopped = spawnSync(command, stopArgs, { stdio: 'inherit', env });
+  if (stopped.status !== 0) {
+    process.exitCode = 1;
+    return;
+  }
+
+  const startArgs = [
+    ...prefix,
+    'daemon',
+    'start',
+    '--port',
+    String(record.port),
+    '--hostname',
+    record.hostname,
+    '--wait',
+  ];
+  const workspaces =
+    record.workspaces.length > 0
+      ? record.workspaces
+      : [record.primaryWorkspace];
+  for (const workspace of workspaces) {
+    startArgs.push('--workspace', workspace);
+  }
+  if (argv.web === false) startArgs.push('--no-web');
+  if (argv['require-auth'] || record.auth === 'bearer') {
+    startArgs.push('--require-auth');
+  }
+  const started = spawnSync(command, startArgs, { stdio: 'inherit', env });
+  if (started.status !== 0) process.exitCode = 1;
+}
+
 const startCommand: CommandModule<unknown, StartArgs> = {
   command: 'start',
   describe: 'Start a local qwen serve daemon in the background',
@@ -1306,6 +1393,35 @@ const stopCommand: CommandModule<unknown, StopArgs> = {
   },
 };
 
+const restartCommand: CommandModule<unknown, RestartArgs> = {
+  command: 'restart',
+  describe: 'Restart a local qwen serve daemon with its recorded settings',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        describe: 'Daemon port; required when more than one is registered',
+      })
+      .option('token', {
+        type: 'string',
+        describe:
+          'Bearer token for a restarted daemon; prefer QWEN_SERVER_TOKEN',
+      })
+      .option('web', {
+        type: 'boolean',
+        default: true,
+        describe: 'Serve the Web Shell; use --no-web for API-only',
+      })
+      .option('require-auth', {
+        type: 'boolean',
+        default: false,
+        describe: 'Require the bearer token even on loopback',
+      }),
+  handler: async (argv) => {
+    await handleRestart(argv);
+  },
+};
+
 export const daemonCommand: CommandModule = {
   command: 'daemon',
   describe: 'Inspect and control local qwen serve daemons',
@@ -1315,6 +1431,7 @@ export const daemonCommand: CommandModule = {
       .command(statusCommand)
       .command(logsCommand)
       .command(stopCommand)
+      .command(restartCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   handler: () => {},
