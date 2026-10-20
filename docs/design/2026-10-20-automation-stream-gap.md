@@ -32,10 +32,30 @@ Three shapes, only the first of which is visible on the wire:
 - **Projection gap.** `covered_sequence` on `ma_event_stream` advances past
   events that were never projected into the readable record. The client sees a
   consistent-looking record that is missing history.
-- **Wake gap.** A wake claims a sequence above work that actually completed.
-  `TransportConsumerStore.claimWake` refuses a redelivered or older wake, but a
-  wake that jumps forward is a different question, and it is the one that can
-  reorder an occurrence against its own settlement.
+- **Lost activation after a claim.** `wake_covered_sequence` is a dedup
+  watermark, not a completion watermark: `TransportWakeActivator.onWake` claims
+  the sequence before it submits the load, and a rejected submission keeps the
+  claim and leaves the wake to SQL wake recovery. A delayed or reordered wake is
+  therefore normal; the fault is narrower — the claim committed and the
+  activation never ran (process exit, dropped load). The property is that the
+  independent SQL wake recovery still finds the committed, unconsumed input, and
+  the claim watermark is never read as progress.
+
+## Scope from the tracker
+
+The tracker's FG11e row names three scenarios; the first two are not covered by
+the journal shapes above, so they are scoped here rather than dropped:
+
+- **Task stream resume.** Disconnect the run's task event stream between `fire`
+  and `settle`, then resume it, and assert the terminal task state is delivered
+  exactly once. The task stream carries its own cursor and expiry
+  (`ManagedTaskService`), so a SESSION snapshot watermark cannot stand in for it.
+- **List cursor stability.** Page the Session's runs list while a new run is
+  inserted, and assert no entry is skipped or duplicated across the boundary.
+- **Session SSE resume.** Resume a Session stream with `Last-Event-ID`; this
+  first needs a check that automation events are observable on that stream at
+  all, and if they are not, the scenario is recorded as deferred with that check
+  as its precondition.
 
 ## The mechanisms a gate would lean on
 
@@ -63,10 +83,13 @@ Three shapes, only the first of which is visible on the wire:
 3. **No lost occurrence.** An occurrence whose events fall inside the gap still
    ends in a terminal outcome, or is provably still pending. Silence is a
    failure.
-4. **The snapshot fallback is chosen on evidence.** When the gap reaches below
-   `replay_floor_sequence`, the recovery must read from `current_snapshot_id`
-   and know that the snapshot is stale (`snapshot_stale_since` set) rather than
-   treating it as complete.
+4. **The snapshot fallback is chosen on evidence.** A cursor below
+   `replay_floor_sequence` triggers the fallback regardless of staleness:
+   `ManagedSnapshotStore` sets `snapshot_stale_since` only when
+   `covered_sequence` overtakes the snapshot, so a floor-crossing cursor can
+   meet a snapshot that is still current. The gate must check the snapshot's own
+   coverage and the continuation after it, and cover a fresh snapshot and a
+   stale one as separate cases.
 
 ## Fixture requirements
 

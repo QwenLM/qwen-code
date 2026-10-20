@@ -26,9 +26,25 @@ FG11b 从相反方向钉住的失效形态。
   都会产生它。
 - **投影缺口。** `ma_event_stream` 上的 `covered_sequence` 越过了从未投影进可读
   记录的事件。客户端看到的是一份自洽但缺历史的记录。
-- **唤醒缺口。** 一次 wake 认领了高于实际完成工作的序号。
-  `TransportConsumerStore.claimWake` 会拒绝重投或更旧的 wake，但「向前跳」的
-  wake 是另一个问题，也正是会让 occurrence 与其自身结算错序的那一个。
+- **认领后激活丢失。** `wake_covered_sequence` 是去重水位，不是完成水位：
+  `TransportWakeActivator.onWake` 先认领序号再提交 load，提交被拒时认领仍然
+  保留，并把该 wake 留给 SQL wake recovery。因此延迟或乱序的 wake 是正常的；
+  故障更窄——认领已提交而激活从未执行（进程退出、load 被丢弃）。性质是独立的
+  SQL wake recovery 仍能找到已提交且未消费的输入，且认领水位绝不当作进度读。
+
+## 来自 tracker 的范围
+
+tracker 的 FG11e 行点名三个场景；前两个不被上面的 journal 形态覆盖，因此在此
+定界而不是丢弃：
+
+- **task 流续传。** 在 `fire` 与 `settle` 之间断开该 run 的 task 事件流，再续传，
+  断言终态恰好投递一次。task 流有自己的游标与过期判定（`ManagedTaskService`），
+  SESSION 的快照水位不能代替它。
+- **列表游标稳定。** 在插入新 run 的同时翻页 Session 的 runs 列表，断言跨页边界
+  没有条目被跳过或重复。
+- **Session SSE 续传。** 用 `Last-Event-ID` 续传 Session 流；这首先需要确认
+  automation 事件在该流上是否可观测，若不可观测，则把该场景记为延期，并把该
+  检查写成前置条件。
 
 ## 门禁会依赖的机制
 
@@ -50,9 +66,11 @@ FG11b 从相反方向钉住的失效形态。
    结算一次。这是 FG11a/b 从丢应答侧钉过的性质；缺口门禁要从缺事件侧再钉一遍。
 3. **没有丢失的 occurrence。** 落在缺口内的事件所属 occurrence 仍须进入终态，
    或有证据地保持未决。沉默即失败。
-4. **快照回退按证据选择。** 当缺口低到 `replay_floor_sequence` 之下，恢复必须从
-   `current_snapshot_id` 读，并知道该快照已陈旧（`snapshot_stale_since` 已置），
-   而不是把它当作完整。
+4. **快照回退按证据选择。** 游标低于 `replay_floor_sequence` 即触发回退，与陈旧
+   与否无关：`ManagedSnapshotStore` 只在 `covered_sequence` 越过快照时才置
+   `snapshot_stale_since`，所以穿越 floor 的游标可能遇到仍然最新的快照。门禁
+   必须检查快照自身的覆盖范围与之后的续读，并把「新快照」与「陈旧快照」分成
+   两个用例。
 
 ## 夹具要求
 
