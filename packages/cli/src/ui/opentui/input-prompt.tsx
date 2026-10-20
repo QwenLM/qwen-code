@@ -46,6 +46,7 @@ import {
   useTerminalDimensions,
 } from '@opentui/react';
 import {
+  handleEditorKey,
   isDeleteWordBackwardSequence,
   isPrintableKeyInput,
   isUnmodifiedBackspaceSequence,
@@ -62,7 +63,16 @@ import path from 'node:path';
 import { copyFile, mkdir, stat, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { classifyPastedImagePaths } from '../utils/pasted-image-paths.js';
-import type { OpenTuiInputSubmission } from './input-submission.js';
+import { editTextInExternalEditor } from '../utils/external-editor.js';
+import {
+  allowEditorTypeInSandbox,
+  isValidEditorType,
+} from '@qwen-code/qwen-code-core/utils/editor.js';
+import type {
+  OpenTuiInputSubmission,
+  OpenTuiCancelSettled,
+  OpenTuiComposerHandle,
+} from './input-submission.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { normalizeDescription, type Suggestion } from '../utils/suggestions.js';
@@ -211,13 +221,14 @@ export interface InputPromptProps {
     >,
   ) => boolean | Promise<boolean>;
   onNotice?: (text: string) => void;
+  preferredEditor?: string;
   /** Submitted prompts (chronological) feeding history navigation. */
   userMessages: readonly string[];
   config?: Config;
   /** Live agent turn in flight: Esc interrupts instead of clearing. */
   streaming?: boolean;
   /** Esc-while-streaming hook (aborts the live turn in the parent). */
-  onInterrupt?: () => void;
+  onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   onCancelCommand?: () => boolean;
   approvalMode?: ApprovalMode;
   placeholder?: string;
@@ -226,7 +237,7 @@ export interface InputPromptProps {
   onEscapeArmedChange?: (armed: boolean) => void;
   /** Lets the parent read/clear the composer buffer (Ctrl+Q queue). */
   composerHandle?: {
-    current: { getText: () => string; setText: (t: string) => void } | null;
+    current: OpenTuiComposerHandle | null;
   };
   /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
   queueLength?: number;
@@ -289,19 +300,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
   const { width } = useTerminalDimensions();
   const renderer = useRenderer();
+  const focusRef = useRef(focus);
+  focusRef.current = focus;
   const editorRef = useRef<TextareaRenderable | null>(null);
-  useEffect(() => {
-    if (!props.composerHandle) return;
-    props.composerHandle.current = {
-      getText: () => editorRef.current?.plainText ?? '',
-      setText: (t: string) => {
-        editorRef.current?.setText(t);
-      },
-    };
-    return () => {
-      if (props.composerHandle) props.composerHandle.current = null;
-    };
-  }, [props.composerHandle]);
   const userMessagesRef = useRef(userMessages);
   userMessagesRef.current = userMessages;
   // Read through a ref inside refreshCompletion so recency updates never
@@ -614,9 +615,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
   const sessionId = config?.getSessionId?.();
   const sessionRef = useRef(sessionId);
+  const cancelPendingRef = useRef(false);
   useLayoutEffect(() => {
     if (sessionRef.current !== sessionId) {
       clearDraft();
+      cancelPendingRef.current = false;
       sessionRef.current = sessionId;
     }
     draftRef.current.valid = true;
@@ -633,6 +636,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       const current = el.plainText;
       const text = [submission.text, current].filter(Boolean).join(separator);
       el.setText(text);
+      el.gotoBufferEnd();
       draftRef.current.attachments.unshift(
         ...(submission.imagePaths ?? []).map((imagePath) => ({
           id: randomUUID(),
@@ -649,6 +653,61 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     },
     [showAttachments],
   );
+
+  const cancelTurn = useCallback(() => {
+    if (!onInterrupt || cancelPendingRef.current) return;
+    const draft = draftRef.current;
+    const empty =
+      !editorRef.current?.plainText &&
+      !draft.attachments.length &&
+      !draft.pending &&
+      !claimedDraftRef.current;
+    const session = sessionRef.current;
+    cancelPendingRef.current = true;
+    onInterrupt(({ queued, prompt }) => {
+      if (session !== sessionRef.current || !draftRef.current.valid) return;
+      cancelPendingRef.current = false;
+      const popped = onPopQueue?.();
+      const pending = [queued, popped].filter((entry) => entry != null);
+      if (pending.length) {
+        restoreSubmission(
+          {
+            text: pending.map((entry) => entry.text).join('\n\n'),
+            imagePaths: pending.flatMap((entry) => entry.imagePaths ?? []),
+            submittedPrompt: pending
+              .map((entry) => entry.submittedPrompt ?? entry.text)
+              .join('\n\n'),
+          },
+          '\n',
+        );
+      } else if (
+        empty &&
+        prompt &&
+        draft === draftRef.current &&
+        draft.valid &&
+        !editorRef.current?.plainText &&
+        !draft.attachments.length &&
+        !draft.pending &&
+        !claimedDraftRef.current
+      ) {
+        restoreSubmission(prompt);
+      }
+    });
+  }, [onInterrupt, onPopQueue, restoreSubmission]);
+
+  useEffect(() => {
+    if (!props.composerHandle) return;
+    props.composerHandle.current = {
+      getText: () => editorRef.current?.plainText ?? '',
+      setText: (text) => {
+        editorRef.current?.setText(text);
+      },
+      cancelTurn,
+    };
+    return () => {
+      if (props.composerHandle) props.composerHandle.current = null;
+    };
+  }, [props.composerHandle, cancelTurn]);
 
   const submitDraft = useCallback(
     async (raw: string, deferUntilIdle = false) => {
@@ -980,10 +1039,75 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     promoteImagePaths,
   ]);
 
+  const editorRequestRef = useRef<Draft | null>(null);
+  const openExternalEditor = useCallback(async () => {
+    if (editorRequestRef.current) return;
+    const draft = draftRef.current;
+    editorRequestRef.current = draft;
+    let suspended = false;
+    try {
+      while (draft.pending) await draft.pending;
+      const el = editorRef.current;
+      if (
+        !el ||
+        !focusRef.current ||
+        !draft.valid ||
+        draftRef.current !== draft
+      )
+        return;
+      const before = expandPendingPastePlaceholders(
+        el.plainText,
+        pendingPastesRef.current,
+      );
+      const preferred = props.preferredEditor;
+      const after = editTextInExternalEditor(before, {
+        preferredEditor:
+          preferred &&
+          isValidEditorType(preferred) &&
+          allowEditorTypeInSandbox(preferred)
+            ? preferred
+            : undefined,
+        beforeLaunch: () => {
+          suspended = true;
+          renderer.suspend();
+        },
+      });
+      if (
+        draft.valid &&
+        draftRef.current === draft &&
+        editorRef.current === el &&
+        after !== before
+      ) {
+        el.replaceText(after);
+        el.gotoBufferEnd();
+        restoredProvenanceRef.current = null;
+        historyRestoredTextRef.current = null;
+        setTextVersion((v) => v + 1);
+      }
+    } catch (error) {
+      if (draft.valid && draftRef.current === draft) {
+        onNotice?.(
+          `Could not open external editor: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    } finally {
+      if (editorRequestRef.current === draft) editorRequestRef.current = null;
+      if (suspended) {
+        try {
+          renderer.resume();
+        } catch (error) {
+          onNotice?.(
+            `Could not resume terminal: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+  }, [props.preferredEditor, renderer, onNotice]);
+
   // ── keyboard: global handlers run BEFORE the focused editor, so
   //    preventDefault here keeps the editor from double-handling a key ─────
   useKeyboard((key: KeyEvent) => {
-    if (!focus) return;
+    if (!focus || key.eventType === 'release') return;
     const el = editorRef.current;
 
     // Any non-Esc key disarms the double-Esc clear window.
@@ -994,6 +1118,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
 
     if (!el) return;
+    if (key.ctrl && key.name === 'x') {
+      setSelectedAttachment(-1);
+      key.preventDefault();
+      void openExternalEditor();
+      return;
+    }
     const selected = selectedAttachmentRef.current;
     if (selected >= 0) {
       let handled = true;
@@ -1029,11 +1159,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       key.name === 'up' &&
       !key.ctrl &&
       !key.shift &&
-      el.logicalCursor.row === 0 &&
+      el.scrollY + el.visualCursor.visualRow === 0 &&
       draftRef.current.attachments.length > 0
     ) {
       setSelectedAttachment(draftRef.current.attachments.length - 1);
       key.preventDefault();
+      return;
+    }
+    if (handleEditorKey(el, key)) {
+      setTextVersion((v) => v + 1);
       return;
     }
     if (key.name === 'q' && key.ctrl) {
@@ -1126,8 +1260,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
     if (
       key.name === 'backspace' &&
-      (key.ctrl || key.super || key.meta || key.option) &&
-      key.eventType !== 'release'
+      (key.ctrl || key.super || key.meta || key.option)
     ) {
       // DELETE_WORD_BACKWARD parity (keyBindings.ts: ctrl/command+backspace;
       // the legacy \x1f byte is consumed on the raw-input path). Kitty
@@ -1145,7 +1278,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     // next Enter/Tab.
     if (
       key.sequence === '!' &&
-      key.eventType !== 'release' &&
       el.plainText.length === 0 &&
       suggestions.length === 0 &&
       onToggleShellMode
@@ -1191,11 +1323,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // is streaming it interrupts too — one keypress does both.
       if (shellModeActive) {
         onToggleShellMode?.();
-        if (streaming) onInterrupt?.();
+        if (streaming) cancelTurn();
         return;
       }
       if (streaming) {
-        onInterrupt?.();
+        cancelTurn();
         return;
       }
       const commandCancelled = onCancelCommand?.() ?? false;

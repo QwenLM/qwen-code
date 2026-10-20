@@ -70,7 +70,11 @@ import {
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
-import type { OpenTuiInputSubmission } from './input-submission.js';
+import type {
+  OpenTuiInputSubmission,
+  OpenTuiCancelSettled,
+  OpenTuiComposerHandle,
+} from './input-submission.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -180,7 +184,7 @@ export interface OpenTuiAppProps {
   /** False while waiting on the API (↑), true once content arrives (↓). */
   isReceivingContent?: boolean;
   /** Aborts the in-flight turn (Esc while streaming). */
-  onInterrupt?: () => void;
+  onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   approvalMode?: ApprovalMode;
   /** Mid-turn queued prompts (queue rows + badge + Esc pop-back). */
   messageQueue?: readonly string[];
@@ -197,7 +201,7 @@ export interface OpenTuiAppProps {
   onRenderError?: (error: Error) => void;
   /** Entry-owned composer buffer handle (early-input injection). */
   composerHandle?: {
-    current: { getText: () => string; setText: (text: string) => void } | null;
+    current: OpenTuiComposerHandle | null;
   };
   /** U-7: finished follow-up suggestion, shown as the ghost placeholder. */
   promptSuggestion?: string | null;
@@ -710,11 +714,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           notify(`Tool scheduling (${outcome.toolName}) is not wired.`);
           return false;
         case 'quit':
-          // Nothing queued may run behind an exit: the interrupt below creates
-          // the idle edge that wakes the drain, and the same abort promotes
-          // the live turn's steering queue into a fresh model turn. Both are
-          // discarded first, or the session spends another turn after the user
-          // asked to leave.
+          // Clear both queues before interrupt creates the shell's idle edge.
+          // The live turn also suppresses late restored steering after abort.
           deferredCommandsRef.current = [];
           onPopQueue?.();
           // A running `!` shell command dies with the session too — every
@@ -1166,6 +1167,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               <OpenTuiInputPrompt
                 onSubmit={onSubmit}
                 onNotice={notify}
+                preferredEditor={settings.merged.general?.preferredEditor}
                 userMessages={userMessages}
                 config={config}
                 focus

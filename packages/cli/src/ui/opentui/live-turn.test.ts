@@ -37,7 +37,7 @@ import {
 // Stream-layer stub: records what each turn was handed and holds the first
 // turn open until the test releases it, so a second submission lands mid-turn.
 // `declines` marks 1-based turn numbers that end without yielding — the
-// @-expansion decline path (an abort landing inside the read).
+// @-expansion decline path without an explicit user abort.
 const live = vi.hoisted(() => ({
   turns: [] as Array<{ prompt: unknown; options: unknown }>,
   waiters: [] as Array<() => void>,
@@ -160,6 +160,106 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   function park(turn: number, call: WaitingCallInfo) {
     (live.turns[turn - 1].options as LivePromptOptions).onWaitingCall?.(call);
   }
+
+  it('returns late restored steering with image ownership at cancel settlement without resending', async () => {
+    const path = join(dir, 'cancel.png');
+    writeFileSync(path, png);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('original', [path], {
+        submittedPrompt: 'typed original',
+      });
+    });
+    const options = live.turns[0].options as LivePromptOptions;
+    let held: OpenTuiSteeringSubmission[] = [];
+    act(() => {
+      result.current.submit('read @delayed.txt', [path]);
+      held = options.drainSteering!();
+      result.current.submit('queued before cancel');
+    });
+    const settled = vi.fn();
+    act(() => {
+      result.current.interrupt(settled);
+      result.current.submit('queued after cancel');
+    });
+    expect(settled).not.toHaveBeenCalled();
+    expect(live.signals[0].aborted).toBe(true);
+    await act(async () => {
+      options.restoreSteering!(held);
+      live.waiters.shift()!();
+    });
+    expect(settled).toHaveBeenCalledExactlyOnceWith({
+      queued: expect.objectContaining({
+        text: 'read @delayed.txt\n\nqueued before cancel\n\nqueued after cancel',
+        imagePaths: [path],
+      }),
+      prompt: {
+        text: 'original',
+        imagePaths: [path],
+        submittedPrompt: 'typed original',
+      },
+    });
+    expect(live.turns).toHaveLength(1);
+    expect(result.current.messageQueue).toEqual([]);
+  });
+
+  it.each(['tool', 'generated', 'reset'] as const)(
+    'does not restore an unsafe cancelled prompt: %s',
+    async (kind) => {
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      act(() => {
+        result.current.submit(
+          'original',
+          undefined,
+          kind === 'generated' ? { invocationEchoed: true } : undefined,
+        );
+      });
+      if (kind === 'tool') act(() => park(1, approval('tool')));
+      const settled = vi.fn();
+      act(() => {
+        result.current.interrupt(settled);
+        if (kind === 'reset') result.current.resetTranscript([]);
+      });
+      await act(async () => live.waiters.shift()!());
+      if (kind === 'reset') expect(settled).not.toHaveBeenCalled();
+      else
+        expect(settled).toHaveBeenCalledExactlyOnceWith({
+          queued: null,
+          prompt: null,
+        });
+      expect(live.turns).toHaveLength(1);
+    },
+  );
+
+  it('does not restart late restored steering after a bare exit interrupt', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('original'));
+    const options = live.turns[0].options as LivePromptOptions;
+    let held: OpenTuiSteeringSubmission[] = [];
+    act(() => {
+      result.current.submit('read @delayed.txt');
+      held = options.drainSteering!();
+      result.current.popQueue();
+      result.current.interrupt();
+    });
+    await act(async () => {
+      options.restoreSteering!(held);
+      live.waiters.shift()!();
+    });
+    expect(live.signals[0].aborted).toBe(true);
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.messageQueue).toEqual(['read @delayed.txt']);
+    expect(live.turns).toHaveLength(1);
+    expect(
+      result.current.items.filter((item) => item.kind === 'user'),
+    ).toHaveLength(1);
+  });
 
   it('rejects the whole draft if any attachment cannot be read', () => {
     const path = join(dir, 'good.png');
@@ -618,8 +718,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   });
 
   it('consumes only its own submission when a replayed turn declines (R2-2)', async () => {
-    // The one reachable decline of the expander — an abort landing inside the
-    // @-mention read — ends the replayed turn without a send. Each queued
+    // A declined @-mention read ends the replayed turn without a send. Each queued
     // submission rides its own chained turn, so the sibling must survive the
     // decline instead of being swallowed with a joined payload.
     live.declines.add(2);

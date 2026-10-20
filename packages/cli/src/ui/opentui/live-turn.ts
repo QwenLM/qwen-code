@@ -51,7 +51,10 @@ import {
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
-import type { OpenTuiInputSubmission } from './input-submission.js';
+import type {
+  OpenTuiInputSubmission,
+  OpenTuiCancelSettled,
+} from './input-submission.js';
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -148,7 +151,7 @@ export interface OpenTuiLiveTurn {
     options?: OpenTuiSubmitOptions,
   ): boolean;
   /** Aborts the in-flight turn (Esc). */
-  interrupt(): void;
+  interrupt(onSettled?: OpenTuiCancelSettled): void;
   /** Replaces the transcript from a replay batch (session switch/resume). */
   resetTranscript(events: readonly OpenTuiStreamEvent[]): void;
   /** Folds one externally produced event (update notices, startup warnings). */
@@ -195,6 +198,12 @@ export function useOpenTuiLiveTurn(
     [],
   );
   const abortRef = useRef<AbortController | null>(null);
+  const activeTurnRef = useRef<{
+    seq: number;
+    prompt?: OpenTuiInputSubmission;
+    toolStarted: boolean;
+    onCancelSettled?: OpenTuiCancelSettled;
+  } | null>(null);
   const mountedRef = useRef(true);
 
   const streamingRef = useRef(false);
@@ -252,13 +261,38 @@ export function useOpenTuiLiveTurn(
     [syncQueue],
   );
 
+  const popQueue = useCallback((): OpenTuiInputSubmission | null => {
+    const entries = queueRef.current.filter((entry) => !entry.generated);
+    if (entries.length === 0) return null;
+    // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
+    // blank line, not a single newline. Generated command payloads cannot
+    // be reconstructed as editable composer text, so they remain queued.
+    queueRef.current = queueRef.current.filter((entry) => entry.generated);
+    syncQueue();
+    return {
+      text: entries.map((entry) => entry.text).join('\n\n'),
+      imagePaths: entries.flatMap((entry) => entry.imagePaths ?? []),
+      submittedPrompt: entries
+        .map((entry) => entry.submittedPrompt ?? entry.text)
+        .join('\n\n'),
+      deferUntilIdle: entries.every((entry) => entry.deferUntilIdle),
+    };
+  }, [syncQueue]);
+
   const runTurn = useCallback(
     async (
       prompt: PartListUnion,
       promptId: string,
       turnOptions?: OpenTuiSubmitOptions,
+      editablePrompt?: OpenTuiInputSubmission,
     ) => {
       const seq = ++turnSeqRef.current;
+      const active: NonNullable<typeof activeTurnRef.current> = {
+        seq,
+        prompt: editablePrompt,
+        toolStarted: false,
+      };
+      activeTurnRef.current = active;
       const abort = new AbortController();
       abortRef.current = abort;
       // A runTurn is a new user query, so the counter restarts; tool-result
@@ -279,6 +313,7 @@ export function useOpenTuiLiveTurn(
           },
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
+            active.toolStarted = true;
             setWaitingCalls((prev) =>
               prev.some((c) => c.callId === call.callId)
                 ? prev
@@ -290,6 +325,7 @@ export function useOpenTuiLiveTurn(
           // ink counts model text, thoughts and tool-args JSON toward the
           // token estimate, but only model text means content is arriving.
           // Tool output is tool-generated, so it counts nowhere.
+          if (ev.type === 'tool-start') active.toolStarted = true;
           switch (ev.type) {
             case 'text':
               streamingCharsRef.current += ev.delta.length;
@@ -338,41 +374,57 @@ export function useOpenTuiLiveTurn(
           waitingCallsRef.current = [];
           setWaitingCalls([]);
           setBusy(false);
-          // One queued submission per chained turn: a decline (e.g. an abort
-          // landing inside an @-expansion read) must consume only its own
-          // submission — the rest stay queued for the following boundaries,
-          // matching ink's pop-one-submission-per-settle drain.
-          const rest = queueRef.current;
-          if (rest.length > 0) {
-            const [entry, ...remaining] = rest;
-            queueRef.current = remaining;
-            syncQueue();
-            const promptId = nextLivePromptId(config);
-            if (!entry.turnOptions?.invocationEchoed) {
-              apply({
-                type: 'user',
-                text: entry.text,
+          if (activeTurnRef.current === active) activeTurnRef.current = null;
+          if (abort.signal.aborted) {
+            active.onCancelSettled?.({
+              queued: popQueue(),
+              prompt: active.toolStarted ? null : (active.prompt ?? null),
+            });
+          } else {
+            // A declined read consumes only its own queued submission.
+            // Explicit aborts above never start another turn.
+            const rest = queueRef.current;
+            if (rest.length > 0) {
+              const [entry, ...remaining] = rest;
+              queueRef.current = remaining;
+              syncQueue();
+              const promptId = nextLivePromptId(config);
+              if (!entry.turnOptions?.invocationEchoed) {
+                apply({
+                  type: 'user',
+                  text: entry.text,
+                  promptId,
+                  sentToModel: true,
+                });
+              }
+              // ink keeps provenance for a queued submission, and the raw text
+              // is what the stream layer expands `@path` mentions from.
+              void runTurn(
+                entry.content,
                 promptId,
-                sentToModel: true,
-              });
+                entry.generated
+                  ? entry.turnOptions
+                  : {
+                      ...entry.turnOptions,
+                      submittedPrompt: entry.submittedPrompt ?? entry.text,
+                    },
+                entry.generated ? undefined : entry,
+              );
             }
-            // ink keeps provenance for a queued submission, and the raw text
-            // is what the stream layer expands `@path` mentions from.
-            void runTurn(
-              entry.content,
-              promptId,
-              entry.generated
-                ? entry.turnOptions
-                : {
-                    ...entry.turnOptions,
-                    submittedPrompt: entry.submittedPrompt ?? entry.text,
-                  },
-            );
           }
         }
       }
     },
-    [config, apply, drainQueue, restoreQueue, setBusy, setReceiving, syncQueue],
+    [
+      config,
+      apply,
+      drainQueue,
+      restoreQueue,
+      setBusy,
+      setReceiving,
+      syncQueue,
+      popQueue,
+    ],
   );
 
   const submit = useCallback(
@@ -397,14 +449,13 @@ export function useOpenTuiLiveTurn(
       ) {
         return false;
       }
+      const generated =
+        options?.invocationEchoed === true ||
+        options?.modelOverride !== undefined ||
+        options?.refreshContextFilesOnWrite !== undefined ||
+        options?.onComplete !== undefined ||
+        (typeof content !== 'string' && options?.submittedPrompt === undefined);
       if (streamingRef.current) {
-        const generated =
-          options?.invocationEchoed === true ||
-          options?.modelOverride !== undefined ||
-          options?.refreshContextFilesOnWrite !== undefined ||
-          options?.onComplete !== undefined ||
-          (typeof content !== 'string' &&
-            options?.submittedPrompt === undefined);
         pushQueue({
           text,
           content: prompt,
@@ -424,14 +475,31 @@ export function useOpenTuiLiveTurn(
       if (!options?.invocationEchoed) {
         apply({ type: 'user', text, promptId, sentToModel: true });
       }
-      void runTurn(prompt, promptId, options);
+      void runTurn(
+        prompt,
+        promptId,
+        options,
+        generated
+          ? undefined
+          : {
+              text,
+              imagePaths: imagePaths ? [...imagePaths] : undefined,
+              submittedPrompt: options?.submittedPrompt ?? text,
+            },
+      );
       return true;
     },
     [config, apply, pushQueue, runTurn],
   );
 
-  const interrupt = useCallback(() => {
-    abortRef.current?.abort();
+  const interrupt = useCallback((onSettled?: OpenTuiCancelSettled) => {
+    const active = activeTurnRef.current;
+    if (active && active.seq === turnSeqRef.current) {
+      active.onCancelSettled ??= onSettled;
+      abortRef.current?.abort();
+    } else {
+      onSettled?.({ queued: null, prompt: null });
+    }
   }, []);
 
   const resetTranscript = useCallback(
@@ -439,6 +507,7 @@ export function useOpenTuiLiveTurn(
       // Invalidate the in-flight generation first: its late events and
       // settles are dead on arrival (P2-2).
       turnSeqRef.current += 1;
+      activeTurnRef.current = null;
       const abort = abortRef.current;
       abortRef.current = null;
       // Settle parked confirmations as Cancel so the scheduler's queue wakes
@@ -467,29 +536,12 @@ export function useOpenTuiLiveTurn(
     setWaitingCalls((prev) => prev.filter((c) => c.callId !== callId));
   }, []);
 
-  const popQueue = useCallback((): OpenTuiInputSubmission | null => {
-    const entries = queueRef.current.filter((entry) => !entry.generated);
-    if (entries.length === 0) return null;
-    // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
-    // blank line, not a single newline. Generated command payloads cannot
-    // be reconstructed as editable composer text, so they remain queued.
-    queueRef.current = queueRef.current.filter((entry) => entry.generated);
-    syncQueue();
-    return {
-      text: entries.map((entry) => entry.text).join('\n\n'),
-      imagePaths: entries.flatMap((entry) => entry.imagePaths ?? []),
-      submittedPrompt: entries
-        .map((entry) => entry.submittedPrompt ?? entry.text)
-        .join('\n\n'),
-      deferUntilIdle: entries.every((entry) => entry.deferUntilIdle),
-    };
-  }, [syncQueue]);
-
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       turnSeqRef.current += 1;
+      activeTurnRef.current = null;
       queueRef.current = [];
       abortRef.current?.abort();
     };
