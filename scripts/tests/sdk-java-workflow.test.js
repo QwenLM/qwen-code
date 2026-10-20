@@ -714,42 +714,62 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
         s.name,
       ).toBeGreaterThanOrEqual(50 * 60);
     }
-    // The wait budget is read back from the workflow so the arithmetic below
-    // cannot drift from it: the value pins above still force a deliberate
-    // update when the literal moves, but a re-size can no longer miss these
-    // sums and silently under-demand.
-    const waitSeconds = [
-      ...parsed.jobs.test.steps,
-      ...parsed.jobs['mysql-integration'].steps,
-    ]
-      .filter((s) => typeof s.run === 'string')
-      .flatMap((s) =>
-        [...s.run.matchAll(/flock --wait (\d+) 9/g)].map((m) => Number(m[1])),
-      );
-    expect(new Set(waitSeconds).size, 'one wait budget per lock').toBe(1);
-    const lockWait = waitSeconds[0];
+    // The wait budget and the acquisition count are read back from the
+    // workflow so the arithmetic below cannot drift from it: the value pins
+    // above still force a deliberate update when the literal moves, but a
+    // re-size or an added lock site can no longer miss these sums and
+    // silently under-demand.
+    const waitsByJob = Object.fromEntries(
+      Object.entries(parsed.jobs).map(([id, j]) => [
+        id,
+        (j.steps ?? [])
+          .filter((s) => typeof s.run === 'string')
+          .flatMap((s) =>
+            [...s.run.matchAll(/flock --wait (\d+) 9/g)].map((m) =>
+              Number(m[1]),
+            ),
+          ),
+      ]),
+    );
+    const allWaits = Object.values(waitsByJob).flat();
+    expect(new Set(allWaits).size, 'one wait budget per lock').toBe(1);
+    const waitSum = (id) =>
+      waitsByJob[id].reduce((total, seconds) => total + seconds, 0);
     // The ceiling must absorb one full wait per acquisition — this job takes
-    // the lock once per Maven step — plus the measured Maven work inside the
-    // lock plus the uncapped setup the wait does not cover. Run 39097018288
-    // held the host lock for 47m26s, and the sibling test job's fast-tier leg
-    // now also runs the full managed-agent H2 suite inside the lock: 925 s of
-    // Maven work per hold in job 117729316936 (run 39145783034), where the
-    // step waited 1515 s and held 925 s. Main run 39143975111 then starved on
-    // both attempts because the 40-minute budget lost to a queue of holds, not
-    // to one hold (#14608). The wait now covers about 5.8 such holds, 5400 s.
-    const measuredMavenSeconds = 50 * 60;
+    // the lock once per Maven step — plus the measured locked work inside the
+    // lock plus the uncapped setup the wait does not cover. The verify step in
+    // run 39097018288 took 2846 s with ~2790 s holding the lock: ~1220 s of
+    // Maven plus ~1570 s of in-lock ~/.m2 write-back, so main's 50-minute term
+    // covers the whole locked step, not Maven alone. The sibling test job's
+    // fast-tier leg now also runs the full managed-agent H2 suite inside the
+    // lock: 925 s of Maven work per hold in job 117729316936 (run 39145783034),
+    // where the step waited 1515 s and held 925 s. Main run 39143975111 then
+    // starved on both attempts because the 40-minute budget lost to a queue of
+    // holds, not to one hold (#14608). The wait now covers about 5.8 such
+    // holds, 5400 s, but only about 1.9 of these ~2790 s verify holds;
+    // same-run acquirers share a host, so the worst same-run queue measured is
+    // ~3278 s.
+    const measuredLockedWorkSeconds = 50 * 60;
     const mavenSetupSeconds = 30 * 60;
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(
-      mavenSteps.length * lockWait + measuredMavenSeconds + mavenSetupSeconds,
+      waitSum('mysql-integration') +
+        measuredLockedWorkSeconds +
+        mavenSetupSeconds,
     );
     // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus one measured hold (925 s of Maven work in job
-    // 117729316936) plus the ~11 minutes of uncapped setup.
+    // cover every one of its waits plus one measured hold (925 s of Maven work
+    // in job 117729316936) plus the ~11 minutes of uncapped setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      lockWait + 925 + 11 * 60,
+      waitSum('test') + 925 + 11 * 60,
     );
+    // A floor alone would let a future re-size raise the ceiling instead of
+    // the wait, and a wedged job would hold a pool runner for that much
+    // longer. Both values stay under GitHub's 360-minute hosted-job maximum,
+    // which mysql-integration falls back to.
+    expect(parsed.jobs.test['timeout-minutes']).toBe(150);
+    expect(parsed.jobs['mysql-integration']['timeout-minutes']).toBe(280);
   });
 
   it('installs and verifies against one job-local Maven repository', () => {

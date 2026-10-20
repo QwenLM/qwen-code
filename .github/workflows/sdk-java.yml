@@ -42,10 +42,15 @@ jobs:
     # 117729316936 (run 39145783034) this step spent 1515 s waiting behind
     # sibling holds and then held sdk-java-tests.lock for 925 s while Maven
     # ran, so the old 40-minute wait lost to a queue of holds rather than to
-    # one hold (#14608). A wait now covers about 5.8 such holds (5400 s); the
-    # ceiling is that wait plus one hold (925 s) plus the ~11 minutes of
-    # uncapped setup, plus margin: 150. Hosted lanes never take the lock and
-    # inherit this ceiling as a bound, not as an expected duration.
+    # one hold (#14608). A wait now covers about 5.8 fast-tier holds (925 s)
+    # but only about 1.9 of the full-tier verify holds measured on run
+    # 39097018288 (~2790 s: ~1220 s of Maven plus ~1570 s of in-lock ~/.m2
+    # write-back). A full-tier run puts five acquisitions of this lock in
+    # flight and same-run acquirers share a host, so the worst same-run queue
+    # measured is ~3278 s. The ceiling is one wait plus one hold (925 s) plus
+    # the ~11 minutes of uncapped setup: 5400 + 925 + 660 = 6985 s, under
+    # 150 minutes. Hosted lanes never take the lock and inherit this ceiling
+    # as a bound, not as an expected duration.
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -433,13 +438,18 @@ jobs:
     # sibling test job holds the lock for the sdk-java suite plus the full
     # managed-agent H2 suite, 925 s of Maven work per hold in job 117729316936
     # (run 39145783034), and main run 39143975111 starved on both attempts
-    # (#14608). That hold can only arrive cross-run, because this lane runs
-    # only on the full tier and the full-H2 hold sits on the fast tier, so a
-    # wait covers a queue of holds rather than one: 5400 s is about 5.8 of
-    # them. The ceiling is both waits plus the ~50 minutes of measured Maven
-    # work main's ceiling was sized on plus 30 minutes of uncapped setup and
-    # margin: 280. Hosted lanes never take the lock and inherit this ceiling
-    # as a bound, not a duration.
+    # (#14608). That fast-tier hold can only arrive cross-run, because this
+    # lane runs only on the full tier and the full-H2 hold sits on the fast
+    # tier. A full-tier run also puts five acquisitions of this lock in
+    # flight with no needs:/max-parallel ordering, and same-run acquirers
+    # share a host, so the wait covers a queue: 5400 s is about 5.8 fast-tier
+    # holds (925 s) but about 1.9 of this job's own verify holds (~2790 s:
+    # ~1220 s of Maven plus ~1570 s of in-lock ~/.m2 write-back), and the
+    # worst same-run queue measured is ~3278 s. The ceiling is both waits
+    # plus the ~50-minute locked-work term main sized on plus the 30-minute
+    # setup term: 2 × 5400 + 3000 + 1800 = 15600 s = 260 minutes, with a
+    # 20-minute margin to 280. Hosted lanes never take the lock and inherit
+    # this ceiling as a bound, not a duration.
     timeout-minutes: 280
     services:
       mariadb:
