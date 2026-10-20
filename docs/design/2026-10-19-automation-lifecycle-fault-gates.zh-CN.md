@@ -64,12 +64,14 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   尚未开始」之间扣留，本夹具暂未暴露该注入点。
 - `close-*` 需要工作区支撑的 Session：automation API 拒绝没有工作区的
   Session（`session_not_found`），而在本夹具里关闭工作区 Session 会得到
-  `workspace_unavailable`，来自托管会话的 workspace 执行可用性检查，而非
-  FG11f 命中的 store 级授权。
+  `409 workspace_unavailable`，消息为 `Hosted Workspace execution is not
+available.`——由嵌入式 broker 与 action store 抛出，而非 FG11f 故障的
+  那层 store 级授权。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
-  接受。把 wake turn 扣在模型上时，该取消在 120 s 内没有让 run 结算，
-  Harness 连接以 socket EOF 断开；要构造这一格需要换一个扣留点。
+  接受。把 wake turn 扣在模型上时发出该取消，并没有停住 run：模型释放后
+  run 结算为 `completed`，等待 `cancelled` 的 120 s 窗口到期。要构造这一格
+  需要一个让取消赢下这场竞速的扣留点，本夹具尚未暴露。
 - 取消期间的租约接管不在范围内，与 FG11c 一致。
 - stream gap 门禁（FG11e）不在此处。
 

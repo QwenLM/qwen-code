@@ -79,15 +79,16 @@ around it.
   turn, which this fixture does not expose yet.
 - `close-*` needs a workspace-backed Session: the automation API refuses a
   Session without one (`session_not_found`), while closing a workspace
-  Session in this fixture answers `workspace_unavailable` from the managed
-  Session's workspace-execution check, not from the store-level authority
-  FG11f hits.
+  Session in this fixture answers `409 workspace_unavailable` with
+  `Hosted Workspace execution is not available.` — raised by the embedded
+  broker and the action store, not by the store-level authority FG11f faults.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
-  `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn parked
-  on the model, that cancel then left the run unsettled for 120 s while the
-  Harness connection closed with socket EOF; staging the cell needs a
-  different hold point.
+  `GET /v1/agents/sessions/{id}/tasks` is accepted. Sent while the wake turn
+  was parked on the model, that cancel did not stop the run: once the model
+  was released the run settled `completed`, and a 120 s wait for `cancelled`
+  expired. The cell needs a hold point where the cancel wins that race, which
+  this fixture does not expose.
 - Lease takeover during a cancel is out of scope, as in FG11c.
 - The stream-gap gate (`FG11e`) is untouched.
 
