@@ -34,14 +34,16 @@ const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
  * Keeps the installed activation's horizon ahead of a reader while the worker
  * is alive. The install stamps a fixed expiry, so without renewal a session
  * that outlives its lease reads as abandoned behind a live writer lock.
- * Renewal failures are retried on the next tick: a durable write failure
- * already fences new appends, so the timer only logs. A renewal that is still
- * in flight owns the next attempt: queueing another one behind a stalled Store
- * call would grow the backlog for the whole outage.
+ * Renewal failures are retried on the next tick; a durable write failure
+ * already fences new appends. A renewal that is still in flight owns the next
+ * attempt: queueing another one behind a stalled Store call would grow the
+ * backlog for the whole outage.
  *
- * A stopped writer cannot renew again, and a persistent failure repeats the
- * same rejection every interval for the rest of the process's life, so both
- * end the loop. Three consecutive failures span one full lease
+ * A stopped writer cannot renew again, and a persistent non-recoverable
+ * failure repeats the same rejection every interval for the rest of the
+ * process's life, so both end the loop. An unsettled append is recoverable:
+ * the store may settle it later, so it keeps retrying instead. Three
+ * consecutive non-recoverable failures span one full lease
  * (`leaseDurationMs / 3` per attempt), which is the point at which the
  * activation can no longer be kept ahead of a reader anyway.
  */
