@@ -18,6 +18,7 @@ export * from './bridgeTypes.js';
 export * from './session-source.js';
 export * from './session-startup-config.js';
 export * from './bridgeOptions.js';
+export * from './workflow-ancestor-trust.js';
 export * from './prompt-ledger.js';
 export * from './session-restore-timeout.js';
 export * from './replayWindowLimits.js';

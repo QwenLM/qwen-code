@@ -31,24 +31,24 @@ public interface HarnessConnector extends AutoCloseable {
     default boolean supportsLifecycle() { return false; }
 
     default boolean supportsLifecycle(String profile) {
-        return com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
+        return com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
     }
 
-    default void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    default void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
     }
 
-    default void settleLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    default void settleLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
     }
 
     default boolean supportsFencedTitles() { return false; }
 
-    default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
 
-    default void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+    default void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
 
