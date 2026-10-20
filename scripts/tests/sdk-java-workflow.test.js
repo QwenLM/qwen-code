@@ -113,6 +113,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     for (const [name, run] of [
       ['Build Qwen Code', 'npm run build'],
       ['Bundle Qwen Code', 'npm run bundle'],
+      ['Run Java daemon E2E', 'npx tsx scripts/run-java-daemon-sdk-e2e.ts'],
     ]) {
       const explicit = steps.find((s) => s.name === name);
       expect(explicit.run, name).toBe(run);
@@ -1120,6 +1121,18 @@ describe('SDK Java install-transient retry', () => {
       'test',
     ]);
   });
+
+  it.each(installs)(
+    "%s install warning matches the step's prepare behaviour",
+    (jobName, step) => {
+      const skips = step.env?.QWEN_SKIP_PREPARE === '1';
+      expect(step.run, jobName).toContain(
+        skips
+          ? "this step skips prepare's build"
+          : "this step also runs prepare's build",
+      );
+    },
+  );
 
   it.each(installs)('%s retries a transient install', (jobName, step) => {
     for (const fragment of [
