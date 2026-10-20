@@ -1022,6 +1022,12 @@ const EN: Messages = {
   'composerAdd.extensions.empty': 'No extensions are enabled',
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': 'No MCP servers are available',
+  'managed.mcp.catalog': (v) =>
+    `Catalog snapshot: ${plural(v?.tools, 'tool')} (${v?.toolsState}); ${plural(v?.resources, 'resource')} (${v?.resourcesState}); ${plural(v?.prompts, 'prompt')} (${v?.promptsState})`,
+  'managed.mcp.discovery.complete': 'complete',
+  'managed.mcp.discovery.partial': 'partial',
+  'managed.mcp.discovery.failed': 'failed',
+  'managed.mcp.discovery.stale': 'stale',
   'composerAdd.skills.label': 'Skills',
   'composerAdd.plan.label': 'Plan mode',
   'composerAdd.plan.description': 'Plan first, run after you approve',
@@ -3197,6 +3203,9 @@ const EN: Messages = {
   'model.footer': 'Enter select, ↑↓ navigate, Esc close',
   'model.searchHint': 'Press / to search',
   'model.fastHint': 'for suggestions and side tasks',
+  'model.refresh': 'Refresh models',
+  'model.refreshing': 'Refreshing models…',
+  'model.refreshFailed': (v) => `Unable to refresh models: ${v?.error ?? ''}`,
   'model.noMatch': (v) => `No model matching "${v?.query ?? ''}"`,
   'model.unavailable':
     'Models are unavailable; the daemon default will be used.',
@@ -3432,8 +3441,6 @@ const EN: Messages = {
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
-  'trajectory.truncated':
-    'Showing the most recent records; earlier history is not loaded.',
   'trajectory.loadingPages': (v) =>
     `Loading records… (${v?.pages ?? 0} ${Number(v?.pages) === 1 ? 'page' : 'pages'} so far)`,
   'trajectory.olderFailed': (v) =>
@@ -3444,8 +3451,6 @@ const EN: Messages = {
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
     'Part of this transcript could not be read, so some records are missing.',
-  'trajectory.totals': (v) =>
-    `Loaded window · ${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')}`,
   'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
   'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
   'trajectory.turnSummary': (v) =>
@@ -3498,12 +3503,6 @@ const EN: Messages = {
     `Showing ${v?.from ?? ''}–${v?.to ?? ''} of ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) =>
     `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
-  'trajectory.metric.elapsed': 'Elapsed span',
-  'trajectory.metric.active': 'Active coverage',
-  'trajectory.metric.main': 'Main model total',
-  'trajectory.metric.help': 'Metric definitions',
-  'trajectory.metric.scope':
-    'Counts cover projected rows in the loaded window, including loaded subagent records. Selection and zoom do not change them.',
   'trajectory.metric.elapsed.help':
     'Elapsed span: earliest recorded start to latest end, including gaps; plotted records only.',
   'trajectory.metric.active.help':
@@ -3512,14 +3511,9 @@ const EN: Messages = {
     'Main model total: sum of main-session model request durations, excluding subagent requests and tools. Failed attempts may count.',
   'trajectory.metric.missing.help':
     'Unplotted requests and tools remain in the list. An em dash means unrecorded; zero is a measured zero.',
-  'trajectory.failures': (v) =>
-    `Failed requests ${v?.requests ?? 0} · failed tools ${v?.tools ?? 0}`,
   'trajectory.unrecorded': 'unrecorded',
   'trajectory.unplotted': (v) =>
     `Unplotted: ${v?.starts ?? 0} without start · ${v?.timing ?? 0} without duration`,
-  'trajectory.missingStart': (v) =>
-    `${v?.count ?? 0} timed records have no start`,
-  'trajectory.missingTiming': (v) => `${v?.count ?? 0} tools have no duration`,
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
@@ -3527,9 +3521,6 @@ const EN: Messages = {
     'History may have changed while disconnected. Refresh the latest window to update.',
   'trajectory.lifecycleIncomplete':
     'Lifecycle details may be incomplete or outside the retained limit.',
-  'trajectory.selected.label': 'Selected',
-  'trajectory.selected.none': 'Choose a record',
-  'trajectory.selected.noTiming': 'no request or tool timing',
   'trajectory.inspector.title': 'Record details',
   'trajectory.inspector.open': 'View details',
   'trajectory.inspector.close': 'Close details',
@@ -5467,6 +5458,12 @@ const ZH: Messages = {
   'composerAdd.extensions.empty': '没有已启用的扩展',
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': '没有可用的 MCP 服务',
+  'managed.mcp.catalog': (v) =>
+    `目录快照：${v?.tools} 个工具（${v?.toolsState}）；${v?.resources} 个资源（${v?.resourcesState}）；${v?.prompts} 个提示（${v?.promptsState}）`,
+  'managed.mcp.discovery.complete': '已完成',
+  'managed.mcp.discovery.partial': '部分完成',
+  'managed.mcp.discovery.failed': '失败',
+  'managed.mcp.discovery.stale': '已过期',
   'composerAdd.skills.label': '技能',
   'composerAdd.plan.label': '计划模式',
   'composerAdd.plan.description': '先出计划，批准后再执行',
@@ -7462,6 +7459,9 @@ const ZH: Messages = {
   'model.footer': 'Enter 选择，↑↓ 导航，Esc 关闭',
   'model.searchHint': '按 / 搜索',
   'model.fastHint': '用于建议和旁路任务',
+  'model.refresh': '刷新模型列表',
+  'model.refreshing': '正在刷新模型…',
+  'model.refreshFailed': (v) => `刷新模型失败：${v?.error ?? ''}`,
   'model.noMatch': (v) => `没有匹配 "${v?.query ?? ''}" 的模型`,
   'model.unavailable': '模型列表暂不可用，将使用守护进程默认模型。',
   'model.none': '没有可用模型',
@@ -7681,14 +7681,11 @@ const ZH: Messages = {
   'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
-  'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
   'trajectory.loadingPages': (v) => `正在读取记录…（已 ${v?.pages ?? 0} 页）`,
   'trajectory.olderFailed': (v) => `更早的记录没有读到：${v?.message ?? ''}`,
   'trajectory.olderPartial': '更早的记录只读到一部分，所以没有显示。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
-  'trajectory.totals': (v) =>
-    `已加载窗口 · ${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 请求 · ${v?.tools ?? 0} 工具`,
   'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
   'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
   'trajectory.turnSummary': (v) =>
@@ -7739,12 +7736,6 @@ const ZH: Messages = {
   'trajectory.zoom.status': (v) =>
     `显示 ${v?.from ?? ''}–${v?.to ?? ''}，共 ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
-  'trajectory.metric.elapsed': '执行跨度',
-  'trajectory.metric.active': '活跃覆盖',
-  'trajectory.metric.main': '主模型请求累计',
-  'trajectory.metric.help': '指标说明',
-  'trajectory.metric.scope':
-    '计数针对已加载窗口内投影后的记录，包含已加载的子代理记录；时间框选和缩放不改变总计。',
   'trajectory.metric.elapsed.help':
     '执行跨度：已记录开始到结束的跨度，含间隔；仅覆盖可绘制记录。',
   'trajectory.metric.active.help':
@@ -7753,20 +7744,13 @@ const ZH: Messages = {
     '主模型请求累计：主会话模型请求耗时之和，不含子代理请求和工具；可能包含失败尝试。',
   'trajectory.metric.missing.help':
     '未绘制的请求和工具仍保留在列表。破折号表示未记录，零表示真实零值。',
-  'trajectory.failures': (v) =>
-    `失败请求 ${v?.requests ?? 0} · 失败工具 ${v?.tools ?? 0}`,
   'trajectory.unrecorded': '未记录',
   'trajectory.unplotted': (v) =>
     `未绘制：有耗时无起点 ${v?.starts ?? 0} 条 · 无耗时 ${v?.timing ?? 0} 条`,
-  'trajectory.missingStart': (v) => `${v?.count ?? 0} 条有耗时记录缺少起点`,
-  'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
   'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
   'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
-  'trajectory.selected.label': '所选',
-  'trajectory.selected.none': '请选择一条记录',
-  'trajectory.selected.noTiming': '无请求或工具计时',
   'trajectory.inspector.title': '记录详情',
   'trajectory.inspector.open': '查看详情',
   'trajectory.inspector.close': '关闭详情',

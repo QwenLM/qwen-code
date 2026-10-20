@@ -433,15 +433,15 @@ jobs:
     # pool-safe: the database is a per-job service container on a random host
     # port, and every Maven run holds the test job's per-host sdk-java lock.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # On the pool this job takes the per-host sdk-java lock once per
-    # Maven step — two acquisitions today — behind the fast tier's ~925 s
-    # hold. Run 39229303984's fast-tier job exhausted the old 60-minute
-    # wait before Maven started, so each acquisition now waits 90 minutes.
-    # The ceiling absorbs both waits, the ~50 minutes of measured Maven
-    # work, 30 minutes of uncapped setup and margin: 280. Hosted lanes
-    # never take the lock and inherit this ceiling as a bound, not as an
-    # expected duration.
-    timeout-minutes: 280
+    # On the pool this job takes the per-host sdk-java lock once, around the
+    # single step that runs both Maven commands. Run 39353663670's verify
+    # acquisition waited the full 90 minutes after the install step released
+    # the lock, so a per-step lock let this job lose its place in the host
+    # queue between installing and verifying. The ceiling absorbs that wait,
+    # the ~60 minutes of measured Maven work, and 30 minutes of uncapped
+    # setup plus 20 minutes of margin: 200. Hosted lanes never take the lock
+    # and inherit this ceiling as a bound, not as an expected duration.
+    timeout-minutes: 200
     services:
       mariadb:
         image: 'mariadb:10.11.18'
@@ -608,9 +608,11 @@ jobs:
         env:
           MARIADB_CONTAINER: '${{ job.services.mariadb.id }}'
         run: |-
-          # Connector/J encodes the 17 MiB LONGBLOB fixture as a ~34 MiB query.
+          # Connector/J hex-encodes the 32 MiB LONGBLOB fixture into a ~67 MiB
+          # query, so the budget must sit above it: the inventory's byte-limit
+          # gate, not the server packet limit, is what the test exercises.
           # Set this job's disposable service before its first JDBC connection.
-          docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=67108864; SELECT @@GLOBAL.max_allowed_packet"'
+          docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -642,31 +644,29 @@ jobs:
             sleep $((attempt * 15))
           done
 
-      - name: 'Install Managed Agent dependencies'
+      - name: 'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration'
         env:
-          # Job-local repo, shared with the verify step below (pinned in
-          # scripts/tests/sdk-java-workflow.test.js): the per-step lock is
-          # released at each step boundary, so the fixed 0.1.0-alpha release
-          # coordinates must not round-trip through the host-shared ~/.m2,
-          # where another run's same-coordinate jars would win the resolve.
+          # Job-local repo: the host-shared ~/.m2 can already hold another
+          # run's same-coordinate fixed release jars, so both Maven runs
+          # resolve from this job's seeded copy (pinned in
+          # scripts/tests/sdk-java-workflow.test.js).
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+          MYSQL_PORT: "${{ job.services.mariadb.ports['3306'] }}"
         run: |-
+          set -o pipefail
+          # One acquisition spans both Maven runs: run 39353663670's verify
+          # step waited the full 90 minutes after the install step released
+          # the lock, so a per-step lock let this job lose its place in the
+          # host queue between installing and verifying. The ticketed queue
+          # in sdk-java-lock.sh makes that one wait FIFO instead of a
+          # wake-up race against sibling holds (qwen-code#14743).
           source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
           sdk_java_lock_acquire 5400
           # Seed from the host-shared repo (cache-restored on hosted runners)
           # so it and the egress proxy keep paying off for the job-local copy.
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-
-      - name: 'Run Managed Agent tests, Checkstyle, and MySQL integration'
-        working-directory: 'packages/managed-agent-server'
-        env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
-          MYSQL_PORT: "${{ job.services.mariadb.ports['3306'] }}"
-        run: |-
-          set -o pipefail
-          source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-          sdk_java_lock_acquire 5400
+          cd packages/managed-agent-server
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
             -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
             -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
@@ -736,8 +736,11 @@ jobs:
     # Verify to 173 minutes; the FG13b Hook result store-rejection cell adds
     # 150 s, moving the fork to 9915 s and Verify to 176 minutes; the FG13b
     # Hook plan-result store-rejection cell adds 150 s, moving the fork to
-    # 10080 s and Verify to 179 minutes, wrapping
-    # fork + 600 s plus margin;
+    # 10065 s and Verify to 178 minutes; the FG11d cancel cell adds 15 s,
+    # moving the fork to 10080 s and Verify to 179 minutes; the FG12f delivery
+    # entry moves from 30 s to 50 s, moving the fork to 10100 s; the FG11d
+    # retire-at-intent cell adds 18 s, moving the fork to 10118 s, wrapping
+    # fork + 600 s plus margin (10718 s of fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
@@ -842,7 +845,7 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 10080 s, so the step wraps to fork + 600 s plus margin (179 min).
+        # 10118 s, so the step wraps to fork + 600 s plus margin (179 min).
         timeout-minutes: 179
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
