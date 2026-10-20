@@ -4,7 +4,7 @@
 
 状态：第一阶段已在 #14443 合入（契约 `1.59.0`），第二阶段（SSH Workspace 注册）已在 #14456 合入（契约 `1.60.0`），第三阶段（Session 标题）已在 #14475 合入。各阶段都不改 schema。决定 9 已在 #14669 合入、决定 10 已在 #14681 合入、`CANCELLING` 车道的取消已在 #14694 合入、跨 Harness kill 的故障门禁已在 #14750 合入。
 
-这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 总 issue）的 **D7-2** 切片，由 [#14166](https://github.com/QwenLM/qwen-code/issues/14166) 跟踪。#12380 规定，Stage D 只有同时具备持久命令投递（D7-1，[#14168](https://github.com/QwenLM/qwen-code/issues/14168)）和原命令对账（本切片），才能暴露 `java_durable`。D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选开启的 profile）要等这两者都完成。本切片涉及的每一处代码，都在 #14166 的设计说明里做了分类。
+这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 总 issue）的 **D7-2** 切片，由 [#14166](https://github.com/QwenLM/qwen-code/issues/14166) 跟踪。#12380 规定，Stage D 只有同时具备持久命令投递（D7-1，[#14168](https://github.com/QwenLM/qwen-code/issues/14168)）和原命令对账（本切片），才能暴露 `java_durable`。D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选开启的 profile）已在两者之后以 #14470 合入。本切片涉及的每一处代码，都在 #14166 的设计说明里做了分类。
 
 ## 问题
 
@@ -136,7 +136,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 
 ### 11. 未观察到执行的 cancel 停车
 
-一个已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，挂起的 `CANCEL` 不能记为 `turn_already_settled`：取消可能已经到达那个结果未知的执行，也可能没有。`settleTurnCommands` 在 Turn 失败时、Session 行锁之下，把所有仍为 pending 的 cancel 记为 `recovery_blocked`，失败码 `cancel_unconfirmed`，保持 `java_durable`/`blocked`，且不再投递。Turn 结束后才提交的 cancel 在 CAS 落空后用 `requireTurnForUpdate` 重新读取当前行，并按终态结算为 `turn_already_settled`，因此陈旧快照不会让它停在 PENDING，副本时钟偏移也不会改变分类；从未尝试提交的 Turn 走同一路径。该停车行目前不在 acceptance-unknown kind 集合中，因此会一直停车（诚实、不再投递），直到后续新增从 Turn journal 读取的 `CancelEvidence`。
+一个已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，挂起的 `CANCEL` 不能记为 `turn_already_settled`：取消可能已经到达那个结果未知的执行，也可能没有。`settleTurnCommands` 在 Turn 失败时、Session 行锁之下，把所有仍为 pending 的 cancel 记为 `recovery_blocked`，失败码 `cancel_unconfirmed`，保持 `java_durable`/`blocked`，且不再投递。Turn 结束后才提交的 cancel 在 CAS 落空后用 `requireTurnForUpdate` 重新读取当前行，并按终态结算为 `turn_already_settled`，因此陈旧快照不会让它停在 PENDING，副本时钟偏移也不会改变分类；从未尝试提交的 Turn 走同一路径。该停车行已属于 acceptance-unknown kind 集合，由 `CancelEvidence` 从原 prompt 保留的持久终态事件结算（#14763）：`cancelled` 记为完成，`completed`/`error` 以 `turn_already_settled` 失败，证据缺失或不可读则继续停车。
 
 ## 验证
 

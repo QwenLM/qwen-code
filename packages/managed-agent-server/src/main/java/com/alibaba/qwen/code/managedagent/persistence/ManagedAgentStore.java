@@ -2016,18 +2016,16 @@ public class ManagedAgentStore implements AgentStateStore {
     // ever takes the row, nothing re-sends it, and only the reconciler
     // settles it, from the kind's own keyed evidence.
     private static final String ACCEPTANCE_UNKNOWN_KINDS =
-            "('TASK_CANCEL', 'SUBMIT_INPUT', 'RENAME')";
+            "('TASK_CANCEL', 'SUBMIT_INPUT', 'CANCEL', 'RENAME')";
     // For these it is a published wait on a precondition of an operation
     // whose acceptance is known: the lifecycle coordinator re-drives it, and
     // keyed effect receipts keep the re-drive from repeating an effect.
     private static final String LIFECYCLE_WAIT_KINDS =
             "('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE')";
-    // A Turn CANCEL parked cancel_unconfirmed is in neither set yet (decision
-    // 11): nothing settles it and nothing re-drives it while no
-    // CancelEvidence reader exists, so it stays parked and is never
-    // delivered. The follow-up adds 'CANCEL' to ACCEPTANCE_UNKNOWN_KINDS when
-    // that reader lands, never to LIFECYCLE_WAIT_KINDS, whose rows
-    // claimOperation re-drives.
+    // A Turn CANCEL parked cancel_unconfirmed is in ACCEPTANCE_UNKNOWN_KINDS
+    // (decision 11): the reconciler settles it from CancelEvidence, which
+    // reads the original prompt's retained durable terminal event, and the
+    // row is never claimed or delivered again.
     /** Turn input whose submission no Harness answered (D7-2). */
     static final String SUBMIT_INPUT_UNCONFIRMED = "submit_input_unconfirmed";
     /** A Turn cancel whose effect on an unobserved execution no Harness
@@ -2159,9 +2157,8 @@ public class ManagedAgentStore implements AgentStateStore {
 
     // Only a completed operation is delivered and carries a receipt; a
     // failed or cancelled one stays java_durable and blocked, so it is never
-    // delivered again. A parked submit_input is due for the reconciler at
-    // once; a parked Turn cancel has no evidence reader yet and stays parked
-    // (decision 11).
+    // delivered again. A parked submit_input or Turn cancel is due for the
+    // reconciler at once (decision 11).
     private void settleTurnCommand(String tenantId, String sessionId,
             String turnId, OperationKind kind, String state,
             String admissionStage, String failureCode, long now) {
