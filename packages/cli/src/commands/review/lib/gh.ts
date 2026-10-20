@@ -230,8 +230,8 @@ export function normalizeGhHostForUrl(host: string): string {
  */
 export function ghEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, CLICOLOR_FORCE: '0' };
-  delete env.GH_FORCE_TTY;
-  if (ghHost) env.GH_HOST = ghHost;
+  delete env['GH_FORCE_TTY'];
+  if (ghHost) env['GH_HOST'] = ghHost;
   return env;
 }
 
