@@ -2,7 +2,8 @@
 
 [English](2026-10-19-automation-publication-fault-gates.md) | [简体中文](2026-10-19-automation-publication-fault-gates.zh-CN.md)
 
-状态：提案。第 1 片（进程内故障臂）与第 2 片（发布者死亡）在此定界，均未实现。
+状态：第 1 片部分交付。`drop-ack-after-write` 已在打包栈上实跑绿；
+`fail-before-write` 与 `timeout` 在此定界但尚未实现，第 2 片（发布者死亡）未触碰。
 
 Issue：#14446，FG11 tracker。tracker 的 gate 表把 FG11f 列为本轮欠的两片之一。
 FG11c 已交付；本设计是剩余部分。
