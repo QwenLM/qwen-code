@@ -612,9 +612,11 @@ jobs:
         env:
           MARIADB_CONTAINER: '${{ job.services.mariadb.id }}'
         run: |-
-          # Connector/J encodes the 17 MiB LONGBLOB fixture as a ~34 MiB query.
+          # Connector/J hex-encodes the 32 MiB LONGBLOB fixture into a ~67 MiB
+          # query, so the budget must sit above it: the inventory's byte-limit
+          # gate, not the server packet limit, is what the test exercises.
           # Set this job's disposable service before its first JDBC connection.
-          docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=67108864; SELECT @@GLOBAL.max_allowed_packet"'
+          docker exec "${MARIADB_CONTAINER}" sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" mariadb --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
