@@ -17367,15 +17367,18 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: true,
-      });
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     const before = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
       { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
@@ -17515,65 +17518,77 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).post(`/session/${SESSION_ID}/cancel`),
     )
       .set('X-Qwen-Client-Id', created.body.clientId)
+      .timeout(SETTLE_TIMEOUT_MS)
       .then((response) => response);
-    await vi.waitFor(() => expect(cancelCommitted).toBe(true));
-    finishModel();
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: false,
-      });
-    });
-    let nextSignal: AbortSignal | undefined;
+    // A preceding assertion can fail before the request is awaited below.
+    void cancelResponse.catch(() => {});
     let finishNextModel!: () => void;
-    const nextModelGate = new Promise<void>((resolve) => {
-      finishNextModel = resolve;
-    });
-    state.model.mockImplementationOnce(async ({ signal }) => {
-      nextSignal = signal;
-      await nextModelGate;
-      return { text: 'next answer completed', model: 'test-model' };
-    });
-    const nextPrompt = [{ type: 'text', text: 'complete the next answer' }];
-    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .set('X-Qwen-Client-Id', created.body.clientId)
-      .send({
-        prompt: nextPrompt,
-        promptId: randomUUID(),
-        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
-      })
-      .expect(202);
-    await vi.waitFor(() => expect(nextSignal).toBeDefined());
-    releaseCancelAck();
-    const cancelled = await cancelResponse;
-    expect(cancelled.status).toBe(204);
-    expect(nextSignal!.aborted).toBe(false);
-    finishNextModel();
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: false,
+    try {
+      await vi.waitFor(() => expect(cancelCommitted).toBe(true), {
+        timeout: SETTLE_TIMEOUT_MS,
       });
-    });
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
-    expect(
-      journal.events.filter((event) => event.kind === 'cancel.requested'),
-    ).toHaveLength(1);
-    expect(
-      journal.events.filter((event) => event.kind === 'turn.settled'),
-    ).toHaveLength(2);
-    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .set('X-Qwen-Client-Id', created.body.clientId)
-      .expect(204);
+      finishModel();
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      let nextSignal: AbortSignal | undefined;
+      const nextModelGate = new Promise<void>((resolve) => {
+        finishNextModel = resolve;
+      });
+      state.model.mockImplementationOnce(async ({ signal }) => {
+        nextSignal = signal;
+        await nextModelGate;
+        return { text: 'next answer completed', model: 'test-model' };
+      });
+      const nextPrompt = [{ type: 'text', text: 'complete the next answer' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .send({
+          prompt: nextPrompt,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(() => expect(nextSignal).toBeDefined());
+      releaseCancelAck();
+      const cancelled = await cancelResponse;
+      expect(cancelled.status).toBe(204);
+      expect(nextSignal!.aborted).toBe(false);
+      finishNextModel();
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(
+        journal.events.filter((event) => event.kind === 'cancel.requested'),
+      ).toHaveLength(1);
+      expect(
+        journal.events.filter((event) => event.kind === 'turn.settled'),
+      ).toHaveLength(2);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .expect(204);
+    } finally {
+      finishModel();
+      releaseCancelAck();
+      finishNextModel?.();
+      await cancelResponse.catch(() => {});
+    }
   });
 
   it.each(['expired', 'cancelled'])(
