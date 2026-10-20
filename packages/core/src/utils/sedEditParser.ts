@@ -679,6 +679,16 @@ function hasUnsafeQuantifiedGroup(pattern: string): boolean {
         ) {
           return true;
         }
+        // A zero-capable quantifier on an anchored group, then another
+        // quantifier or alternation, is leftmost-longest in GNU sed and a
+        // shorter match in JavaScript. Decline and let real sed run.
+        if (
+          group.hasAnchor &&
+          quantifierAllowsZero(pattern, i + 1) &&
+          restHasQuantifierOrAlternation(pattern, quantifierEnd)
+        ) {
+          return true;
+        }
         if (groups.length > 0) {
           groups[groups.length - 1]!.hasQuantifier = true;
         }
@@ -720,10 +730,11 @@ function skipCharacterClass(pattern: string, start: number): number {
 
 // `+` (\+ in BRE) and `{1,}` repeat an anchored group and do not match GNU
 // sed: sed drops the match, JavaScript keeps a shorter one. `{0,}` is the
-// same shape as `*` and matches sed, so both stay simulated. `{n,}` for
-// n >= 2 cannot repeat an anchored group; sed and JavaScript both leave it
-// unmatched. A finite interval with min <= 1 and max >= 2 (`{0,2}`, `{1,2}`)
-// also diverges. Intervals with no anchor are not touched.
+// same shape as `*` and matches sed when no quantifier or alternation
+// follows, so those stay simulated. `{n,}` for n >= 2 cannot repeat an
+// anchored group; sed and JavaScript both leave it unmatched. A finite
+// interval with min <= 1 and max >= 2 (`{0,2}`, `{1,2}`) also diverges.
+// Intervals with no anchor are not touched.
 function isUnsafeAnchoredGroupQuantifier(
   pattern: string,
   start: number,
@@ -740,6 +751,40 @@ function isUnsafeAnchoredGroupQuantifier(
     return bounds.min === 1;
   }
   return bounds.min <= 1 && bounds.max >= 2;
+}
+
+// `*`, `?` (\? in BRE), `{0,n}`, and `{0,}` can match empty.
+function quantifierAllowsZero(pattern: string, start: number): boolean {
+  const char = pattern[start];
+  if (char === '*' || char === '?') {
+    return true;
+  }
+  const bounds = readBraceQuantifierBounds(pattern, start);
+  return bounds !== null && bounds.min === 0;
+}
+
+function restHasQuantifierOrAlternation(
+  pattern: string,
+  start: number,
+): boolean {
+  for (let i = start; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '\\') {
+      i++;
+      continue;
+    }
+    if (char === '[') {
+      i = skipCharacterClass(pattern, i);
+      continue;
+    }
+    if (char === '*' || char === '+' || char === '?' || char === '|') {
+      return true;
+    }
+    if (char === '{' && readBraceQuantifierBounds(pattern, i) !== null) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function readBraceQuantifierBounds(
@@ -978,10 +1023,11 @@ function hasOddBackslashRun(pattern: string, index: number): boolean {
   return count % 2 === 1;
 }
 
-// BRE anchors ^ at the start of the expression and immediately after \( or \|,
-// and $ at the end and immediately before ) or | (escaped or raw). An even
-// run of backslashes is a literal \, so \\(^ is not a group and $\\b keeps
-// $ literal.
+// BRE anchors ^ at the start of the expression and immediately after \( or \|.
+// $ anchors at the end of the pattern, before \) or \|, and before a raw )
+// or | that is not the pattern's last character. A final raw ) or | leaves
+// $ literal. An even run of backslashes is a literal \, so \\(^ is not a
+// group and $\\b keeps $ literal.
 function isBreCaretAnchor(pattern: string, index: number): boolean {
   if (index === 0) {
     return true;
@@ -998,8 +1044,11 @@ function isBreDollarAnchor(pattern: string, index: number): boolean {
     return true;
   }
   const next = pattern[index + 1];
-  const marker = next === '\\' ? pattern[index + 2] : next;
-  return marker === ')' || marker === '|';
+  if (next === '\\') {
+    const marker = pattern[index + 2];
+    return marker === ')' || marker === '|';
+  }
+  return (next === ')' || next === '|') && index + 1 < pattern.length - 1;
 }
 
 function unescapeSedDelimiter(pattern: string): string {

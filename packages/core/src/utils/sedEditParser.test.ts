@@ -314,15 +314,43 @@ describe('sedEditParser', () => {
       parseSedEditCommand("sed -i 's/\\(\\(^a\\)\\)*/X/' a.ts"),
     ).not.toBeNull();
     expect(applySed("sed -i 's/\\(\\(^a\\)\\)*/X/' a.ts", 'aa\n')).toBe('Xa\n');
+    // No quantifier after the group: GNU sed 4.9 rewrites "ab" to "X".
+    expect(applySed("sed -i 's/\\(^a\\)*b/X/' a.ts", 'ab\n')).toBe('X\n');
   });
 
-  // GNU sed 4.9: $ before a raw ) or | is an anchor, so the line is unchanged.
+  // A zero-capable quantifier on an anchored group, followed by another
+  // quantifier, is leftmost-longest in GNU sed 4.9. JavaScript keeps a
+  // shorter match, so these are handed to real sed.
+  it('declines an anchored group with a zero quantifier before later quantified text', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)*\\(ab\\)*/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)*\\(ab\\)\\?/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{0,1\\}\\(ab\\)*/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{0,\\}\\(ab\\)*/X/' f.txt"),
+    ).toBeNull();
+  });
+
+  // GNU sed 4.9 anchors $ before a raw ) or | only when that marker is not
+  // the last character of the pattern. A final ) or | leaves $ literal.
   it('anchors $ before a raw ) or |', () => {
     expect(applySed("sed -i 's/\\(^foo$|bar\\)/Z/' f.txt", 'foo$|bar\n')).toBe(
       'foo$|bar\n',
     );
     expect(applySed("sed -i 's/x$)y/Z/' f.txt", 'x$)y\n')).toBe('x$)y\n');
     expect(applySed("sed -i 's/x$|y/Z/' f.txt", 'x$|y\n')).toBe('x$|y\n');
+    expect(applySed("sed -i 's/x$))/Z/' f.txt", 'x$))\n')).toBe('x$))\n');
+    expect(applySed("sed -i 's/x$)/Z/' f.txt", 'ax$)b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/x$|/Z/' f.txt", 'ax$|b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/x$)/Z/g' f.txt", 'ax$)b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/x$|/Z/g' f.txt", 'ax$|b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/(x$)/Z/g' f.txt", 'a(x$)b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/x$)/Z/g' f.txt", 'x$)\nx$)\n')).toBe('Z\nZ\n');
   });
 
   // $ followed by \ and a char other than ) or | stays literal. GNU sed 4.9
