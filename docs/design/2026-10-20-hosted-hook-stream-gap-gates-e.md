@@ -83,5 +83,7 @@ result. The cursor machinery is shared; the Hook lane is the new subject.
 The `hosted-harness-mysql` lane on Linux with MySQL 8.4 and a delegated
 cgroup v2 root is the evidence. `managed-agent-gate.yml` selects the `fast`
 tier on `pull_request`; the full suite runs on the first maintainer approval
-of the head commit, so a skipped lane is not a passing gate. The cell adds
-150 s to the shared fork: healthy 9630 s, fork 10230 s, Verify 181 minutes.
+of the head commit, so a skipped lane is not a passing gate. This cell adds
+150 s; with main's FG12f delivery entry (30 s to 50 s, +20 s) and the FG11d
+retire-at-intent cell (+18 s), the merged ledger is healthy 9668 s, fork
+10268 s, Verify 182 minutes.

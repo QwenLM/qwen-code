@@ -339,7 +339,7 @@ class HostedHookStreamGapIT {
                                 "FG13E_")) {
                     String text = message.path("content").toString();
                     prompt = text.substring(text.lastIndexOf("FG13E_"))
-                            .replaceAll("[^A-Z_].*", "");
+                            .replaceAll("[^A-Z0-9_].*", "");
                     results.clear();
                 } else if ("tool".equals(message.path("role").asText())) {
                     results.add(message);

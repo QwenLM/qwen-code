@@ -71,4 +71,6 @@ Hook 状态本身不在公共流上，所以这一格钉的是台账与断流，
 证据来自 Linux 上的 `hosted-harness-mysql` 车道，MySQL 8.4 与委派的 cgroup v2
 根。`managed-agent-gate.yml` 在 `pull_request` 上只选 `fast` 档；完整套件由维护者
 对 head 提交的首次批准触发，因此被跳过的车道不算通过。
-本格给共享 fork 增加 150 s：healthy 9630 s、fork 10230 s、Verify 181 分钟。
+本格增加 150 s；叠加 main 的 FG12f 投递格（30→50 s，+20 s）与 FG11d
+retire-at-intent（+18 s）后，合并台账为 healthy 9668 s、fork 10268 s、
+Verify 182 分钟。
