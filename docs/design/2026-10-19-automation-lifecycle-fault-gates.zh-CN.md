@@ -2,7 +2,8 @@
 
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
-状态：第 1 片部分交付。`disable-span` 已实现并实跑绿；其余两格与第 2 片已定界但未实现。
+状态：`disable-span`、按 run 的取消格与 `retire-at-intent` 已实现并实跑绿；
+`close-queued-input` 与取消矩阵的其余部分已定界但未实现。
 
 Issue：#14446，FG11 tracker。`d` 行记载按 run 取消已由 #14526 实现，并声明
 retire、disable、close 与 round 级取消矩阵并未因该合并而结清。
@@ -30,17 +31,18 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 模型桩。故障由既有 relay 承载：`held(...)` 在 Harness 看到操作之前扣住它，
 `relayed(...)` 丢掉一次应答，scanner 自己的调度器在用例布置期间被挂起。
 
-只有 `disable-span` 能直接跑在这套夹具上。`retire-at-intent` 需要在
-「run 已提交、wake turn 未开始」之间扣留，`close-*` 需要夹具当前能够接受的
-会话关闭；两点记在「边界」里，而不是当作已就绪。
+`disable-span` 与 `retire-at-intent` 能直接跑在这套夹具上：relay 扣住
+`fire_run`，把这次 fire 停在 occurrence 已提交、Harness 尚未准入之间，这正是
+这一格需要的窗口。`close-*` 仍需要夹具当前无法接受的会话关闭，记在「边界」里，
+而不是当作已就绪。
 
 ## 第 1 片：retire、disable、close
 
-| 格子                 | 构造                                                       | 预期                                                                                                                              |
-| -------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `retire-at-intent`   | claim 以 `intent` 停在 Harness 时 retire（relay 扣住操作） | claim 结算为 `cancelled`/`not_started_proven`；occurrence 不是 `unknown`                                                          |
-| `disable-span`       | 以禁用状态创建定义，跨两个到期 slot 后再 enable            | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                |
-| `close-queued-input` | 有 automation input 排在 held turn 之后时关闭 Session      | 排队的 input 结算且不产生模型 Turn；关闭 Session 上的存活定义每个 slot 记 `skipped(session_not_active)`，这是今天的行为，在此钉住 |
+| 格子                 | 构造                                                                       | 预期                                                                                                                              |
+| -------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `retire-at-intent`   | occurrence 已提交、Harness 尚未准入 `fire_run` 时 retire（relay 扣住操作） | occurrence 结算为 `skipped`/`definition_retired` 且 attempts 为 0；不提交 run、不起模型 Turn，claim 绝不为 `unknown`              |
+| `disable-span`       | 以禁用状态创建定义，跨两个到期 slot 后再 enable                            | 禁止期内不产生 `fired` occurrence 与 run；重新 enable 后第一个 slot 恰好 fire 一次                                                |
+| `close-queued-input` | 有 automation input 排在 held turn 之后时关闭 Session                      | 排队的 input 结算且不产生模型 Turn；关闭 Session 上的存活定义每个 slot 记 `skipped(session_not_active)`，这是今天的行为，在此钉住 |
 
 ## 第 2 片：取消矩阵
 
@@ -50,6 +52,9 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 - schedule、未来 slot、兄弟 run 与前台工作不受影响；
 - 在任何尝试之前被取消的排队 input 结算且不调用模型，自然完成的 run 保留
   其结果；
+- `cancel-stops-only-the-target` 已交付：把 wake turn 扣在模型上时，公开 task
+  cancel 让 task 与 run 在一秒内结算为 `cancelled`，schedule 保持 `live`；反之在
+  收到 `202` 后立刻释放模型，turn 会先跑完——本格避开的正是这个顺序。
 - 同一 key 的重试复用原 operation 与 run，被扣住的 cancel 绝不重投。
 
 #14526 已实现按 run 取消；第 2 片在它周围钉住 round 级矩阵。
@@ -58,10 +63,14 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 
 - 这些格子不执行 Workspace 工具、不触及发布；FG11f 负责那些，并受其设计
   中记录的执行授权缺口阻塞。
-- `retire-at-intent` 需要 claim 先存在。relay 在 Harness 之前扣住 `fire_run`
-  时，Spring 根本不会提交 `automation_run`，首次构造拿到的是空 run 列表，
-  没有东西可以结算成 `cancelled`。要构造它，需要在「run 已提交、wake turn
-  尚未开始」之间扣留，本夹具暂未暴露该注入点。
+- `retire-at-intent` 是 Harness 准入前的 retire，不是已提交的 intent。relay 在
+  Harness 看到 `fire_run` 之前扣住它，因此只有 occurrence、没有 `automation_run`：
+  此时 retire 让 occurrence 以 `skipped`/`definition_retired` 收口、attempts 为 0，
+  没有可取消的 run。已提交 intent 是另一条路径——`HostedAutomationSession.fire()`
+  在定义于其下 retire 后取消它已持有的 `intent`，由 CLI 侧用例「ends a claim its
+  definition retired under as cancelled, never started」钉成 `cancelled` 与
+  `not_started_proven`。本车道不执行那条分支，缺口在此保留，而不是被这一格当作
+  已结清。
 - `close-*` 需要工作区支撑的 Session：automation API 拒绝没有工作区的
   Session（`session_not_found`），而在本夹具里关闭工作区 Session 会得到
   `409 workspace_unavailable`，消息为 `Hosted Workspace execution is not
