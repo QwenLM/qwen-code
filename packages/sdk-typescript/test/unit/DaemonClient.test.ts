@@ -11021,6 +11021,23 @@ describe('DaemonClient', () => {
       expect(calls[0]?.signal?.aborted).toBe(true);
     });
 
+    it('reloads model providers through an encoded workspace-qualified mutation', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { status: 'applied' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client
+          .workspaceByCwd('/tmp/work space')
+          .reloadModelProviders({ clientId: 'client-1' }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/models/reload',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('workspaceById and workspaceByCwd call workspace-qualified agents routes', async () => {
       const list = {
         v: 1,
