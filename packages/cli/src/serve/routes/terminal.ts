@@ -344,27 +344,36 @@ export function createTerminalWsHandler(
         return;
       }
       if (snapshot.failed) {
-        // The client only accepts binary output after the handshake, so the
-        // failure replay must send it first — exactly like the exited path
-        // below. cleanup() detaches the failure listener, so it runs after.
-        sendControl(ws, {
-          type: 'snapshot',
-          replay: !created,
-          handlesPrimaryDa: snapshot.handlesPrimaryDa === true,
-        });
-        cleanup();
         // The registry keeps a failed session's buffer for exactly this
-        // replay; route it through the same backpressure guard as the
-        // exited path below.
-        if (!sendOutput(ws, snapshot.output)) {
-          ws.close(1013, 'Terminal output backpressure');
-          return;
+        // replay. The client must receive the snapshot control before its
+        // first binary frame, just as on the live/exited path below.
+        let replaySent = false;
+        try {
+          sendControl(ws, {
+            type: 'snapshot',
+            replay: !created,
+            handlesPrimaryDa: snapshot.handlesPrimaryDa === true,
+          });
+          replaySent = sendOutput(ws, snapshot.output);
+          if (replaySent) {
+            sendControl(ws, {
+              type: 'error',
+              message: snapshot.failureMessage ?? 'Terminal failed',
+            });
+          }
+        } finally {
+          try {
+            cleanup();
+          } finally {
+            // This is a logical failed state; the existing registry failure
+            // guard releases retained state without sending another signal.
+            registry.release(terminalId, workspace.workspaceCwd);
+          }
         }
-        sendControl(ws, {
-          type: 'error',
-          message: snapshot.failureMessage ?? 'Terminal failed',
-        });
-        ws.close(4001, 'Terminal failed');
+        ws.close(
+          replaySent ? 4001 : 1013,
+          replaySent ? 'Terminal failed' : 'Terminal output backpressure',
+        );
         return;
       }
 

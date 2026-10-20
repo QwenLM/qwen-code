@@ -309,7 +309,44 @@ describe('terminal WebSocket route', () => {
     expect(registry.release).not.toHaveBeenCalled();
   });
 
-  it('closes with the failure state when a reconnect hits a failed session', async () => {
+  it.each(['held\r\n', ''])(
+    'handshakes before replaying failed output %j and releases once',
+    async (output) => {
+      const registry = registryWithSnapshot({
+        output,
+        exited: false,
+        workspaceCwd: '/workspace',
+        failed: true,
+        failureMessage: 'resource limit reached',
+      });
+      const detachFailure = vi.fn();
+      vi.mocked(registry.addFailureListener).mockReturnValueOnce(detachFailure);
+      const ws = new FakeWebSocket();
+
+      await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+        ws as unknown as WebSocket,
+        request,
+      );
+
+      expect(ws.sent).toEqual([
+        '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+        Buffer.from(output),
+        '\x00{"type":"error","message":"resource limit reached"}',
+      ]);
+      expect(ws.send.mock.invocationCallOrder[0]!).toBeLessThan(
+        detachFailure.mock.invocationCallOrder[0]!,
+      );
+      expect(detachFailure).toHaveBeenCalledOnce();
+      expect(registry.release).toHaveBeenCalledExactlyOnceWith(
+        'terminal:manual-1',
+        '/workspace',
+      );
+      expect(ws.close).toHaveBeenCalledOnce();
+      expect(ws.close).toHaveBeenCalledWith(4001, 'Terminal failed');
+    },
+  );
+
+  it('releases a failed replay when its binary output is backpressured', async () => {
     const registry = registryWithSnapshot({
       output: 'held\r\n',
       exited: false,
@@ -318,28 +355,135 @@ describe('terminal WebSocket route', () => {
       failureMessage: 'resource limit reached',
     });
     const ws = new FakeWebSocket();
-
+    ws.bufferedAmount = 8 * 1024 * 1024 + 1;
     await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
       ws as unknown as WebSocket,
       request,
     );
-
-    // The snapshot handshake must come first: the client drops binary
-    // frames that arrive while it is awaiting one.
-    expect(ws.sent[0]).toBe(
+    expect(ws.sent).toEqual([
       '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+    ]);
+    expect(registry.release).toHaveBeenCalledExactlyOnceWith(
+      'terminal:manual-1',
+      '/workspace',
     );
-    // The retained scrollback is replayed before the failure frame, the
-    // same way the exited path replays it.
-    expect(sentOutput(ws)).toEqual(['held\r\n']);
-    const errorFrame =
-      '\x00{"type":"error","message":"resource limit reached"}';
-    const errorIndex = ws.sent.indexOf(errorFrame);
-    expect(errorIndex).toBeGreaterThan(-1);
-    expect(ws.sent.findIndex((data) => Buffer.isBuffer(data))).toBeLessThan(
-      errorIndex,
+    expect(ws.close).toHaveBeenCalledExactlyOnceWith(
+      1013,
+      'Terminal output backpressure',
     );
-    expect(ws.close).toHaveBeenCalledWith(4001, 'Terminal failed');
+  });
+
+  it.each([1, 2, 3])(
+    'detaches and releases when failed replay send %i throws',
+    async (throwAt) => {
+      const registry = registryWithSnapshot({
+        output: 'held\r\n',
+        exited: false,
+        workspaceCwd: '/workspace',
+        failed: true,
+        failureMessage: 'resource limit reached',
+      });
+      const subscriptions = new EventEmitter();
+      const detachOutput = vi.fn();
+      const detachExit = vi.fn();
+      const detachFailure = vi.fn();
+      vi.mocked(registry.addOutputListener).mockImplementationOnce(
+        (_id, listener) => {
+          subscriptions.on('output', listener);
+          detachOutput.mockImplementation(() => {
+            subscriptions.off('output', listener);
+          });
+          return detachOutput;
+        },
+      );
+      vi.mocked(registry.addExitListener).mockImplementationOnce(
+        (_id, listener) => {
+          subscriptions.on('exit', listener);
+          detachExit.mockImplementation(() => {
+            subscriptions.off('exit', listener);
+          });
+          return detachExit;
+        },
+      );
+      vi.mocked(registry.addFailureListener).mockImplementationOnce(
+        (_id, listener) => {
+          subscriptions.on('failure', listener);
+          detachFailure.mockImplementation(() => {
+            subscriptions.off('failure', listener);
+          });
+          return detachFailure;
+        },
+      );
+      const ws = new FakeWebSocket();
+      const sendError = new Error('injected send failure');
+      ws.send.mockImplementation((data) => {
+        if (ws.send.mock.calls.length === throwAt) throw sendError;
+        return ws.sent.push(data);
+      });
+
+      await expect(
+        createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+          ws as unknown as WebSocket,
+          request,
+        ),
+      ).rejects.toBe(sendError);
+
+      const frames = [
+        '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+        Buffer.from('held\r\n'),
+        '\x00{"type":"error","message":"resource limit reached"}',
+      ];
+      expect(ws.sent).toEqual(frames.slice(0, throwAt - 1));
+      expect(ws.send.mock.calls).toEqual(
+        frames.slice(0, throwAt).map((frame) => [frame]),
+      );
+      expect(detachOutput).toHaveBeenCalledOnce();
+      expect(detachExit).toHaveBeenCalledOnce();
+      expect(detachFailure).toHaveBeenCalledOnce();
+      for (const event of ['output', 'exit', 'failure']) {
+        expect(subscriptions.listenerCount(event)).toBe(0);
+      }
+      expect(registry.release).toHaveBeenCalledExactlyOnceWith(
+        'terminal:manual-1',
+        '/workspace',
+      );
+      subscriptions.emit('output', 'late output');
+      subscriptions.emit('exit', { exitCode: 7 });
+      subscriptions.emit('failure', 'late failure');
+      ws.emit('close');
+      expect(ws.send).toHaveBeenCalledTimes(throwAt);
+      expect(registry.release).toHaveBeenCalledOnce();
+      expect(ws.close).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still releases a failed replay when cleanup throws', async () => {
+    const registry = registryWithSnapshot({
+      output: 'held\r\n',
+      exited: false,
+      workspaceCwd: '/workspace',
+      failed: true,
+    });
+    const cleanupError = new Error('injected detach failure');
+    const detachFailure = vi.fn(() => {
+      throw cleanupError;
+    });
+    vi.mocked(registry.addFailureListener).mockReturnValueOnce(detachFailure);
+    const ws = new FakeWebSocket();
+
+    await expect(
+      createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+        ws as unknown as WebSocket,
+        request,
+      ),
+    ).rejects.toBe(cleanupError);
+
+    expect(detachFailure).toHaveBeenCalledOnce();
+    expect(registry.release).toHaveBeenCalledExactlyOnceWith(
+      'terminal:manual-1',
+      '/workspace',
+    );
+    expect(ws.close).not.toHaveBeenCalled();
   });
 
   it('closes cleanly when the session disappears before replay', async () => {
