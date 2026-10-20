@@ -51,6 +51,12 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
   下一次队首检查会回收 owner PID 已死且 mtime 超过 10 秒的票（活着
   的 waiter 每轮循环都会 touch 自己的票，所以 mtime 能跳过正在创建
   中的票；PID 被回收复用单独也无法清掉票）。
+- 两个类别共享同一把物理锁。`fast` 是 PR 反馈 lane，`normal` 是
+  approval 和 main 的 full-tier 工作。队首取排序后的第一张票，fast
+  票排在最前，所以 fast job 最多只等当前正在跑的那一次持锁，而不是
+  排在一串 full-tier 长任务后面。normal 票等待超过
+  `SDK_JAVA_LOCK_PROMOTE_AFTER`（默认 1200 秒）后会把自己改名进 fast
+  类别，因此持续的 PR 流量也无法饿死 full tier。
 - 成功后锁仍以 fd 9 留在 step 的 shell 里，因此它仍会在 step 边界
   自动释放 —— 这个辅助脚本改变的是**获取顺序**，而不是释放语义。
   EXIT/INT/TERM trap 负责丢弃票据。
@@ -80,8 +86,9 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 ## 验证计划
 
 - 辅助脚本的单元行为由 `scripts/tests/sdk-java-lock.test.js` 钉住
-  （仅 POSIX）：两个 waiter 的 FIFO 顺序、过期 owner 的回收、超时
-  签名与票据清理，`flock` 以 PATH stub 注入。
+  （仅 POSIX）：两个 waiter 的 FIFO 顺序、fast 先于 normal 的顺序、
+  aging 提升、过期 owner 的回收、超时签名与票据清理，`flock` 以
+  PATH stub 注入。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   现在 pin 的是 source 该辅助脚本和三处 `sdk_java_lock_acquire 5400`
   预算，`.size-baseline` 记录工作流的新尺寸。

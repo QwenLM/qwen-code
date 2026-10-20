@@ -56,6 +56,13 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   PID is dead and whose mtime is older than 10 seconds (a live waiter touches
   its ticket every loop, so the mtime guard skips mid-creation tickets and a
   recycled PID alone is not enough to clear one).
+- Two classes share the one physical lock. `fast` is the pull-request
+  feedback lane; `normal` is approval and main full-tier work. The head is
+  the first sorted ticket, and fast tickets sort first, so a fast job waits
+  at most the hold already running instead of a queue of long full-tier
+  holds. A normal ticket that waits past `SDK_JAVA_LOCK_PROMOTE_AFTER`
+  (default 1200 s) renames itself into the fast class, so continuous PR
+  traffic cannot starve the full tier.
 - On success the lock stays on fd 9 in the step shell, so it still releases
   automatically at the step boundary — the helper changes acquisition order,
   not release semantics. An EXIT/INT/TERM trap drops the ticket.
@@ -89,8 +96,9 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 
 - Unit behavior of the helper is pinned by
   `scripts/tests/sdk-java-lock.test.js` (POSIX-only): FIFO ordering across
-  two waiters, stale-owner reaping, timeout signature and ticket cleanup,
-  with `flock` stubbed on `PATH`.
+  two waiters, fast-before-normal ordering, aging promotion, stale-owner
+  reaping, timeout signature and ticket cleanup, with `flock` stubbed on
+  `PATH`.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` now pins the sourced helper and
   the `sdk_java_lock_acquire 5400` budget at each acquisition site, and the

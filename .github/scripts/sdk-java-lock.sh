@@ -14,14 +14,25 @@
 # PID namespace are both per-host, so a cancelled or killed step's orphaned
 # ticket is reaped by the next head-of-line check.
 #
+# Two classes share the one physical lock. `fast` is the pull-request
+# feedback lane; it is served before `normal` (approval and main full-tier
+# work), so a fast job never waits behind a queue of long full-tier holds —
+# its worst wait is the hold already running. A normal ticket that waits
+# more than SDK_JAVA_LOCK_PROMOTE_AFTER seconds (default 1200) is promoted
+# into the fast class, so continuous PR traffic cannot starve the full tier.
+#
 # Source this file from the locking step and call
-# `sdk_java_lock_acquire <wait-seconds>`. On success the lock stays on fd 9 in
-# the step shell, so it releases automatically at the step boundary exactly
-# like the inline `flock --wait` block did; the armed traps drop the ticket on
-# exit, interrupt or termination. On timeout the function prints the pinned
-# infrastructure-signature line and returns 1.
+# `sdk_java_lock_acquire <wait-seconds> [fast|normal]`. On success the lock
+# stays on fd 9 in the step shell, so it releases automatically at the step
+# boundary exactly like the inline `flock --wait` block did; the armed traps
+# drop the ticket on exit, interrupt or termination. On timeout the function
+# prints the pinned infrastructure-signature line and returns 1.
 sdk_java_lock_acquire() {
   local wait_seconds="${1:?wait seconds required}"
+  local priority="${2:-normal}"
+  local rank=1
+  [[ ${priority} == 'fast' ]] && rank=0
+  local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"
   mkdir -p "${queue}"
@@ -54,18 +65,19 @@ sdk_java_lock_acquire() {
   fi
   seq=$((seq + 1))
   printf '%s\n' "${seq}" >"${queue}/.seq"
-  local ticket
-  ticket=$(printf '%s/%010d.%s.ticket' "${queue}" "${seq}" "$$")
+  local seq_padded
+  seq_padded=$(printf '%010d' "${seq}")
+  local ticket="${queue}/${rank}.${seq_padded}.$$.ticket"
   : >"${ticket}"
   rmdir "${counter}"
 
   # The wait line prints on the first wait, then caps at one per minute.
-  local start=${SECONDS} heart=$((SECONDS - 61)) head name pid
+  local start=${SECONDS} heart=$((SECONDS - 61)) head name pid mtime
+  local promoted=$((rank == 0))
   while true; do
     # Reap dead owners: their ticket can neither hold nor wait in line. A
     # live waiter touches its ticket every loop, so the 10-second mtime
     # guard skips one mid-creation and a recycled PID alone cannot clear it.
-    local mtime
     for head in "${queue}/"*.ticket; do
       [[ -e ${head} ]] || continue
       name=${head##*/}
@@ -81,6 +93,17 @@ sdk_java_lock_acquire() {
         fi
       fi
     done
+
+    # Age a normal ticket into the fast class so a continuous PR stream
+    # cannot starve the full tier.
+    if ((!promoted && SECONDS - start >= promote_after)); then
+      local promoted_ticket="${queue}/0.${seq_padded}.$$.ticket"
+      if mv "${ticket}" "${promoted_ticket}" 2>/dev/null; then
+        ticket="${promoted_ticket}"
+        promoted=1
+        echo "Promoted sdk-java host lock queue ticket ${seq} to the fast class after $((promote_after / 60)) minutes"
+      fi
+    fi
 
     # sed -n 1p consumes every line: head -n 1 would close the pipe early
     # and pipefail would then fail the assignment with a SIGPIPE status.
@@ -101,12 +124,12 @@ sdk_java_lock_acquire() {
     fi
     if ((SECONDS - start >= wait_seconds)); then
       rm -f "${ticket}"
-      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq}"
+      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq} (${priority})"
       return 1
     fi
     if ((SECONDS - heart >= 60)); then
       heart=${SECONDS}
-      echo "Waiting for the sdk-java host lock as queue ticket ${seq}"
+      echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${priority})"
     fi
     touch "${ticket}"
     sleep 2
@@ -114,6 +137,6 @@ sdk_java_lock_acquire() {
 }
 
 if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
-  echo "source ${0} and call sdk_java_lock_acquire <wait-seconds>" >&2
+  echo "source ${0} and call sdk_java_lock_acquire <wait-seconds> [fast|normal]" >&2
   exit 2
 fi
