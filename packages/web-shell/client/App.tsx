@@ -21727,6 +21727,7 @@ export function App({
                       : undefined
                   }
                   onOpenPlugins={() => {
+                    setPluginInitialTab('extensions');
                     closeMobileDrawer();
                     openPanel('plugins');
                   }}

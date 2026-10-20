@@ -143,12 +143,30 @@ export function PluginManagerPage({
       {!detailOpen ? (
         <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center justify-between gap-3 border-b bg-background px-5 py-3">
           <TabsList className="h-8" aria-label={t('plugins.sections')}>
-            <TabsTrigger ref={initialFocusRef} value="extensions">
+            <TabsTrigger
+              ref={activeTab === 'extensions' ? initialFocusRef : undefined}
+              value="extensions"
+            >
               {t('plugins.extensions')}
             </TabsTrigger>
-            <TabsTrigger value="mcp">{t('plugins.mcp')}</TabsTrigger>
-            <TabsTrigger value="skills">{t('plugins.skills')}</TabsTrigger>
-            <TabsTrigger value="agents">{t('plugins.agents')}</TabsTrigger>
+            <TabsTrigger
+              ref={activeTab === 'mcp' ? initialFocusRef : undefined}
+              value="mcp"
+            >
+              {t('plugins.mcp')}
+            </TabsTrigger>
+            <TabsTrigger
+              ref={activeTab === 'skills' ? initialFocusRef : undefined}
+              value="skills"
+            >
+              {t('plugins.skills')}
+            </TabsTrigger>
+            <TabsTrigger
+              ref={activeTab === 'agents' ? initialFocusRef : undefined}
+              value="agents"
+            >
+              {t('plugins.agents')}
+            </TabsTrigger>
           </TabsList>
           {workspaceSelect(false)}
         </div>
