@@ -30,6 +30,10 @@ const chmodFault = vi.hoisted<{
   error: (Error & NodeJS.ErrnoException) | null;
 }>(() => ({ error: null }));
 
+const lstatFault = vi.hoisted<{ path: string | null }>(() => ({
+  path: null,
+}));
+
 const noFollowFault = vi.hoisted<{
   error: (Error & { code?: string }) | null;
   calls: string[];
@@ -50,6 +54,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     open: async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
+      if (chmodFault.error !== null) {
+        handle.chmod = () => Promise.reject(chmodFault.error!);
+      }
       const failure = directorySyncFault.error;
       if (
         failure !== null &&
@@ -64,6 +71,16 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     chmod: async (...args: Parameters<typeof actual.chmod>) => {
       if (chmodFault.error !== null) throw chmodFault.error;
       return actual.chmod(...args);
+    },
+    lstat: async (...args: Parameters<typeof actual.lstat>) => {
+      if (lstatFault.path !== null && args[0] === lstatFault.path) {
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => true,
+          mode: 0o755,
+        } as Awaited<ReturnType<typeof actual.lstat>>;
+      }
+      return actual.lstat(...args);
     },
   };
 });
@@ -335,6 +352,28 @@ describe('managed session resource store', () => {
         expect(await store.read(ref)).toEqual(Buffer.from('x', 'utf8'));
       } finally {
         chmodFault.error = null;
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not chmod through a replaced directory entry',
+    async () => {
+      const { store, runtimeBaseDir } = await createStore();
+      const outside = path.join(runtimeBaseDir, 'outside');
+      await fs.mkdir(outside, { recursive: true, mode: 0o755 });
+      await fs.chmod(outside, 0o755);
+      const kindDir = path.join(store.sessionRoot, 'managed-input');
+      await fs.mkdir(store.sessionRoot, { recursive: true });
+      await fs.symlink(outside, kindDir);
+      lstatFault.path = kindDir;
+      try {
+        await store
+          .publish('managed-input', Buffer.from('x', 'utf8'))
+          .catch(() => undefined);
+        expect((await fs.stat(outside)).mode & 0o777).toBe(0o755);
+      } finally {
+        lstatFault.path = null;
       }
     },
   );

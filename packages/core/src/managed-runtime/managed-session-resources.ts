@@ -5,7 +5,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -307,12 +308,40 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
   // mount without chmod support stays as it is rather than turning a working
   // publish into a refusal.
   if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700) {
-    await chmod(directory, 0o700).catch(() => undefined);
+    await tightenDirectory(directory);
   }
   // `publish` promises a ref that is safe to reference from a transaction
   // once it resolves, so the directory entry has to be durable in its parent
   // before bytes land under it.
   await syncDirectory(path.dirname(directory));
+}
+
+/**
+ * Tightens a directory the session owns through a no-follow handle. A swap
+ * between the lstat gate and this call cannot redirect the permission change
+ * to another path. A refused open or chmod leaves the directory as it is so
+ * a working publish does not become a refusal.
+ */
+async function tightenDirectory(directory: string): Promise<void> {
+  const flags =
+    constants.O_RDONLY |
+    (constants.O_NOFOLLOW ?? 0) |
+    (constants.O_DIRECTORY ?? 0);
+  let handle: FileHandle;
+  try {
+    handle = await open(directory, flags);
+  } catch {
+    return;
+  }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isDirectory()) return;
+    await handle.chmod(0o700);
+  } catch {
+    // A refused chmod keeps the pre-change capability.
+  } finally {
+    await handle.close();
+  }
 }
 
 async function syncDirectory(directory: string): Promise<void> {
