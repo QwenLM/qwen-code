@@ -2,7 +2,8 @@
 
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
-状态：第 1 片部分交付。`disable-span` 已实现并实跑绿；其余两格与第 2 片已定界但未实现。
+状态：`disable-span` 与按 run 的取消格已实现并实跑绿；`retire-at-intent`、
+`close-queued-input` 与取消矩阵的其余部分已定界但未实现。
 
 Issue：#14446，FG11 tracker。`d` 行记载按 run 取消已由 #14526 实现，并声明
 retire、disable、close 与 round 级取消矩阵并未因该合并而结清。
@@ -50,6 +51,9 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 - schedule、未来 slot、兄弟 run 与前台工作不受影响；
 - 在任何尝试之前被取消的排队 input 结算且不调用模型，自然完成的 run 保留
   其结果；
+- `cancel-stops-only-the-target` 已交付：把 wake turn 扣在模型上时，公开 task
+  cancel 让 task 与 run 在一秒内结算为 `cancelled`，schedule 保持 `live`；反之在
+  收到 `202` 后立刻释放模型，turn 会先跑完——本格避开的正是这个顺序。
 - 同一 key 的重试复用原 operation 与 run，被扣住的 cancel 绝不重投。
 
 #14526 已实现按 run 取消；第 2 片在它周围钉住 round 级矩阵。
@@ -64,12 +68,19 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
   尚未开始」之间扣留，本夹具暂未暴露该注入点。
 - `close-*` 需要工作区支撑的 Session：automation API 拒绝没有工作区的
   Session（`session_not_found`），而在本夹具里关闭工作区 Session 会得到
-  `workspace_unavailable`，来自托管会话的 workspace 执行可用性检查，而非
-  FG11f 命中的 store 级授权。
+  `409 workspace_unavailable`，消息为 `Hosted Workspace execution is not
+available.`。公开 close 路由经 `SessionLifecycleService.admit` 的 workspace
+  分支进入 `ManagedAgentStore.beginWorkspaceLifecycle`，由 `beginLifecycle`
+  抛出。该消息由五个类里的十处共享，因此要指名路由而非某个类：它不是 FG11f
+  故障的 store 级授权。那一片记录了两种拒绝——非持久 broker 在 `resolveScope`
+  的 409，以及切到持久 broker 后 `WorkspaceExecutionStore` 的
+  `Workspace execution authority is unavailable.`——两者都不是本条生命周期抛错。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
-  接受。把 wake turn 扣在模型上时，该取消在 120 s 内没有让 run 结算，
-  Harness 连接以 socket EOF 断开；要构造这一格需要换一个扣留点。
+  接受。把 wake turn 一直扣在模型上时，取消会赢：task 与 run 都在一秒内结算为
+  `cancelled`，之后再释放模型也不会复活。反之，在收到 `202` 后立刻释放模型，
+  turn 会先跑完，run 结算为 `completed`。因此扣住的模型本身就是这一格所需的
+  扣留点；决定结果的是释放顺序，而不是夹具。
 - 取消期间的租约接管不在范围内，与 FG11c 一致。
 - stream gap 门禁（FG11e）不在此处。
 
