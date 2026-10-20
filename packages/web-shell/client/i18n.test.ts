@@ -55,12 +55,8 @@ describe('web-shell i18n catalog', () => {
     expect(getTranslator('zh-CN')('trajectory.filter.search')).toBe(
       '搜索已加载记录…',
     );
-    expect(en('trajectory.filter.count', { count: 1 })).toBe(
-      '1 matching record',
-    );
-    expect(en('trajectory.filter.count', { count: 2 })).toBe(
-      '2 matching records',
-    );
+    expect(en('trajectory.filter.count', { count: 1 })).toBe('1 match');
+    expect(en('trajectory.filter.count', { count: 2 })).toBe('2 matches');
     expect(en('trajectory.filter.truncated', { count: 1 })).toContain(
       '(1 record)',
     );
