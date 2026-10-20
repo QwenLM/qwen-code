@@ -1469,20 +1469,24 @@ npm run test:e2e:managed-harness-restart-approval-expiry
 npm run test:e2e:managed-harness-restart-continuation-closeout
 ```
 
-Four additional arms layer one fault on the Allow path (#14481 step 2). The
+Five additional arms layer one fault on the Allow path (#14481 step 2). The
 first crashes the replacement Harness as soon as the decision is durably
 recorded; the second holds the Runtime Broker's execution `:start` so the
-crash lands after the `PREPARED` row and before the physical dispatch. Both
-leave the original Action, prepare key, digest and Runtime identity in place,
-start a third Harness generation, and require exactly one settled execution,
-one file effect and one terminal. The other two drop the control plane's
-reply after it committed; the retry under the same `Idempotency-Key` must
-land on the original record, so a lost decision produces one
-`ACTION_RESPONSE` operation and a lost Turn admission produces one Turn row:
+crash lands after the `PREPARED` row and before the physical dispatch; the
+third crashes after the approved result commits while the post-tool model
+round is held, so its reissue must reuse the saved request and retract the
+published prefix. All three leave the original Action, prepare key, digest
+and Runtime identity in place, start a third Harness generation, and require
+exactly one settled execution, one file effect and one terminal. The other
+two drop the control plane's reply after it committed; the retry under the
+same `Idempotency-Key` must land on the original record, so a lost decision
+produces one `ACTION_RESPONSE` operation and a lost Turn admission produces
+one Turn row:
 
 ```bash
 npm run test:e2e:managed-harness-restart-approval-after-decision
 npm run test:e2e:managed-harness-restart-approval-after-prepare
+npm run test:e2e:managed-harness-restart-approval-after-result
 npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
 npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 ```
@@ -1490,9 +1494,9 @@ npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The approval path still has no
 packaged arm for a lost load reply, a failed cleanup followed by another
-crash, a committed terminal that was not delivered, a payable checkpoint
-whose terminal write is missing, or a crash after the approved result
-commits; those rows stay focused or integration tested (#14481).
+crash, a committed terminal that was not delivered, or a payable checkpoint
+whose terminal write is missing; those rows stay focused or integration
+tested (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:

@@ -1375,11 +1375,13 @@ describe('ShellTool', () => {
         outputCaptureLimitExceeded: true,
       });
       expect(clipped.rawOutputSize).toBeNull();
+      expect(clipped.truncatedByProducer).toBe(true);
 
       // Control: the same body without a discard is still measured, so the
       // null above is the capture bound and not "shell never declares".
       const whole = await runFg('yes', { output });
       expect(whole.rawOutputSize).not.toBeNull();
+      expect(whole.truncatedByProducer).toBeUndefined();
     });
 
     describe('simulated sed edit', () => {
