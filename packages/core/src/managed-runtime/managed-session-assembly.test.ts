@@ -24,6 +24,7 @@ import {
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { readManagedSessionTitleInfoSync } from '../utils/sessionStorageUtils.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { ManagedSessionAppendUnsettledError } from './managed-session-records.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import type {
   ManagedSessionJournalStore,
@@ -378,6 +379,30 @@ describe('managed session assembly', () => {
       expect(renew).toHaveBeenCalledTimes(3);
       await vi.advanceTimersByTimeAsync(60_000);
       expect(renew).toHaveBeenCalledTimes(3);
+    } finally {
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
+  it('keeps renewing through unsettled appends until the store recovers', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const unsettled = new ManagedSessionAppendUnsettledError(
+      new Error('store unavailable'),
+    );
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValueOnce(unsettled)
+      .mockRejectedValueOnce(unsettled)
+      .mockRejectedValueOnce(unsettled)
+      .mockResolvedValue(undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(4);
     } finally {
       renew.mockRestore();
       await session.close();

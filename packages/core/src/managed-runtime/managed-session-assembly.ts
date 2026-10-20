@@ -22,7 +22,10 @@ import type {
   ManagedSessionKey,
   ManagedSessionSubject,
 } from './managed-session-records.js';
-import { ManagedSessionRecordError } from './managed-session-records.js';
+import {
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionRecordError,
+} from './managed-session-records.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
@@ -61,11 +64,21 @@ function startActivationRenewal(
         if (!stopped) failures = 0;
       })
       .catch((error: unknown) => {
+        if (stopped) return;
+        if (error instanceof ManagedSessionAppendUnsettledError) {
+          // The store may still settle this append. A later tick can renew
+          // once it recovers, so this must not count toward the permanent
+          // stop; only errors that fence the writer end the loop.
+          debugLogger.debug(
+            'Managed Session activation renewal deferred',
+            describeRenewalError(error),
+          );
+          return;
+        }
         debugLogger.debug(
           'Managed Session activation renewal failed',
           describeRenewalError(error),
         );
-        if (stopped) return;
         failures += 1;
         if (authority.writesStopped || failures >= MAX_RENEWAL_FAILURES) {
           debugLogger.warn(
