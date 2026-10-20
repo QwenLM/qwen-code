@@ -110,10 +110,10 @@ the journal shapes above, so they are scoped here rather than dropped:
 
 ## Open questions
 
-- The replay-versus-snapshot branch is located: `ManagedAgentService
-.replayableEvents` throws `ReplayCursorExpired` when the cursor falls below
-  `replay_floor_sequence`, and `ManagedEventStreamService` turns that into one
-  resync frame. What is still open is narrower — which automation event types
+- The replay-versus-snapshot branch is located:
+  `ManagedAgentService.replayableEvents` throws `ReplayCursorExpired` when the
+  cursor falls below `replay_floor_sequence`, and `ManagedEventStreamService`
+  turns that into one resync frame. What is still open is narrower — which automation event types
   reach the Session stream, and how a projection gap is told apart from a slow
   projection sitting at the same sequence.
 - The client-visible contract exists one design document outside the FG11 set:
