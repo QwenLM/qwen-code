@@ -137,7 +137,7 @@ export class PtyLimitError extends Error {
             '; the pty was terminated with an explicit failure instead of ' +
             'growing without bound' +
             (details.hasUndeliveredData
-              ? '; undelivered output was discarded'
+              ? `; undelivered ${details.code === 'QWEN_PTY_WRITE_LIMIT' ? 'input' : 'output'} was discarded`
               : '')),
     );
     this.name = 'PtyLimitError';
@@ -564,7 +564,7 @@ export class BunPtyProcess extends EventEmitter {
           limitKind: 'write-queue-per-pty',
           limit: this.limits.writeQueueBytes,
           acceptedBytes: this.writeQueuedBytes,
-          hasUndeliveredData: false,
+          hasUndeliveredData: this.writeQueuedBytes > 0,
           pid: this.pid,
         }),
       );
@@ -580,7 +580,7 @@ export class BunPtyProcess extends EventEmitter {
           limitKind: 'write-queue-process',
           limit: processPtyBudget.totalWriteQueueBytes,
           acceptedBytes: budget.writeQueueBytes,
-          hasUndeliveredData: false,
+          hasUndeliveredData: this.writeQueuedBytes > 0,
           pid: this.pid,
         }),
       );

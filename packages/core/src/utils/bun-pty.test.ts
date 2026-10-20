@@ -604,7 +604,8 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     expect(error.limit).toBe(LIMIT);
     expect(error.acceptedBytes).toBeGreaterThan(0);
     expect(error.acceptedBytes).toBeLessThanOrEqual(LIMIT);
-    expect(error.hasUndeliveredData).toBe(false);
+    expect(error.hasUndeliveredData).toBe(true);
+    expect(error.message).toContain('undelivered input was discarded');
 
     expect(pty.stats.resourceFailed).toBe(true);
     expect(pty.stats.writeQueuedBytes).toBe(0);

@@ -172,6 +172,7 @@ it.skipIf(process.platform === 'win32').each([false, true])(
         limitKind: 'write-queue-per-pty',
         limit: 4096,
         acceptedBytes: 0,
+        hasUndeliveredData: false,
       });
       expect(exits).toEqual([{ exitCode: 3, signal: 0 }]);
       expect(pty.stats).toMatchObject({
@@ -367,6 +368,73 @@ it.skipIf(process.platform === 'win32')(
       );
       expect(exit).toHaveBeenCalledExactlyOnceWith({ exitCode: 3, signal: 0 });
     } finally {
+      fake.readCallback?.(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      fake.readCallback = undefined;
+    }
+    expect(fake.close).toHaveBeenCalledExactlyOnceWith(fake.fd);
+    expect(kill).not.toHaveBeenCalled();
+    expect(getPtyBudgetStats()).toEqual({
+      activePtys: 0,
+      pausedHoldBytes: 0,
+      writeQueueBytes: 0,
+    });
+  },
+);
+
+it.skipIf(process.platform === 'win32').each(['per-pty', 'process'])(
+  'reports discarded queued input on the %s write cap',
+  async (scope) => {
+    vi.useFakeTimers();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw new Error('Blocked process.kill');
+    });
+    const { spawn, getPtyBudgetStats, processPtyBudget } = await import(
+      './bun-pty.js'
+    );
+    const original = processPtyBudget.totalWriteQueueBytes;
+    const pty = spawn('mock-command-never-executed', [], {
+      env: {},
+      limits: { writeQueueBytes: scope === 'per-pty' ? 4096 : 8192 },
+    });
+    const errors: Array<
+      Error & {
+        code?: string;
+        limitKind?: string;
+        acceptedBytes?: number;
+        hasUndeliveredData?: boolean;
+      }
+    > = [];
+    pty.on('error', (error) => errors.push(error));
+    try {
+      if (scope === 'process') processPtyBudget.totalWriteQueueBytes = 4096;
+      fake.retryWrites = true;
+      fake.captureWrite = true;
+      pty.write(Buffer.alloc(4096));
+      expect(pty.stats.writeQueuedBytes).toBe(4096);
+      expect(fake.writeCallback).toBeTypeOf('function');
+      fake.nativeExit!(3, 0);
+      pty.write('x');
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({
+        code: 'QWEN_PTY_WRITE_LIMIT',
+        limitKind: `write-queue-${scope}`,
+        acceptedBytes: 4096,
+        hasUndeliveredData: true,
+      });
+      expect(errors[0]!.message).toContain('undelivered input was discarded');
+      expect(errors[0]!.message).not.toContain('undelivered output');
+      expect(pty.stats.writeQueuedBytes).toBe(0);
+      expect(fake.write).toHaveBeenCalledTimes(1);
+    } finally {
+      processPtyBudget.totalWriteQueueBytes = original;
+      fake.writeCallback?.(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      fake.writeCallback = undefined;
       fake.readCallback?.(
         Object.assign(new Error('mock EIO'), { code: 'EIO' }),
         0,

@@ -495,6 +495,36 @@ describe('WebTerminalRegistry', () => {
     );
   });
 
+  it.each(['linux', 'win32'])(
+    'reports capacity refusal without retry and frees the id on %s',
+    async (platform) => {
+      osPlatform.mockReturnValue(platform);
+      const registry = new WebTerminalRegistry();
+      const dispose = vi.spyOn(Terminal.prototype, 'dispose');
+      spawn.mockImplementationOnce(() => {
+        throw Object.assign(new Error('capacity'), {
+          code: 'QWEN_PTY_ACTIVE_LIMIT',
+          limitKind: 'active-pty-count',
+          limit: 64,
+        });
+      });
+      const result = await create(registry, 'terminal:capacity');
+      const message =
+        'PTY capacity limit reached (QWEN_PTY_ACTIVE_LIMIT, active-pty-count, limit 64): capacity';
+      expect(result).toEqual({ error: message });
+      expect(warn).toHaveBeenCalledExactlyOnceWith(message);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(dispose).toHaveBeenCalledTimes(platform === 'win32' ? 1 : 0);
+      expect(kill).not.toHaveBeenCalled();
+      expect(process.kill).not.toHaveBeenCalled();
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(registry.readSnapshot('terminal:capacity')).toBeUndefined();
+      await expect(create(registry, 'terminal:capacity')).resolves.toEqual({
+        terminalId: 'terminal:capacity',
+      });
+    },
+  );
+
   it('reports a spawn failure and frees the id when both backends fail', async () => {
     osPlatform.mockReturnValue('win32');
     const responder = new Terminal();

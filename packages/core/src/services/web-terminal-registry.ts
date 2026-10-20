@@ -129,6 +129,23 @@ const getPtyLimitMessage = (err: unknown): string | undefined => {
   return err instanceof Error ? err.message : String(err);
 };
 
+const getPtyAdmissionMessage = (err: unknown): string | undefined => {
+  const failure = err as {
+    code?: unknown;
+    limitKind?: unknown;
+    limit?: unknown;
+  } | null;
+  if (failure?.code !== 'QWEN_PTY_ACTIVE_LIMIT') return undefined;
+  const details = [
+    failure.code,
+    typeof failure.limitKind === 'string' ? failure.limitKind : undefined,
+    typeof failure.limit === 'number' ? `limit ${failure.limit}` : undefined,
+  ]
+    .filter((detail) => detail !== undefined)
+    .join(', ');
+  return `PTY capacity limit reached (${details}): ${getErrorMessage(err)}`;
+};
+
 /**
  * Subscribe to a PTY's `error` event and return a real Disposable. The two
  * backends disagree on what `on` hands back (see SpawnedWebTerminalPty.on), so
@@ -486,7 +503,11 @@ export class WebTerminalRegistry {
         // behavior beats a terminal that cannot start at all. A failed spawn
         // produced no child process, so the retry cannot double-spawn (the
         // `ptySpawned` argument from #11497).
-        if (!useBundledConpty) throw firstError;
+        if (
+          !useBundledConpty ||
+          getPtyAdmissionMessage(firstError) !== undefined
+        )
+          throw firstError;
         spawned = spawnPty(false) as SpawnedWebTerminalPty;
       }
       dataDisposable = spawned.onData(handleData);
@@ -560,10 +581,15 @@ export class WebTerminalRegistry {
           }
         });
       }
-    } catch {
+    } catch (error) {
       queryReplyDisposable?.dispose();
       queryTerminal?.dispose();
       this.finishCreating(terminalId);
+      const admissionMessage = getPtyAdmissionMessage(error);
+      if (admissionMessage !== undefined) {
+        debugLogger.warn(admissionMessage);
+        return { error: admissionMessage };
+      }
       return { error: 'Failed to spawn shell' };
     }
 
