@@ -27,6 +27,7 @@ public final class ManagedSchema {
     public static final String CSI_APPLICATION_RETIREMENT =
             "/db/managed-schema/V12__csi_application_retirement.sql";
     public static final String WAKE_RECOVERY = "/db/managed-schema/V11__wake_recovery.sql";
+    public static final String HOSTED_CLEANUP = "/db/managed-schema/V13__hosted_cleanup_debt.sql";
     // Additive migrations over the published V1 baseline, in version order.
     public static final String SSH_WORKSPACE =
             "/db/managed-schema/V7__ssh_workspace_registration.sql";
@@ -37,7 +38,8 @@ public final class ManagedSchema {
             new Migration(5, MODEL_SELECTION), new Migration(6, APPROVAL_SELECTION),
             new Migration(7, SSH_WORKSPACE), new Migration(8, TURN_COMMAND_OPERATIONS),
             new Migration(9, RUNTIME_SESSION_HARNESS), new Migration(10, PLAN_MODE),
-            new Migration(11, WAKE_RECOVERY), new Migration(12, CSI_APPLICATION_RETIREMENT));
+            new Migration(11, WAKE_RECOVERY), new Migration(12, CSI_APPLICATION_RETIREMENT),
+            new Migration(13, HOSTED_CLEANUP));
     private static final int CURRENT = EXTENSIONS.getLast().version();
 
     private record Migration(int version, String resource) {
