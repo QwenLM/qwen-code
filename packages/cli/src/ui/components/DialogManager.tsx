@@ -160,6 +160,7 @@ export const DialogManager = ({
   if (uiState.loopDetectionConfirmationRequest) {
     return (
       <LoopDetectionConfirmation
+        cause={uiState.loopDetectionConfirmationRequest.cause}
         onComplete={uiState.loopDetectionConfirmationRequest.onComplete}
       />
     );

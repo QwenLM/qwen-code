@@ -19,6 +19,9 @@ import type { WebShellRightPanelItem } from '../../customization';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import type { TurnOutputScheduledTask } from './TurnOutputs';
 
+const mockDocxRender = vi.hoisted(() => vi.fn());
+vi.mock('docx-preview', () => ({ renderAsync: mockDocxRender }));
+
 const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
   URL,
   'createObjectURL',
@@ -5350,7 +5353,7 @@ describe('ArtifactPanel trajectory entry', () => {
   });
 });
 
-describe('ArtifactPanel native PDF previews', () => {
+describe('ArtifactPanel binary document previews', () => {
   const bytes = Buffer.from('%PDF-1.7');
   function pdfArtifact(patch: Partial<DaemonSessionArtifact> = {}) {
     return {
@@ -5369,6 +5372,11 @@ describe('ArtifactPanel native PDF previews', () => {
     return { root, container };
   }
   beforeEach(() => {
+    mockDocxRender
+      .mockReset()
+      .mockImplementation(async (data: ArrayBuffer, body: HTMLElement) => {
+        body.textContent = Buffer.from(data).toString();
+      });
     vi.stubGlobal('Blob', NodeBlob);
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
@@ -5422,6 +5430,29 @@ describe('ArtifactPanel native PDF previews', () => {
     async (status) => {
       const { root, container } = mountPdf();
       act(() => root.render(artifactPanel(pdfArtifact({ status }))));
+      await flush();
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(container.textContent).toContain(status);
+      expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['missing', 'expired'])(
+    'does not read a %s DOCX artifact',
+    async (status) => {
+      const { root, container } = mountPdf();
+      act(() =>
+        root.render(
+          artifactPanel(
+            pdfArtifact({
+              kind: 'document',
+              workspacePath: 'reports/Report.DOCX',
+              status,
+            }),
+          ),
+        ),
+      );
       await flush();
       expect(container.querySelector('iframe')).toBeNull();
       expect(container.textContent).toContain(status);
@@ -5487,35 +5518,160 @@ describe('ArtifactPanel native PDF previews', () => {
     expect(URL.createObjectURL).not.toHaveBeenCalled();
   });
 
-  it('uses only the selected workspace for a PDF read', async () => {
-    mockWorkspace.capabilities.features = ['workspace_qualified_rest_core'];
+  it.each(['PDF', 'DOCX'])(
+    'uses only the selected workspace for a %s read',
+    async (extension) => {
+      mockWorkspace.capabilities.features = ['workspace_qualified_rest_core'];
+      mockSecondaryWorkspaceActions.fileStat.mockResolvedValue({
+        type: 'file',
+        sizeBytes: bytes.length,
+        modifiedMs: 1,
+      });
+      mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockResolvedValue({
+        contentBase64: bytes.toString('base64'),
+        offset: 0,
+        returnedBytes: bytes.length,
+        sizeBytes: bytes.length,
+      });
+      const { root, container } = mountPdf();
+      act(() =>
+        root.render(
+          artifactPanel(
+            pdfArtifact({
+              kind: extension === 'PDF' ? 'pdf' : 'document',
+              workspacePath: `reports/Report.${extension}`,
+            }),
+            {
+              workspaceCwd: '/secondary',
+              workspaceId: 'secondary-id',
+            },
+          ),
+        ),
+      );
+      if (extension === 'DOCX') {
+        act(() =>
+          container.querySelector('iframe')!.dispatchEvent(new Event('load')),
+        );
+      }
+      await flush();
+      expect(
+        container.querySelector(
+          extension === 'DOCX' ? '[data-web-shell-docx-preview]' : 'iframe',
+        ),
+      ).not.toBeNull();
+      expect(
+        mockSecondaryWorkspaceActions.readWorkspaceFileBytes,
+      ).toHaveBeenCalled();
+      expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['available', 'changed'])(
+    'loads a %s DOCX artifact as binary',
+    async (status) => {
+      const { root, container } = mountPdf();
+      act(() =>
+        root.render(
+          artifactPanel(
+            pdfArtifact({
+              kind: 'document',
+              workspacePath: 'report.docx',
+              status,
+            }),
+          ),
+        ),
+      );
+      const preview = container.querySelector('[data-web-shell-docx-preview]')!;
+      expect(preview).not.toBeNull();
+      act(() =>
+        preview.querySelector('iframe')!.dispatchEvent(new Event('load')),
+      );
+      await flushPreview();
+      expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledWith(
+        'report.docx',
+        { offset: 0, maxBytes: 256 * 1024 },
+      );
+      expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+      expect(preview.querySelector('iframe')!.style.visibility).toBe('visible');
+      expect(
+        preview.querySelector('iframe')!.contentDocument!.body.textContent,
+      ).toBe(bytes.toString());
+    },
+  );
+
+  it('replaces a pending DOCX read when the same path moves to another workspace owner', async () => {
+    let finish!: (value: {
+      contentBase64: string;
+      offset: number;
+      returnedBytes: number;
+      sizeBytes: number;
+    }) => void;
+    mockWorkspaceActions.readFileBytes.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const secondaryBytes = Buffer.from('Secondary DOCX content');
     mockSecondaryWorkspaceActions.fileStat.mockResolvedValue({
       type: 'file',
-      sizeBytes: bytes.length,
-      modifiedMs: 1,
+      sizeBytes: secondaryBytes.length,
+      modifiedMs: 2,
     });
     mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockResolvedValue({
-      contentBase64: bytes.toString('base64'),
+      contentBase64: secondaryBytes.toString('base64'),
       offset: 0,
-      returnedBytes: bytes.length,
-      sizeBytes: bytes.length,
+      returnedBytes: secondaryBytes.length,
+      sizeBytes: secondaryBytes.length,
+    });
+    const artifact = pdfArtifact({
+      kind: 'document',
+      workspacePath: 'report.docx',
     });
     const { root, container } = mountPdf();
+    act(() => root.render(artifactPanel(artifact)));
+    act(() =>
+      container.querySelector('iframe')!.dispatchEvent(new Event('load')),
+    );
+    await flush();
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(1);
     act(() =>
       root.render(
-        artifactPanel(pdfArtifact(), {
+        artifactPanel(artifact, {
           workspaceCwd: '/secondary',
           workspaceId: 'secondary-id',
         }),
       ),
     );
-    await flush();
-    expect(container.querySelector('iframe')).not.toBeNull();
+    act(() =>
+      container.querySelector('iframe')!.dispatchEvent(new Event('load')),
+    );
+    await flushPreview();
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/secondary',
+    );
+    expect(mockSecondaryWorkspaceActions.fileStat).toHaveBeenCalledTimes(2);
     expect(
       mockSecondaryWorkspaceActions.readWorkspaceFileBytes,
-    ).toHaveBeenCalled();
-    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
-    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    ).toHaveBeenCalledWith('report.docx', { offset: 0, maxBytes: 256 * 1024 });
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.stat).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-web-shell-docx-preview] iframe')!
+        .contentDocument!.body.textContent,
+    ).toBe(secondaryBytes.toString());
+    await act(async () =>
+      finish({
+        contentBase64: bytes.toString('base64'),
+        offset: 0,
+        returnedBytes: bytes.length,
+        sizeBytes: bytes.length,
+      }),
+    );
+    expect(
+      container.querySelector('iframe')!.contentDocument!.body.textContent,
+    ).toBe(secondaryBytes.toString());
+    expect(mockDocxRender).toHaveBeenCalledTimes(1);
   });
 
   it('keeps PDF bytes downloadable when the native viewer is unavailable', async () => {

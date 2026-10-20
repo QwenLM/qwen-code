@@ -4484,7 +4484,7 @@
       "type": "object",
       "properties": {
         "mods": {
-          "description": "Run the experimental JavaScript and TypeScript Mod command subset from enabled extensions in trusted headless sessions.",
+          "description": "Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.",
           "type": "boolean",
           "default": false
         },
