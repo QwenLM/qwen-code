@@ -4,10 +4,11 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationStorageException;
 import com.alibaba.qwen.code.managedagent.config.InternalSurfaceConfiguration.RoutingFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStorageException;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -42,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ApiExceptionHandlerTest {
     private static final String SECRET = "sk_live_PRIVATE_BODY_VALUE";
     private static final String CONTRACT =
-            "com.alibaba.qwen.code.managedagent.store.ToolPublicationContract";
+            "com.alibaba.qwen.code.managedagent.persistence.ToolPublicationContract";
 
     @Test
     void reportsStorageAccessDeniedAsDefiniteRejectionWithoutProviderDetails() {
@@ -71,7 +72,7 @@ class ApiExceptionHandlerTest {
         MockHttpServletResponse response = new MockHttpServletResponse();
         response.setCommitted(true);
 
-        assertThat(new ApiExceptionHandler().api(new ApiException(
+        assertThat(new ApiExceptionHandler().api(new ManagedAgentException(
                 HttpStatus.NOT_FOUND, "session_not_found", "gone"),
                 new MockHttpServletRequest(), response)).isNull();
         assertThat(new ApiExceptionHandler().runtime(new RuntimeBrokerException(
@@ -340,7 +341,7 @@ class ApiExceptionHandlerTest {
                 frame(CONTRACT, "id", 383),
                 frame(CONTRACT, "token", 402),
                 frame(CONTRACT, "request", 112),
-                frame("com.alibaba.qwen.code.managedagent.store.ToolPublicationStore", "reserve", 50),
+                frame("com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore", "reserve", 50),
                 frame("com.alibaba.qwen.code.managedagent.api.ToolPublicationController", "grant", 73),
                 frame("com.alibaba.qwen.code.managedagent.api.TenantContextFilter", "doFilterInternal", 60),
         });

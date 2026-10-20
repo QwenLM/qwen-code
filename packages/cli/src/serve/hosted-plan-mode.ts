@@ -25,9 +25,9 @@ export const HOSTED_PUBLIC_PLAN_TOOL: FunctionDeclaration = {
   },
 };
 
-export const HOSTED_PUBLIC_PLAN_READS = new Set(['read_file', 'glob']);
+export const HOSTED_PUBLIC_PLAN_READS = new Set(['read_file', 'glob', 'skill']);
 export const HOSTED_PUBLIC_PLAN_REFUSAL =
-  'Plan mode is read-only: only read_file, glob and a single exit_plan_mode call are allowed. Submit a plan with exit_plan_mode and wait for the user to approve it before making changes or running Shell commands.';
+  'Plan mode is read-only: only read_file, glob, static skill loading and a single exit_plan_mode call are allowed. Submit a plan with exit_plan_mode and wait for the user to approve it before making changes or running Shell commands.';
 
 export async function hostedPublicPlanActive(
   session: ManagedSession,

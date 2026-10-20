@@ -37,6 +37,7 @@ const refreshCapabilities = vi.fn();
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
   const React = await import('react');
   return {
+    DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
     DaemonWorkspaceProvider: ({ children }: { children: React.ReactNode }) => {
       if (workspaceShouldThrow) throw new Error('provider boom');
       return React.createElement(React.Fragment, null, children);

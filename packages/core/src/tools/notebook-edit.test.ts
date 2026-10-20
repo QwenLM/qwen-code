@@ -68,6 +68,7 @@ describe('NotebookEditTool', () => {
       getMemoryFileCount: () => 0,
       setMemoryFileCount: vi.fn(),
       getToolRegistry: () => ({}) as never,
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
     tool = new NotebookEditTool(config);
   });
@@ -184,6 +185,84 @@ describe('NotebookEditTool', () => {
       expect(cacheState.entry.lastReadWasFull).toBe(true);
       expect(cacheState.entry.lastReadCacheable).toBe(false);
     }
+  });
+
+  it('records the edited notebook as a session artifact', async () => {
+    vi.mocked(config.isRecordArtifactEnabled).mockReturnValue(true);
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await replaceLoadData(filePath);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      'automatically recorded as a workspace artifact with workspacePath "analysis.ipynb"',
+    );
+    expect(result.artifacts).toEqual([
+      {
+        title: 'analysis.ipynb',
+        kind: 'notebook',
+        storage: 'workspace',
+        workspacePath: 'analysis.ipynb',
+        mimeType: 'application/x-ipynb+json',
+        sizeBytes: fs.statSync(filePath).size,
+      },
+    ]);
+  });
+
+  it('only refreshes a notebook when record_as_artifact is false', async () => {
+    vi.mocked(config.isRecordArtifactEnabled).mockReturnValue(true);
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await edit({
+      notebook_path: filePath,
+      cell_id: 'load-data',
+      new_source: 'x = 2\nprint(x)',
+      record_as_artifact: false,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).not.toContain('automatically recorded');
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({
+        workspacePath: 'analysis.ipynb',
+        updateOnly: true,
+      }),
+    ]);
+  });
+
+  it('does not record a notebook when artifact recording is disabled', async () => {
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await replaceLoadData(filePath);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toBeUndefined();
+  });
+
+  it('does not record a notebook when the edit fails', async () => {
+    vi.mocked(config.isRecordArtifactEnabled).mockReturnValue(true);
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
+    );
+
+    const result = await edit({
+      notebook_path: filePath,
+      cell_id: 'missing-cell',
+      new_source: 'x = 2\n',
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.artifacts).toBeUndefined();
   });
 
   it('blocks writing a secret into a team-memory notebook', async () => {

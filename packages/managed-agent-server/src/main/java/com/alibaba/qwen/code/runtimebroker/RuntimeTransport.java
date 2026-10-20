@@ -60,6 +60,12 @@ public interface RuntimeTransport {
                 "csi_native_execution_unavailable", "Original CSI execution is unavailable.", false));
     }
 
+    default CompletionStage<byte[]> csiFileFinalize(RuntimeBindingRecord runtime, ContextBinding binding,
+            Map<String, Object> operation) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "csi_file_finalization_unavailable", "Original CSI file finalization is unavailable.", false));
+    }
+
     /** Explicit comparison inputs are component expectations, not trusted CSI placement provenance. */
     default CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
@@ -207,6 +213,18 @@ public interface RuntimeTransport {
                 "workspace_mount_release_unsupported",
                 "Runtime transport does not support Workspace mount release.",
                 false));
+    }
+
+    /**
+     * Finishes durable ownership for a Session the Broker has already retired.
+     * The caller must hold durable proof that the Runtime stopped holding the
+     * Session — a persisted drain receipt matching the binding and no active
+     * executions — and must never call this on a mere transport failure. A
+     * transport without durable ownership has nothing to clear.
+     */
+    default CompletionStage<Boolean> releaseRetired(RuntimeLease lease,
+            RuntimeSession session) {
+        return CompletableFuture.completedFuture(true);
     }
 
     /**
