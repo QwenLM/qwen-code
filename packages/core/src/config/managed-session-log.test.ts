@@ -71,9 +71,22 @@ const REANCHOR_GROWTH_BYTES = 32 * 1024 + 2 * 1024;
 
 // Each renewal loop below runs until the log grows by tens of KiB, so its
 // duration is set by per-renewal cost under host contention; the 70 KiB copy
-// has overrun the 60 s ecs-qwen lane ceiling (#14581). Slow hosts get double
-// it; fast hosts keep the lane default.
-const renewalLoopTimeoutMs = isSlowTestHost() ? 120_000 : undefined;
+// has overrun the 60 s ecs-qwen lane ceiling (#14581). The ecs-qwen lane gets
+// double that ceiling; slow hosts without that lane marker keep the
+// verification gate's 60 s clamp, which the lane config cannot see because
+// the gate passes it on the command line.
+function renewalLoopTimeout(
+  slowHost: boolean,
+  runnerName: string | undefined,
+): number | undefined {
+  if (!slowHost) return undefined;
+  return runnerName?.startsWith('ecs-qwen-') ? 120_000 : 60_000;
+}
+
+const renewalLoopTimeoutMs = renewalLoopTimeout(
+  isSlowTestHost(),
+  process.env['RUNNER_NAME'],
+);
 
 let root: string;
 let projectDir: string;
@@ -104,6 +117,28 @@ async function crashWriterLock(): Promise<Record<string, unknown>> {
     JSON.stringify({ ...crashed, pid: 999_999 }),
   );
   return crashed;
+}
+
+// A stalled renewal would otherwise burn the per-test ceiling and report only
+// a timeout; cap the iterations so the failure names the cause. A healthy
+// 70 KiB loop measures ~36 renewals, so the cap is far above real cost.
+const RENEWAL_LOOP_CAP = 5_000;
+
+async function growLogBy(
+  authority: ManagedSession['authority'],
+  transcriptPath: string,
+  from: number,
+  bytes: number,
+): Promise<void> {
+  for (let renewals = 0; ; renewals++) {
+    if ((await stat(transcriptPath)).size - from >= bytes) return;
+    if (renewals >= RENEWAL_LOOP_CAP) {
+      throw new Error(
+        `renewal loop made no progress after ${renewals} renewals`,
+      );
+    }
+    await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
+  }
 }
 
 function sessionService(): SessionService {
@@ -468,6 +503,23 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
+  it('keeps the renewal-loop ceiling under the gate clamp off the pool', () => {
+    expect(renewalLoopTimeout(true, 'ecs-qwen-runner-64c-01')).toBe(120_000);
+    expect(renewalLoopTimeout(true, undefined)).toBe(60_000);
+    expect(renewalLoopTimeout(false, undefined)).toBeUndefined();
+  });
+
+  it('fails a renewal loop that makes no progress', async () => {
+    const transcriptPath = path.join(root, 'stalled.log');
+    await writeFile(transcriptPath, '');
+    const authority = {
+      renewActivation: vi.fn(async () => undefined),
+    } as unknown as ManagedSession['authority'];
+    await expect(growLogBy(authority, transcriptPath, 0, 1)).rejects.toThrow(
+      /made no progress/,
+    );
+  }, 10_000);
+
   it(
     're-anchors its title on finalize after renewals alone moved the log on',
     async () => {
@@ -487,9 +539,7 @@ describe('Managed Session log recording', () => {
       const { authority } = (
         config as unknown as { managedSession: ManagedSession }
       ).managedSession;
-      while ((await stat(transcriptPath)).size - titledAt < 70 * 1024) {
-        await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
-      }
+      await growLogBy(authority, transcriptPath, titledAt, 70 * 1024);
       expect(sessionService().getSessionTitleInfo(SESSION_ID)?.title).not.toBe(
         'Idle title',
       );
@@ -538,9 +588,7 @@ describe('Managed Session log recording', () => {
       const { authority } = (
         config as unknown as { managedSession: ManagedSession }
       ).managedSession;
-      while ((await stat(transcriptPath)).size - renamedAt < 70 * 1024) {
-        await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
-      }
+      await growLogBy(authority, transcriptPath, renamedAt, 70 * 1024);
       // The session list now finds only the early title, in the head window.
       expect(sessionService().getSessionTitleInfo(SESSION_ID)).toMatchObject({
         title: 'Early title',
@@ -738,11 +786,7 @@ describe('Managed Session log recording', () => {
             | undefined;
           if (payload?.customTitle === 'New title') {
             const from = (await stat(transcriptPath)).size;
-            while ((await stat(transcriptPath)).size - from < 34 * 1024) {
-              await authority.renewActivation({
-                leaseDurationMs: 5 * 60 * 1000,
-              });
-            }
+            await growLogBy(authority, transcriptPath, from, 34 * 1024);
           }
           return write.call(this, record);
         },
@@ -776,9 +820,7 @@ describe('Managed Session log recording', () => {
       const { authority } = (
         config as unknown as { managedSession: ManagedSession }
       ).managedSession;
-      while ((await stat(transcriptPath)).size - from < REANCHOR_GROWTH_BYTES) {
-        await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
-      }
+      await growLogBy(authority, transcriptPath, from, REANCHOR_GROWTH_BYTES);
       const write = ManagedSessionRecordSink.prototype.write;
       const failing = vi
         .spyOn(ManagedSessionRecordSink.prototype, 'write')

@@ -20,34 +20,53 @@ vi.mock('node:os', async (importOriginal) => {
 
 // Mirrors packages/cli/src/test-utils/slow-test-host.test.ts; keep both in sync.
 describe('isSlowTestHost', () => {
-  const initialRunnerName = process.env['RUNNER_NAME'];
-
   beforeEach(() => {
+    vi.stubEnv('RUNNER_NAME', undefined);
+    vi.stubEnv('RUNNER_ENVIRONMENT', undefined);
+    vi.stubEnv('CI', 'false');
     vi.mocked(os.loadavg).mockReturnValue([0, 0, 0]);
     vi.mocked(os.availableParallelism).mockReturnValue(64);
   });
 
   afterEach(() => {
-    if (initialRunnerName === undefined) {
-      delete process.env['RUNNER_NAME'];
-    } else {
-      process.env['RUNNER_NAME'] = initialRunnerName;
-    }
+    vi.unstubAllEnvs();
   });
 
   it('treats the ecs-qwen pool as slow regardless of load', () => {
-    process.env['RUNNER_NAME'] = 'ecs-qwen-runner-64c-01';
+    vi.stubEnv('RUNNER_NAME', 'ecs-qwen-runner-64c-01');
     expect(isSlowTestHost()).toBe(true);
   });
 
   it('treats a saturated host as slow without RUNNER_NAME', () => {
-    delete process.env['RUNNER_NAME'];
     vi.mocked(os.loadavg).mockReturnValue([96, 0, 0]);
     expect(isSlowTestHost()).toBe(true);
   });
 
+  it('treats load equal to the available parallelism as saturated', () => {
+    vi.mocked(os.loadavg).mockReturnValue([64, 0, 0]);
+    expect(isSlowTestHost()).toBe(true);
+  });
+
   it('keeps an unsaturated host fast without RUNNER_NAME', () => {
-    delete process.env['RUNNER_NAME'];
+    vi.mocked(os.loadavg).mockReturnValue([2, 0, 0]);
+    expect(isSlowTestHost()).toBe(false);
+  });
+
+  it('treats a markerless CI child as slow', () => {
+    vi.stubEnv('CI', 'true');
+    expect(isSlowTestHost()).toBe(true);
+  });
+
+  it('keeps a named non-ecs runner fast', () => {
+    vi.stubEnv('CI', 'true');
+    vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-01');
+    vi.mocked(os.loadavg).mockReturnValue([2, 0, 0]);
+    expect(isSlowTestHost()).toBe(false);
+  });
+
+  it('keeps a CI runner with an environment marker fast', () => {
+    vi.stubEnv('CI', 'true');
+    vi.stubEnv('RUNNER_ENVIRONMENT', 'github-hosted');
     vi.mocked(os.loadavg).mockReturnValue([2, 0, 0]);
     expect(isSlowTestHost()).toBe(false);
   });
