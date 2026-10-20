@@ -11,6 +11,10 @@ import {
 import type { MessageListProps } from './MessageList';
 import type { Message } from '../adapters/types';
 
+vi.mock('../hooks/useMessageDeletion', () => ({
+  useMessageDeletion: () => undefined,
+}));
+
 const appBridgeMocks = vi.hoisted(() => ({
   constructed: 0,
   last: null as {
