@@ -611,10 +611,19 @@ describe('OpenTuiHooksDialog', () => {
       />,
     );
     expect(screen.queryByText('Hooks')).toBeNull();
+    for (
+      let i = 0;
+      i < DISPLAY_HOOK_EVENTS.indexOf(HookEventName.PreToolUse);
+      i++
+    ) {
+      await press('down');
+    }
     await press('return');
     expect(screen.getByText('Read')).toBeTruthy();
     await press('return');
     await press('return');
+    expect(screen.queryByText('Hook details')).toBeNull();
+    expect(screen.getByText('Event:')).toBeTruthy();
     expect(screen.getByText('HEAD')).toBeTruthy();
     expect(screen.getByText('MIDDLE')).toBeTruthy();
     expect(screen.getByText('TAIL')).toBeTruthy();
