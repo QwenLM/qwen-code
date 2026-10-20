@@ -382,7 +382,6 @@ export function spawn(
       options,
       cwd,
       env,
-      name,
       encoding,
     );
   } catch (error) {
@@ -440,7 +439,6 @@ export class BunPtyProcess extends EventEmitter {
     options: BunPtyForkOptions,
     cwd: string,
     env: { [key: string]: string | undefined },
-    name: string,
     encoding: string | null,
   ) {
     super();
@@ -911,6 +909,7 @@ export class BunPtyProcess extends EventEmitter {
       } catch {
         // Process group already gone.
       }
+      if (this.exited) return;
       try {
         process.kill(this.pid, sig);
       } catch {

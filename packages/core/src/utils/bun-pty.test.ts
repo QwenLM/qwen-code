@@ -984,6 +984,9 @@ describe.skipIf(!POSIX)('fd lifetime and write-error races', () => {
         deliverOutput(fsCapture.reads.shift()!, 'chunk-one'),
       ).not.toThrow();
       expect(reported).toHaveLength(1);
+      expect(reported[0]?.message).toBe(
+        'pty data listener threw: data listener boom',
+      );
       expect(fsCapture.reads).toHaveLength(1);
       expect(pty.stats.readInFlight).toBe(true);
 

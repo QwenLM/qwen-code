@@ -595,3 +595,96 @@ it
     expect(fake.close).toHaveBeenCalledExactlyOnceWith(fake.fd);
   },
 );
+
+it
+  .skipIf(process.platform === 'win32')
+  .each([
+    'exit-before-fallback',
+    'exit-during-term-group',
+    'exit-during-kill-group',
+    'still-live-after-fd-close',
+  ])(
+  'preserves group fallback after %s without signalling a reaped leader',
+  async (mode) => {
+    vi.useFakeTimers();
+    let descendantAlive = true;
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (Math.abs(pid) !== fake.pid) throw new Error('Blocked unknown PID');
+      if (pid === -fake.pid && signal === 'SIGKILL') descendantAlive = false;
+      if (
+        pid === -fake.pid &&
+        ((mode === 'exit-during-term-group' && signal === 'SIGTERM') ||
+          (mode === 'exit-during-kill-group' && signal === 'SIGKILL'))
+      ) {
+        fake.nativeExit!(0, 15);
+      }
+      return true;
+    });
+    const { spawn, getPtyBudgetStats } = await import('./bun-pty.js');
+    const pty = spawn('mock-command-never-executed', [], {
+      env: {},
+      limits: { writeQueueBytes: 4096 },
+    });
+    try {
+      expect(fake.nativeExit).toBeTypeOf('function');
+      pty.on('error', vi.fn());
+      pty.write(Buffer.alloc(8192));
+      expect(kill.mock.calls).toEqual(
+        mode === 'exit-during-term-group'
+          ? [[-fake.pid, 'SIGTERM']]
+          : [
+              [-fake.pid, 'SIGTERM'],
+              [fake.pid, 'SIGTERM'],
+            ],
+      );
+      expect(vi.getTimerCount()).toBe(1);
+      if (mode === 'exit-before-fallback') {
+        fake.nativeExit!(0, 15);
+      }
+      // Native leader exit does not prove TERM-resistant descendants exited.
+      expect(descendantAlive).toBe(true);
+      // Closing the fd and refunding budgets must also preserve group fallback.
+      fake.readCallback!(
+        Object.assign(new Error('mock EIO'), { code: 'EIO' }),
+        0,
+      );
+      expect(fake.close).toHaveBeenCalledExactlyOnceWith(fake.fd);
+      expect(getPtyBudgetStats()).toEqual({
+        activePtys: 0,
+        pausedHoldBytes: 0,
+        writeQueueBytes: 0,
+      });
+      expect(vi.getTimerCount()).toBe(1);
+      vi.advanceTimersByTime(499);
+      expect(
+        kill.mock.calls.filter(([, signal]) => signal === 'SIGKILL'),
+      ).toEqual([]);
+      expect(descendantAlive).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(
+        kill.mock.calls.filter(([, signal]) => signal === 'SIGKILL'),
+      ).toEqual(
+        mode === 'still-live-after-fd-close'
+          ? [
+              [-fake.pid, 'SIGKILL'],
+              [fake.pid, 'SIGKILL'],
+            ]
+          : [[-fake.pid, 'SIGKILL']],
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      expect(descendantAlive).toBe(false);
+      const signals = kill.mock.calls.slice();
+      fake.nativeExit!(0, 15);
+      vi.advanceTimersByTime(1000);
+      expect(kill.mock.calls).toEqual(signals);
+    } finally {
+      if (pty.stats.readInFlight) {
+        fake.readCallback!(
+          Object.assign(new Error('cleanup EIO'), { code: 'EIO' }),
+          0,
+        );
+      }
+      fake.nativeExit!(0, 15);
+    }
+  },
+);
