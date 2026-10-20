@@ -70,7 +70,15 @@ describe('SpotBugs gate witness', () => {
     ];
     expect(enforcing.length).toBe(4);
     for (const step of enforcing) {
-      expect(step.run).toContain('verify');
+      // Match the command line only: the MariaDB job's merged step explains
+      // its own incident in comments that say 'verify', so a bare
+      // toContain('verify') would let prose witness the phase after a real
+      // narrowing to `clean test`.
+      const commands = step.run
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .join('\n');
+      expect(commands).toMatch(/\bclean verify\b/);
       expect(step.run).not.toContain('spotbugs.skip');
     }
 

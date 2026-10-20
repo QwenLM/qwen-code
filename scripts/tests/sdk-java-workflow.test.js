@@ -50,8 +50,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       );
       const verify = steps.findIndex(
         (s) =>
-          (s['working-directory'] === 'packages/managed-agent-server' ||
-            s.run?.includes('-f packages/managed-agent-server/pom.xml') ||
+          (s.run?.includes('-f packages/managed-agent-server/pom.xml') ||
             s.run?.includes('cd packages/managed-agent-server')) &&
           s.run?.includes('clean verify'),
       );
@@ -737,10 +736,16 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     expect(lockWait).toBeDefined();
     const lockAt = step.run.indexOf(lockWait);
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
+    // The deleted `working-directory:` applied to the whole step; its `cd`
+    // replacement only applies from where it sits, so pin it between the two
+    // Maven runs: above the install it breaks the SDK `-f` path, below the
+    // verify it runs `clean verify` in the wrong module.
+    const cdAt = step.run.indexOf('cd packages/managed-agent-server');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
     expect(lockAt).toBeGreaterThan(-1);
     expect(installAt).toBeGreaterThan(lockAt);
-    expect(verifyAt).toBeGreaterThan(installAt);
+    expect(cdAt).toBeGreaterThan(installAt);
+    expect(verifyAt).toBeGreaterThan(cdAt);
     // The ceiling must absorb one full lock wait plus the ~60 minutes of
     // measured Maven work and ~30 minutes of uncapped setup.
     expect(
@@ -790,6 +795,18 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     expect(step.run).toContain(
       '|| echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
     );
+    // One body replaced the two-step split, so only these positions still
+    // order the phases: the write-back runs against a directory the seed has
+    // not created yet if hoisted above it, and its warning arm swallows the
+    // failure instead of reddening the gate.
+    const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository"');
+    const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
+    const verifyAt = step.run.indexOf('-Pmysql-integration');
+    const writeBackAt = step.run.indexOf('tar -C "${RUNNER_TEMP}/m2-repo"');
+    expect(seedAt).toBeGreaterThan(-1);
+    expect(installAt).toBeGreaterThan(seedAt);
+    expect(verifyAt).toBeGreaterThan(installAt);
+    expect(writeBackAt).toBeGreaterThan(verifyAt);
   });
 });
 
