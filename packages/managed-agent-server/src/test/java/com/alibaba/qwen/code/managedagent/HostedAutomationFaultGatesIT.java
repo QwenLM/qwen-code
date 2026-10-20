@@ -1397,6 +1397,10 @@ class HostedAutomationFaultGatesIT {
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
         Files.createDirectory(temporary.resolve("broker"));
         if (publicationFaults != null || workspaceLifecycle) {
+            // Durable local-process mode refuses a Runtime state directory any
+            // other account can read: the publication arms need it for a public
+            // Shell Session, and the Workspace lifecycle arm needs it before a
+            // close can be admitted.
             Files.setPosixFilePermissions(temporary.resolve("broker"),
                     java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
         }
