@@ -128,6 +128,17 @@ final class ManagedSessionRetirementStore {
                     session);
             return true;
         }
+        var cleanupOwners = jdbc.queryForList("SELECT owner_key, owner_revision, resource_key"
+                + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'HOSTED_CLEANUP'"
+                + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE", scope, limit);
+        for (var row : cleanupOwners) {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
+                    + " AND owner_kind = 'HOSTED_CLEANUP' AND owner_key = ? AND owner_revision = ?"
+                    + " AND resource_key = ?", scope, row.get("owner_key"), row.get("owner_revision"), row.get("resource_key"));
+        }
+        if (!cleanupOwners.isEmpty()) {
+            return true;
+        }
         var streams =
                 jdbc.queryForList(
                         "SELECT stream_kind, stream_id FROM ma_event_stream WHERE tenant_id = ? AND"
