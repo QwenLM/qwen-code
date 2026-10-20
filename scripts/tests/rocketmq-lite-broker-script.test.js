@@ -192,6 +192,30 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     ['namesrv', 'broker', 'proxy'].filter((name) =>
       existsSync(join(work, `${name}.pid`)),
     );
+  // Runs the real chooser the workflow lane runs and returns its NAME=VALUE
+  // output, remembering the holder directory so a failed case cannot leak it.
+  const choosePorts = () => {
+    const picked = spawnSync(process.execPath, [chooser], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    expect(picked.status).toBe(0);
+    const chosen = Object.fromEntries(
+      picked.stdout
+        .trim()
+        .split('\n')
+        .map((line) => line.split('=')),
+    );
+    holderDir = chosen.RMQ_HOLDER_DIR;
+    return chosen;
+  };
+  const parkedPorts = (chosen) =>
+    [
+      'RMQ_NAMESRV_PORT',
+      'RMQ_BROKER_PORT',
+      'RMQ_PROXY_GRPC_PORT',
+      'RMQ_PROXY_REMOTING_PORT',
+    ].map((name) => Number(chosen[name]));
 
   it('stops what a failed start launched and leaves a foreign listener', async () => {
     const holder = await foreignListener(ports[1]);
@@ -252,44 +276,35 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
   }, 200_000);
 
   it('takes over the ports the chooser parked and releases the rest', async () => {
-    const picked = spawnSync(process.execPath, [chooser], {
-      encoding: 'utf8',
-      timeout: 120_000,
-    });
-    expect(picked.status).toBe(0);
-    const chosen = Object.fromEntries(
-      picked.stdout
-        .trim()
-        .split('\n')
-        .map((line) => line.split('=')),
-    );
-    holderDir = chosen.RMQ_HOLDER_DIR;
-    const parked = [
-      'RMQ_NAMESRV_PORT',
-      'RMQ_BROKER_PORT',
-      'RMQ_PROXY_GRPC_PORT',
-      'RMQ_PROXY_REMOTING_PORT',
-    ].map((name) => chosen[name]);
-    expect(existsSync(holderDir)).toBe(true);
+    const chosen = choosePorts();
+    const parked = parkedPorts(chosen);
+    expect(existsSync(chosen.RMQ_HOLDER_DIR)).toBe(true);
 
     // start consumes the chooser's holder records exactly as the workflow
     // lane does; a record its `read` cannot parse aborts the start here.
-    const started = run('start', { ...chosen, RMQ_HOLDER_DIR: holderDir });
+    const started = run('start', chosen);
 
     expect(started.status).toBe(0);
     // Every holder this job owned is gone, including the broker companions,
     // and each parked port now belongs to the component that took it over.
-    expect(existsSync(holderDir)).toBe(false);
-    for (const port of parked.map(Number)) {
-      expect(await isFree(port)).toBe(false);
-    }
+    expect(existsSync(chosen.RMQ_HOLDER_DIR)).toBe(false);
+    for (const port of parked) expect(await isFree(port)).toBe(false);
 
-    expect(run('stop', { ...chosen, RMQ_HOLDER_DIR: holderDir }).status).toBe(
-      0,
-    );
-    for (const port of parked.map(Number)) {
+    expect(run('stop', chosen).status).toBe(0);
+    for (const port of parked) expect(await isFree(port)).toBe(true);
+    expect(pidFiles()).toEqual([]);
+  }, 200_000);
+
+  it('releases the ports the chooser parked on stop', async () => {
+    const chosen = choosePorts();
+
+    // stop reads the same holder records, for the rollback and stop paths the
+    // chooser's holders are meant to survive.
+    expect(run('stop', chosen).status).toBe(0);
+
+    expect(existsSync(chosen.RMQ_HOLDER_DIR)).toBe(false);
+    for (const port of parkedPorts(chosen)) {
       expect(await isFree(port)).toBe(true);
     }
-    expect(pidFiles()).toEqual([]);
   }, 200_000);
 });
