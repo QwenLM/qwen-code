@@ -872,6 +872,12 @@ const EN: Messages = {
     'Unable to preview this workbook. It may be damaged, password protected, too complex, or unsupported by this browser. You can download the original.',
   'excel.timeout':
     'This workbook took too long to preview. Download the original to open it.',
+  'docx.tooLarge':
+    'DOCX preview supports files up to 10 MiB. Download the original to open it.',
+  'docx.invalid':
+    'Unable to preview this DOCX document. You can download the original.',
+  'docx.timeout':
+    'This document took too long to preview. Download the original or try again.',
   'artifact.openLink': 'Open link',
   'artifact.longDocument': 'File is large. Source is shown by default.',
   'artifact.renderFullPreview': 'Render full preview',
@@ -5323,6 +5329,9 @@ const ZH: Messages = {
   'excel.invalid':
     '无法预览此工作簿，文件可能已损坏、受密码保护、复杂度过高，或当前浏览器不支持。你可以下载原文件。',
   'excel.timeout': '工作簿预览超时，请下载原文件打开。',
+  'docx.tooLarge': 'DOCX 预览支持最大 10 MiB 的文件，请下载原文件打开。',
+  'docx.invalid': '无法预览此 DOCX 文档，你可以下载原文件。',
+  'docx.timeout': '文档预览超时，你可以下载原文件或重试。',
   'artifact.openLink': '打开链接',
   'artifact.longDocument': '文件过大，默认展示源码。',
   'artifact.renderFullPreview': '完整排版预览',
