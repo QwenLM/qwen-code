@@ -4,6 +4,7 @@ import {
   DIFF_MERGE_INVISIBLE_CHARACTERS,
   escapeDiffContent,
   escapeInvisibleForMerge,
+  escapePairForMerge,
 } from './diffContent';
 
 describe('escapeInvisibleForMerge', () => {
@@ -49,12 +50,6 @@ describe('escapeInvisibleForMerge', () => {
     expect(escapeInvisibleForMerge('a\\u200bb')).toBe('a\\\\u200bb');
   });
 
-  it('leaves a plain backslash path readable instead of colliding', () => {
-    // Doubling a backslash is the price of injectivity; it must stay
-    // reversible-looking rather than swallowing the following character.
-    expect(escapeInvisibleForMerge('C:\\tmp')).toBe('C:\\\\tmp');
-  });
-
   it('differs from the decoration class on exactly the structural set', () => {
     // The two classes differ on CR alone: LF and TAB were never in either, so
     // CR is the one character that reached a document as a literal escape.
@@ -70,5 +65,41 @@ describe('escapeInvisibleForMerge', () => {
     expect(marks(DIFF_MERGE_INVISIBLE_CHARACTERS, '\n')).toBe(false);
     expect(marks(DIFF_MERGE_INVISIBLE_CHARACTERS, '\u200b')).toBe(true);
     expect(escapeDiffContent('\r')).toBe('\\r');
+  });
+});
+
+describe('escapePairForMerge', () => {
+  it('leaves ordinary text alone rather than rewriting every backslash', () => {
+    // Doubling a backslash is the price of injectivity, and it must only be
+    // paid by a file that needs neutralising. Charging every file rendered
+    // `/\\d+/` for a regex written `/\d+/`, `C:\\tmp` for a path written
+    // `C:\tmp` and `"\\n"` for `"\n"` in the narrow artifact pane, while the
+    // wide branch fifteen lines away showed the raw bytes — one artifact,
+    // two contents, flipped by dragging the split handle past 720px.
+    const pair = escapePairForMerge(
+      'C:\\tmp\\file.txt',
+      'const re = /^\\d+$/;',
+    );
+    expect(pair.oldText).toBe('C:\\tmp\\file.txt');
+    expect(pair.newText).toBe('const re = /^\\d+$/;');
+  });
+
+  it('escapes both sides once either side carries an invisible character', () => {
+    expect(escapePairForMerge('a\u200bb', 'ab')).toEqual({
+      oldText: 'a\\u200bb',
+      newText: 'ab',
+    });
+  });
+
+  it('keeps a real invisible character distinct from its escape literal', () => {
+    // The decision is taken over the pair for exactly this shape. Decided per
+    // side, the literal `\u200b` on the right would stay raw while the real
+    // U+200B on the left escaped to the same characters — the merge view would
+    // report "unchanged" for a file that changed, which is the defect the
+    // doubling exists to prevent.
+    const pair = escapePairForMerge('a\u200bb', 'a\\u200bb');
+    expect(pair.oldText).toBe('a\\u200bb');
+    expect(pair.newText).toBe('a\\\\u200bb');
+    expect(pair.oldText).not.toBe(pair.newText);
   });
 });

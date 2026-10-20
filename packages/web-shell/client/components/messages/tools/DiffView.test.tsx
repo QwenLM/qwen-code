@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { I18nProvider } from '../../../i18n';
 import {
   buildContextBoundedDiff,
+  buildUnifiedDiff,
   DIFF_OMITTED_MARKER,
 } from '../../../utils/unifiedDiff';
 import { DiffView } from './DiffView';
@@ -147,6 +148,32 @@ it.each([
     expect(container.textContent).not.toContain('\\r');
   },
 );
+
+it('renders a terminator-only edit as its notice instead of two identical rows', () => {
+  // `splitLines` drops the final terminator from both sides, so the rows this
+  // pair used to produce read `y` and `y` once the CRLF strip ran: a `+1/-1`
+  // badge over two byte-identical rows, while the bounded builder answered the
+  // same texts with this sentence.
+  expect(renderDiff(buildUnifiedDiff('x\r\ny', 'x\r\ny\r\n'))).toEqual([
+    'Trailing newline added at end of file.',
+  ]);
+});
+
+it('keeps a negative CRLF verdict off the screen and its rows honest', () => {
+  // The marker tells the parser "the source layer looked and this file is
+  // mixed", so the guess-from-rows fallback stands down. It is a verdict, not
+  // content: it must not print, and the rows must keep the `\r` visible
+  // because in a mixed file that `\r` is real content.
+  const diff = buildContextBoundedDiff(
+    'bare\nc1\r\nc2\r\nc3\r\nz\r',
+    'bare\nc1\r\nc2\r\nc3\r\nw\r',
+  );
+  renderDiff(diff);
+  expect(container.textContent).not.toContain('\\diff-crlf-mixed');
+  expect(
+    container.querySelectorAll('[title^="Invisible character:"]').length,
+  ).toBeGreaterThan(0);
+});
 
 it.each([
   '👨\u200d👩\u200d👧',

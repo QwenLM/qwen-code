@@ -37,3 +37,42 @@ export function escapeInvisibleForMerge(content: string): string {
       escapeDiffContent(character),
     );
 }
+
+// Non-global on purpose: `test()` on a global regex advances `lastIndex`, and
+// `DIFF_MERGE_INVISIBLE_CHARACTERS` is shared with `MatchDecorator`, which
+// mutates that state on its own schedule.
+const MERGE_INVISIBLE_PROBE = new RegExp(
+  DIFF_MERGE_INVISIBLE_CHARACTERS.source,
+  'u',
+);
+
+/**
+ * The pair-level entry point, and the only one the merge view should use.
+ *
+ * `escapeInvisibleForMerge` is injective but not free: doubling a backslash
+ * rewrites text that has no invisible character in it, so applying it to every
+ * file renders `/\\d+/` for a regex whose source is `/\d+/` — content that is
+ * not in the file, inside the surface whose job is to show the file. The
+ * transform is only *needed* when there is a character to neutralise, so the
+ * decision belongs to the pair: if neither side carries one, hand both sides
+ * through untouched and the merge view compares the real bytes.
+ *
+ * The decision must be taken over both texts at once. Deciding per side lets
+ * one side's raw `\u200b` literal meet the other side's escaped real U+200B and
+ * compare equal, which is the original "certifies unchanged" defect wearing the
+ * opposite mask. A side without an invisible character is still passed through
+ * the transform when its partner has one, so both documents stay in the same
+ * comparison space.
+ */
+export function escapePairForMerge(
+  oldText: string,
+  newText: string,
+): { oldText: string; newText: string } {
+  const needsNeutralizing =
+    MERGE_INVISIBLE_PROBE.test(oldText) || MERGE_INVISIBLE_PROBE.test(newText);
+  if (!needsNeutralizing) return { oldText, newText };
+  return {
+    oldText: escapeInvisibleForMerge(oldText),
+    newText: escapeInvisibleForMerge(newText),
+  };
+}

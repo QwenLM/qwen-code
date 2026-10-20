@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { useI18n } from '../../../i18n';
 import { DIFF_INVISIBLE_CHARACTERS, escapeDiffContent } from './diffContent';
 import {
+  DIFF_CRLF_MIXED_MARKER,
   DIFF_CRLF_UNIFORM_MARKER,
   localizeDiffNotice,
   parseUnifiedDiff,
@@ -26,9 +27,10 @@ export const DiffView = memo(function DiffView({
   const input = maxLength === undefined ? diff : diff.slice(0, maxLength);
   const { lines, additions, deletions, crlfUniform } = parseUnifiedDiff(input);
   // Whether a trailing `\r` is part of a `\r\n` terminator is decided in
-  // `parseUnifiedDiff`, so both patch sources agree: builders know the source
-  // text and emit `DIFF_CRLF_UNIFORM_MARKER`, while raw patches (which no
-  // builder produced) are judged from their own rows, since a uniform-CRLF
+  // `parseUnifiedDiff`, which reads the verdict builders stamp — affirmative
+  // or negative, because a builder that refuses to certify a file is telling
+  // the renderer something too. Raw patches (which no builder produced) carry
+  // no verdict, and only they are judged from their own rows: a uniform-CRLF
   // file keeps the `\r` on every content row. A mixed file keeps the `\r`
   // visible as an escape node, which is the honest rendering there.
   // Builders emit a notice as the whole preview, never inside a raw patch.
@@ -39,7 +41,11 @@ export const DiffView = memo(function DiffView({
   let remaining = maxLength ?? Infinity;
   let truncated = input.length < diff.length;
   const renderedLines = lines.flatMap((line) => {
-    if (line.type === 'header' && line.content === DIFF_CRLF_UNIFORM_MARKER) {
+    if (
+      line.type === 'header' &&
+      (line.content === DIFF_CRLF_UNIFORM_MARKER ||
+        line.content === DIFF_CRLF_MIXED_MARKER)
+    ) {
       return [];
     }
     if (remaining === 0) {

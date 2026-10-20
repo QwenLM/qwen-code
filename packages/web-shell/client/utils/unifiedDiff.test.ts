@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   buildContextBoundedDiff,
   buildUnifiedDiff,
+  DIFF_CRLF_MIXED_MARKER,
   DIFF_CRLF_UNIFORM_MARKER,
   DIFF_OMITTED_MARKER,
+  DIFF_TRAILING_NEWLINE_ADDED_MARKER,
   DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
   localizeDiffNotice,
   parseUnifiedDiff,
@@ -358,6 +360,58 @@ describe('CRLF uniformity is decided at the source layer', () => {
     ).toBe(false);
   });
 
+  it('reports a terminator-only edit as the trailing-newline notice', () => {
+    // Both sides satisfy `isUniformCrlf`'s one-unterminated-final-line
+    // allowance, so this pair certified uniform and the strip then deleted the
+    // `\r` from both rows: `-y` and `+y` rendered byte-identical under a
+    // `+1/-1` badge — a view asserting a change it could not show, and
+    // disagreeing with the bounded builder, which answers this exact shape
+    // with the notice.
+    expect(buildUnifiedDiff('x\r\ny', 'x\r\ny\r\n')).toBe(
+      DIFF_TRAILING_NEWLINE_ADDED_MARKER,
+    );
+    expect(buildUnifiedDiff('x\r\ny\r\n', 'x\r\ny')).toBe(
+      DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
+    );
+  });
+
+  it('keeps an insertion preview of a sole blank line as a content row', () => {
+    // The terminator gate needs both sides non-empty. `extractDiff` builds
+    // insertion previews from `('', newText)`, and
+    // `''.replace(/\r?\n$/, '')` equals `'\n'.replace(/\r?\n$/, '')`, so a
+    // guard-less gate would answer the whole edit with a notice about a
+    // newline instead of showing the line it adds.
+    expect(buildUnifiedDiff('', '\n')).toBe('+');
+    expect(parseUnifiedDiff(buildUnifiedDiff('', '\r\n'))).toMatchObject({
+      additions: 1,
+      deletions: 0,
+    });
+  });
+
+  it('stamps a negative verdict instead of leaving the renderer to guess', () => {
+    // A builder that refused to certify uniformity used to say nothing, and
+    // silence was indistinguishable from "no builder ran" — so the renderer
+    // voted on the rows the patch happened to show. Here the source layer says
+    // "mixed" and the renderer must not overturn it.
+    const diff = buildContextBoundedDiff('a\r\n', 'a\n');
+    expect(diff.split('\n')[0]).toBe(DIFF_CRLF_MIXED_MARKER);
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+  });
+
+  it('does not let a context window certify a whole file', () => {
+    // A partial `core.autocrlf` conversion: the only bare-LF line sits outside
+    // the ±3 row window around the change, so every row the patch shows is
+    // `\r`-terminated. The rows are honest and the conclusion is not — the
+    // window cannot speak for line 1. The verdict can.
+    const oldText = 'bare\nc1\r\nc2\r\nc3\r\nz\r';
+    const diff = buildContextBoundedDiff(
+      oldText,
+      'bare\nc1\r\nc2\r\nc3\r\nw\r',
+    );
+    expect(diff).not.toContain('bare');
+    expect(parseUnifiedDiff(diff).crlfUniform).toBe(false);
+  });
+
   it('keeps the marker out of the bounded hunk arithmetic', () => {
     const oldText = Array.from({ length: 10 }, (_, i) => `L${i}\r`).join('\n');
     const newSegments = oldText.split('\n');
@@ -460,6 +514,32 @@ describe('raw patches infer CRLF uniformity from their own rows', () => {
     expect(parseUnifiedDiff(rawPatch([' a', '-b', '+c'])).crlfUniform).toBe(
       false,
     );
+  });
+
+  it('honours the unterminated-final-line notice rather than voting it down', () => {
+    // `isUniformCrlf` allows one unterminated final line, and jsdiff's real
+    // output marks exactly that row with git's notice. Counting it as a
+    // dissenting vote painted three `\r` chips over a file the builder renders
+    // clean — same bytes, two producers, two renderings. Only the notice lets
+    // a patch claim the allowance; an unmarked unterminated row is still an LF
+    // line in a mixed file.
+    const patch = rawPatch([
+      ' a\r',
+      '-b\r',
+      '-c',
+      '\\ No newline at end of file',
+      '+c\r',
+    ]);
+    expect(parseUnifiedDiff(patch).crlfUniform).toBe(true);
+  });
+
+  it('does not withhold the vote of a single row that kept its terminator', () => {
+    // The trailing-row exclusion protects a row cut mid-way by `maxLength`,
+    // and it fired on every patch that did not end with `\n` — including one
+    // whose last row is intact and `\r`-terminated, which has no other row to
+    // be judged by.
+    expect(parseUnifiedDiff('@@ -0,0 +1,1 @@\n+a\r').crlfUniform).toBe(true);
+    expect(parseUnifiedDiff('@@ -0,0 +1,1 @@\n+a\r\n').crlfUniform).toBe(true);
   });
 
   it('ignores a row truncated by maxLength slicing', () => {

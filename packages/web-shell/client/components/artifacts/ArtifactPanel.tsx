@@ -66,7 +66,7 @@ import { DiffView } from '../messages/tools/DiffView';
 import {
   DIFF_INVISIBLE_CHARACTERS,
   escapeDiffContent,
-  escapeInvisibleForMerge,
+  escapePairForMerge,
 } from '../messages/tools/diffContent';
 import diffStyles from '../messages/tools/DiffView.module.css';
 import { TurnCallsPanel } from './TurnCallsPanel';
@@ -2904,8 +2904,11 @@ function CodeMirrorDiff({
     // inserted side renders escapes: a diff that certifies falsely. Escape
     // BOTH sides through the same transform before they enter the merge view
     // so the comparison runs over escaped text and every side renders the
-    // same visible escapes. The transform leaves line terminators alone (see
-    // DIFF_MERGE_INVISIBLE_CHARACTERS): this text is a document, not a row.
+    // same visible escapes — but only when there is something to escape;
+    // `escapePairForMerge` decides that for the pair, because the transform
+    // is not a no-op on ordinary text. The transform leaves line terminators
+    // alone (see DIFF_MERGE_INVISIBLE_CHARACTERS): this text is a document,
+    // not a row.
     void import('@codemirror/merge')
       .then(({ MergeView, unifiedMergeView }) => {
         if (cancelled) return;
@@ -2924,12 +2927,21 @@ function CodeMirrorDiff({
             return;
           }
 
+          // One decision for both sides: `escapePairForMerge` returns the
+          // pair untouched when neither carries an invisible character, so a
+          // backslash in ordinary source is never doubled on screen, and
+          // escapes both when either does, so the comparison space stays
+          // consistent. The wide branch compares raw text, so gating the
+          // escape on the pair is also what keeps the two branches agreeing
+          // about whether a change exists.
+          const pair = escapePairForMerge(oldText, newText);
+
           view = new EditorView({
-            doc: escapeInvisibleForMerge(newText),
+            doc: pair.newText,
             extensions: [
               ...extensions,
               unifiedMergeView({
-                original: escapeInvisibleForMerge(oldText),
+                original: pair.oldText,
                 highlightChanges: true,
                 gutter: true,
                 mergeControls: false,

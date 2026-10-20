@@ -5451,3 +5451,74 @@ it('renders matching visible escapes in mixed artifact diffs neutralize the same
   expect(cm!.textContent).toContain('looking');
   expect(patch!.textContent).toContain('safe\\u200blooking');
 });
+
+it('shows a backslash-bearing artifact diff exactly as the file has it', async () => {
+  // The escape that neutralises invisible characters has to be injective,
+  // because the merge view compares the two documents to decide what changed.
+  // The price of injectivity is doubling every backslash — and charging that
+  // to a file that holds no invisible character rewrote its content on screen:
+  // a regex written `/\d+/` rendered `/\\d+/`, a Windows path `C:\tmp`
+  // rendered `C:\\tmp`, and selection-copy carried the doubled bytes out of a
+  // read-only pane. `escapePairForMerge` decides per pair, so a pair with
+  // nothing to neutralise reaches the editor as the real bytes.
+  const oldText = 'const re = /^\\d+$/;\nconst home = "C:\\tmp";\n';
+  const newText = 'const re = /^\\w+$/;\nconst home = "C:\\tmp";\n';
+  const changes = [
+    {
+      path: 'src/regex.ts',
+      status: 'modified' as const,
+      toolCallId: 'tool-regex',
+      isArtifact: false,
+      diffs: [{ oldText, newText, fullContent: true }],
+    },
+  ];
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounted.push({ root, container });
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            {
+              id: 'review',
+              kind: 'review',
+              title: 'Review',
+              changes,
+              workspaceCwd: '/primary',
+              workspaceId: 'primary-id',
+            },
+          ]}
+          activeTabId="review"
+          reviewChanges={changes}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>,
+    ),
+  );
+  act(() =>
+    container
+      .querySelector<HTMLButtonElement>('button[aria-label="src/regex.ts"]')
+      ?.click(),
+  );
+  await flush();
+  await act(async () => {
+    await vi.waitFor(() => {
+      if (!container.querySelector('.cm-content')) {
+        throw new Error('CodeMirror editor not mounted yet');
+      }
+    });
+  });
+  const cm = container.querySelector('.cm-content');
+  expect(cm).not.toBeNull();
+  expect(EditorView.findFromDOM(cm!)!.state.doc.toString()).toBe(newText);
+  // The backslash survives once, not twice, in the painted text as well.
+  expect(cm!.textContent).toContain('C:\\tmp');
+  expect(cm!.textContent).not.toContain('C:\\\\tmp');
+});
