@@ -717,6 +717,10 @@ export default {
   Default: '預設',
   'Code Mode': '程式碼模式',
   'Code Mode Only': '僅程式碼模式',
+  'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
+  'Mods (Experimental)': 'Mods（實驗性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本機互動終端和無介面工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',

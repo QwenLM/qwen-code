@@ -33,12 +33,14 @@ import {
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
 import {
+  HOSTED_TOOL_INPUT_ORDER,
   HostedHookSession,
   HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
   semanticInputDigest,
+  type HostedToolInputOrder,
 } from './hosted-hook-session.js';
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
 import * as stdio from '../utils/stdioHelpers.js';
@@ -549,6 +551,79 @@ it('resumes an oversized saved occurrence only on the digest of the fields it wa
     requests.filter((request) => request.kind === 'hook-execute'),
   ).toHaveLength(0);
   expect(await savedPlan('call-1')).toEqual(saved);
+});
+
+it.each([false, true])(
+  'saves a tool input order on the plan and resumes the occurrence only under that order (oversized: %s)',
+  async (oversized) => {
+    if (oversized) {
+      catalog = {
+        ...catalog,
+        hooks: [{ ...catalog.hooks[0], config: { type: HookType.Function } }],
+      };
+      hooks.setMessagesProvider(() => [
+        { text: 'x'.repeat(8 * 1024 * 1024 + 1) },
+      ]);
+    }
+    const fields = { tool_name: 'read_file', tool_input: { file_path: 'a' } };
+    const fire = (owner: HostedHookSession, order?: string) =>
+      owner.fire(
+        HookEventName.PreToolUse,
+        'call-1',
+        fields,
+        signal(),
+        undefined,
+        undefined,
+        order as HostedToolInputOrder | undefined,
+      );
+    const output = await fire(hooks, HOSTED_TOOL_INPUT_ORDER);
+    const saved = await savedPlan('call-1');
+    expect(saved).toMatchObject({ toolInputOrder: HOSTED_TOOL_INPUT_ORDER });
+    if (oversized)
+      expect(saved.refusedInputDigest).toBe(semanticInputDigest(fields));
+    const replacement = new HostedHookSession(options, session, pin);
+    expect(await fire(replacement, HOSTED_TOOL_INPUT_ORDER)).toEqual(output);
+    for (const order of [undefined, 'pre-permission/1'])
+      await expect(fire(replacement, order)).rejects.toThrow(
+        HostedHookInputConflictError,
+      );
+    const dispatched = requests.filter(
+      (request) => request.kind === 'hook-execute',
+    );
+    expect(dispatched).toHaveLength(oversized ? 0 : 1);
+    // The order is the plan's own: no Hook ever receives it.
+    for (const request of dispatched)
+      expect(JSON.stringify(request)).not.toContain(HOSTED_TOOL_INPUT_ORDER);
+    expect(await savedPlan('call-1')).toEqual(saved);
+  },
+);
+
+it('never resumes an occurrence saved without an order under one, or the reverse', async () => {
+  const fields = { tool_name: 'read_file', tool_input: { file_path: 'a' } };
+  const output = await hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    fields,
+    signal(),
+  );
+  expect(await savedPlan('call-1')).not.toHaveProperty('toolInputOrder');
+  await expect(
+    hooks.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      fields,
+      signal(),
+      undefined,
+      undefined,
+      HOSTED_TOOL_INPUT_ORDER,
+    ),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  expect(
+    await hooks.fire(HookEventName.PreToolUse, 'call-1', fields, signal()),
+  ).toEqual(output);
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
 });
 
 it('consumes once at intent even when execution fails', async () => {
@@ -1330,6 +1405,35 @@ it('rejects a changed input while the same occurrence is still running', async (
   expect(hooks.hasPendingOperations).toBe(false);
 });
 
+it('rejects another tool input order while the same occurrence is still running', async () => {
+  let finish: ((result: ManagedHookResult) => void) | undefined;
+  execute = () =>
+    new Promise((resolve) => {
+      finish = resolve;
+    });
+  const fields = { tool_name: 'read_file' };
+  const firing = hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    fields,
+    signal(),
+    undefined,
+    undefined,
+    HOSTED_TOOL_INPUT_ORDER,
+  );
+  await vi.waitFor(() => expect(finish).toBeDefined(), {
+    timeout: isSlowTestHost() ? 30_000 : 1_000,
+  });
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-1', fields, signal()),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  finish!({ success: true, outcome: 'success', duration: 0 });
+  await firing;
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
+});
+
 it('cancels an active occurrence and does not dispatch later sequential hooks', async () => {
   catalog = {
     ...catalog,
@@ -1990,12 +2094,13 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
   );
   try {
     const abort = new AbortController();
-    const fired = hooks.fire(
-      HookEventName.PreToolUse,
-      'call-1',
-      {},
-      abort.signal,
-    );
+    // Observe rejection before waiting for dispatch on a busy test host.
+    const outcome = hooks
+      .fire(HookEventName.PreToolUse, 'call-1', {}, abort.signal)
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
     await vi.waitFor(
       () =>
         expect(
@@ -2004,7 +2109,7 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
       { timeout: isSlowTestHost() ? 30_000 : 10_000 },
     );
     abort.abort();
-    await expect(fired).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+    expect(await outcome).toBeInstanceOf(HostedHookRecoveryRequiredError);
     const child = session.authority
       .extensionRecordsInDomain('hook_execution')
       .find(
