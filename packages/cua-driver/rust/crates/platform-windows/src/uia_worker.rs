@@ -317,7 +317,17 @@ async fn call_worker(name: &str, args: Value) -> anyhow::Result<ToolResult> {
         .await?;
     client.flush().await?;
     let mut line = String::new();
-    let read = BufReader::new(client).read_line(&mut line).await?;
+    let mut reader = BufReader::new(client);
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        reader.read_line(&mut line),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "UIAccess worker response timed out; input may have been sent; observe before retrying"
+        )
+    })??;
     if read == 0 {
         anyhow::bail!("UIAccess worker closed before returning {name}");
     }
@@ -327,11 +337,9 @@ async fn call_worker(name: &str, args: Value) -> anyhow::Result<ToolResult> {
     })
 }
 
-/// Returns None only inside the authenticated UIAccess worker itself. Every
-/// caller in the ordinary runtime receives either the worker result or a hard
-/// availability error; foreground input never falls back to medium integrity.
+/// UIAccess is an explicit optional route. Once selected, failure never falls back.
 pub(crate) async fn forward_required(name: &str, args: Value) -> Option<ToolResult> {
-    if is_worker_process() {
+    if is_worker_process() || std::env::var("CUA_DRIVER_USE_UIACCESS").as_deref() != Ok("1") {
         return None;
     }
     Some(call_worker(name, args).await.unwrap_or_else(|error| {

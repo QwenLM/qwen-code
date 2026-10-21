@@ -1435,8 +1435,9 @@ class HostedAutomationFaultGatesIT {
     }
 
     // FG11d: a run that completes on its own keeps its outcome. A cancel that
-    // arrives after the run settled is refused with `task_already_settled`, and
-    // neither the run nor its occurrence is rewritten.
+    // arrives after the run settled is refused with
+    // `409 task_action_unavailable`, and neither the run nor its occurrence is
+    // rewritten.
     @Test
     @Timeout(600)
     void fg11dSettledRunKeepsItsOutcomeOnMySql() throws Exception {

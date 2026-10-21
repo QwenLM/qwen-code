@@ -9,6 +9,7 @@
   "type": "module",
   "workspaces": [
     "packages/*",
+    "packages/cua-driver/typescript",
     "packages/channels/base",
     "packages/channels/telegram",
     "packages/channels/weixin",
