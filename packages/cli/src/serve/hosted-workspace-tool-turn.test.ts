@@ -83,6 +83,7 @@ import {
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 import * as hostedPlan from './hosted-plan-mode.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -3482,11 +3483,23 @@ function actionIds(): string[] {
   ];
 }
 
+// requested() polls the Turn's sequential fsynced durable writes (options
+// publish, action request, durable-wait checkpoint). A fixed budget for that
+// chain flaked on the shared pool (#13397, #15093), so budget it through the
+// slow-host policy, clamped to the per-test ceiling the runner actually sets
+// (60 s on the ecs-qwen pool, 15 s elsewhere) so a genuine hang still fails
+// on the assertion inside the test rather than as a bare runner timeout.
+const REQUESTED_TIMEOUT_MS = isSlowTestHost()
+  ? Math.min(
+      45_000,
+      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ? 60_000 : 15_000,
+    )
+  : 10_000;
+
 async function requested(count = 1): Promise<string> {
   let requestId = '';
   // The Action request commits first and its await_action checkpoint after
-  // it, each behind fsynced durable writes; on the coverage-enabled, shared
-  // post-merge CI runners the checkpoint lost vitest's 1s default (#13397).
+  // it, each behind fsynced durable writes.
   await vi.waitFor(
     async () => {
       const ids = actionIds();
@@ -3495,7 +3508,7 @@ async function requested(count = 1): Promise<string> {
       expect(session.authority.action(requestId)?.state).toBe('requested');
       expect((await checkpoint()).continuation.phase).toBe('await_action');
     },
-    { timeout: 10_000 },
+    { timeout: REQUESTED_TIMEOUT_MS },
   );
   return requestId;
 }
