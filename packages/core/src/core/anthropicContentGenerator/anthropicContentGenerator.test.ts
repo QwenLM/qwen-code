@@ -570,8 +570,7 @@ describe('AnthropicContentGenerator', () => {
 
     it('applies proxy identity when ANTHROPIC_BASE_URL env points to a proxy and config.baseUrl is unset', async () => {
       // Pre-fix only `config.baseUrl` was read, so an env-only proxy URL was
-      // treated as native: wrong UA and auth, plus the cache-scope beta and
-      // scope:'global' sent to a proxy. baseUrl is omitted on purpose.
+      // treated as native: wrong UA and auth. baseUrl is omitted on purpose.
       process.env['ANTHROPIC_BASE_URL'] = IDEALAB;
       const built = await construct(cfg({ apiKey: 'idealab-token' }));
       expectProxyIdentity(built, 'idealab-token');
@@ -620,8 +619,8 @@ describe('AnthropicContentGenerator', () => {
   // constructor-time config, so a per-request opt-out that drops `thinking` /
   // `output_config` drops their flags too (PR #3788 review feedback).
   describe('per-request anthropic-beta header', () => {
-    // Native baseURL: the cache-scope beta needs both `enableCacheControl`
-    // and a native host (proxies are covered below).
+    // The cache-scope beta needs `enableCacheControl` plus an explicit
+    // `forceGlobalCacheScope` opt-in, on every baseURL (issue #15039).
     const base = (overrides: Partial<ContentGeneratorConfig> = {}) =>
       maxCfg(100, { baseUrl: NATIVE, ...overrides });
     const weatherTools = () => [
@@ -636,9 +635,9 @@ describe('AnthropicContentGenerator', () => {
       config: { systemInstruction: 'sys', tools: weatherTools() },
     });
 
-    // The systemInstruction gives the body the scope:'global' cache_control
-    // that `buildPerRequestHeaders` scans for the cache-scope beta; with no
-    // system or tools the beta is suppressed (see below).
+    // The systemInstruction puts a cache_control entry in the body that
+    // `buildPerRequestHeaders` scans for the cache-scope beta; it carries
+    // scope:'global' only under the opt-in (see below).
     const callOnce = async (
       config: ContentGeneratorConfig,
       requestConfig?: object,
@@ -893,10 +892,10 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toBe(SCOPE_BETA);
     });
 
-    it('strips the cache-scope beta and scope:"global" field on non-Anthropic baseURLs', async () => {
-      // Both are Anthropic-only extensions that proxies may not ignore
-      // safely. Proxies keep per-session ephemeral cache_control (pre-PR
-      // behavior), so prompt caching is preserved.
+    it('ships no cache-scope beta or scope:"global" on a non-Anthropic baseURL', async () => {
+      // Without the opt-in every baseURL ships per-session ephemeral
+      // cache_control (issue #15039), so a proxy never sees a scope extension
+      // it may not ignore safely and prompt caching is preserved.
       const { req, headers } = await send(
         base({ baseUrl: DEEPSEEK, reasoning: false }),
         sysAndTools(),
@@ -944,7 +943,7 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toBeUndefined();
     });
 
-    it('emits scope:"global" on non-Anthropic baseURLs when forceGlobalCacheScope is true (#6642)', async () => {
+    it('emits scope:"global" when forceGlobalCacheScope is true (#6642)', async () => {
       // Proxies such as Routify or OpenRouter opt in to both extensions.
       const { req, headers } = await send(
         base({
