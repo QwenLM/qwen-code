@@ -156,17 +156,23 @@ function OpenTuiEntryApp({
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
 
-  const userMessages = useMemo(
-    () =>
-      live.items.flatMap((item) =>
-        item.kind === 'user' &&
-        item.sentToModel !== false &&
-        (item.recallText ?? item.text).trim()
-          ? [item.recallText ?? item.text]
-          : [],
-      ),
-    [live.items],
-  );
+  const userMessagesRef = useRef<readonly string[]>([]);
+  const userMessages = useMemo(() => {
+    const next = live.items.flatMap((item) =>
+      item.kind === 'user' &&
+      item.sentToModel !== false &&
+      (item.recallText ?? item.text).trim()
+        ? [item.recallText ?? item.text]
+        : [],
+    );
+    if (
+      next.length !== userMessagesRef.current.length ||
+      next.some((text, index) => text !== userMessagesRef.current[index])
+    ) {
+      userMessagesRef.current = next;
+    }
+    return userMessagesRef.current;
+  }, [live.items]);
 
   // U-7: generate follow-up suggestions on the streaming→idle edge — the
   // entry owns that edge, the shell stays stream-state-free.

@@ -1775,7 +1775,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       if (recalled !== null) {
         el.setText(recalled);
         el.gotoBufferEnd();
-        restoredProvenanceRef.current = null;
+        invalidateImportedInput();
         historyRestoredTextRef.current = recalled;
         setTextVersion((v) => v + 1);
       }
