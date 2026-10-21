@@ -20,7 +20,7 @@ Every harness E2E result should identify these dimensions:
 | Dimension | Values |
 | --- | --- |
 | OS | `windows`, `macos`, `linux` |
-| Window system | Win32/UIA, AppKit/AX, X11/AT-SPI, Wayland/AT-SPI, WebView/CDP |
+| Window system | Win32/UIA, AppKit/AX, X11/AT-SPI, WebView/CDP |
 | Harness | Electron, Tauri, WPF, WinUI3, WebView2, AppKit, SwiftUI, WKWebView, GTK3 |
 | Action targeting | `ax`, `px`, `page`, `not_applicable` |
 | Delivery | `background`, `foreground`, `N/A` |
@@ -140,13 +140,12 @@ transient-panel AX discovery gap.
 
 | Harness | Source test | Window system | Coverage |
 | --- | --- | --- | --- |
-| Electron | `cross_platform_behavior_test.rs` | X11 and hosted Sway | Shared web action matrix |
-| Tauri | `cross_platform_behavior_test.rs` | X11 and hosted Sway | Shared web action matrix |
-| GTK3 | `harness_gtk3_test.rs` | X11/AT-SPI and Wayland/AT-SPI where configured | Native GTK controls and input |
-| Desktop target | `desktop_scope_linux_test.rs` | X11/Wayland | Per-call window/desktop modality, screen-absolute action delivery, and strict rejection |
+| Electron | `cross_platform_behavior_test.rs` | X11 | Shared web action matrix |
+| Tauri | `cross_platform_behavior_test.rs` | X11 | Shared web action matrix |
+| GTK3 | `harness_gtk3_test.rs` | X11/AT-SPI | Native GTK controls and input |
+| Desktop target | `desktop_scope_linux_test.rs` | X11 | Per-call window/desktop modality, screen-absolute action delivery, and strict rejection |
 
-Nix provides the Linux build and desktop environment. X11 and Wayland are
-separate matrix dimensions because their capture and input contracts differ.
+Linux requires an authenticated X11 display and its AT-SPI session bus.
 Linux runs do not produce GIF output. Every canonical GUI cell retains an MP4
 and trajectory alongside screenshots, AX trees, structured results, and driver
 logs for E2E evidence.
@@ -186,9 +185,7 @@ allowed, and the desktop-side-effect oracles pass.
 | Windows unit/compile | `windows-latest` | Package-scoped `cargo test --all-targets --no-run --locked` |
 | Windows Harness E2E | Active Windows user session | `scripts/ci/windows/run-rust-e2e.ps1 -RequireGui` |
 | Linux X11 Harness E2E | Nix X11 session | `scripts/ci/linux/run-rust-e2e.sh` |
-| Linux Sway Harness E2E | Controlled wlroots session | `scripts/ci/linux/run-rust-e2e-wayland.sh` |
-| Linux nested-compositor E2E | Controlled experimental session | `scripts/ci/linux/run-rust-e2e-inject.sh` |
-| Linux representative desktop E2E | Existing GNOME, KDE, or Xorg login | `scripts/ci/linux/run-rust-e2e-desktop.sh <desktop>` |
+| Linux representative desktop E2E | Existing Xorg login | `scripts/ci/linux/run-rust-e2e-desktop.sh <desktop>` |
 | macOS Harness E2E | Maintainer Lume SIP-off worker with a logged-in session and inherited grants | `packages/cua-driver/tests/runners/macos-lume/run-all.sh` |
 
 Workflows select private execution lanes. Rust source owns scenario definitions,
