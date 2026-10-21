@@ -240,6 +240,7 @@ export QWEN_MANAGED_AGENT_HARNESS_ENABLED='true'
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4170'
 export QWEN_MANAGED_AGENT_HARNESS_TOKEN='replace-me'
 export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='sha256:replace-with-64-hex-characters'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 
 mvn spring-boot:run
 ```
@@ -424,8 +425,10 @@ Restore transaction pages are bounded to 8 MiB of unencoded record bytes even
 when the requested item limit is larger. Unknown head states, unsafe counters,
 or missing transaction revisions fail closed as storage corruption.
 
-The routes are disabled by default. Enable them only on a private service
-listener or trusted service network:
+The routes follow `qwen.managed-agent.harness.enabled` by default, because
+the Hosted Harness requires them; `QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED`
+overrides that default. Serve them only on a private service listener or
+trusted service network. The explicit settings are:
 
 ```bash
 export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
@@ -435,16 +438,25 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 ```
 
 `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` must be reachable from the Hosted
-Harness. When both the Harness and Store are enabled, Java includes a scoped
+Harness. When it is blank and the store listener — the internal listener when
+`internal-server.port` is set, otherwise the public one — binds a blank,
+`127.0.0.1`, `0.0.0.0`, `::` or `::1` address on a fixed port, the server
+uses that listener's loopback `http://` URL. A public listener that serves TLS
+through `server.ssl`, or any other listener, needs an explicit URL.
+When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
 HTTP adapter with the descriptor's broker-issued writer credential (or a
 self-generated secret when no binding key is configured). Workspace-bound Sessions use
 their persisted Workspace ID for the Store scope; unbound Sessions use
 `QWEN_MANAGED_AGENT_WORKSPACE_ID`. The public Session, private journal and Runtime
-binding retain one `(tenantId, workspaceId, sessionId)` identity. The global ID
-must still be set explicitly when enabling the Session Store; if the Runtime
-Broker also has an explicit ID, startup rejects a mismatch.
+binding retain one `(tenantId, workspaceId, sessionId)` identity. When the
+global store ID is blank, the store uses the Runtime Broker's ID: its configured
+ID, otherwise the hash a local-process or Kubernetes Broker derives from
+`QWEN_MANAGED_AGENT_WORKSPACE_CWD`, even while the Broker is disabled. If the
+Runtime Broker also has an explicit ID, startup rejects a mismatch. Keep an
+existing deployment's ID unchanged, since unbound Sessions resolve their store
+scope from it.
 
 This activates the durable create and cold-load paths for newly created Hosted
 Sessions. The load path rebuilds the Harness state from the scoped Store and
@@ -597,23 +609,19 @@ QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \
 qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web
 ```
 
-— and Spring must point at it with the matching base URL. Spring's HTTP
-Session Store stays off by default, and the Hosted Harness rejects every
-attach without a store descriptor, so Spring also needs the three values
-the one-shot launcher writes into `spring.env` — the connector refuses to
-start when the store is enabled with a blank base URL or workspace ID.
-Export all four together:
+— and Spring must point at it with the matching base URL. The Hosted
+Harness rejects every attach without a store descriptor; the HTTP Session
+Store follows the Harness, defaults to this server's loopback listener and is
+scoped by the workspace ID exported in Prerequisites, so only the Harness URL
+changes:
 
 ```bash
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
-export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
-export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'
-export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 ```
 
-All four are read once at JVM startup, so if `mvn spring-boot:run` is
-already up on the 4170 value exported in Prerequisites, restart it with the
-overrides in place.
+It is read once at JVM startup, so if `mvn spring-boot:run` is already up
+on the 4170 value exported in Prerequisites, restart it with the override in
+place.
 
 `--port` is a request, not a guarantee: `qwen serve` moves to the next free
 port on a collision, and 4171 is exactly where a daemon displaced from 4170
@@ -1228,7 +1236,7 @@ Marker v2 stores birth time as a canonical `Instant` string. Linux reads creatio
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
-The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it does not upgrade or migrate an existing database. Preserve old deployments and their data for historical access. Do not attach this binary to an old catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
+The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it refuses catalogs from that retired chain. Additive migrations within the current canonical chain follow their own rollout requirements, including the [V15 drained cutover](#hosted-recovery-scope). Preserve retired deployments and their data for historical access. Do not attach this binary to a retired catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
 
 Stop all processes and external jobs that can write the storage, account for
 old Runtime holders and verify the original root before registration. Initialize
@@ -1560,6 +1568,12 @@ itself, so a failing test in the Hosted MySQL job does not skip the arms, and
 each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
+
+Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Past execution overlap does not disable file undo. Undo requires other current memberships to release, then briefly excludes new acquisitions; existing file-level history checks still apply. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)).
+
+V15 stores ordinary execution memberships per Runtime Session. Use the matching Server/Broker build and schema. There is no singleton-holder conversion or fallback execution authority; CSI reservation and physical-maintenance ownership keep their existing roles.
+
+Fresh installations initialize an empty catalog. An existing canonical V1–V14 catalog requires a drained cutover, not a mixed-version rolling upgrade: disable new Turn admission, then use the old build to finish or recover and release every ordinary LOCAL/SSH_LOCAL holder. Stop the old Server, Broker, Harness, Runtime workers and other storage writers, then verify that no `ma_storage_owner` row with `storage_kind IN ('LOCAL', 'SSH_LOCAL')` and `maintenance_id IS NULL` has a non-null `holder_key`. Only then apply V15 and start the matching build. An UNKNOWN holder with unconfirmed writer cleanup must remain on the old deployment until recovery and release succeed. Do not manually clear its ownership or start the new build against that catalog.
 
 The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
 macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
