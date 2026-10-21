@@ -105,6 +105,8 @@ class HostedAutomationFaultGatesIT {
     // FG11f: the publication case faults the physical object write and keeps
     // whatever the store accepted, so the assertions read the same bytes.
     private HostedGateTestSupport.PublicationFaults publicationFaults;
+    // Cases that close a Session need the Workspace lifecycle the guard gates.
+    private boolean workspaceLifecycle;
     private final Map<String, byte[]> publicationObjects = new ConcurrentHashMap<>();
     private final Map<String, Integer> physicalPuts = new ConcurrentHashMap<>();
     private final AtomicInteger publicationFaultsSeen = new AtomicInteger();
@@ -1292,6 +1294,119 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-cancel-retire", 202);
     }
 
+    // FG11d: the fire is parked in the relay before the Harness admits it, so the
+    // occurrence exists and no run does, and the definition is retired there. The
+    // retire settles the occurrence instead of leaving it to the recovery sweep:
+    // `skipped` for `definition_retired` with no attempt, no run, no Turn. A claim
+    // already held at `intent` is a different branch — the Harness cancels it on
+    // its own, which the CLI-side session case pins; this lane does not reach it.
+    @Test
+    @Timeout(600)
+    void fg11dRetireAtIntentSettlesTheClaimOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("retire-intent");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_INTENT", "0 0 1 1 *"), "fg11d-intent-base", 202).path("id").asText();
+        Hold parked = hold("retire-at-intent",
+                body -> kind(body, "fire_run") && id.equals(body.path("scheduleId").asText()));
+        // The manual fire blocks while parked, so it cannot run on this thread.
+        // Its answer crosses threads as data: an assertion raised inside the
+        // thread would be swallowed, and the case would then accept any status.
+        AtomicReference<HttpResponse<String>> answered = new AtomicReference<>();
+        AtomicReference<Throwable> lost = new AtomicReference<>();
+        Thread manual = Thread.ofVirtual().start(() -> {
+            try {
+                answered.set(send("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-intent-run"));
+            } catch (Throwable failure) {
+                lost.set(failure);
+            }
+        });
+        assertThat(parked.reached().await(150, TimeUnit.SECONDS)).as("the fire parked at admission").isTrue();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-intent-retire", 202);
+        parked.release().countDown();
+        manual.join(150_000);
+        assertThat(lost.get()).as("the fire request completes").isNull();
+        HttpResponse<String> answer = answered.get();
+        assertThat(answer).as("the fire was answered").isNotNull();
+        // Retire and the fire race: the retire either refuses the fire outright or
+        // wins after admission. Any other answer is a defect, so nothing here may
+        // absorb it.
+        assertThat(answer.statusCode()).as("the fire is admitted or refused: %s", answer.body())
+                .isIn(202, 409);
+        if (answer.statusCode() == 409) {
+            assertThat(answer.body()).as("the refused fire names the skipped run")
+                    .contains("automation_run_skipped");
+        }
+        Map<String, Object> claim = jdbc.queryForMap("SELECT outcome, reason, attempts FROM ma_schedule_occurrence"
+                + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?", tenant, id,
+                "manual:fg11d-intent-run");
+        assertThat(claim).as("the retired claim settles skipped, never unknown")
+                .containsEntry("outcome", "skipped").containsEntry("reason", "definition_retired");
+        assertThat(((Number) claim.get("attempts")).intValue()).as("no attempt was spent").isZero();
+        assertThat(jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id = ?"
+                + " AND session_id = ? AND domain = 'automation_run'", String.class, tenant, session))
+                .as("no run commits behind a claim that never started").isEmpty();
+        assertThat(modelPrompts).as("the retired claim never reaches the model")
+                .noneMatch(prompt -> prompt.contains("FG11D_INTENT"));
+    }
+
+    // FG11d: a Session carrying a live definition is closed, and the next slot
+    // records `skipped` for `session_not_active` with no model Turn. This pins
+    // today's behaviour rather than changing it; later slots reach the same
+    // admission refusal while the definition stays live, which the reason line
+    // tells apart from a retirement.
+    @Test
+    @Timeout(600)
+    void fg11dClosedSessionSkipsTheNextSlotOnMySql() throws Exception {
+        workspaceLifecycle = true;
+        boot("fg11d");
+        String session = createSession("close-queued");
+        // Park the scanner until the Session has closed: a minute boundary in
+        // the setup window would otherwise let the definition fire while the
+        // Session is still active, and that prompt would outlive the close and
+        // redden the final assertion for the wrong reason.
+        scannerHold = SchedulerHold.hold(spring.getBean("managedAutomationScheduler",
+                ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_CLOSE", "* * * * *"), "fg11d-close-base", 202).path("id").asText();
+        String close = request("POST", "/v1/agents/sessions/" + session + "/close", null, "fg11d-close", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(request("GET",
+                "/v1/agents/sessions/" + session + "/operations/" + close, null, null, 200)
+                .path("status").asText()).as("the close completes").isEqualTo("completed"));
+        // The close is what decides the slot's fate, so the scanner starts here.
+        scannerHold.countDown();
+        assertThat(awaitOccurrence(id, "skipped")).as("the skip names the closed Session")
+                .containsEntry("reason", "session_not_active");
+        assertThat(modelPrompts).as("no Turn starts for a closed Session")
+                .noneMatch(prompt -> prompt.contains("FG11D_CLOSE"));
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-close-retire", 202);
+    }
+
+    // FG11d: a close cannot cut a turn that is in flight. The Session answers
+    // `409 turn_active`, so an automation input queued behind that turn is
+    // decided by the turn rather than by the close attempt — the refusal is what
+    // this arm can pin, because no close ever reaches the queue.
+    @Test
+    @Timeout(600)
+    void fg11dCloseIsRefusedWhileATurnIsActiveOnMySql() throws Exception {
+        workspaceLifecycle = true;
+        boot("fg11d");
+        String session = createSession("close-turn-active");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-active-base", 202).path("id").asText();
+        // The fire parks on the model, so the Session carries an active turn.
+        request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-active-held", 202);
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-active-held")));
+        HttpResponse<String> refused = send("POST", "/v1/agents/sessions/" + session + "/close", null,
+                "fg11d-close-active");
+        assertThat(refused.statusCode()).as("a close cannot cut an active turn").isEqualTo(409);
+        assertThat(refused.body()).as("the refusal names the turn").contains("turn_active");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-active-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
@@ -1303,9 +1418,11 @@ class HostedAutomationFaultGatesIT {
         temporary = temporary.toRealPath();
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
         Files.createDirectory(temporary.resolve("broker"));
-        if (publicationFaults != null) {
-            // Durable local-process mode refuses a Runtime state directory
-            // any other account can read; a public Shell Session needs it.
+        if (publicationFaults != null || workspaceLifecycle) {
+            // Durable local-process mode refuses a Runtime state directory any
+            // other account can read: the publication arms need it for a public
+            // Shell Session, and the Workspace lifecycle arm needs it before a
+            // close can be admitted.
             Files.setPosixFilePermissions(temporary.resolve("broker"),
                     java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
         }
@@ -1465,9 +1582,9 @@ class HostedAutomationFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.durable-local-process="
-                        + (publicationFaults != null),
+                        + (publicationFaults != null || workspaceLifecycle),
                 "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
-                        + (publicationFaults != null
+                        + (publicationFaults != null || workspaceLifecycle
                                 || "Linux".equals(System.getProperty("os.name"))),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
@@ -1510,7 +1627,8 @@ class HostedAutomationFaultGatesIT {
         // Registration must follow the same condition as the guard itself: the
         // guard allows Linux and macOS, and a public Shell wake turn verifies
         // the registered root before any execution.
-        if (publicationFaults != null || "Linux".equals(System.getProperty("os.name"))) {
+        if (publicationFaults != null || workspaceLifecycle
+                || "Linux".equals(System.getProperty("os.name"))) {
             spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", UUID.randomUUID().toString());
         }

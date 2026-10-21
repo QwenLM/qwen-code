@@ -538,6 +538,29 @@ describe('runNonInteractiveStreamJson', () => {
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });
 
+  it('rejects continuation using classifiable history before the bounded pre-check', async () => {
+    const { continueResults } = installContinueDispatch();
+    const { llmClient } = createInitializedLlmClient([
+      { role: 'user', parts: [{ text: 'restored context' }] },
+    ]);
+    const getHistoryForRecovery = vi.fn(() => [
+      { role: 'model', parts: [{ text: 'Done.' }] },
+    ]);
+    Object.assign(llmClient.getChat(), { getHistoryForRecovery });
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+      yield createContinueRequest();
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(getHistoryForRecovery).toHaveBeenCalledWith(50);
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+  });
+
   it('rejects continue_last_turn when the last turn ended cleanly', async () => {
     const { continueResults } = installContinueDispatch();
     const { getHistoryTail } = createInitializedLlmClient([
