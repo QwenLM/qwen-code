@@ -3274,6 +3274,24 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     );
   });
 
+  it('keeps a complete summary that quotes the compression directive', async () => {
+    // Real models list the directive among the user's messages, <analysis>
+    // tag included. An unclosed-block strip would cut the snapshot at that
+    // quote and hide its closing tag.
+    mockVllmBackend(WINDOW, false, {
+      text:
+        '<analysis>The user asked to port the parser.</analysis>\n' +
+        '<state_snapshot>\n<all_user_messages>\n' +
+        '"First, reason in your <analysis> block. Then, produce the ' +
+        '<state_snapshot> XML."\n</all_user_messages>\n' +
+        '<next_step>Finish the port.</next_step>\n</state_snapshot>',
+    });
+
+    const result = await compressChars(182_000, 45_000);
+
+    expectCompressed(result);
+  });
+
   it('keeps a complete summary that uses no snapshot tags', async () => {
     mockVllmBackend(WINDOW, false, { text: 'Goal: port the parser. Done.' });
 

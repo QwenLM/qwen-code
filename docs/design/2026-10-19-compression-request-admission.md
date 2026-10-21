@@ -69,7 +69,7 @@ A second failure, or any other error, returns `COMPRESSION_FAILED_API_ERROR` as 
 
 ### Truncated summaries
 
-A summary that opens `<state_snapshot>` and never closes it is dropped as `COMPRESSION_FAILED_OUTPUT_TRUNCATED`, whatever count it reports. vLLM serves `prompt + max_tokens > window` by lowering `max_tokens` to the room the prompt leaves rather than rejecting the request, so the reported output count stays below the budget requested and the existing threshold check cannot see the cut. A summary without the tags is unaffected.
+A summary that opens `<state_snapshot>` and never closes it is dropped as `COMPRESSION_FAILED_OUTPUT_TRUNCATED`, whatever count it reports. vLLM serves `prompt + max_tokens > window` by lowering `max_tokens` to the room the prompt leaves rather than rejecting the request, so the reported output count stays below the budget requested and the existing threshold check cannot see the cut. A summary without the tags is unaffected. Only closed `<analysis>` blocks are set aside before the check: real models often quote the compression directive, `<analysis>` tag included, inside the snapshot, and stripping from that quote to the end would take the closing tag too.
 
 ### Accounting
 

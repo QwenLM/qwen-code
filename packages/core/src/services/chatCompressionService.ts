@@ -486,11 +486,16 @@ function hasStateSnapshot(summary: string): boolean {
   );
 }
 
-/** Whether the summary was cut off inside the `<state_snapshot>` it opened. */
+/**
+ * Whether the summary was cut off inside the `<state_snapshot>` it opened.
+ * Only closed `<analysis>` blocks are set aside: a snapshot often quotes the
+ * compression directive, `<analysis>` tag included, and stripping from an
+ * unclosed `<analysis>` to the end would take the snapshot's closing tag too.
+ */
 function hasUnclosedStateSnapshot(summary: string): boolean {
-  const stripped = stripAnalysisBlock(summary);
-  const start = stripped.lastIndexOf('<state_snapshot>');
-  return start >= 0 && !stripped.includes('</state_snapshot>', start);
+  const body = summary.replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
+  const start = body.lastIndexOf('<state_snapshot>');
+  return start >= 0 && !body.includes('</state_snapshot>', start);
 }
 
 export class ChatCompressionService {

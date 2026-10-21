@@ -69,7 +69,7 @@
 
 ### 被截断的摘要
 
-摘要打开了 `<state_snapshot>` 却没有闭合时，不管报告的输出数是多少，都按 `COMPRESSION_FAILED_OUTPUT_TRUNCATED` 丢弃。vLLM 遇到 `prompt + max_tokens > window` 时不拒绝请求，而是把 `max_tokens` 降到 prompt 剩下的空间，于是报告的输出数低于请求的预算，原有的阈值检查看不出被截断。不带标签的摘要不受影响。
+摘要打开了 `<state_snapshot>` 却没有闭合时，不管报告的输出数是多少，都按 `COMPRESSION_FAILED_OUTPUT_TRUNCATED` 丢弃。vLLM 遇到 `prompt + max_tokens > window` 时不拒绝请求，而是把 `max_tokens` 降到 prompt 剩下的空间，于是报告的输出数低于请求的预算，原有的阈值检查看不出被截断。不带标签的摘要不受影响。检查前只去掉已闭合的 `<analysis>` 块：真实模型经常在 snapshot 里引用压缩指令，连同其中的 `<analysis>` 标签；如果从这个引用一直去到结尾，snapshot 的闭合标签也会被一起去掉。
 
 ### token 计数
 
