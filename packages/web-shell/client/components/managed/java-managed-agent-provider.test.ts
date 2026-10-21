@@ -1294,6 +1294,57 @@ describe('createJavaManagedAgentProvider', () => {
     );
   });
 
+  it('derives the same title for a Workspace-bound create', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
+      jsonResponse({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        status: 'accepted',
+        replayed: false,
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      productScope: 'tenant:actor',
+      enableWorkspaceBinding: true,
+    });
+
+    // The bound create omitted the title, so the list and header showed a
+    // Session-ID prefix while the standard shell shows a prompt-derived title.
+    await provider.workspaceBinding!.createSession!(
+      {
+        agentId: 'qwen-code',
+        workspaceId: 'ws-default',
+        cwdRelative: 'services/api',
+        text: '\u001b[31mERROR\u001b[0m the build failed',
+      },
+      { clientId: 'client-1', idempotencyKey: 'key-1' },
+    );
+
+    const body = JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body));
+    expect(body.title).toBe('[31mERROR [0m the build failed');
+    expect(body.workspace).toEqual({
+      workspaceId: 'ws-default',
+      cwdRelative: 'services/api',
+    });
+
+    // The cap must slice by code point: a code-unit cut at 77 splits an astral
+    // character, sending a title that ends in a lone high surrogate, which no
+    // store column keeps, so the server would persist the tail as '?'.
+    await provider.workspaceBinding!.createSession!(
+      {
+        agentId: 'qwen-code',
+        workspaceId: 'ws-default',
+        cwdRelative: 'services/api',
+        text: `${'a'.repeat(76)}\u{1f600}${'b'.repeat(10)}`,
+      },
+      { clientId: 'client-1', idempotencyKey: 'key-2' },
+    );
+    const capped = JSON.parse(String(fetchImpl.mock.calls[1]![1]?.body)).title;
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(capped)).toBe(false);
+  });
+
   it('scopes the storageKey by environmentId when no productScope is given', () => {
     const a = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',

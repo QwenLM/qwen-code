@@ -999,9 +999,14 @@ function ManagedSessionsContent({
               data-managed-workspace-binding
             >
               {home && (
-                <summary className="cursor-pointer text-muted-foreground">
-                  {summary.workspace.workspaceId} ·{' '}
-                  {summary.workspace.cwdRelative}
+                <summary
+                  className="cursor-pointer text-muted-foreground"
+                  title={summary.workspace.workspaceId}
+                >
+                  <span className="inline-block max-w-[34ch] truncate align-bottom">
+                    {summary.workspace.workspaceId}
+                  </span>{' '}
+                  · {summary.workspace.cwdRelative}
                   {displayedModel && (
                     <span data-managed-model> · {displayedModel}</span>
                   )}
@@ -1009,13 +1014,18 @@ function ManagedSessionsContent({
                   {t(`managed.runtime.${summary.runtimeState}`)}
                 </summary>
               )}
-              <p>
-                {t('managed.workspaceBound')}: {summary.workspace.workspaceId}
-              </p>
-              <p>
-                {t('managed.workspaceDirectory')}:{' '}
-                {summary.workspace.cwdRelative}
-              </p>
+              {!home && (
+                <>
+                  <p>
+                    {t('managed.workspaceBound')}:{' '}
+                    {summary.workspace.workspaceId}
+                  </p>
+                  <p>
+                    {t('managed.workspaceDirectory')}:{' '}
+                    {summary.workspace.cwdRelative}
+                  </p>
+                </>
+              )}
               {interactive && (
                 <ManagedSessionCwdControl
                   key={`${provider.storageKey}:${summary.sessionId}`}
