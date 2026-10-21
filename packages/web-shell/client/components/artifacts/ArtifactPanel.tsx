@@ -1509,6 +1509,10 @@ export function ArtifactPanel({
         ) : isWorkspaceScopedTab(activeTab) &&
           (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
           (activeTab.kind !== 'file' || !activeTab.previewOnly) &&
+          (activeTab.kind !== 'review' ||
+            !(activeTab.changes ?? reviewChanges).some(
+              (change) => change.diffs.length > 0,
+            )) &&
           (activeTab.kind !== 'artifact' ||
             activeTabArtifact?.metadata?.['artifactType'] !==
               'web_preview_snapshot') &&
@@ -1521,20 +1525,26 @@ export function ArtifactPanel({
             changes={activeTab.changes ?? reviewChanges}
             selectedPath={activeTab.selectedPath ?? selectedReviewPath}
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
-            onOpenFilePreview={(change) =>
-              onOpenFilePreview(
-                change,
-                activeTab.workspaceCwd ?? workspaceCwd,
-                activeTab.workspaceId,
-              )
+            onOpenFilePreview={
+              activeWorkspaceActions
+                ? (change) =>
+                    onOpenFilePreview(
+                      change,
+                      activeTab.workspaceCwd ?? workspaceCwd,
+                      activeTab.workspaceId,
+                    )
+                : undefined
             }
-            onDownloadFile={(change, isCancelled) =>
-              downloadWorkspaceFile(
-                activeWorkspaceActions!,
-                change.path,
-                getReviewDownloadMimeType(change.path),
-                isCancelled,
-              )
+            onDownloadFile={
+              activeWorkspaceActions
+                ? (change, isCancelled) =>
+                    downloadWorkspaceFile(
+                      activeWorkspaceActions,
+                      change.path,
+                      getReviewDownloadMimeType(change.path),
+                      isCancelled,
+                    )
+                : undefined
             }
             onDownloadError={(downloadError) => {
               const message = t('common.downloadFailed', {
@@ -2486,8 +2496,8 @@ function ReviewChanges({
   changes: readonly TurnOutputFileChange[];
   selectedPath: string | null;
   workspaceCwd?: string;
-  onOpenFilePreview: (change: TurnOutputFileChange) => void;
-  onDownloadFile: (
+  onOpenFilePreview?: (change: TurnOutputFileChange) => void;
+  onDownloadFile?: (
     change: TurnOutputFileChange,
     isCancelled: () => boolean,
   ) => Promise<void>;
@@ -2609,7 +2619,7 @@ function ReviewChanges({
     setExpandedPath((current) => (current === path ? null : path));
   };
   const downloadFile = async (change: TurnOutputFileChange) => {
-    if (downloadingPaths.has(change.path)) return;
+    if (!onDownloadFile || downloadingPaths.has(change.path)) return;
     setDownloadingPaths((current) => new Set(current).add(change.path));
     try {
       await onDownloadFile(change, () => !mountedRef.current);
@@ -2707,8 +2717,10 @@ function ReviewChanges({
           >
             {changes.map((change) => {
               const isExpanded = expandedPath === change.path;
-              const canOpenPreview = isRenderedFilePath(change.path);
-              const canDownload = isDownloadableReviewFilePath(change.path);
+              const canOpenPreview =
+                onOpenFilePreview && isRenderedFilePath(change.path);
+              const canDownload =
+                onDownloadFile && isDownloadableReviewFilePath(change.path);
               return (
                 <div
                   key={`${change.toolCallId}:${change.path}`}
@@ -2742,7 +2754,7 @@ function ReviewChanges({
                         <button
                           type="button"
                           className={styles.reviewOpenButton}
-                          onClick={() => onOpenFilePreview(change)}
+                          onClick={() => onOpenFilePreview?.(change)}
                           title={`${t('turnOutputs.preview')} ${change.path}`}
                         >
                           {t('turnOutputs.preview')}
