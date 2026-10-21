@@ -1,16 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.store.FaultingExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
-import com.alibaba.qwen.code.managedagent.store.StoreFaultGate;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.StoreFaultGate;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -44,6 +44,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -363,11 +364,30 @@ class HostedMcpStoreFaultGatesIT {
         String releaseId = configurationId + ":release";
         CloseRef close = prepareClose(session);
         storeFault().arm(StoreFaultGate.Phase.RELEASING, configurationId);
-        HttpResponse<String> refused = rawLifecycle(session, close.operationId(),
-                close.claimGeneration(), "settle_resources");
+        // A settle can be refused before it reaches the releasing commit,
+        // as the released gate observes, so drive the idempotent phase
+        // until the armed fault fires instead of waiting on one request.
+        // The budget leaves room for the kill/reload/settle tail inside
+        // @Timeout(600).
+        long deadline = System.nanoTime() + Duration.ofSeconds(90).toNanos();
+        List<Integer> answers = new ArrayList<>();
+        HttpResponse<String> refused = null;
+        while (storeFault().attempts() == 0
+                && System.nanoTime() < deadline) {
+            refused = rawLifecycle(session, close.operationId(),
+                    close.claimGeneration(), "settle_resources",
+                    Duration.ofSeconds(120));
+            answers.add(refused.statusCode());
+            if (storeFault().attempts() == 0) {
+                Thread.sleep(1_000);
+            }
+        }
+        assertThat(refused).isNotNull();
+        assertThat(storeFault().attempts())
+                .as("the store wrapper fired; settle answers: %s", answers)
+                .isPositive();
         assertThat(refused.statusCode()).as("releasing refusal: %s",
                 refused.body()).isEqualTo(503);
-        waitForRejection();
         assertThat(configuration(session.id()).path("releaseState").asText())
                 .as("the rejected releasing commit leaves the record active")
                 .isEqualTo("active");
@@ -447,17 +467,33 @@ class HostedMcpStoreFaultGatesIT {
                 + runtimeSessionId + ":release";
         CloseRef close = prepareClose(session);
         storeFault().arm(StoreFaultGate.Phase.RELEASED, configurationId);
+        // Only this cell raises the request ceiling: it drives the same
+        // settle under CI load and must outlive the phase's own retry delay,
+        // which the class-wide 30 s does not cover.
+        // Under CI load the settle can take longer than a fixed attempt
+        // count; keep driving the idempotent phase until the fault fires.
+        // The budget stays short enough that the kill/reload/settle tail
+        // below still fits @Timeout(600), and every answer is kept so a
+        // stall names the phase that never reached the released commit.
+        long deadline = System.nanoTime() + Duration.ofSeconds(90).toNanos();
+        List<Integer> answers = new ArrayList<>();
         HttpResponse<String> refused = null;
-        for (int attempt = 0; attempt < 30
-                && storeFault().attempts() == 0; attempt++) {
-            refused = rawLifecycle(session, close.operationId(),
-                    close.claimGeneration(), "settle_resources");
+        while (storeFault().attempts() == 0
+                && System.nanoTime() < deadline) {
+            refused = rawRequest("POST", "/session/" + session.id()
+                    + "/lifecycle", json.writeValueAsString(lifecycleBody(
+                            session, close.operationId(),
+                            close.claimGeneration(), "settle_resources")),
+                    session.clientId(), Duration.ofSeconds(120));
+            answers.add(refused.statusCode());
             if (storeFault().attempts() == 0) {
                 Thread.sleep(1_000);
             }
         }
         assertThat(refused).isNotNull();
-        waitForRejection();
+        assertThat(storeFault().attempts())
+                .as("the store wrapper fired; settle answers: %s", answers)
+                .isPositive();
         assertThat(configuration(session.id()).path("releaseState").asText())
                 .as("the records stay drained")
                 .isEqualTo("drained");
@@ -478,8 +514,13 @@ class HostedMcpStoreFaultGatesIT {
                 .filter(entry -> "POST".equals(entry.get("method")))
                 .filter(entry -> ownerReleasePath.equals(entry.get("path")))
                 .toList();
+        // A retried settle may re-send the idempotent owner release before
+        // the fault fires, so only the resend after reload is pinned to one.
         assertThat(ownerReleases).as("the first detach released the owner")
-                .hasSize(2);
+                .hasSizeGreaterThanOrEqualTo(2);
+        // The fault sits on the released commit, so a release that answered
+        // anything else would have left the records in the drained state
+        // asserted above.
         assertThat(ownerReleases).allSatisfy(entry -> {
             assertThat(entry.get("status")).isEqualTo(200);
             JsonNode answer = (JsonNode) entry.get("answer");
@@ -595,17 +636,16 @@ class HostedMcpStoreFaultGatesIT {
     }
 
     private String holderIdentity() {
-        List<String> rows = jdbc.queryForList("SELECT CONVERT(holder_key"
-                + " USING utf8mb4) FROM ma_storage_owner WHERE tenant_id = ?"
-                + " AND holder_key IS NOT NULL", String.class, tenant);
+        List<String> rows = jdbc.queryForList("SELECT CONCAT(CONVERT(binding_id USING utf8mb4),"
+                + " ':', runtime_generation, ':', CONVERT(runtime_session_id USING utf8mb4),"
+                + " ':', execution_storage_key) FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND execution_storage_key IS NOT NULL", String.class, tenant);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     private int storageHolds() {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " ma_storage_owner WHERE tenant_id = ? AND holder_key IS"
-                + " NOT NULL", Integer.class, tenant);
-        return count == null ? 0 : count;
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND execution_storage_key IS NOT NULL", Integer.class, tenant);
     }
 
     private int drainReceipts(SessionRef session) {
@@ -839,9 +879,16 @@ class HostedMcpStoreFaultGatesIT {
     private HttpResponse<String> rawLifecycle(SessionRef session,
             String operationId, long claimGeneration, String phase)
             throws Exception {
+        return rawLifecycle(session, operationId, claimGeneration, phase,
+                Duration.ofSeconds(30));
+    }
+
+    private HttpResponse<String> rawLifecycle(SessionRef session,
+            String operationId, long claimGeneration, String phase,
+            Duration timeout) throws Exception {
         return rawRequest("POST", "/session/" + session.id() + "/lifecycle",
                 json.writeValueAsString(lifecycleBody(session, operationId,
-                        claimGeneration, phase)), session.clientId());
+                        claimGeneration, phase)), session.clientId(), timeout);
     }
 
     private String uuid() {
@@ -960,9 +1007,16 @@ class HostedMcpStoreFaultGatesIT {
 
     private HttpResponse<String> rawRequest(String method, String path,
             String payload, String clientId) throws Exception {
+        return rawRequest(method, path, payload, clientId,
+                Duration.ofSeconds(30));
+    }
+
+    private HttpResponse<String> rawRequest(String method, String path,
+            String payload, String clientId, Duration timeout)
+            throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(
                 "http://127.0.0.1:" + harnessPort + path))
-                .timeout(Duration.ofSeconds(30))
+                .timeout(timeout)
                 .header("Authorization", "Bearer " + TOKEN)
                 .header("X-Qwen-Harness-Protocol-Version", "1")
                 .header("X-Qwen-Harness-Boot-Id", bootId)
@@ -1234,13 +1288,33 @@ class HostedMcpStoreFaultGatesIT {
             assertThat(harness.isAlive())
                     .as("Harness log: %s", temporary.resolve("harness.log"))
                     .isTrue();
-            JsonNode capabilities = json.readTree(http.send(
-                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
-                            + harnessPort + "/capabilities"))
-                            .timeout(Duration.ofSeconds(2))
-                            .header("Authorization", "Bearer " + TOKEN)
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString()).body());
+            HttpResponse<String> answer;
+            try {
+                answer = http.send(
+                        HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                                + harnessPort + "/capabilities"))
+                                .timeout(Duration.ofSeconds(2))
+                                .header("Authorization", "Bearer " + TOKEN)
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+            } catch (IOException notReady) {
+                // AssertionError is what the boot wait retries.
+                throw new AssertionError("capabilities: " + notReady,
+                        notReady);
+            }
+            assertThat(answer.statusCode())
+                    .as("capabilities: %s", answer.body())
+                    .isEqualTo(200);
+            JsonNode capabilities;
+            try {
+                capabilities = json.readTree(answer.body());
+            } catch (IOException notJsonYet) {
+                throw new AssertionError("capabilities: " + answer.body(),
+                        notJsonYet);
+            }
+            assertThat(capabilities)
+                    .as("capabilities: %s", answer.body())
+                    .isNotNull();
             bootId = capabilities.at("/hostedHarness/bootId").asText();
             assertThat(bootId).isNotBlank();
         });

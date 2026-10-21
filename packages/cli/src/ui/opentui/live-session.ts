@@ -20,6 +20,12 @@
  * feature parity + regression are complete.
  */
 
+import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
+import {
+  InteractiveModToolScheduler,
+  type InteractiveCompletedToolCall,
+} from '../../services/interactive-mod-tool-scheduler.js';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { appendFileSync } from 'node:fs';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
@@ -34,8 +40,8 @@ import {
   clampInlineMediaPart,
   compactToolResultDisplayForHistory,
   computeInitialTurnFromHistory,
-  CoreToolScheduler,
   didWriteProjectContextFile,
+  finalizeToolResponses,
   formatFullTurnVisionNotice,
   formatVisionBridgeNotice,
   getErrorMessage,
@@ -64,16 +70,6 @@ import {
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
-
-interface LooseCompletedCall {
-  request: { callId: string; name?: string; args?: unknown };
-  status: string;
-  response?: {
-    responseParts?: Part[];
-    resultDisplay?: unknown;
-    error?: unknown;
-  };
-}
 
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
@@ -122,6 +118,7 @@ export interface LivePromptOptions {
    * documented rule that continuations carry no provenance.
    */
   submittedPrompt?: string;
+  humanInput?: HumanPromptInput;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
@@ -750,6 +747,7 @@ export async function* livePromptEvents(
     const sendOptions = first
       ? {
           type: SendMessageType.UserQuery,
+          ...(options?.humanInput ? { humanInput: options.humanInput } : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
           ...(options?.submittedPrompt
             ? { submittedPrompt: options.submittedPrompt }
@@ -861,15 +859,25 @@ export async function* livePromptEvents(
         : [];
     };
 
-    let completed: LooseCompletedCall[] = [];
+    let completed: Array<
+      InteractiveCompletedToolCall & {
+        nativeAttemptsObserved?: boolean;
+      }
+    > = [];
     // callIds whose real invocation description already went out (one per
     // call, ink mapToDisplay parity).
     const descriptionSeen = new Set<string>();
     // Calls last seen in the scheduler's queued state, so a status only goes
     // out when it changes.
     const queuedSeen = new Set<string>();
-    const scheduler = new CoreToolScheduler({
+    const scheduler = new InteractiveModToolScheduler({
       config,
+      onNativeAttempt: (call) =>
+        observeInteractiveModTool(
+          config,
+          call,
+          options?.refreshContextFilesOnWrite === true,
+        ),
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
       outputUpdateHandler: (callId, chunk) => {
@@ -965,19 +973,64 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
-        completed = calls as unknown as LooseCompletedCall[];
+        completed = calls.filter(
+          (call): call is InteractiveCompletedToolCall =>
+            call.status === 'success' ||
+            call.status === 'error' ||
+            call.status === 'cancelled',
+        );
         live.close();
       },
     });
-    void scheduler.schedule(pending as never, abort);
+    const scheduled = scheduler.schedule(pending as never, abort);
+    void scheduled.catch((error: unknown) => {
+      const cancelled =
+        abort.aborted ||
+        (error instanceof Error && error.name === 'AbortError');
+      const ids = new Set([
+        ...pending.map((call) => call.callId),
+        ...waitingSeen,
+        ...queuedSeen,
+        ...descriptionSeen,
+      ]);
+      for (const id of ids) {
+        live.push({ type: 'tool-queued', id, queued: false });
+        live.push({ type: 'confirm-resolved', id, outcome: 'rejected' });
+        live.push({
+          type: 'tool-end',
+          id,
+          success: false,
+          summary: cancelled ? 'cancelled' : 'error',
+        });
+      }
+      live.close();
+    });
     for (;;) {
       const ev = await live.next();
       if (ev === undefined) break;
       yield ev;
     }
+    await scheduled;
 
+    const usesMods = completed.some((call) => call.nativeAttemptsObserved);
+    const finalResponses = usesMods
+      ? await finalizeToolResponses(
+          config,
+          completed.map((call) => ({
+            callId: call.request.callId,
+            toolName: call.request.name,
+            responseParts: call.response?.responseParts ?? [],
+            persistedOutputFiles: call.response?.persistedOutputFiles,
+            artifacts: call.response?.artifacts,
+          })),
+        )
+      : completed.map((call) => ({
+          responseParts: call.response.responseParts,
+          persistedOutputFiles: call.response.persistedOutputFiles,
+          artifacts: call.response.artifacts,
+        }));
     const responseParts: Part[] = [];
-    for (const call of completed) {
+    for (const [index, call] of completed.entries()) {
       const resp = call.response;
       const result = toolResultEvent(call.request.callId, resp?.resultDisplay);
       if (result) yield result;
@@ -993,7 +1046,23 @@ export async function* livePromptEvents(
               ? 'error'
               : 'ok',
       };
-      if (resp?.responseParts) responseParts.push(...resp.responseParts);
+      if (resp) {
+        const final = finalResponses[index];
+        responseParts.push(...final.responseParts);
+        if (usesMods)
+          config
+            .getChatRecordingService()
+            ?.recordToolResult(final.responseParts, {
+              callId: call.request.callId,
+              status: call.status,
+              resultDisplay: resp.resultDisplay,
+              error: resp.error,
+              errorType: resp.errorType,
+              executionStatus: resp.executionStatus,
+              persistedOutputFiles: final.persistedOutputFiles,
+              artifacts: final.artifacts,
+            });
+      }
     }
     // ink use-llm-stream parity (:5328): when every tool in the batch was
     // cancelled, the cancelled responses go to history only — no follow-up
@@ -1054,11 +1123,16 @@ export async function* livePromptEvents(
     // context file (GEMINI.md/…), refresh the memory instruction before the
     // next model pass so the updated context is already in the system prompt.
     if (options?.refreshContextFilesOnWrite && completed.length > 0) {
-      const candidates = completed.map((call) => ({
-        toolName: call.request.name ?? '',
-        args: call.request.args as Record<string, unknown> | undefined,
-        status: call.status,
-      }));
+      const candidates = completed
+        .filter(
+          (call) =>
+            !('nativeAttemptsObserved' in call && call.nativeAttemptsObserved),
+        )
+        .map((call) => ({
+          toolName: call.request.name ?? '',
+          args: call.request.args as Record<string, unknown> | undefined,
+          status: call.status,
+        }));
       if (didWriteProjectContextFile(candidates, config.getProjectRoot())) {
         await refreshMemoryInstruction(config, {
           logContext: 'opentui context-file memory tool batch',

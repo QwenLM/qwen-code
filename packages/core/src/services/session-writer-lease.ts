@@ -2532,6 +2532,95 @@ export class SessionWriterLease {
     return this.runExclusive(() => this.appendJsonLineOnce(value));
   }
 
+  readTranscript(): Promise<string> {
+    return this.runExclusive(async () => {
+      await this.assertOwnedAndUnchangedOnce();
+      const handle = await openTranscriptForRead(
+        this.transcriptPath,
+        this.expectedTranscriptState,
+      );
+      if (!handle) return '';
+      try {
+        const text = await handle.readFile('utf8');
+        await this.assertOwnedAndUnchangedOnce();
+        if (
+          createHash('sha256').update(text).digest('hex') !==
+          this.expectedTranscriptHasher!.copy().digest('hex')
+        ) {
+          throw new SessionTranscriptChangedError();
+        }
+        return text;
+      } finally {
+        await handle.close();
+      }
+    });
+  }
+
+  replaceTranscript(text: string, expectedSha256: string): Promise<void> {
+    return this.runExclusive(async () => {
+      await this.assertOwnedAndUnchangedOnce();
+      if (
+        this.managedFormatVersion !== undefined ||
+        this.expectedTranscriptHasher!.copy().digest('hex') !== expectedSha256
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
+      const directoryPath = path.dirname(this.transcriptPath);
+      await fs.mkdir(directoryPath, { recursive: true, mode: 0o700 });
+      const directory = await openDurableLockDirectory(directoryPath);
+      const temporaryPath = path.join(
+        directoryPath,
+        `.${randomUUID()}.jsonl.tmp`,
+      );
+      let temporary: fs.FileHandle | undefined;
+      let replaced = false;
+      try {
+        temporary = await fs.open(temporaryPath, 'wx', 0o600);
+        const mode = this.expectedTranscriptState?.exists
+          ? this.expectedTranscriptState.fingerprint.mode
+          : undefined;
+        if (mode !== undefined) await temporary.chmod(mode & 0o777);
+        await temporary.writeFile(text, 'utf8');
+        await temporary.sync();
+        const replacementState = transcriptStateFromStat(
+          await temporary.stat(),
+        );
+        await temporary.close();
+        temporary = undefined;
+        await syncDurableLockDirectory(directory);
+        await this.assertOwnedAndUnchangedOnce();
+        await fs.rename(temporaryPath, this.transcriptPath);
+        replaced = true;
+        await syncDurableLockDirectory(directory);
+        const snapshot = await captureTranscriptSnapshot(
+          this.transcriptPath,
+          replacementState,
+          () => this.released,
+        );
+        const expectedHash = createHash('sha256').update(text).digest('hex');
+        if (snapshot.hasher.copy().digest('hex') !== expectedHash) {
+          throw new SessionTranscriptChangedError();
+        }
+        await this.readOwnedLock();
+        this.expectedTranscriptState = snapshot.state;
+        this.expectedTranscriptHasher = snapshot.hasher;
+      } catch (error) {
+        if (error instanceof SessionWriterError) throw error;
+        if (!replaced) {
+          await this.assertOwnedAndUnchangedOnce();
+          throw error;
+        }
+        throw new SessionWriterUnavailableError({
+          cause: error instanceof Error ? error : undefined,
+        });
+      } finally {
+        await temporary?.close().catch(() => undefined);
+        await fs.unlink(temporaryPath).catch(() => undefined);
+        await directory.handle.close().catch(() => undefined);
+      }
+    });
+  }
+
   /**
    * Discards a trailing byte range this owner has proven was never committed,
    * then re-pins the transcript proof.

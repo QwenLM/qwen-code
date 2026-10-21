@@ -74,8 +74,39 @@ jobs:
         with:
           persist-credentials: false
 
+      # A workflow_run event is delivered once, but this job can sit in the
+      # queue long enough for the same run to be re-run. Attempt 1 of run
+      # 39237270547 waited hours here; by the time it ran, attempt 2 was green,
+      # so the failed-jobs list read from the latest attempt was empty and a
+      # per-commit issue was filed for an already-green head (#14768). A later
+      # attempt owns the run: its own completion event reports the result.
+      - name: 'Skip a superseded attempt'
+        id: 'live'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          REPO: '${{ github.repository }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+        run: |-
+          set -euo pipefail
+          superseded=false
+          if live_attempt="$(
+            gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
+              --jq '.run_attempt'
+          )"; then
+            # A missing run_attempt must fail open, not read as attempt 0.
+            if [[ -n "${RUN_ATTEMPT}" && "${live_attempt}" -gt "${RUN_ATTEMPT}" ]]; then
+              superseded=true
+              echo "::warning::Run ${WORKFLOW_RUN_ID} is on attempt ${live_attempt}; this attempt-${RUN_ATTEMPT} event is stale and its own completion event reports the result."
+            fi
+          else
+            echo "::warning::Could not read run ${WORKFLOW_RUN_ID}; assuming this attempt-${RUN_ATTEMPT} event is current and reporting."
+          fi
+          echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Select the failure destination'
         id: 'destination'
+        if: "${{ steps.live.outputs.superseded != 'true' }}"
         env:
           GH_TOKEN: '${{ github.token }}'
           REPO: '${{ github.repository }}'
@@ -118,14 +149,20 @@ jobs:
           echo "file_issue=${file_issue}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Download failed job logs'
+        if: "${{ steps.live.outputs.superseded != 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
         run: |-
           log_dir="${RUNNER_TEMP}/failed-logs"
           mkdir -p "${log_dir}"
 
+          # The endpoint names the event's attempt, not the run: the
+          # supersession check above can pass and the run still move on while
+          # this paginates, and the run-level endpoint resolves to the latest
+          # attempt.
           # One fetch feeds both projections below. `--paginate` prints one
           # JSON document per page, and the comment helper reads this file
           # with a single JSON.parse, so the pages merge into one document
@@ -135,7 +172,7 @@ jobs:
           # error normalizes to an empty list: the same degradation the
           # per-commit body already handles.
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
-          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
+          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
             --paginate | jq -s '{jobs: [ .[].jobs[]? ]}' > "${jobs_json}"; then
             echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}"
           fi
@@ -173,6 +210,7 @@ jobs:
 
       - name: 'Detect infrastructure-only failures'
         id: 'infra'
+        if: "${{ steps.live.outputs.superseded != 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
@@ -433,6 +471,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: 'write'
+      pull-requests: 'write'
     steps:
       - name: 'Post or update the failure summary'
         env:

@@ -1,12 +1,12 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
-import com.alibaba.qwen.code.managedagent.service.ChildResultRelay;
-import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
-import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
-import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
-import com.alibaba.qwen.code.managedagent.service.WakeRecovery;
-import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
+import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
+import com.alibaba.qwen.code.managedagent.session.WakeRecovery;
+import com.alibaba.qwen.code.managedagent.workspace.ChildResultRelay;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -28,6 +28,21 @@ class ManagedAgentPropertiesTest {
     private static final String DURABLE_KEY = "qwen.managed-agent.runtime-broker.durable-local-process";
     private static final String TRUSTED_KEY =
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
+
+    @Test
+    void verifiedFileRuntimeCanResolvePersistedImportsWithNewImportsDisabled() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        assertThat(properties.getRuntimeBroker().isLocalDirectoryImportEnabled()).isFalse();
+        assertThat(properties.getRuntimeBroker().getWorkspaceMounts()).isEmpty();
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(false);
+        assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
 
     @Test
     void applicationYmlBindsTheDurableAndTrustedDefaults() throws java.io.IOException {

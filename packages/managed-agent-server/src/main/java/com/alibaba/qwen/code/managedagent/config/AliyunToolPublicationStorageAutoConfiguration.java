@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.store.AliyunToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.artifact.AliyunToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
 import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;

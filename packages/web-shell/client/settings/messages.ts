@@ -16,6 +16,10 @@ type SettingsMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
+  'settings.label.experimental.generatedUi': 'Generated UI',
+  'settings.description.experimental.generatedUi':
+    'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -109,6 +113,10 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
 };
 
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
+  'settings.label.experimental.generatedUi': 'Generated UI 生成式界面',
+  'settings.description.experimental.generatedUi':
+    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
+
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',

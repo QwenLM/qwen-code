@@ -432,6 +432,24 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     });
   });
 
+  it.each([
+    [
+      'GET',
+      '/workspaces/ws/session/session%2F1/artifact-library',
+      'GET /workspaces/:workspace/session/:id/artifact-library',
+    ],
+    [
+      'DELETE',
+      '/workspaces/ws/session/session%2F1/artifact-library/artifact-1',
+      'DELETE /workspaces/:workspace/session/:id/artifact-library/:artifactId',
+    ],
+  ])('attributes %s artifact library requests', (method, path, route) => {
+    expect(resolveDaemonTelemetryRoute(mockReq(method, path))).toEqual({
+      route,
+      sessionId: 'session/1',
+    });
+  });
+
   it('attributes workspace transcript reads to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);
@@ -1141,19 +1159,19 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  // MCP App calls resolve the live session owner in the handler, adding one
-  // handler-resolved route while preserving the two pre-resolved routes.
-  it('contains 80 unique routes with the audited 78/2 attribution split', () => {
+  // Shell runtime and message group routes resolve the live session owner
+  // in the handler, preserving the two pre-resolved routes.
+  it('contains 83 unique routes with the audited 81/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(80);
-    expect(new Set(keys).size).toBe(80);
+    expect(keys).toHaveLength(83);
+    expect(new Set(keys).size).toBe(83);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(78);
+    ).toHaveLength(81);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

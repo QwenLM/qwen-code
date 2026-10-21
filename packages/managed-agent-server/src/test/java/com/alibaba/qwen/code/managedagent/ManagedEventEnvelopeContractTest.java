@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
-import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.event.ManagedEventEnvelope;
+import com.alibaba.qwen.code.managedagent.event.ManagedEventEnvelopes;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;

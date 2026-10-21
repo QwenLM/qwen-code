@@ -10,12 +10,12 @@ the three SIGKILL points on a run's revisions, all on the packaged stack.
 This slice covers the cells that live in Spring, where the scanner and its
 lease run:
 
-| Case                           | Injection                                                                                                                                                       | Expected                                                                                                                                                                                                                                                       |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spring-kill-before-answer`    | The occurrence is `firing`, the Harness has committed the run, and the fixture holds the answer before Spring settles it; SIGKILL the Spring child. Restart it. | The re-driven fire reuses the committed `arun_` identity: one committed `automation_run`, one accepted input, one model Turn, and the occurrence `fired` exactly once.                                                                                         |
-| `spring-kill-before-watermark` | The answer landed (revision 2 committed) and the fixture parks `advanceWatermark`; SIGKILL the Spring child, then restart.                                      | No second fire for the same slot. The watermark catches up and the ledger holds one run chain. The wake turn may be aborted by the kill, so its model Turn is not asserted here.                                                                               |
-| `two-scanner-race`             | Two Spring children on one MySQL and tenant, with one due slot, both ticked.                                                                                    | The ledger deduplicates: one occurrence, one committed `automation_run`, one model Turn. This case does not stage a lease takeover; fencing is enforced by the store's `lease_owner`/`fence` predicates on `claim`, `settleOccurrence` and `advanceWatermark`. |
-| `parked-tool-harness-kill`     | The wake turn is parked on a Runtime tool call; SIGKILL the Harness child.                                                                                      | Deferred: see the note under Budget.                                                                                                                                                                                                                           |
+| Case                           | Injection                                                                                                                                                       | Expected                                                                                                                                                                                                                                                           |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spring-kill-before-answer`    | The occurrence is `firing`, the Harness has committed the run, and the fixture holds the answer before Spring settles it; SIGKILL the Spring child. Restart it. | The re-driven fire reuses the committed `arun_` identity: one committed `automation_run` and one accepted input, with the occurrence `fired` exactly once. The kill drops the Harness Session, so the wake turn may be aborted and its Turn count is not asserted. |
+| `spring-kill-before-watermark` | The answer landed (revision 2 committed) and the fixture parks `advanceWatermark`; SIGKILL the Spring child, then restart.                                      | No second fire for the same slot. The watermark catches up and the ledger holds one run chain. The wake turn may be aborted by the kill, so its model Turn is not asserted here.                                                                                   |
+| `two-scanner-race`             | Two Spring children on one MySQL and tenant, with one due slot, both ticked.                                                                                    | The ledger deduplicates: one occurrence, one committed `automation_run`, one model Turn. This case does not stage a lease takeover; fencing is enforced by the store's `lease_owner`/`fence` predicates on `claim`, `settleOccurrence` and `advanceWatermark`.     |
+| `parked-tool-harness-kill`     | The wake turn is parked on a Runtime tool call; SIGKILL the Harness child.                                                                                      | Deferred: see the note under Budget.                                                                                                                                                                                                                               |
 
 The live-run reconcile case ("a wake turn is live past its first transcript
 write, drive `reconcile_run` through an overlap-`skip` slot, the run stays
@@ -23,8 +23,9 @@ write, drive `reconcile_run` through an overlap-`skip` slot, the run stays
 
 ## What the gate pins
 
-At most one run and one model Turn per occurrence, and one committed
-`automation_run` plus one accepted input for the slot. A Spring process
+At most one run and one committed input per occurrence, and one model
+Turn wherever the wake turn completes, plus one committed
+`automation_run` for the slot. A Spring process
 that dies mid-fire must not produce a second run on restart. A run whose
 wake turn settled must settle from the journal's `turn.settled`, never as
 `failed`/`outcome_unknown`, even when the settling process died before
@@ -58,8 +59,10 @@ This slice reuses that shape with an automation fixture main, and adds:
   settle's `HELD` proof reads the same row, so an outside lock blocks the
   occurrence write too and the crash point never arrives.
 - **Two children.** `two-scanner-race` starts two fixture JVMs against the
-  same MySQL and tenant, each with its own internal port and its own
-  `ready.json`, and points both at the same Harness.
+  same MySQL and tenant, both pointed at the same Harness. Only the first
+  binds an internal listener; the second runs with that listener off and
+  advertises the first child's session-store URL, which is the store the
+  session was created against.
 
 ## Ledger
 
@@ -106,7 +109,7 @@ the increment.
 - `mvn -Pmysql-integration -DskipTests test-compile checkstyle:check` clean,
   and `checkstyle:check@runtime-broker-checkstyle` clean on this tree.
 - Each implemented case green on JDK 21 with a real MySQL, selected with
-  `mvn -Pmysql-integration -Dit.test=HostedAutomationSpringCrashIT#<method>`
+  `mvn -Phosted-automation-gates -Dit.test=HostedAutomationSpringCrashIT#<method>`
   `failsafe:integration-test`; the whole class green.
 - Every witness red at the site the table names, restored byte for byte.
 - `scripts/tests/hosted-process-ci.test.js` green with the composed budget.

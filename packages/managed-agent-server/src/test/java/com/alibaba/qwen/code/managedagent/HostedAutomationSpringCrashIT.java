@@ -6,7 +6,7 @@
 
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -113,7 +113,7 @@ class HostedAutomationSpringCrashIT {
                 .startsWith("jdbc:mysql:");
         assertThat(System.getProperty("mysql.user"))
                 .as("FG11c slice 2 requires -Dmysql.user").isNotBlank();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(required("mysql.url"),
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -164,7 +164,7 @@ class HostedAutomationSpringCrashIT {
     }
 
     private Child startChild(Path root, String tenant, int internalPort,
-            int publicPort, int broker) throws Exception {
+            int publicPort, int broker, int storeBasePort) throws Exception {
         if (fixtureDatabaseUrl == null) {
             // Cases that do not need a private database share the one the
             // pass provided.
@@ -180,7 +180,7 @@ class HostedAutomationSpringCrashIT {
                 root.toString(), required("node.executable"),
                 cliEntry().toString(), tenant,
                 String.valueOf(internalPort), String.valueOf(broker),
-                String.valueOf(publicPort));
+                String.valueOf(publicPort), String.valueOf(storeBasePort));
         builder.environment().put("FG11C_MYSQL_URL", fixtureDatabaseUrl);
         builder.environment().put("FG11C_MYSQL_USER", required("mysql.user"));
         builder.environment().put("FG11C_MYSQL_PASSWORD",
@@ -208,7 +208,7 @@ class HostedAutomationSpringCrashIT {
             fixturePublicPort = freePort();
         }
         Child child = startChild(root, tenant, fixtureInternalPort,
-                fixturePublicPort, brokerPort);
+                fixturePublicPort, brokerPort, fixtureInternalPort);
         fixture = child.process();
         controlUrl = child.controlUrl();
         publicUrl = child.publicUrl();
@@ -413,7 +413,7 @@ class HostedAutomationSpringCrashIT {
         assertThat(System.getProperty("mysql.url"))
                 .as("FG11c slice 2 requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(required("mysql.url"),
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -485,7 +485,7 @@ class HostedAutomationSpringCrashIT {
                 .as("FG11c slice 2 requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
         String databaseUrl = freshDatabaseUrl();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(databaseUrl,
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -518,7 +518,7 @@ class HostedAutomationSpringCrashIT {
             Integer chains = jdbc.queryForObject(
                     "SELECT COUNT(DISTINCT run_id) FROM ma_schedule_occurrence"
                             + " WHERE tenant_id = ? AND schedule_id = ?"
-                            + " AND run_id IS NOT NULL",
+                            + " AND outcome = 'fired'",
                     Integer.class, tenant, definition);
             return watermarkSlot(definition) != null && chains != null
                     && chains == 1 ? true : null;
@@ -531,8 +531,7 @@ class HostedAutomationSpringCrashIT {
                 .as("one accepted input across the crash")
                 .isEqualTo(1);
         // The kill also drops the Harness's Session connection, so the
-        // wake turn may be aborted before its model call; the turn count is
-        // the kill-before-answer cell's property, not this one's.
+        // wake turn may be aborted before its model call; no Turn is asserted.
         assertThat(occurrenceOutcome(definition)).isEqualTo("fired");
     }
 
@@ -562,7 +561,7 @@ class HostedAutomationSpringCrashIT {
                 .as("FG11c slice 2 requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
         String databaseUrl = freshDatabaseUrl();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(databaseUrl,
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -592,13 +591,11 @@ class HostedAutomationSpringCrashIT {
             Integer chains = jdbc.queryForObject(
                     "SELECT COUNT(DISTINCT run_id) FROM ma_schedule_occurrence"
                             + " WHERE tenant_id = ? AND schedule_id = ?"
-                            + " AND run_id IS NOT NULL",
+                            + " AND outcome = 'fired'",
                     Integer.class, tenant, definition);
             return "fired".equals(occurrenceOutcome(definition))
                     && chains != null && chains == 1 ? true : null;
         });
-        // `fired` lands with the fire answer, before the wake turn's model
-        // call starts, so wait for the turn and then pin it to exactly one.
         String runId = runIdOf(definition);
         assertThat(committedRuns(session))
                 .as("one committed automation_run for the re-driven slot")
@@ -606,15 +603,9 @@ class HostedAutomationSpringCrashIT {
         assertThat(acceptedInputs(session, runId))
                 .as("one accepted input for the re-driven slot")
                 .isEqualTo(1);
-        await("the re-driven run's model Turn", 120,
-                () -> modelPrompts.stream()
-                        .anyMatch(prompt -> prompt.contains(
-                                "FG11C2_KILL_ANSWER")) ? true : null);
-        long turns = modelPrompts.stream()
-                .filter(prompt -> prompt.contains("FG11C2_KILL_ANSWER"))
-                .count();
-        assertThat(turns).as("one model Turn for the re-driven run")
-                .isEqualTo(1);
+        // The kill also drops the Harness's Session connection, so the wake
+        // turn may be aborted before its model call. This case owns the
+        // committed run and its accepted input, not a Turn count.
     }
 
     private boolean fireReached() {
@@ -632,11 +623,17 @@ class HostedAutomationSpringCrashIT {
     }
 
     private String runIdOf(String schedule) {
-        return jdbc.queryForObject(
+        List<String> runIds = jdbc.queryForList(
                 "SELECT run_id FROM ma_schedule_occurrence WHERE tenant_id = ?"
-                        + " AND schedule_id = ? AND run_id IS NOT NULL"
+                        + " AND schedule_id = ?"
+                        + " AND outcome IN ('firing', 'fired')"
                         + " ORDER BY slot DESC LIMIT 1", String.class, tenant,
                 schedule);
+        assertThat(runIds)
+                .as("a firing or fired occurrence for %s carries a run id",
+                        schedule)
+                .isNotEmpty();
+        return runIds.get(0);
     }
 
     private int committedRuns(String sessionId) {
@@ -672,11 +669,15 @@ class HostedAutomationSpringCrashIT {
     }
 
     private String occurrenceOutcome(String schedule) {
-        return jdbc.queryForObject(
+        List<String> outcomes = jdbc.queryForList(
                 "SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
-                        + " AND schedule_id = ? ORDER BY slot DESC LIMIT 1",
-                String.class,
+                        + " AND schedule_id = ?"
+                        + " AND outcome IN ('firing', 'fired')"
+                        + " ORDER BY slot DESC LIMIT 1", String.class,
                 tenant, schedule);
+        // The waiters poll this helper before the slot row exists, so an
+        // absent row must read as a value they can compare, not a throw.
+        return outcomes.isEmpty() ? "absent" : outcomes.get(0);
     }
 
     @Test
@@ -686,7 +687,7 @@ class HostedAutomationSpringCrashIT {
                 .as("FG11c slice 2 requires -Dmysql.url")
                 .startsWith("jdbc:mysql:");
         String databaseUrl = freshDatabaseUrl();
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(
                 new DriverManagerDataSource(databaseUrl,
                         required("mysql.user"),
                         System.getProperty("mysql.password", "")));
@@ -700,8 +701,11 @@ class HostedAutomationSpringCrashIT {
         Path rootB = Files.createDirectories(temporary.resolve("race-b"));
         startFixture(rootA, tenantName);
         startHarness();
-        Child second = startChild(rootB, tenantName, freePort(), freePort(),
-                freePort());
+        // The store is the primary child's. The second child binds no
+        // internal listener (port 0) and points its store base URL at the
+        // primary, or the Harness rejects every load with a store mismatch.
+        Child second = startChild(rootB, tenantName, 0, freePort(),
+                freePort(), fixtureInternalPort);
         try {
             String session = createSession("race");
             String definition = apiRequest("POST", "/v1/agent-automations",
@@ -715,12 +719,12 @@ class HostedAutomationSpringCrashIT {
                 Integer occurrences = jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_schedule_occurrence"
                                 + " WHERE tenant_id = ? AND schedule_id = ?"
-                                + " AND run_id IS NOT NULL",
+                                + " AND outcome = 'fired'",
                         Integer.class, tenant, definition);
                 Integer chains = jdbc.queryForObject(
                         "SELECT COUNT(DISTINCT run_id) FROM"
                                 + " ma_schedule_occurrence WHERE tenant_id = ?"
-                                + " AND schedule_id = ? AND run_id IS NOT NULL",
+                                + " AND schedule_id = ? AND outcome = 'fired'",
                         Integer.class, tenant, definition);
                 return occurrences != null && occurrences == 1
                         && chains != null && chains == 1

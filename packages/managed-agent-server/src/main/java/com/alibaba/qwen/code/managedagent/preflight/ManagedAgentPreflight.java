@@ -85,6 +85,7 @@ public final class ManagedAgentPreflight {
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
         checks.add(harnessCheck(properties));
+        checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
         checks.add(workspaceCheck(properties));
@@ -184,13 +185,15 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    private static ManagedAgentProperties bind(
+    static ManagedAgentProperties bind(
             ConfigurableEnvironment environment, List<Check> checks) {
         try {
-            return Binder.get(environment)
+            ManagedAgentProperties properties = Binder.get(environment)
                     .bind("qwen.managed-agent",
                             Bindable.of(ManagedAgentProperties.class))
                     .orElseGet(ManagedAgentProperties::new);
+            properties.setEnvironment(environment);
+            return properties;
         } catch (RuntimeException error) {
             checks.add(new Check("config", Status.FAIL,
                     "binding failed: " + rootMessage(error),
@@ -312,6 +315,31 @@ public final class ManagedAgentPreflight {
                 null);
     }
 
+    // Reads the values after the startup validation applied its defaults.
+    static Check sessionStoreCheck(ManagedAgentProperties properties) {
+        ManagedAgentProperties.SessionStore store =
+                properties.getSessionStore();
+        if (!properties.getHarness().isEnabled() || !store.isEnabled()) {
+            return new Check("session-store", Status.SKIP, "disabled", null);
+        }
+        if (StringUtils.isBlank(store.getBaseUrl())) {
+            return new Check("session-store", Status.FAIL,
+                    "base URL is empty",
+                    "set QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL to the"
+                            + " listener the Harness reaches");
+        }
+        if (StringUtils.isBlank(store.getWorkspaceId())) {
+            return new Check("session-store", Status.FAIL,
+                    "workspace ID is empty",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_CWD or"
+                            + " QWEN_MANAGED_AGENT_WORKSPACE_ID");
+        }
+        return new Check("session-store", Status.PASS,
+                store.getBaseUrl() + ", workspace "
+                        + store.getWorkspaceId(),
+                null);
+    }
+
     static Check harnessCheck(ManagedAgentProperties properties) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
         if (!harness.isEnabled()) {
@@ -339,10 +367,18 @@ public final class ManagedAgentPreflight {
             HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                     .timeout(Duration.ofMillis(TIMEOUT_MILLIS))
                     .header("Accept", "application/json")
+                    .header("Authorization", "Bearer " + harness.getToken())
                     .GET()
                     .build();
             HttpResponse<String> response = client.send(request,
                     HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 401 || response.statusCode() == 403) {
+                return new Check("harness", Status.FAIL,
+                        url + " rejected the configured token ("
+                                + response.statusCode() + ")",
+                        "set QWEN_MANAGED_AGENT_HARNESS_TOKEN to the token the"
+                                + " Harness accepts");
+            }
             if (response.statusCode() != 200) {
                 return new Check("harness", Status.FAIL,
                         url + " answered " + response.statusCode(),
@@ -365,8 +401,21 @@ public final class ManagedAgentPreflight {
 
     static Check toolPathCheck(ManagedAgentProperties properties) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
+        if (broker.getSsh().isEnabled()
+                && (!files || broker.getSsh().getNodes().isEmpty())) {
+            return new Check("tool-path", Status.FAIL,
+                    "SSH Runtime requires Workspace files and configured nodes",
+                    "enable Workspace files and add runtime-broker.ssh.nodes");
+        }
+        if (!StringUtils.isBlank(broker.getWorkspaceCreationRoot()) && !files) {
+            return new Check("tool-path", Status.FAIL,
+                    "Workspace creation requires Workspace files",
+                    "set QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true");
+        }
         if (shell && !files) {
             return new Check("tool-path", Status.FAIL,
                     "Workspace Shell requires Workspace files",
@@ -403,8 +452,6 @@ public final class ManagedAgentPreflight {
                     "Workspace files require the Runtime Broker",
                     "set QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED=true");
         }
-        ManagedAgentProperties.RuntimeBroker broker =
-                properties.getRuntimeBroker();
         if ("static".equals(broker.getProvisioner())) {
             return new Check("tool-path", Status.FAIL,
                     "Workspace files cannot use the static provisioner",

@@ -41,7 +41,9 @@ public enum ManagedSchemaProjection {
                     + "recovery_deadline, execution_mode, verification_request_json, verification_ready, "
                     + "verification_next_at, publication_id, publication_command_id, slot_key, "
                     + "execution_key, item_id, policy_version, failure_status, failure_code, gmt_create, "
-                    + "gmt_modified, completed_at"),
+                    + "gmt_modified, completed_at, progress_format, progress_version, progress_stage, "
+                    + "settlement_deadline_ms, frozen_request_bytes, frozen_request_sha256, cut_bytes, "
+                    + "cut_sha256, finalize_receipt_bytes, finalize_receipt_sha256, csi_retirement_target_key"),
     OPERATION_WORK(
             "operation_key, work_kind, target_key, target_id, tenant_id, session_id, "
                     + "storage_key, physical_key, state, revision, payload_version, payload_json, "
@@ -79,7 +81,7 @@ public enum ManagedSchemaProjection {
                     + "last_verified_at, retention_until"),
     RESOURCE_REF(
             "session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, "
-                    + "workspace_id, session_id, journal_revision, resource_id, gmt_create"),
+                    + "workspace_id, session_id, journal_revision, resource_id, gmt_create, runtime_binding_key"),
     RUNTIME_BINDING(
             "binding_id, request_key, scope_key, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, isolation_key, provisioner_kind, "
@@ -95,7 +97,8 @@ public enum ManagedSchemaProjection {
     RUNTIME_SESSION(
             "scope_key, runtime_session_id, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, harness_session_id, turn_kind, "
-                    + "binding_id, runtime_generation, session_state, record_version, last_active_at"),
+                    + "binding_id, runtime_generation, session_state, record_version, last_active_at, "
+                    + "execution_storage_key, execution_exclusive"),
     RUNTIME_SLOT(
             "request_key, tenant_id, workspace_id, workspace_generation, canonical_cwd, "
                     + "capability_digest, isolation_class, isolation_key, provisioner_kind, storage_id, "
@@ -131,7 +134,7 @@ public enum ManagedSchemaProjection {
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, wake_pending, "
-                    + "wake_head_revision, wake_retry_at, wake_scan_pending"),
+                    + "wake_head_revision, wake_retry_at, wake_scan_pending, cleanup_head_revision"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_key_hash, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "

@@ -75,9 +75,12 @@ export function createHostedHarnessContract(
       'hosted_model_round_recovery_v1',
       'model-selection/1',
       'approval-selection/1',
+      'live-approval-selection/1',
       'agent-definition-approval-selection/1',
       'plan-mode/1',
       'input-attachments/1',
+      'session-skills/1',
+      'session-skills/2',
       // GET /session/:id/events writes keepalive comments while no event
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',

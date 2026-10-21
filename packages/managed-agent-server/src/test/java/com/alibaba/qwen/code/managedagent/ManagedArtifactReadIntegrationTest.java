@@ -1,8 +1,16 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.*;
-import com.alibaba.qwen.code.managedagent.service.*;
-import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
+import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.api.ManagedArtifactController;
+import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
+import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
+import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactPolicy;
+import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactService;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.servlet.MockMvc;
@@ -101,7 +109,7 @@ class ManagedArtifactReadIntegrationTest {
                             return invocation.callRealMethod();
                         })
                 .when(reader)
-                .readRange(any(), anyLong(), anyInt(), any(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.ReadLease.class), any(Runnable.class));
+                .readRange(any(), anyLong(), anyInt(), any(com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore.ReadLease.class), any(Runnable.class));
         var mvc =
                 mvc(
                         new ManagedArtifactService(
@@ -473,7 +481,7 @@ class ManagedArtifactReadIntegrationTest {
         AtomicInteger lookups = new AtomicInteger(), opens = new AtomicInteger();
         var data =
                 org.mockito.Mockito.mock(
-                        com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore.class,
+                        com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore.class,
                         org.mockito.Mockito.withSettings()
                                 .spiedInstance(fixture.publications())
                                 .defaultAnswer(
@@ -497,7 +505,7 @@ class ManagedArtifactReadIntegrationTest {
         var reader =
                 new ManagedArtifactReader(
                         beans.getBeanProvider(
-                                com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore
+                                com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore
                                         .class));
         AtomicInteger decisions = new AtomicInteger();
         var allowed = new java.util.concurrent.atomic.AtomicBoolean(true);

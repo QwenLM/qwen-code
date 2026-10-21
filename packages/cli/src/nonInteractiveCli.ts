@@ -5,6 +5,7 @@
  */
 
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
@@ -176,60 +177,9 @@ import {
   buildInitialSystemReminders,
   insertAfterFunctionResponses,
 } from './nonInteractive/nonInteractiveHelpers.js';
-
-// Human-readable labels for the detectors that can fire mid-stream.
-// Surfaced to stderr in TEXT mode so a headless run that halts on a loop
-// doesn't exit with empty stdout and no explanation — see PR #3236 review.
-const LOOP_TYPE_LABELS: Record<LoopType, string> = {
-  [LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS]:
-    'the model repeated the same tool call with identical arguments',
-  // Reasoning-stream chants fire this type too (checkReasoningContentLoop),
-  // and getResponseText filters reasoning out of visible output — the label
-  // must name both channels so a headless halt on an empty stdout is not
-  // mistaken for a detector misfire.
-  [LoopType.CHANTING_IDENTICAL_SENTENCES]:
-    'the model repeated the same sentence in its output or reasoning',
-  [LoopType.REPETITIVE_THOUGHTS]:
-    'the model repeated the same reasoning thought',
-  [LoopType.READ_FILE_LOOP]:
-    'the model spent too many consecutive calls reading files without making progress',
-  [LoopType.ACTION_STAGNATION]:
-    'the model kept calling the same tool without making progress',
-  [LoopType.SHELL_COMMAND_STAGNATION]:
-    'the model repeated similar shell inspection commands without making progress',
-  [LoopType.GLOBAL_TOOL_CALL_DUPLICATE]:
-    'the model repeated the same tool call across the turn, even when not back-to-back',
-  [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
-    'the model alternated between the same two tool calls in a repeating pattern',
-  [LoopType.TURN_TOOL_CALL_CAP]:
-    'the turn reached the per-turn tool-call limit',
-  [LoopType.INVALID_TOOL_PARAMS_STAGNATION]:
-    'the model repeatedly sent invalid tool parameters without correcting them',
-  [LoopType.REPEATED_TOOL_EXECUTION_FAILURE]:
-    'the same tool execution failure continued after a corrective reminder',
-};
-
-function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
-  const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
-  const detail = reason ? ` (${loopType}: ${reason})` : '';
-  // The always-on guards run before the skipLoopDetection gate, so that
-  // setting can't disable them — don't suggest it for those loop types. The
-  // per-turn cap is also always-on but has its own knob, so it gets a
-  // dedicated hint instead of membership in this list.
-  const isAlwaysOn =
-    loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
-    loopType === LoopType.SHELL_COMMAND_STAGNATION ||
-    loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
-    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION ||
-    loopType === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
-  const hint =
-    loopType === LoopType.TURN_TOOL_CALL_CAP
-      ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'
-      : isAlwaysOn
-        ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
-        : ' Set the `model.skipLoopDetection` setting to true to disable.';
-  return `Loop detection halted the run${detail}.${hint}`;
-}
+import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import { formatLoopDetectedMessage } from './utils/loop-detected-message.js';
+import type { LoopStop } from './utils/loop-detected-message.js';
 
 interface HeadlessGoalTurn extends GoalContinuationTurn {
   permit: GoalTurnPermit;
@@ -389,11 +339,16 @@ export function skipHeadlessLoopSentinel(
   return true;
 }
 
+const PROVIDER_DUPLICATE_ID_LOOP_STOP: LoopStop = {
+  loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+  loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+};
+
 function emitLoopDetectedMessage(
   config: Config,
-  loopType: LoopType | undefined,
+  stop: LoopStop | undefined,
 ): string {
-  const message = formatLoopDetectedMessage(loopType);
+  const message = formatLoopDetectedMessage(stop);
   // In TEXT mode the adapter swallows LoopDetected, so we print here. In
   // JSON modes the adapter emits a structured result, which is enough.
   if (config.getOutputFormat() !== OutputFormat.TEXT) {
@@ -456,6 +411,7 @@ async function emitNonInteractiveFinalMessage(params: {
  * @param controlService - Optional control service for future permission handling.
  */
 export interface RunNonInteractiveOptions {
+  humanInput?: HumanPromptInput;
   modSession?: ModSession;
   abortController?: AbortController;
   adapter?: JsonOutputAdapterInterface;
@@ -2617,6 +2573,15 @@ export async function runNonInteractive(
             modelOverride,
             ...(isFirstTurn &&
               sendType === SendMessageType.UserQuery &&
+              !goalTurn &&
+              !options.continueInterrupted &&
+              !isSlashCommand(input) &&
+              options.humanInput &&
+              !isSlashCommand(options.humanInput.text) && {
+                humanInput: options.humanInput,
+              }),
+            ...(isFirstTurn &&
+              sendType === SendMessageType.UserQuery &&
               !options.continueInterrupted &&
               submittedPrompt.trim().length > 0 && { submittedPrompt }),
             ...(isFirstTurn && promptAdmission && { promptAdmission }),
@@ -2698,7 +2663,7 @@ export async function runNonInteractive(
             if (!loopDetected) {
               loopDetectedMessage = emitLoopDetectedMessage(
                 config,
-                event.value?.loopType,
+                event.value,
               );
             }
             loopDetected = true;
@@ -2774,7 +2739,7 @@ export async function runNonInteractive(
           ) {
             loopDetectedMessage = emitLoopDetectedMessage(
               config,
-              LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+              PROVIDER_DUPLICATE_ID_LOOP_STOP,
             );
             return emitLoopDetectedResult();
           }
@@ -3027,7 +2992,7 @@ export async function runNonInteractive(
                   if (!loopDetected) {
                     loopDetectedMessage = emitLoopDetectedMessage(
                       config,
-                      event.value?.loopType,
+                      event.value,
                     );
                   }
                   loopDetected = true;
@@ -3088,7 +3053,7 @@ export async function runNonInteractive(
                 ) {
                   loopDetectedMessage = emitLoopDetectedMessage(
                     config,
-                    LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+                    PROVIDER_DUPLICATE_ID_LOOP_STOP,
                   );
                   loopDetected = true;
                   return;
