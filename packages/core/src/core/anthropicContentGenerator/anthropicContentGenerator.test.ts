@@ -630,6 +630,16 @@ describe('AnthropicContentGenerator', () => {
         ],
       },
     ];
+    // The converter marks only the last tool, so a two-tool body is the
+    // smallest shape where the scan has to walk past an unmarked tool.
+    const twoTools = () => [
+      {
+        functionDeclarations: [{ name: 'read_file', description: 'Read' }],
+      },
+      {
+        functionDeclarations: [{ name: 'run_shell', description: 'Run' }],
+      },
+    ];
     const sysAndTools = () => ({
       contents: 'Hi',
       config: { systemInstruction: 'sys', tools: weatherTools() },
@@ -881,12 +891,14 @@ describe('AnthropicContentGenerator', () => {
     });
 
     it('ships the cache-scope beta when only tools (no systemInstruction) carry scope:"global"', async () => {
-      // scope:'global' on the last tool alone fires the body-scan.
+      // Two tools and no systemInstruction: only tools[1] carries
+      // scope:'global', so the body-scan must walk past the unmarked
+      // tools[0] to find it.
       const { headers } = await send(
         base({ reasoning: false, forceGlobalCacheScope: true }),
         {
           contents: 'Hi',
-          config: { tools: weatherTools() },
+          config: { tools: twoTools() },
         },
       );
       expect(headers['anthropic-beta']).toBe(SCOPE_BETA);
@@ -916,14 +928,6 @@ describe('AnthropicContentGenerator', () => {
       // therefore ships the per-session shape like any other baseURL, and
       // prompt caching stays on. One tool was the single shape the API
       // accepted, which is why this pins two.
-      const twoTools = () => [
-        {
-          functionDeclarations: [{ name: 'read_file', description: 'Read' }],
-        },
-        {
-          functionDeclarations: [{ name: 'run_shell', description: 'Run' }],
-        },
-      ];
       const { req, headers } = await send(base({ reasoning: false }), {
         contents: 'Hi',
         config: { systemInstruction: 'sys', tools: twoTools() },
