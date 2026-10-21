@@ -15,12 +15,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const script = fileURLToPath(import.meta.url);
 const repo = path.dirname(path.dirname(script));
-// The release validation pool shares a runner with the rest of the matrix, so
-// this suite's hundreds of subprocess probes run about twice as slowly there.
-// Release run 39621619809 failed at the old 300 s per-worker and 600 s total
-// spawn caps; budget for the slow pool instead.
-const WORKER_TIMEOUT_MS = 600_000;
-const CI_TIMEOUT_MS = 1_500_000;
+// The release pool shares a runner with the rest of the matrix, so these
+// subprocess probes run about twice as slowly there: in release run
+// 39621619809 the node worker passed at 294 s and the bun worker was
+// SIGTERM'd by the old 300 s per-worker cap at 301 s; the old 600 s outer
+// cap was never reached. The spawn outlives both sequential workers plus
+// their setup, and quality_scripts' 30-minute budget also covers ~295 s of
+// job setup and the ~288 s scripts suite, so 540 s per worker is the most
+// that envelope holds. release-workflow.test.js pins both bounds.
+const WORKER_TIMEOUT_MS = 540_000;
+const CI_TIMEOUT_MS = 2 * WORKER_TIMEOUT_MS + 60_000;
 const sha = (file) =>
   createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const run = (bin, args, options = {}) => {

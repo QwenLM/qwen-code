@@ -3031,6 +3031,36 @@ exit 0`,
     expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
   });
 
+  it('keeps the standalone runtime spawn inside the quality_scripts budget', () => {
+    const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
+    const worker = /^const WORKER_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const derived =
+      /^const CI_TIMEOUT_MS = 2 \* WORKER_TIMEOUT_MS \+ ([\d_]+);$/m.exec(
+        source,
+      );
+    expect(
+      worker,
+      'WORKER_TIMEOUT_MS must stay a plain constant',
+    ).not.toBeNull();
+    expect(
+      derived,
+      'CI_TIMEOUT_MS must derive from WORKER_TIMEOUT_MS',
+    ).not.toBeNull();
+    const workerMs = Number(worker[1].replaceAll('_', ''));
+    const spawnMs = 2 * workerMs + Number(derived[1].replaceAll('_', ''));
+    // The child runs the node and bun workers sequentially, so an outer cap at
+    // or below twice the worker cap would fire first and lose the host-naming
+    // diagnostic.
+    expect(spawnMs).toBeGreaterThan(2 * workerMs);
+    // Slow-pool measurements around this spawn: ~295 s job setup, ~8 s runtime
+    // provisioning, ~288 s scripts suite, ~8 s teardown. The job timeout bounds
+    // everything, so retuning either constant alone must fail here.
+    const aroundTheSpawnSeconds = 600;
+    expect(spawnMs / 1000 + aroundTheSpawnSeconds).toBeLessThanOrEqual(
+      releaseYaml.jobs.quality_scripts['timeout-minutes'] * 60,
+    );
+  });
+
   it('stages every integration package manifest after versioning', () => {
     expect(releaseStepScript).toContain(
       'git add package.json pnpm-lock.yaml packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json',
