@@ -647,9 +647,9 @@ Harness or Runtime Broker credentials.
 
 ### Native macOS Workspace development
 
-The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable same-boot worker adoption. Set `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`; whole-host reboot recovery remains Linux-only. Keep durable local mode and verified Workspace recovery enabled, register the storage offline using the maintenance command below, and configure the same mount in the Java service. A missing registration still refuses tool execution.
+The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable same-boot worker adoption. Set `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`; whole-host reboot recovery remains Linux-only. Keep durable local mode and verified Workspace recovery enabled. Use the local directory import below for automatic registration, or register storage offline using the maintenance command and configure the same mount in the Java service. A missing registration still refuses tool execution.
 
-For the Vite entry, set `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true` and `VITE_MANAGED_AGENT_ACTOR_ID` to your development actor. On the loopback Java service, set `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id` and grant that actor access to the registered Workspace. Configure `VITE_MANAGED_AGENT_MODEL_PRESETS` with published AgentDefinition IDs for new-task model choices; the server's `model-catalog` supplies model choices within bound Sessions. These settings supplement the Broker and Hosted Harness wiring below; enabling selectors alone does not enable tools.
+For the Vite entry, set `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true` and `VITE_MANAGED_AGENT_ACTOR_ID` to your development actor. On the loopback Java service, set `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`; local directory import grants the importing actor automatically, while offline registration requires a separate Workspace grant. Configure `VITE_MANAGED_AGENT_MODEL_PRESETS` with published AgentDefinition IDs for new-task model choices; the server's `model-catalog` supplies model choices within bound Sessions. These settings supplement the Broker and Hosted Harness wiring below; enabling selectors alone does not enable tools.
 
 macOS storage identity combines `IOPlatformUUID` with the original device, inode and nanosecond birth time from native `stat`, cross-checked against the JDK directory identity. Worker identity also checks `kern.bootsessionuuid` and the exact process start instant before re-attestation. Preserve the SQL database, private Runtime state directory and credential key across Broker restarts. macOS handles use explicit `macos` namespace labels; older Java readers refuse them. A different boot is refused even for operator stop attestation. Background Shell, Monitor, command Hooks and Linux CSI retain their existing platform restrictions. The published reference distribution's Linux qualification is unchanged.
 
@@ -719,6 +719,28 @@ An uncertain response must be retried with the same key and name. The page prese
 
 ### Select an existing local project directory
 
+For a trusted single-user deployment bound to loopback, enable
+`QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED=true` alongside Workspace files,
+durable local-process execution, verified recovery, and the trusted actor header.
+Then **Workspace → Choose existing directory** browses this computer directly,
+without a pre-registered parent or grant. Import keeps the project in place,
+automatically registers its projects parent outside Git worktrees, grants the
+current actor OWNER access, and sets the project as the initial working directory.
+The parent shares file access and its physical-owner lease across projects; this
+is not a filesystem sandbox. Existing owned roots are reused while sessions run.
+Private Runtime state and creation roots must stay outside imported parents.
+Remote listeners and signed/shared deployments cannot enable this local feature.
+
+The actor-authenticated directory query accepts `localPath` (empty starts at the
+host home directory), and create accepts an absolute `localPath` with the name
+and idempotency key. These fields are exclusive with Workspace-relative source
+fields. `localDirectoryImport` advertises the capability independently; pending
+receipts pin native root identity and completed receipts resolve imported roots
+after restart or disabling further imports. Neither retry nor restart repairs a
+missing/foreign marker or restores revoked access. See the
+[local import design](../../docs/design/2026-10-21-managed-local-directory-import.md).
+
+For other deployments, the existing authorized-root flow remains available.
 With verified LOCAL storage enabled, **New workspace → Choose existing directory** browses the Linux or macOS execution host through Java. Select an ACTIVE ROOT Workspace you own, then choose an existing project beneath its authorized root. Administrators can register and grant a projects parent directory once; the root must remain outside all Git worktrees. The selected project stays in place and becomes the new Workspace's persistent default working directory. Other Workspaces on that storage retain the same shared file-access scope and physical-owner lease; selecting a subdirectory does not create filesystem isolation.
 
 `POST /api/agent/web-shell/v1/workspaces/directories/query` accepts `workspaceId` and `cwdRelative`, rechecks OWNER access and native storage, and returns at most 100 real immediate child directories (scanning at most 1024 entries). Only this authorized route discloses its execution-host root path. The existing create route accepts `sourceWorkspaceId` and `cwdRelative` together to bind a new logical Workspace to the verified source storage, configuration, and policy. It does not create directories or re-register storage. The creation receipt pins source generation and directory; pending retries refuse source changes or revoked ownership. Completed replay checks the new Workspace's current access. WebShell summaries expose `defaultCwdRelative` and `canSelectDirectory`; missing values mean `.` and unsupported, respectively. The page advertises `workspaceDirectorySelection` separately from empty creation and preserves the selected directory across retries, refresh, and reselect. See the [bilingual design](../../docs/design/2026-10-16-managed-workspace-directory-selection.md).
@@ -739,11 +761,11 @@ For new Workspace-bound WebShell Sessions, the shared composer queries `POST /ap
 
 The WebShell create request may include `approvalMode` only with a Workspace binding. Omission preserves the existing default and request digest; explicit selection is persisted in the Session and joins its idempotency digest. Retrying the same key reads the original pin even if deployment defaults, the AgentDefinition, or a later Session selection changed. Workspace-bound and definition-pinned Session summaries expose the current `approvalMode`, immutable `initialApprovalMode`, and `approvalRevision`. Legacy unbound built-in Sessions omit this metadata because their execution policy is supplied by the deployment. The public REST create contract is unchanged.
 
-Eligible Workspace Sessions can change their next user-submitted Turn's approval policy. Built-in `qwen-code` Sessions require the Harness feature `approval-selection/1`. Stored AgentDefinition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-shell/1`, or `hosted-workspace-shell/2` additionally require `agent-definition-approval-selection/1`; both features must remain available for execution after any override, including a return to the initial mode. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. The Session must be idle, with no pending approval, context/lifecycle operation, retained Runtime, or recovery work. Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. The definition pin and initial creation policy remain immutable; later user Turns freeze the selected mode and revision. Creation options still expose only the compiled initial policy. Files/2, MCP, read-only child, team-lead, CSI, unknown profiles, and unbound text Sessions do not gain policy selection. There is no public REST mutation endpoint. See the [stored-definition approval design](../../docs/design/2026-10-17-managed-definition-approval-selection.md) ([简体中文](../../docs/design/2026-10-17-managed-definition-approval-selection.zh-CN.md)).
+Eligible Workspace Sessions can change their execution approval policy. With the Harness feature `live-approval-selection/1`, a selection affects subsequent permission checks in the current Turn, and ordinary pending tools are durably allowed when the selected mode permits them. Already dispatched tools and explicit Hook or Plan-exit approvals retain their existing decisions. Built-in `qwen-code` Sessions require the Harness feature `approval-selection/1`. Stored AgentDefinition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-shell/1`, or `hosted-workspace-shell/2` additionally require `agent-definition-approval-selection/1`; both features must remain available for execution after any override, including a return to the initial mode. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. Without live support, the Session must be idle, with no pending approval or retained Runtime. Context/lifecycle and recovery barriers always apply; Plan changes remain idle-only. The options response advertises live behavior with `liveSupported`. Upgrade the control plane and Harness together in a maintenance window, fencing old Java writers before reopening execution; new Harness tool Turns refuse a missing live-policy endpoint. See the [live approval design](../../docs/design/2026-10-20-managed-live-approval.md) ([简体中文](../../docs/design/2026-10-20-managed-live-approval.zh-CN.md)). Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. The definition pin and initial creation policy remain immutable; later user Turns freeze the selected mode and revision. Creation options still expose only the compiled initial policy. Files/2, MCP, read-only child, team-lead, CSI, unknown profiles, and unbound text Sessions do not gain policy selection. There is no public REST mutation endpoint. See the [stored-definition approval design](../../docs/design/2026-10-17-managed-definition-approval-selection.md) ([简体中文](../../docs/design/2026-10-17-managed-definition-approval-selection.zh-CN.md)).
 
-This extension needs no schema migration, but old Java readers and writers ignore custom overrides. Upgrade Harness first, then stop or fence every old Java/Broker process sharing the catalog and deploy the new control plane everywhere before permitting changes. After a custom override, rollback must use a compatible build or keep affected Sessions blocked while applying a forward fix. Do not mix old Java binaries, clear revisions, or rewrite definition/history to roll back. Custom initial-yolo definitions retain the existing ten-minute approval timeout fallback after an override; custom initial-default/auto-edit definitions retain their stored timeout.
+The stored-definition extension needs no schema migration, but old Java readers and writers ignore custom overrides. For live approval, use the coordinated control-plane/Harness upgrade described above and stop or fence every old Java/Broker process sharing the catalog before permitting changes. After a custom override, rollback must use a compatible build or keep affected Sessions blocked while applying a forward fix. Do not mix old Java binaries, clear revisions, or rewrite definition/history to roll back. Custom initial-yolo definitions retain the existing ten-minute approval timeout fallback after an override; custom initial-default/auto-edit definitions retain their stored timeout.
 
-Schema V6 preserves the original policy and adds a current override plus per-Turn approval snapshots. Turn admission and policy changes share the Session row lock, so retries and recovery execute the admitted snapshot. Revision zero and legacy Turns consistently omit the private `approvalSelection` field and execute the confirmed immutable definition, preserving prompt retry identity across Harness capability upgrades; positive revisions always send the saved Turn snapshot. `yolo` skips ordinary file and Shell approvals, while explicit Hook ask/deny decisions retain their existing behavior. The configured approval timeout persists for new selectable Full Access Sessions and survives a later switch back to asking. Legacy Full Access definitions without a timeout keep the existing 10-minute fallback. WebShell retains an uncertain change with its original request and key across refresh, blocks send/model/cwd changes until receipt readback, and ignores older policy revisions. A Session with an override cannot execute through an older Harness. Deploy the updated Harness first, upgrade schema and all Java/Broker readers and writers during a maintenance window, then release WebShell; rollback binaries must understand the saved override and snapshots. See the [approval selection design](../../docs/design/managed-approval-selection.md).
+Schema V6 preserves the original policy and adds a current override plus per-Turn approval snapshots. Turn admission and policy changes share the Session row lock. Immutable Turn snapshots preserve retry and recovery identity; live permission boundaries separately read the current durable Session selection. Revision zero and legacy Turns consistently omit the private `approvalSelection` field, preserving prompt retry identity across Harness capability upgrades; positive revisions always send the saved Turn snapshot. `yolo` skips ordinary file and Shell approvals, while explicit Hook ask/deny decisions retain their existing behavior. The configured approval timeout persists for new selectable Full Access Sessions and survives a later switch back to asking. Legacy Full Access definitions without a timeout keep the existing 10-minute fallback. WebShell retains an uncertain change with its original request and key across refresh, blocks send/model/cwd changes until receipt readback, and ignores older policy revisions. A Session with an override cannot execute through an older Harness. Follow the coordinated live rollout above; rollback binaries must understand the saved override and snapshots. See the [approval selection design](../../docs/design/managed-approval-selection.md).
 
 Workspace-bound WebShell Session summaries can include `modelContext` with the actual observed `modelId`, optional latest-request `inputTokens` and resolved `contextWindowSize`, and `observedAt`. The Hosted CLI records capacity beside successful provider usage; the Java Session Store projects only committed main-model attempts into one private latest-resource pointer. Lists read these observations in one batch without scanning journal history. Older or invalid usage advances the pointer but leaves missing values unknown; cumulative billing totals and inferred capacities never substitute for them. The shared usage popover does not offer manual compression. New tasks continue to select published AgentDefinition presets. This observation projection uses existing SQL tables and resource-reference cleanup without changing the recovery format.
 
@@ -1340,6 +1362,16 @@ mvn -Pmysql-integration \
 Use a disposable database: the integration test creates and deletes fixture
 rows within the selected schema.
 
+The `hosted-harness-mysql` profile additionally clears every `ma_` base table
+before each top-level `Hosted*IT` class, while retaining the schema and Flyway
+history. Its JUnit extension is enabled only in that profile; one fork and
+disabled JUnit parallelism keep cleanup ahead of the next class's contexts.
+Use a database exclusively owned by this test invocation. Class teardown must
+still stop all contexts and child processes. State is preserved between methods,
+nested classes, and context restarts inside one class. See the
+[isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
+([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
+
 ## Linux extension process acceptance
 
 `HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.
@@ -1469,20 +1501,24 @@ npm run test:e2e:managed-harness-restart-approval-expiry
 npm run test:e2e:managed-harness-restart-continuation-closeout
 ```
 
-Four additional arms layer one fault on the Allow path (#14481 step 2). The
+Five additional arms layer one fault on the Allow path (#14481 step 2). The
 first crashes the replacement Harness as soon as the decision is durably
 recorded; the second holds the Runtime Broker's execution `:start` so the
-crash lands after the `PREPARED` row and before the physical dispatch. Both
-leave the original Action, prepare key, digest and Runtime identity in place,
-start a third Harness generation, and require exactly one settled execution,
-one file effect and one terminal. The other two drop the control plane's
-reply after it committed; the retry under the same `Idempotency-Key` must
-land on the original record, so a lost decision produces one
-`ACTION_RESPONSE` operation and a lost Turn admission produces one Turn row:
+crash lands after the `PREPARED` row and before the physical dispatch; the
+third crashes after the approved result commits while the post-tool model
+round is held, so its reissue must reuse the saved request and retract the
+published prefix. All three leave the original Action, prepare key, digest
+and Runtime identity in place, start a third Harness generation, and require
+exactly one settled execution, one file effect and one terminal. The other
+two drop the control plane's reply after it committed; the retry under the
+same `Idempotency-Key` must land on the original record, so a lost decision
+produces one `ACTION_RESPONSE` operation and a lost Turn admission produces
+one Turn row:
 
 ```bash
 npm run test:e2e:managed-harness-restart-approval-after-decision
 npm run test:e2e:managed-harness-restart-approval-after-prepare
+npm run test:e2e:managed-harness-restart-approval-after-result
 npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
 npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 ```
@@ -1490,9 +1526,9 @@ npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The approval path still has no
 packaged arm for a lost load reply, a failed cleanup followed by another
-crash, a committed terminal that was not delivered, a payable checkpoint
-whose terminal write is missing, or a crash after the approved result
-commits; those rows stay focused or integration tested (#14481).
+crash, a committed terminal that was not delivered, or a payable checkpoint
+whose terminal write is missing; those rows stay focused or integration
+tested (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:

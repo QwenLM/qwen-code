@@ -3350,6 +3350,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return {
       llmContent,
       rawOutputSize,
+      // `rawCapture` alone may still carry the complete output in its bounded
+      // preview; only a capture-bound discard means the body was cut.
+      ...(result.outputCaptureLimitExceeded
+        ? { truncatedByProducer: true }
+        : {}),
       returnDisplay: {
         type: 'shell_result',
         version: 1,

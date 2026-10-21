@@ -381,6 +381,40 @@ public class ManagedSessionStore {
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
     }
 
+    @Transactional
+    public java.util.Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
+            ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        if (request.kind() != null) {
+            throw invalid("Approval queries do not accept lifecycle authority.");
+        }
+        authorizeOrdinary(tenantId, sessionId, writerToken, request);
+        var rows = jdbc.queryForList("SELECT agent_id, agent_definition_digest, tool_profile, workspace_id,"
+                + " approval_mode, selected_approval_mode, approval_revision FROM ma_session"
+                + " WHERE tenant_id=? AND session_id=? FOR UPDATE", tenantId, sessionId);
+        if (rows.size() != 1) {
+            throw conflict("managed_session_scope_conflict", "The Managed Session is missing.");
+        }
+        var row = rows.getFirst();
+        String profile = (String) row.get("tool_profile");
+        if (row.get("workspace_id") == null
+                || ("qwen-code".equals(row.get("agent_id"))
+                        ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
+                || !(com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES.equals(profile)
+                        || com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
+            return null;
+        }
+        String mode = (String) row.get("selected_approval_mode");
+        if (mode == null) {
+            mode = (String) row.get("approval_mode");
+        }
+        long revision = ((Number) row.get("approval_revision")).longValue();
+        if (!com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.supportsApprovalMode(mode)
+                || revision < 0 || revision > 9_007_199_254_740_991L) {
+            throw conflict("approval_selection_conflict", "The approval selection is invalid.");
+        }
+        return java.util.Map.of("mode", mode, "revision", revision);
+    }
+
     // An ordinary write against a v2-claimed Session must fail with the
     // claim's name, and the read that names it must never walk the three
     // cliffs the earlier probes hit: no plain consistent read ahead of the
@@ -585,7 +619,7 @@ public class ManagedSessionStore {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', o3_backfill_through = 0, o3_backfill_pending = FALSE, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
                     STORAGE_VERSION,
                     request.writerId(),
@@ -600,7 +634,7 @@ public class ManagedSessionStore {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, o3_backfill_through, o3_backfill_pending, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', 0, FALSE, ?, ?)",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
                             .harnessDrainKey(tenantId),
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository
@@ -1006,6 +1040,10 @@ public class ManagedSessionStore {
                         sessionId,
                         closureReader,
                         hostedReferences);
+                if ("hosted.cleanup".equals(event.path("kind").asText())) {
+                    HostedCleanupReferences.apply(jdbc, tenantId, request.workspaceId(), sessionId,
+                            event.path("payload"), reader, revision, now.getTime());
+                }
             }
         }
         boolean v2 = authority != null && jdbc.queryForObject(
@@ -1144,6 +1182,7 @@ public class ManagedSessionStore {
                         + " journal_revision = ?, committed_sequence = ?,"
                         + " wake_pending = wake_pending OR ?,"
                         + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
+                        + " cleanup_head_revision = CASE WHEN cleanup_head_revision = ? THEN ? ELSE cleanup_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
                         + " latest_checkpoint_resource_id = COALESCE(?,"
                         + " latest_checkpoint_resource_id),"
@@ -1155,7 +1194,7 @@ public class ManagedSessionStore {
                         + " AND session_id = ?",
                 revision, request.lastSequence(),
                 wakeInput,
-                head.journalRevision(), revision, request.commitDigest(),
+                head.journalRevision(), revision, head.journalRevision(), revision, request.commitDigest(),
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(),
                 activation == null ? head.activationId()

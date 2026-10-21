@@ -147,6 +147,12 @@ export interface HttpManagedSessionStores {
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
   authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
+  approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+}
+
+export interface ManagedSessionApprovalSelection {
+  readonly mode: 'default' | 'auto-edit' | 'yolo';
+  readonly revision: number;
 }
 
 export interface HttpToolPublicationOwner {
@@ -236,6 +242,7 @@ export function createHttpManagedSessionStores(
       client.setLifecycleAuthority(authority),
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
+    approvalSelection: () => client.approvalSelection(),
   };
 }
 
@@ -757,6 +764,32 @@ class ManagedSessionStoreHttpClient {
       writerId: this.writerId,
       writerGeneration: this.grant!.writerGeneration,
     });
+  }
+
+  async approvalSelection(): Promise<
+    ManagedSessionApprovalSelection | undefined
+  > {
+    await this.assertWritable();
+    const value = await this.json('/approval:query', 'POST', {
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: this.grant!.writerGeneration,
+    });
+    if (value === null) return undefined;
+    const selection = asRecord(value, 'approval selection');
+    if (
+      Object.keys(selection).length !== 2 ||
+      !['default', 'auto-edit', 'yolo'].includes(String(selection['mode'])) ||
+      typeof selection['mode'] !== 'string' ||
+      typeof selection['revision'] !== 'number' ||
+      !Number.isSafeInteger(selection['revision']) ||
+      selection['revision'] < 0
+    )
+      throw corrupt('approval selection is invalid.');
+    return {
+      mode: selection['mode'] as ManagedSessionApprovalSelection['mode'],
+      revision: selection['revision'],
+    };
   }
 
   async authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void> {

@@ -770,7 +770,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(32);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(736);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(738);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -827,7 +827,10 @@ class WorkspaceCsiApplicationInventoryTest {
                 .isInstanceOfSatisfying(org.springframework.dao.DataAccessException.class, error ->
                         assertThat(error.getMostSpecificCause()).isInstanceOfSatisfying(java.sql.SQLException.class, sql -> {
                             assertThat(sql.getMessage()).containsIgnoringCase("ck_ma_session_plan");
-                            assertThat(sql.getSQLState() + ":" + sql.getErrorCode()).isIn("23513:23513", "HY000:3819");
+                            // MySQL 8 raises CHECK violations as 23513/3819;
+                            // MariaDB reports the same constraint as 23000/4025.
+                            assertThat(sql.getSQLState() + ":" + sql.getErrorCode())
+                                    .isIn("23513:23513", "HY000:3819", "23000:4025");
                         }));
         jdbc.update("UPDATE ma_session SET plan_enabled = TRUE, selected_approval_mode = 'default', approval_revision = 1");
         var enabled = inspect();

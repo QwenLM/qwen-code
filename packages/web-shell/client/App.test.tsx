@@ -498,6 +498,12 @@ const {
       hasMore: false,
     }),
     getWorkspaceSessionLiveState: vi.fn(),
+    sessionTaskRuntime: vi.fn().mockResolvedValue({
+      v: 1,
+      sessionId: 'nested-session',
+      taskId: 'shell-1',
+      runtime: { outputTail: 'restored output' },
+    }),
     sessionTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -621,6 +627,7 @@ const {
     listSources: vi
       .fn<() => Promise<SessionSourcesResult>>()
       .mockResolvedValue({ revision: 0, sources: [] }),
+    getTaskRuntime: vi.fn(),
     getTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -2672,7 +2679,11 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
 });
 vi.doMock('./components/messages/TasksStatusMessage', async () => {
   const React = await import('react');
+  const actual = await vi.importActual<
+    typeof import('./components/messages/TasksStatusMessage')
+  >('./components/messages/TasksStatusMessage');
   return {
+    shellTaskPanelTitle: actual.shellTaskPanelTitle,
     TasksStatusMessage: (props: {
       planTodos?: Array<{ id: string }>;
       agentTools?: Array<{ callId: string }>;
@@ -6099,7 +6110,10 @@ describe('task activity key', () => {
         .click(),
     );
     await flush();
-    expect(container.textContent).toContain('Historical window');
+    expect(
+      container.querySelector('[data-testid="trajectory-follow-status"]')
+        ?.textContent,
+    ).toBe('Earlier window');
     const input = container.querySelector<HTMLInputElement>(
       'input[type="search"]',
     )!;
@@ -6116,9 +6130,9 @@ describe('task activity key', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
         .click(),
     );
-    const selected = container.querySelector(
-      '[data-testid="trajectory-selected"]',
-    )!.textContent;
+    const selected = container
+      .querySelector('[data-testid="trajectory-row-request"]')!
+      .getAttribute('data-row-key');
     const rows = container.querySelector<HTMLElement>(
       '[data-testid="trajectory-rows"]',
     )!;
@@ -6155,22 +6169,32 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledTimes(
       8,
     );
-    expect(container.textContent).toContain('Historical window');
+    expect(
+      container.querySelector('[data-testid="trajectory-follow-status"]')
+        ?.textContent,
+    ).toBe('Earlier window');
     expect(
       container.querySelector<HTMLInputElement>('input[type="search"]')!.value,
     ).toBe('qwen-test');
     expect(
-      container.querySelector('[data-testid="trajectory-selected"]')!
-        .textContent,
+      container
+        .querySelector('[data-selected="true"]')
+        ?.getAttribute('data-row-key'),
     ).toBe(selected);
     expect(container.querySelector('[data-testid="trajectory-rows"]')).toBe(
       rows,
     );
     expect(rows.scrollTop).toBe(118);
-    expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).toContain('History may have changed while disconnected');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-warnings"]',
+        )!
+        .click(),
+    );
+    expect(document.body.textContent).toContain(
+      'History may have changed while disconnected',
+    );
     expect(
       Array.from(
         container.querySelectorAll('[role="tablist"] [role="tab"]'),
@@ -6180,15 +6204,14 @@ describe('task activity key', () => {
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-window-latest"]',
+          '[data-testid="trajectory-follow-status"]',
         )!
         .click(),
     );
     await flush();
     expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).not.toContain('History may have changed while disconnected');
+      container.querySelector('[data-testid="trajectory-warnings"]'),
+    ).toBeNull();
   });
 
   it('drops a restored trajectory tab when the host stopped listing it', async () => {
@@ -7497,6 +7520,19 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.sessionTasks).toHaveBeenLastCalledWith(
       'nested-session',
     );
+    const restored = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'shell',
+    );
+    expect(restored?.kind).toBe('shell');
+    if (restored?.kind !== 'shell')
+      throw new Error('Shell tab was not restored');
+    expect(restored.title).toBe('npm');
+    await restored.sessionActions!.getTaskRuntime('shell-1');
+    expect(mockWorkspace.client.sessionTaskRuntime).toHaveBeenCalledWith(
+      'nested-session',
+      'shell-1',
+    );
+    expect(mockSessionActions.getTaskRuntime).not.toHaveBeenCalled();
   });
 
   it('does not restart current-session task restoration on transcript updates', async () => {
@@ -15129,7 +15165,14 @@ describe('App read-only local commands mid-turn', () => {
     });
 
     expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/stats');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/stats',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('runs /about immediately while streaming and skips the echo', async () => {
@@ -15172,6 +15215,72 @@ describe('App read-only local commands mid-turn', () => {
     ]);
   });
 
+  it.each(['/about', '/status'])(
+    'does not append a late %s result after switching sessions',
+    async (command) => {
+      const { rerender } = renderApp({});
+      await flush();
+      const preflight = deferred<null>();
+      mockWorkspaceActions.loadPreflight.mockReturnValueOnce(preflight.promise);
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit(command);
+        await Promise.resolve();
+      });
+      const previousSession = mockConnection.sessionId;
+      try {
+        act(() => {
+          mockConnection.sessionId = 'session-switched';
+          testState.ownerVersion += 1;
+          rerender({});
+        });
+        mockStore.dispatch.mockClear();
+        await act(async () => {
+          preflight.resolve(null);
+          await preflight.promise;
+        });
+        await flush();
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+          expect.objectContaining({
+            clearActiveText: false,
+            promptId: expect.stringMatching(/^local-command:/),
+          }),
+        ]);
+      } finally {
+        mockConnection.sessionId = previousSession;
+      }
+    },
+  );
+
+  it('finishes an explicitly requested bug report after the session owner changes', async () => {
+    const onBugReport = vi.fn();
+    renderApp({ onBugReport });
+    await flush();
+    const preflight = deferred<null>();
+    mockWorkspaceActions.loadPreflight.mockReturnValueOnce(preflight.promise);
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/bug report title');
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.loadPreflight).toHaveBeenCalled();
+    expect(onBugReport).not.toHaveBeenCalled();
+    testState.ownerVersion += 1;
+    mockStore.dispatch.mockClear();
+    await act(async () => {
+      preflight.resolve(null);
+      await preflight.promise;
+    });
+    await flush();
+    expect(onBugReport).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'report title' }),
+    );
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        promptId: expect.stringMatching(/^local-command:/),
+      }),
+    ]);
+  });
+
   it('echoes /about when idle', async () => {
     renderApp({});
     await flush();
@@ -15183,7 +15292,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/about');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/about',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('runs /status immediately while streaming and skips the echo', async () => {
@@ -15237,7 +15353,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/status');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/status',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it.each(['/context', '/context detail', '/context -d'])(
@@ -15311,7 +15434,14 @@ describe('App read-only local commands mid-turn', () => {
       });
     });
 
-    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/context');
+    expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/context',
+      undefined,
+      expect.objectContaining({
+        source: 'local_command',
+        localCommandId: expect.stringMatching(/^local-command:/),
+      }),
+    );
   });
 
   it('reports /stats load failures instead of swallowing them', async () => {
@@ -18681,12 +18811,12 @@ describe('App session callbacks', () => {
       status: 'running',
       startTime: 1_000,
       runtimeMs: 5_000,
-      command: 'npm run dev',
+      command: '/opt/bin/node server.js',
       cwd: '/tmp/project',
       pid: 42,
     };
     testState.backgroundTasks = [shell];
-    const { container } = renderApp();
+    const { container, rerender } = renderApp();
 
     act(() => {
       testState.latestChatEditorProps?.onChatWidthModeChange?.('wide');
@@ -18702,7 +18832,7 @@ describe('App session callbacks', () => {
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="environment-panel"] ul button',
       ),
-    ).find((button) => button.textContent?.includes('npm run dev'));
+    ).find((button) => button.textContent?.includes('/opt/bin/node server.js'));
 
     act(() => shellButton?.click());
 
@@ -18711,11 +18841,14 @@ describe('App session callbacks', () => {
         '[data-testid="environment-panel"]:not([hidden])',
       ),
     ).not.toBeNull();
-    expect(
-      container.querySelector('button[title="npm run dev"]'),
-    ).not.toBeNull();
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
+    testState.backgroundTasks = [{ ...shell, runtimeMs: 8000 }];
+    rerender();
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
+    act(() => shellButton?.click());
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
     expect(container.textContent).toContain('/tmp/project');
-    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(2);
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(3);
   });
 
   it('restores the environment panel open state per session', () => {
@@ -33899,6 +34032,28 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
   });
 
+  it('gives extension install usage and its echo one restorable local identity', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/extensions install';
+    await clickSubmit(container);
+    await flush();
+    const echo = mockStore.appendLocalUserMessage.mock.calls.find(
+      (call) => call[0] === '/extensions install',
+    );
+    expect(echo).toEqual([
+      '/extensions install',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
+    ]);
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'error',
+        promptId: echo![2].localCommandId,
+      }),
+    ]);
+  });
+
   it('does not open the extensions manager page with /extension manage', async () => {
     const { container } = renderApp();
     await flush();
@@ -41929,10 +42084,10 @@ describe('App session callbacks', () => {
     });
     expect(testState.latestModelManagement?.busy).toBe(true);
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-      },
+      }),
     ]);
 
     await act(async () => {
@@ -41964,6 +42119,7 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).toHaveBeenCalledWith([
       {
         type: 'status',
+        promptId: expect.stringMatching(/^local-command:/),
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
       },
     ]);
@@ -42004,16 +42160,16 @@ describe('App session callbacks', () => {
     });
 
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
-      },
+      }),
     ]);
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         type: 'status',
         text: 'This change requires a restart to take effect.',
-      },
+      }),
     ]);
   });
 
@@ -45199,6 +45355,8 @@ describe('App /goal command', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
       '/goal ship it',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
     );
   });
 
@@ -45587,6 +45745,8 @@ describe('App /goal command', () => {
     expect(mockWorkspaceActions.controlGoal).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalledWith(
       '/goal first objective',
+      undefined,
+      expect.objectContaining({ localCommandId: expect.any(String) }),
     );
   });
 
@@ -45605,6 +45765,8 @@ describe('App /goal command', () => {
     expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
     expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalledWith(
       '/goal clear',
+      undefined,
+      expect.objectContaining({ localCommandId: expect.any(String) }),
     );
   });
 

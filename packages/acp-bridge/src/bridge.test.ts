@@ -4557,6 +4557,14 @@ describe('createAcpSessionBridge', () => {
                 tasks: [],
               };
             }
+            if (method === 'qwen/status/session/task_runtime') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                taskId: params['taskId'],
+                runtime: { outputTail: 'ready' },
+              };
+            }
             if (method === 'qwen/status/session/agent_trace') {
               return {
                 v: 1,
@@ -4644,6 +4652,13 @@ describe('createAcpSessionBridge', () => {
       tasks: [],
     });
     await expect(
+      bridge.getSessionTaskRuntime(session.sessionId, 'bg_1'),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      taskId: 'bg_1',
+      runtime: { outputTail: 'ready' },
+    });
+    await expect(
       bridge.getSessionAgentsStatus(session.sessionId),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
@@ -4681,6 +4696,7 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
+      'qwen/status/session/task_runtime',
       'qwen/status/session/agents',
       'qwen/status/session/agent_trace',
       'qwen/status/session/lsp',
@@ -7742,6 +7758,9 @@ describe('createAcpSessionBridge', () => {
           code: 'LOOP_DETECTED',
           errorKind: 'loop_detected',
           loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
         });
       },
       extMethodImpl: (method, params) => {
@@ -7800,6 +7819,8 @@ describe('createAcpSessionBridge', () => {
         content: { type: 'text', text: 'persisted turn content' },
       }),
     });
+    // The loop reason and tool-call numbers survive the refresh too, so Web
+    // Shell can keep showing the cause-specific text after a reload.
     expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
       type: 'turn_error',
       promptId: 'prompt-loop',
@@ -7807,6 +7828,9 @@ describe('createAcpSessionBridge', () => {
         code: 'LOOP_DETECTED',
         errorKind: 'loop_detected',
         loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
       }),
     });
 
@@ -43205,5 +43229,76 @@ describe('background handoff cancellation', () => {
       peerAbort.abort();
       await bridge.shutdown();
     }
+  });
+});
+
+describe('message group deletion', () => {
+  it('rejects at admission while a prompt is active', async () => {
+    const gate = deferred<void>();
+    const ext = vi.fn(async (_method: string) => ({}));
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await gate.promise;
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: ext,
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'active' }],
+    });
+    await expect(
+      bridge.deleteMessageGroups(session.sessionId, {
+        snapshot: 'v1',
+        groupIds: ['group'],
+      }),
+    ).rejects.toBeInstanceOf(SessionBusyError);
+    expect(
+      ext.mock.calls.some(
+        ([method]) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete,
+      ),
+    ).toBe(false);
+    gate.resolve();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('purges deleted replay and publishes invalidation only after the authoritative replacement is seeded', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete)
+          return { deletedGroupIds: ['group'], deletedPromptIds: ['prompt'] };
+        if (method === 'qwen/session/loadUpdates') return { updates: [] };
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'deleted content' },
+      },
+    });
+    await expect(
+      bridge.deleteMessageGroups(session.sessionId, {
+        snapshot: 'v1',
+        groupIds: ['group'],
+      }),
+    ).resolves.toEqual({
+      deletedGroupIds: ['group'],
+      deletedPromptIds: ['prompt'],
+    });
+    expect(
+      JSON.stringify(bridge.getSessionReplaySnapshot(session.sessionId)),
+    ).not.toContain('deleted content');
+    expect(
+      JSON.stringify(bridge.getSessionReplaySnapshot(session.sessionId)),
+    ).toContain('session_messages_deleted');
+    await bridge.shutdown();
   });
 });
