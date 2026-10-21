@@ -8150,14 +8150,21 @@ export class Config {
         this.goalRuntime?.dispose();
       }
 
-      if (this.initialized) {
-        // Stop this session's language servers first: the client fronts a
-        // NativeLspService/LspServerManager with one subprocess per server,
-        // and a sibling cleanup failure below must not strand them (they
-        // outlive the session's Config and leak until the host process
-        // exits otherwise, #14751).
+      // Stop this session's language servers before the rest of the
+      // cleanup. A session Config holds its client before initialization
+      // completes (loadCliConfig starts servers, then installs the client),
+      // so gating on `initialized` would skip teardown exactly for the
+      // sessions that die during startup; the daemon stays up and those
+      // servers are the leak from #14751. Derived Configs never receive a
+      // client, so the guard is the client itself. Kept out of the shared
+      // try below so a stop() rejection can't skip the remaining cleanup.
+      try {
         await this.lspClient?.stop?.();
+      } catch (lspStopError) {
+        this.debugLogger.error('Error stopping LSP client:', lspStopError);
+      }
 
+      if (this.initialized) {
         this.skillManager?.stopWatching();
 
         if (this.toolRegistry) {

@@ -1765,6 +1765,24 @@ describe('Server Config (config.ts)', () => {
       await config.shutdown();
       expect(stop).toHaveBeenCalledTimes(1);
     });
+
+    it('stops the client even when shutdown runs before initialize', async () => {
+      // loadCliConfig installs the client before initialization, so a session
+      // that dies during startup (e.g. daemon admission rejects it) still owns
+      // language servers; teardown must not skip them over `initialized`.
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the remaining cleanup running when lsp stop rejects', async () => {
+      const stop = vi.fn().mockRejectedValue(new Error('stop failed'));
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize(SKIP_ALL_INIT);
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
   });
 
   // Shared isolation for the debug-fallback tests. The module-level
