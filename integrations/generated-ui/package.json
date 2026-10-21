@@ -23,6 +23,7 @@
   "files": [
     "dist/main.js",
     "dist/app.html",
+    "dist/THIRD_PARTY_NOTICES.txt",
     "qwen-extension.json",
     "README.md",
     "skills"

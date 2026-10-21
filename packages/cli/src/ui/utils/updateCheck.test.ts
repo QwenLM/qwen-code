@@ -5,6 +5,11 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import * as installationInfo from '../../utils/installationInfo.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as runtimeInfo from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import {
   checkForUpdates,
   checkForUpdatesDetailed,
@@ -553,6 +558,22 @@ describe('classifyUpdateCheckError', () => {
     );
   });
 
+  it('classifies native fetch TimeoutError DOMExceptions as timeout', () => {
+    expect(
+      classifyUpdateCheckError(
+        new DOMException(
+          'The operation was aborted due to timeout',
+          'TimeoutError',
+        ),
+      ),
+    ).toBe('timeout');
+    expect(
+      classifyUpdateCheckError(
+        new DOMException('The operation was aborted', 'AbortError'),
+      ),
+    ).toBe('registry');
+  });
+
   it('classifies execFile timeouts as timeout', () => {
     const error = Object.assign(new Error('Command failed: npm view'), {
       code: null,
@@ -599,4 +620,207 @@ describe('classifyUpdateCheckError', () => {
     );
     expect(classifyUpdateCheckError('not-an-error')).toBe('registry');
   });
+});
+
+describe('standalone update lookup', () => {
+  let configDir: string;
+  beforeEach(() => {
+    vi.spyOn(runtimeInfo, 'isBunRuntime').mockReturnValue(true);
+    configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'update-lookup-'));
+    for (const key of Object.keys(process.env)) {
+      if (/^npm_config_/i.test(key)) vi.stubEnv(key, undefined);
+    }
+    vi.stubEnv('npm_config_userconfig', path.join(configDir, 'user.npmrc'));
+    vi.stubEnv('npm_config_globalconfig', path.join(configDir, 'global.npmrc'));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  });
+
+  it.each([true, false])(
+    'keeps Node npm transport and inherited configuration (standalone=%s)',
+    async (isStandalone) => {
+      vi.mocked(runtimeInfo.isBunRuntime).mockReturnValue(false);
+      vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+        packageManager: isStandalone
+          ? installationInfo.PackageManager.STANDALONE
+          : installationInfo.PackageManager.NPM,
+        isGlobal: true,
+        isStandalone,
+      });
+      const npmCli = path.join(configDir, 'npm-cli.js');
+      vi.spyOn(installationInfo, 'getNpmCliPath').mockReturnValue(npmCli);
+      vi.stubEnv('npm_config_registry', 'https://corporate.test/');
+      vi.stubEnv('npm_config_https_proxy', 'https://proxy.test/');
+      vi.stubEnv('npm_config_cafile', path.join(configDir, 'corporate-ca.pem'));
+      fs.writeFileSync(
+        path.join(configDir, 'user.npmrc'),
+        'registry=https://corporate.test/\n//corporate.test/:_authToken=synthetic-token',
+      );
+      const fetch = vi.fn();
+      vi.stubGlobal('fetch', fetch);
+      const run = vi.fn().mockResolvedValue({ stdout: '"1.2.3"' });
+
+      expect(
+        await fetchGlobalNpmUpdateInfo(
+          '@qwen-code/qwen-code',
+          '1.0.0',
+          'latest',
+          run,
+        ),
+      ).toMatchObject({ latest: '1.2.3' });
+      expect(run).toHaveBeenCalledWith(
+        process.execPath,
+        [
+          npmCli,
+          'view',
+          '@qwen-code/qwen-code',
+          'dist-tags.latest',
+          '--json',
+          '--global',
+        ],
+        { encoding: 'utf8', timeout: FETCH_TIMEOUT_MS },
+      );
+      expect(fetch).not.toHaveBeenCalled();
+      expect(process.env['npm_config_https_proxy']).toBe('https://proxy.test/');
+      expect(process.env['npm_config_cafile']).toBe(
+        path.join(configDir, 'corporate-ca.pem'),
+      );
+    },
+  );
+
+  it('reads stable and nightly tags without invoking npm', async () => {
+    vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+      packageManager: installationInfo.PackageManager.STANDALONE,
+      isGlobal: true,
+      isStandalone: true,
+    });
+    vi.stubEnv('npm_config_registry', 'https://registry.example.test/custom/');
+    const fetch = vi
+      .fn()
+      .mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({ latest: '1.2.3', nightly: '1.3.0-nightly.1' }),
+          ),
+      );
+    vi.stubGlobal('fetch', fetch);
+    const run = vi.fn();
+    for (const tag of ['latest', 'nightly'] as const) {
+      expect(
+        await fetchGlobalNpmUpdateInfo(
+          '@qwen-code/qwen-code',
+          '1.0.0',
+          tag,
+          run,
+        ),
+      ).toMatchObject({
+        latest: tag === 'latest' ? '1.2.3' : '1.3.0-nightly.1',
+      });
+    }
+    expect(run).not.toHaveBeenCalled();
+    expect(String(fetch.mock.calls[0][0])).toBe(
+      'https://registry.example.test/custom/-/package/%40qwen-code%2Fqwen-code/dist-tags',
+    );
+  });
+
+  it('surfaces registry failures instead of reporting up to date', async () => {
+    vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+      packageManager: installationInfo.PackageManager.STANDALONE,
+      isGlobal: true,
+      isStandalone: true,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('', { status: 503 })),
+    );
+    await expect(
+      fetchGlobalNpmUpdateInfo('@qwen-code/qwen-code', '1.0.0', 'latest'),
+    ).rejects.toThrow('HTTP 503');
+  });
+
+  it.each(['same-origin', 'cross-origin'])(
+    'follows a %s redirect without forwarding credentials across origins',
+    async (mode) => {
+      vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+        packageManager: installationInfo.PackageManager.STANDALONE,
+        isGlobal: true,
+        isStandalone: true,
+      });
+      fs.writeFileSync(
+        path.join(configDir, 'user.npmrc'),
+        'registry=https://registry.test/\n//registry.test/:_authToken=dummy-token',
+      );
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(null, {
+            status: 302,
+            headers: {
+              location:
+                mode === 'same-origin' ? '/tags' : 'https://other.test/tags',
+            },
+          }),
+        )
+        .mockResolvedValueOnce(new Response('{"latest":"1.2.3"}'));
+      vi.stubGlobal('fetch', fetch);
+      expect(
+        (
+          await fetchGlobalNpmUpdateInfo(
+            '@qwen-code/qwen-code',
+            '1.0.0',
+            'latest',
+          )
+        ).latest,
+      ).toBe('1.2.3');
+      expect(fetch.mock.calls[0][1].headers).toEqual({
+        Authorization: 'Bearer dummy-token',
+      });
+      expect(fetch.mock.calls[1][1].headers).toEqual(
+        mode === 'same-origin'
+          ? { Authorization: 'Bearer dummy-token' }
+          : undefined,
+      );
+      expect(fetch.mock.calls[0][1].signal).toBe(fetch.mock.calls[1][1].signal);
+    },
+  );
+
+  it.each(['chain', 'loop'])(
+    'rejects a six-request redirect %s within the shared request budget',
+    async (mode) => {
+      vi.spyOn(installationInfo, 'getInstallationInfo').mockReturnValue({
+        packageManager: installationInfo.PackageManager.STANDALONE,
+        isGlobal: true,
+        isStandalone: true,
+      });
+      // A finite seventh response makes removing the cap fail a business
+      // assertion rather than hanging the test or failing in its loader.
+      const fetch = vi.fn();
+      fetch.mockImplementation(async () =>
+        fetch.mock.calls.length <= 6
+          ? new Response(null, {
+              status: 302,
+              headers: {
+                location:
+                  mode === 'loop' ? '/loop' : `/hop-${fetch.mock.calls.length}`,
+              },
+            })
+          : new Response('{"latest":"1.2.3"}'),
+      );
+      vi.stubGlobal('fetch', fetch);
+      await expect(
+        fetchGlobalNpmUpdateInfo('@qwen-code/qwen-code', '1.0.0', 'latest'),
+      ).rejects.toThrow('Invalid npm registry redirect');
+      expect(fetch).toHaveBeenCalledTimes(6);
+      const signal = fetch.mock.calls[0][1].signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      for (const [, options] of fetch.mock.calls) {
+        expect(options.signal).toBe(signal);
+        expect(options.redirect).toBe('manual');
+      }
+    },
+  );
 });
