@@ -244,3 +244,84 @@ process and artifact evidence.
 - `mem0-settings.ts` identity check couples `command === process.execPath`;
   migrate it together with its spawn site in S3 so the identity cannot drift
   from the launcher.
+
+## Standalone update integration (R1)
+
+This integrates chiga0's update work from
+[#14134](https://github.com/QwenLM/qwen-code/pull/14134),
+[#14139](https://github.com/QwenLM/qwen-code/pull/14139),
+[#14142](https://github.com/QwenLM/qwen-code/pull/14142),
+[#14187](https://github.com/QwenLM/qwen-code/pull/14187), and
+[#14210](https://github.com/QwenLM/qwen-code/pull/14210), through
+`ce67edaba5631e9deaee418296346370dba4c116`. The unrelated interpreter
+call-site changes remain a separate migration; the inventory above is retained.
+
+### Update contract
+
+Node standalone retains its bundled npm transport, including npm's registry,
+proxy, CA and authentication behavior. Only Bun standalone uses native dist-tags
+fetch, so it does not need external Node/npm. That path reads builtin, global,
+user and environment registry/auth settings with global npm precedence and never
+implicitly loads project `.npmrc`. An absent or relative home skips the default
+user config; an explicitly configured path remains supported. Tilde paths require
+an absolute home. Authorization is removed across registry redirect origins.
+Native fetch does not implement every npm transport option; Node continues to use
+npm for those options, and Bun corporate proxy/CA acceptance remains separate.
+
+Registry and authentication keys as well as values expand environment variables.
+Environment fields are trimmed before expansion; a whitespace-only credential
+overrides the same lower-priority key without restoring its token. Authentication
+walks both slash-terminated and slashless paths, then the bare host, preferring
+the longest match and never crossing to a sibling path or different host.
+Unreadable configuration other than a missing file deliberately fails closed;
+unlike npm, a directory-valued config path is not silently ignored. An explicit
+empty prefix keeps npm's cwd-relative meaning; it does not select a new fallback.
+
+Installed manifests select the archive flavor: Node or the Bun OpenTUI preview.
+Missing runtime in an existing object retains the legacy Node interpretation;
+unknown runtimes and malformed manifest shapes fail before network or allocation.
+The error for malformed JSON or a non-object names the manifest and instructs the
+user to restore that installation's known-good manifest, or install the same
+runtime flavor into a new directory. Keep the current install and backup until
+recovery is verified. Deleting the manifest alone is not a repair: an existing
+directory without a manifest is deliberately rejected to protect its contents.
+
+Downloaded manifests must explicitly match the package name, target, runtime and
+requested version. Both direct and prepared updates verify the real interpreter
+identity and CLI version before replacement. Prepared activation rechecks the
+installed identity; an intervening newer installation is preserved. Activation
+uses the existing atomic replacement and rollback mechanisms.
+
+Smoke probes load the actual bundled `cli.js` with `--version`; both runtimes
+also run the production launcher with `--help` to bypass its metadata-only version
+fast path. All probes share a private empty working directory, preventing project
+or archive Bun preloads. Their copied environment removes Node/Bun startup options,
+ambient CLI version and relaunch overrides, preserving the parent environment
+and ordinary variables. Cleanup is attempted in `finally`; a cleanup error keeps
+the original smoke result and reports that a temporary directory may remain.
+
+### Regression evidence and limits
+
+CLI unit tests cover registry selection, Node transport preservation, empty-home
+trust, archive/manifest validation, identity changes, version mismatch, smoke
+isolation, activation and rollback. The real-runtime runner is
+`npm run test:standalone:runtimes`, after building. `PINNED_NODE` and `PINNED_BUN`
+select Node 24.19.0 and Bun 1.3.14; both hosts exercise both payload interpreters
+with verified local HTTPS. A shipped-layout fixture uses the real installation
+detector and query entry point: Bun reaches the HTTPS registry, while Node
+delegates to the npm executor. Missing or invalid bundled CLI files are rejected
+even when launcher metadata reports the requested version. A broken launcher is
+also rejected before replacing either the live install or its rollback backup.
+These probes do not exercise the launcher's ordinary-command child-spawn path.
+Unit fixtures own
+their home and generated wrapper directories. The CI mode provisions these pinned tools, verifies
+published checksums/integrity and runs before the existing script tests.
+
+Synthetic unsigned archives cover checksums, not production signature acceptance.
+The POSIX runner does not cover Windows, and successful local execution would not
+establish all five release targets. Bun's builtin-binding observer can be absent;
+zero-allocation claims require the successful positive control, while directory
+cleanup is always checked. Probe timings are diagnostics, not proof that previous
+first-run timeouts are resolved. Exact candidate build/typecheck, focused tests,
+real runtimes, published signed artifacts and supported-platform results must be
+recorded separately before declaring the migration accepted.

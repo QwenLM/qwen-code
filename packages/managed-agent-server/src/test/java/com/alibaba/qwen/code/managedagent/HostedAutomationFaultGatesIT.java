@@ -1407,6 +1407,33 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-active-retire", 202);
     }
 
+    // FG11d: a retry under the same key reuses the run it already created. The
+    // second POST answers that run, records no second occurrence and starts no
+    // second Turn, so a client retrying a lost answer cannot double the work.
+    @Test
+    @Timeout(600)
+    void fg11dRetriedFireReusesItsRunOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("retry-reuse");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_RETRY", "0 0 1 1 *"), "fg11d-retry-base", 202).path("id").asText();
+        String first = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-retry-run", 202)
+                .path("id").asText();
+        String second = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-retry-run", 202)
+                .path("id").asText();
+        assertThat(second).as("the retry answers the run it already made").isEqualTo(first);
+        // The fire commits asynchronously: wait for the occurrence and for the
+        // Turn it starts before judging what the retry did not add.
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForList(
+                "SELECT occurrence_key FROM ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ?",
+                String.class, tenant, id)).as("one occurrence").hasSize(1));
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("Automation ID: " + id)));
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id))
+                .as("both requests share one Turn").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-retry-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;
