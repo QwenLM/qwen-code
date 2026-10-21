@@ -4534,6 +4534,10 @@ describe('AgentTool', () => {
       'omits parent attribution and unknown usage for external agents (background=%s)',
       async (background) => {
         const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+        // Residency is exercised under an AUTO parent: a DEFAULT parent in a
+        // trusted folder now resolves the child to AUTO, which needs the
+        // child-only permission lease and therefore is not kept resident.
+        vi.mocked(config.getApprovalMode).mockReturnValue(AUTO);
         loadAs({ executor: { kind: 'acp', command: 'claude' } });
         const result = await externalTask(background);
         expect(textOf(result)).toContain(
@@ -4884,6 +4888,10 @@ describe('AgentTool', () => {
     });
 
     it('keeps runtime resources while idle and cleans them when disposed', async () => {
+      // Residency is exercised under an AUTO parent: a DEFAULT parent in a
+      // trusted folder now resolves the child to AUTO, which needs the
+      // child-only permission lease and therefore is not kept resident.
+      vi.mocked(config.getApprovalMode).mockReturnValue(AUTO);
       await launch();
       const agentId = registeredAgentId();
       await untilCompleted();
@@ -4901,6 +4909,10 @@ describe('AgentTool', () => {
     });
 
     const continueResident = async () => {
+      // Residency is exercised under an AUTO parent: a DEFAULT parent in a
+      // trusted folder now resolves the child to AUTO, which needs the
+      // child-only permission lease and therefore is not kept resident.
+      vi.mocked(config.getApprovalMode).mockReturnValue(AUTO);
       await launch();
       await untilCompleted(1);
       const completed = resident();
@@ -4951,6 +4963,10 @@ describe('AgentTool', () => {
     });
 
     it('reports capacity before restarting a resident runtime', async () => {
+      // Residency is exercised under an AUTO parent: a DEFAULT parent in a
+      // trusted folder now resolves the child to AUTO, which needs the
+      // child-only permission lease and therefore is not kept resident.
+      vi.mocked(config.getApprovalMode).mockReturnValue(AUTO);
       await launch();
       await untilCompleted(1);
       mockRegistry.canStartBackgroundAgent.mockReturnValue(false);
@@ -5591,7 +5607,7 @@ describe('AgentTool', () => {
           agentType: 'file-search',
           description: 'Search files',
           persistedCliFlags: expect.objectContaining({
-            approvalMode: 'auto-edit',
+            approvalMode: 'auto',
             bare: false,
             sandbox: null,
             screenReader: false,
