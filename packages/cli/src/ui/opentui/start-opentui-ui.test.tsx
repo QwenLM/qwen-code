@@ -112,7 +112,14 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('child_process')>();
-  return { ...actual, execFile: vi.fn(), execFileSync: vi.fn(() => '') };
+  const execFile = vi.fn();
+  const execFileSync = vi.fn(() => '');
+  return {
+    ...actual,
+    default: { ...actual, execFile, execFileSync },
+    execFile,
+    execFileSync,
+  };
 });
 
 vi.mock('@opentui/core', () => ({
