@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
@@ -643,6 +644,11 @@ public interface AgentStateStore {
     SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt,
             String beforeSessionId, int limit);
+
+    SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState);
+
+    Map<String, WebShellLifecycleOperation> findLatestLifecycleOperations(String tenantId, List<String> sessionIds);
 
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
             String turnId);

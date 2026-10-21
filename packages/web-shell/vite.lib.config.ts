@@ -213,6 +213,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/workflow-agent-details.transcript-stub.ts',
     ],
     [
+      './client/components/managed/managed-lifecycle-messages.ts',
+      './client/components/managed/managed-lifecycle-messages.transcript-stub.ts',
+    ],
+    [
       './client/components/managed/managed-task-messages.ts',
       './client/components/managed/managed-task-messages.transcript-stub.ts',
     ],

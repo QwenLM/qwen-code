@@ -50,6 +50,10 @@ class ManagedAgentSessionCapabilitiesTest {
         when(store.requireSession("tenant", "session")).thenReturn(session);
         when(store.listSessions("tenant", "actor", null, null, 10))
                 .thenReturn(new SessionPage(List.of(session), false));
+        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+                .thenReturn(new SessionPage(List.of(session), false));
+        when(store.findApprovalOwners("tenant", "actor", List.of("session")))
+                .thenReturn(Set.of("session"));
         when(store.completedWorkspaceCloses("tenant", List.of("session")))
                 .thenReturn("CLOSED".equals(status) ? Set.of("session") : Set.of());
 

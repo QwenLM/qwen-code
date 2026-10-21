@@ -1,0 +1,33 @@
+# Managed 会话生命周期与阅读导出
+
+[English](2026-10-22-managed-session-lifecycle-ui.md) | [简体中文](2026-10-22-managed-session-lifecycle-ui.zh-CN.md)
+
+## 问题与现状
+
+Java 已负责持久化的关闭、归档、恢复归档和删除操作。Managed Web Shell 尚无这些入口，适配器丢弃了会话生命周期状态，并将归档会话混入普通历史。公开 items 已支持不可变且逐页授权的快照分页。普通 CLI 导出器读取本地私有记录，不能用于 Managed 浏览器。
+
+## 行为与归属
+
+关闭可靠结束会话并保留可读历史。归档接受已关闭会话；恢复归档恢复为关闭、只读的历史。删除退休会话资源，不删除共享 Workspace 文件。活动会话可通过两个顺序执行、分别幂等的命令关闭再归档。运行中的 Turn 必须显式停止；已有服务端准入保持最终权威，包括恢复阻塞状态。
+
+现有 Managed 导航增加普通/归档视图和行/详情共享菜单。关闭、关闭并归档、删除需要确认。关闭后保持选中；归档或删除当前会话后在同一 Workspace 打开草稿。恢复归档后在普通历史选中恢复的会话。其他选择与草稿保持完整。复用有作用域的 UI primitives、portals 与本地化文案。
+
+## 契约与恢复
+
+WebShell 列表请求增加 `archiveState`（`unarchived`、`archived`、`all`）；省略时保持当前 `all` 行为。在 SQL keyset 分页前筛选。新 cursor 绑定筛选条件；旧 cursor 仅在 `all` 下有效。Public 列表行为保持不变。
+
+WebShell 生命周期 capability 纳入当前 actor 权限。批量查询的可选 `lifecycleOperation` 投影提供当前未结算操作的身份、种类、状态和失败码；已结算会话省略此投影。生命周期请求增加仅用于追踪的 `requestId`。同时更新 canonical OpenAPI、生成浏览器类型、路由注册和契约测试。不需要数据库结构迁移。
+
+浏览器在提交前按 provider 身份 scope 持久保存每个会话的冻结意图。HTTP 202 表示准入，不表示完成。响应丢失时重放原 key。pending/running 继续查询；recovery-blocked 等待对账。仅明确 failed 后用户主动重试才创建新 key。关闭并归档保存两个 key 和当前阶段，刷新后继续。如果关闭成功而归档失败，明确显示已关闭及归档未完成。切换选择不丢操作；身份变化中止旧请求。
+
+## 阅读导出
+
+新增读取授权的 `POST /api/agent/web-shell/v1/sessions/export/query`，将已有不可变快照分页适配为 WebShell items。捕获会话水位，最多等待 30 秒直到已发布快照覆盖水位，再仅使用该快照的 cursor。cursor 过期、水位变化或读取失败时中止导出。不能拼接不同快照或静默遗漏尾部。
+
+HTML 与 Markdown 使用同一份公开数据：标题与时间、用户/助手/思考文本、公开工具调用参数与结果预览，以及公开附件。保留截断提示；完整 Artifact 单独下载。采用 32 MiB 预算。HTML 为静态文档，内联 CSS、转义内容并嵌入安全的光栅图片；不执行会话脚本，不请求远程资源。释放下载 object URL。不导出私有 journal、凭证、恢复引用或内部存储地址。
+
+## 验证与边界
+
+覆盖生命周期菜单、权限、多页筛选、响应丢失、刷新、显式重试与等待恢复、组合操作中断及其他会话/Workspace 文件隔离。覆盖完整不可变导出分页、水位追赶、HTML 离线、注入、Unicode、代码、图片、截断结果与预算错误。运行前端及 Java 定向测试、build/typecheck/bundle、Maven verify 和独立 MySQL 集成测试。真实浏览器/后端证据与受控 transport 测试分开记录。
+
+先交付生命周期/导航，再交付导出。提供 E2E 计划和同步的中英文文档。本次不包含重新打开、导入恢复、批量操作、Workspace 删除或数据库迁移。无待决产品问题。

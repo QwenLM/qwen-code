@@ -4743,6 +4743,55 @@
           }
         }
       }
+    },
+    "/api/agent/web-shell/v1/sessions/export/query": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellExportSession",
+        "x-qwen-implementation-status": "implemented",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Immutable public item snapshot page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellExportPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "409": {
+            "$ref": "#/components/responses/CursorExpired"
+          }
+        },
+        "description": "Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.",
+        "summary": "Read one immutable public Session snapshot page for reading exports"
+      }
     }
   },
   "components": {
@@ -6096,10 +6145,11 @@
             "maximum": 100,
             "default": 20
           },
-          "includeArchived": {
-            "type": "boolean",
-            "default": false,
-            "x-qwen-implementation-status": "planned"
+          "archiveState": {
+            "type": "string",
+            "enum": ["unarchived", "archived", "all"],
+            "default": "all",
+            "description": "Filter before pagination. Omission preserves all readable, undeleted Sessions. Cursors are bound to this filter; legacy cursors are valid only for all."
           }
         }
       },
@@ -6498,6 +6548,10 @@
             "type": ["string", "null"],
             "maxLength": 64,
             "description": "Current durable context compression operation, including recovery_blocked; absent when none is active."
+          },
+          "lifecycleOperation": {
+            "$ref": "#/components/schemas/WebShellLifecycleOperation",
+            "description": "Current unsettled lifecycle operation, queried in batch under Session read authorization. A failed close/delete may leave the Session closing/deleting; only explicit retry starts a new operation. Settled Sessions omit this projection."
           }
         }
       },
@@ -6544,25 +6598,25 @@
           "sessionClose": {
             "type": "boolean",
             "default": false,
-            "description": "Deployment support for close independently of archive/delete. Admission also requires Session ownership and current read access for a bound Session."
+            "description": "Close support including current actor authority. Workspace-bound Sessions require the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "sessionArchive": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+            "description": "Archive support including current actor authority. Workspace-bound Sessions require completed reliable-close evidence, the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "sessionUnarchive": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+            "description": "Unarchive support including current actor authority. Workspace-bound Sessions require completed reliable-close evidence, the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "sessionDelete": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support capability. ACTIVE Workspace files Sessions require L3 lifecycle protocol and reliable original Runtime stop; CLOSED/ARCHIVED Sessions use independent L2 close evidence. Current creator/read authorization and idle/source-state admission checks still apply. The aggregate session lifecycle capability is unchanged."
+            "description": "Delete support including current actor authority. ACTIVE Workspace Sessions require a supported reliable-close protocol; CLOSED/ARCHIVED Sessions use completed close evidence. Workspace-bound Sessions require the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server. The aggregate session lifecycle capability is unchanged."
           },
           "foregroundShell": {
             "type": "boolean",
@@ -8937,6 +8991,11 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128
+          },
+          "requestId": {
+            "type": ["string", "null"],
+            "maxLength": 128,
+            "description": "Trace-only client request identity, excluded from idempotency digests."
           }
         }
       },
@@ -12345,6 +12404,77 @@
           }
         },
         "x-qwen-implementation-status": "implemented"
+      },
+      "WebShellLifecycleOperation": {
+        "type": "object",
+        "required": ["operationId", "type", "status"],
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "type": {
+            "type": "string",
+            "enum": ["close", "archive", "delete"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "recovery_blocked"
+            ]
+          },
+          "failureCode": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "WebShellExportPage": {
+        "type": "object",
+        "required": ["items", "hasMore", "snapshotThroughSequence"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebShellItem"
+            }
+          },
+          "nextCursor": {
+            "type": ["string", "null"]
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "snapshotThroughSequence": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "WebShellExportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cursor": {
+            "type": ["string", "null"],
+            "maxLength": 4096
+          },
+          "limit": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 100,
+            "default": 100
+          }
+        }
       }
     }
   }

@@ -303,7 +303,7 @@ public final class ApiModels {
                     long snapshotThroughSequence) {
     }
 
-    public record WebShellListRequest(String cursor, Integer limit) {
+    public record WebShellListRequest(String cursor, Integer limit, String archiveState) {
     }
 
     public record WebShellSessionRequest(@NotBlank String sessionId) {
@@ -417,7 +417,8 @@ public final class ApiModels {
     }
 
     public record WebShellLifecycleRequest(@NotBlank String sessionId,
-            @NotBlank @Size(max = 128) String idempotencyKey) {
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @Size(max = 128) String requestId) {
     }
 
     public record CompressSessionRequest(
@@ -554,7 +555,8 @@ public final class ApiModels {
             WebShellSessionCapabilities capabilities, String approvalMode,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported,
-            Long compactionRevision, String contextCompressionOperationId) {
+            Long compactionRevision, String contextCompressionOperationId,
+            WebShellLifecycleOperation lifecycleOperation) {
         public WebShellSession(String sessionId, String title, String agentId, String status,
                 long createdAt, long updatedAt, WebShellTurn activeTurn, Object environment,
                 long lastSequence, WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
@@ -562,7 +564,7 @@ public final class ApiModels {
                 Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported) {
             this(sessionId, title, agentId, status, createdAt, updatedAt, activeTurn, environment, lastSequence,
                     workspace, capabilities, approvalMode, modelContext, modelSelection, approvalRevision,
-                    initialApprovalMode, planMode, planModeSupported, 0L, null);
+                    initialApprovalMode, planMode, planModeSupported, 0L, null, null);
         }
     }
 
@@ -817,6 +819,19 @@ public final class ApiModels {
             List<WebShellContentPart> content,
             Map<String, Object> attributes, long firstSequence,
             long lastSequence, long createdAt, long updatedAt) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellLifecycleOperation(String operationId, String type,
+            String status, String failureCode) {
+    }
+
+    public record WebShellExportRequest(@NotBlank String sessionId,
+            @Size(max = 4096) String cursor, @Min(1) @Max(100) Integer limit) {
+    }
+
+    public record WebShellExportPage(List<WebShellItem> items, String nextCursor,
+            boolean hasMore, long snapshotThroughSequence) {
     }
 
     public record WebShellTranscript(List<WebShellItem> items,

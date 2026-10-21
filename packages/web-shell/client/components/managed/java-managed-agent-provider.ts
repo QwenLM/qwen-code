@@ -1,3 +1,4 @@
+import type { components } from './generated/managed-agent-api';
 import {
   isJavaAgentResyncRequired,
   JavaManagedAgentClient,
@@ -151,6 +152,44 @@ export function createJavaManagedAgentProvider(
   }
   return {
     kind: 'java',
+    lifecycle: {
+      submit: (kind, sessionId, command) =>
+        client.lifecycleCommand(
+          kind,
+          {
+            sessionId,
+            idempotencyKey: command.idempotencyKey,
+            requestId: managedRequestId(),
+          },
+          command.signal,
+        ),
+      async unarchive(sessionId, command) {
+        return toSessionSummary(
+          await client.unarchiveSession(
+            {
+              sessionId,
+              idempotencyKey: command.idempotencyKey,
+              requestId: managedRequestId(),
+            },
+            command.signal,
+          ),
+        );
+      },
+      async query(sessionId, operationId, request) {
+        const operation = await client.queryOperation(
+          { sessionId, operationId },
+          request.signal,
+        );
+        if (!['close', 'archive', 'delete'].includes(operation.type))
+          throw new Error('Unexpected lifecycle operation type');
+        return operation as components['schemas']['WebShellCommandOperation'];
+      },
+    },
+    exportSnapshot: (sessionId, request) =>
+      client.exportSnapshot(
+        { sessionId, cursor: request.cursor, limit: 100 },
+        request.signal,
+      ),
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
@@ -602,7 +641,11 @@ export function createJavaManagedAgentProvider(
       : {}),
     async listSessions(request) {
       const page = await client.listSessions(
-        { cursor: request.cursor, limit: request.limit },
+        {
+          cursor: request.cursor,
+          limit: request.limit,
+          archiveState: request.archiveState,
+        },
         request.signal,
       );
       return {
@@ -754,6 +797,9 @@ function toSessionSummary(
     ...(session.contextCompressionOperationId
       ? { contextCompressionOperationId: session.contextCompressionOperationId }
       : {}),
+    lifecycleStatus: session.status.toLowerCase(),
+    lastSequence: session.lastSequence,
+    lifecycleOperation: session.lifecycleOperation,
     activeTurnId: session.activeTurn?.turnId,
     title: session.title || session.sessionId,
     workspace: session.workspace,
@@ -766,6 +812,18 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.sessionClose === true
+        ? { sessionClose: true }
+        : {}),
+      ...(session.capabilities?.sessionArchive === true
+        ? { sessionArchive: true }
+        : {}),
+      ...(session.capabilities?.sessionUnarchive === true
+        ? { sessionUnarchive: true }
+        : {}),
+      ...(session.capabilities?.sessionDelete === true
+        ? { sessionDelete: true }
+        : {}),
       ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
