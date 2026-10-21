@@ -282,6 +282,91 @@ describe('useVim hook', () => {
       },
     );
 
+    describe.each(['global-first', 'composer-first'] as const)(
+      'Escape ownership with %s subscribers',
+      (order) => {
+        it.each(['r', 'f', 'F', 't', 'T', 'd', 'c', 'y', 'g', '>', '<', 'i'])(
+          '%s owns only the consumed Escape broadcast',
+          (command) => {
+            const { result } = renderBuffer('pending draft');
+            const { handleInput, ownsEscape } = result.current.vim;
+            const escape = makeKey('\u001b', 'escape');
+            const nextEscape = makeKey('\u001b', 'escape');
+            act(() => {
+              expect(handleInput(makeKey(command))).toBe(true);
+              expect(ownsEscape(makeKey('\r', 'return'))).toBe(false);
+              const globalSubscriber = () =>
+                expect(ownsEscape(escape)).toBe(true);
+              const composerSubscriber = () =>
+                expect(handleInput(escape)).toBe(true);
+              const subscribers =
+                order === 'global-first'
+                  ? [globalSubscriber, composerSubscriber]
+                  : [composerSubscriber, globalSubscriber];
+              subscribers.forEach((subscriber) => subscriber());
+              expect(ownsEscape(escape)).toBe(true);
+              expect(ownsEscape(nextEscape)).toBe(false);
+              expect(handleInput(nextEscape)).toBe(false);
+              expect(ownsEscape(nextEscape)).toBe(false);
+            });
+            expect(result.current.buffer.text).toBe('pending draft');
+            expect(result.current.vim.mode).toBe('NORMAL');
+            expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+          },
+        );
+      },
+    );
+
+    it.each(['', '2'])(
+      'leaves bare NORMAL Escape with count %s to the global handler',
+      (count) => {
+        const { result } = renderBuffer('pending draft');
+        const escape = makeKey('\u001b', 'escape');
+        act(() => {
+          if (count) {
+            expect(result.current.vim.handleInput(makeKey(count))).toBe(true);
+          }
+          expect(result.current.vim.ownsEscape(escape)).toBe(false);
+          expect(result.current.vim.handleInput(escape)).toBe(false);
+          expect(result.current.vim.ownsEscape(escape)).toBe(false);
+        });
+        expect(result.current.buffer.text).toBe('pending draft');
+      },
+    );
+
+    it('does not own an Escape after Vim is disabled', () => {
+      const { result, rerender } = renderBuffer('pending draft');
+      const escape = makeKey('\u001b', 'escape');
+      act(() => {
+        result.current.vim.handleInput(makeKey('r'));
+        expect(result.current.vim.handleInput(escape)).toBe(true);
+      });
+      expect(result.current.vim.ownsEscape(escape)).toBe(true);
+      mockVimContext.vimEnabled = false;
+      rerender();
+      expect(result.current.vim.ownsEscape(escape)).toBe(false);
+      expect(result.current.vim.handleInput(makeKey('\u001b', 'escape'))).toBe(
+        false,
+      );
+      expect(result.current.buffer.text).toBe('pending draft');
+    });
+
+    it('uses the existing external-mode synchronization for Escape ownership', () => {
+      const { result, rerender } = renderBuffer('pending draft');
+      mockVimContext.vimMode = 'INSERT';
+      rerender();
+      const escape = makeKey('\u001b', 'escape');
+      expect(result.current.vim.ownsEscape(escape)).toBe(true);
+      act(() => expect(result.current.vim.handleInput(escape)).toBe(true));
+      expect(result.current.vim.ownsEscape(escape)).toBe(true);
+      mockVimContext.vimMode = 'NORMAL';
+      rerender();
+      expect(result.current.vim.ownsEscape(makeKey('\u001b', 'escape'))).toBe(
+        false,
+      );
+      expect(result.current.buffer.text).toBe('pending draft');
+    });
+
     it('honors an external mode change before the next input batch', () => {
       const { result, rerender } = renderBuffer('ZZ');
       mockVimContext.vimMode = 'INSERT';

@@ -17,8 +17,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile, execFileSync } from 'child_process';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { InputPromptProps } from './input-prompt.js';
-import type { TextareaRenderable } from '@opentui/core';
 import type { HistoryItem } from '../types.js';
+import { useTextBuffer } from '../components/shared/text-buffer.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import { createInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
@@ -234,7 +234,7 @@ vi.mock('./early-input.js', () => ({
 }));
 
 import type { ReactElement } from 'react';
-import { render } from '@testing-library/react';
+import { render, renderHook } from '@testing-library/react';
 import { act, cloneElement } from 'react';
 import { exitSession } from './exit-lifecycle.js';
 import { startOpenTuiUI } from './start-opentui-ui.js';
@@ -398,9 +398,14 @@ describe('startOpenTuiUI fallback contract', () => {
         setText: () => {},
         submitDraft,
       };
-      mocks.state.appProps!.vim!.editor.current = {
-        plainText: 'owned draft',
-      } as TextareaRenderable;
+      const owner = renderHook(() =>
+        useTextBuffer({
+          initialText: 'owned draft',
+          viewport: { width: 40, height: 8 },
+          isValidPath: () => false,
+        }),
+      );
+      mocks.state.appProps!.vim!.buffer.current = owner.result.current;
       await act(async () => {
         expect(
           mocks.state.appProps!.vim!.handleInput({
@@ -428,27 +433,19 @@ describe('startOpenTuiUI fallback contract', () => {
       await withEntryApp(async () => {
         await act(async () => mocks.state.appProps!.onToggleVim!());
         const invalidateImportedInput = vi.fn();
-        let text = 'owned';
-        let col = 0;
+        const owner = renderHook(() =>
+          useTextBuffer({
+            initialText: 'owned',
+            viewport: { width: 40, height: 8 },
+            isValidPath: () => false,
+          }),
+        );
         mocks.state.appProps!.composerHandle!.current = {
-          getText: () => text,
+          getText: () => owner.result.current.text,
           setText: () => {},
           invalidateImportedInput,
         };
-        mocks.state.appProps!.vim!.editor.current = {
-          get plainText() {
-            return text;
-          },
-          get logicalCursor() {
-            return { row: 0, col };
-          },
-          replaceText(value: string) {
-            text = value;
-          },
-          setCursor(_row: number, value: number) {
-            col = value;
-          },
-        } as TextareaRenderable;
+        mocks.state.appProps!.vim!.buffer.current = owner.result.current;
         const paste = () =>
           mocks.state.appProps!.vim!.handleInput({
             name: 'p',
@@ -461,13 +458,13 @@ describe('startOpenTuiUI fallback contract', () => {
         await act(async () => {
           expect(paste()).toBe(true);
         });
-        expect(text).toBe('oXwned');
+        expect(owner.result.current.text).toBe('oXwned');
         expect(invalidateImportedInput).toHaveBeenCalledTimes(1);
         clipboard.mockReturnValue('');
         await act(async () => {
           expect(paste()).toBe(true);
         });
-        expect(text).toBe('oXwned');
+        expect(owner.result.current.text).toBe('oXwned');
         expect(invalidateImportedInput).toHaveBeenCalledTimes(1);
       });
     } finally {

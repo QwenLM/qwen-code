@@ -29,7 +29,10 @@ import type {
   OpenTuiSteeringSubmission,
   WaitingCallInfo,
 } from './live-session.js';
-import type { OpenTuiInputSubmission } from './input-submission.js';
+import type {
+  OpenTuiCancelSettled,
+  OpenTuiInputSubmission,
+} from './input-submission.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { OpenTuiSlashDispatcher } from './commands-dispatch.js';
 import { CommandKind } from '../commands/types.js';
@@ -973,7 +976,91 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(
       result.current.items.filter((item) => item.kind === 'user'),
     ).toHaveLength(1);
+    expect(live.turns).toHaveLength(2);
+    expect(result.current.messageQueue).toEqual([]);
+    await act(async () => {
+      expect(result.current.submit('unrelated next')).toBe(true);
+    });
+    expect(live.turns.map((turn) => turn.prompt)).toEqual([
+      'first',
+      content,
+      'unrelated next',
+    ]);
+    expect(onComplete).toHaveBeenCalledOnce();
   });
+
+  it.each([false, true])(
+    'discards cancelled generated work but preserves editable input: callback=%s',
+    async (withCallback) => {
+      const onComplete = vi.fn(async () => {});
+      const settled = vi.fn<OpenTuiCancelSettled>();
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      act(() => {
+        expect(result.current.submit('original')).toBe(true);
+        expect(
+          result.current.submit('generated old', undefined, {
+            invocationEchoed: true,
+            onComplete,
+          }),
+        ).toBe(true);
+        expect(
+          result.current.submit('editable queued', undefined, {
+            submittedPrompt: 'typed editable',
+            humanInput: { text: 'typed editable' },
+          }),
+        ).toBe(true);
+      });
+      expect(live.turns).toHaveLength(1);
+      expect(result.current.messageQueue).toEqual([
+        'generated old',
+        'editable queued',
+      ]);
+      act(() => result.current.interrupt(withCallback ? settled : undefined));
+      await act(async () => live.waiters.shift()!());
+      const queueAfterCancel = [...result.current.messageQueue];
+      const settlement = settled.mock.calls[0]?.[0];
+      let restored: OpenTuiInputSubmission | null = null;
+      act(() => {
+        restored = withCallback
+          ? settlement?.kind === 'cancelled'
+            ? settlement.queued
+            : null
+          : result.current.popQueue();
+      });
+      await act(async () => {
+        expect(result.current.submit('unrelated next')).toBe(true);
+      });
+      expect(live.turns.map((turn) => turn.prompt)).toEqual([
+        'original',
+        'unrelated next',
+      ]);
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(live.signals[0].aborted).toBe(true);
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.messageQueue).toEqual([]);
+      expect(queueAfterCancel).toEqual(withCallback ? [] : ['editable queued']);
+      expect(restored).toMatchObject({
+        text: 'editable queued',
+        submittedPrompt: 'typed editable',
+        restoredDraft: {
+          modelText: 'editable queued',
+          humanInput: { text: 'typed editable' },
+          hasUnknownInput: false,
+        },
+      });
+      if (withCallback) {
+        expect(settled).toHaveBeenCalledExactlyOnceWith({
+          kind: 'cancelled',
+          queued: restored,
+          prompt: { text: 'original', submittedPrompt: 'original' },
+        });
+      } else {
+        expect(settled).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('ignores an old generation restoring or draining the new queue', () => {
     const { result } = renderHook(() =>

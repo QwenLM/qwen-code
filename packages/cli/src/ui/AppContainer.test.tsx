@@ -553,7 +553,10 @@ describe('AppContainer State Management', () => {
       isReceivingContent: false,
       clearPendingState: mockClearPendingState,
     });
-    mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
+    mockedUseVim.mockReturnValue({
+      handleInput: vi.fn(),
+      ownsEscape: vi.fn().mockReturnValue(false),
+    });
     mockedUseFolderTrust.mockReturnValue({
       isFolderTrustDialogOpen: false,
       handleFolderTrustSelect: vi.fn(),
@@ -4457,6 +4460,91 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('routes the vim submit through the composer-registered submit path', () => {
+      const mockQueueMessage = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // The composer registers the path that expands large-paste placeholders
+      // and bumps the submit epoch; vim's Enter must use it, not submit the
+      // raw buffer it just cleared.
+      const composerSubmit = vi.fn();
+      const registerSubmit = capturedUIActions.registerPromptSubmit;
+      expect(registerSubmit).toBeDefined();
+      registerSubmit!(composerSubmit);
+      const vimSubmit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+        value: string,
+      ) => void;
+      vimSubmit('[Pasted Content 1200 chars]');
+
+      expect(composerSubmit).toHaveBeenCalledWith(
+        '[Pasted Content 1200 chars]',
+      );
+      expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps a vim composer submit displayed as typed while the model reads the framed paste', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const framed = `<clipboard-paste>\n${body}\n</clipboard-paste>\nattribution`;
+      const queue = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      // What the composer's submit path hands over for a collapsed paste.
+      // Vim drops the submittedPrompt projection, so the transcript, the
+      // session log and a cancel-restore read the display text instead.
+      act(() => {
+        capturedUIActions.handleFinalSubmit(framed, {
+          deferUntilIdle: false,
+          submittedPrompt: placeholder,
+          displayText: placeholder,
+          humanInput: { text: body },
+          pasteExpansions,
+        });
+      });
+      expect(queue).toHaveBeenCalledWith(framed, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
     it('keeps Vim-modified composer text ineligible after Vim is disabled', () => {
       const mockQueueMessage = vi.fn();
       let setVimEnabled: ((enabled: boolean) => void) | undefined;
@@ -4679,56 +4767,63 @@ describe('AppContainer State Management', () => {
       capturedOnCancelSubmit(info);
     };
 
-    it('does not fire outer cancel handler on Esc when vim is enabled in INSERT mode', async () => {
-      mockedUseVimModeState.mockReturnValue({
-        vimEnabled: true,
-        vimMode: 'INSERT',
-      });
-      const cancelSpy = vi.fn();
-      installCancelCapture({
-        streamingState: 'responding',
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest: cancelSpy,
-        retryLastPrompt: vi.fn(),
-      });
-      mockedUseTextBuffer.mockReturnValue({
-        text: '',
-        setText: vi.fn(),
-      });
-      mockedUseMessageQueue.mockReturnValue({
-        removeGoalTurns: vi.fn().mockReturnValue([]),
-        messageQueue: [],
-        addMessage: vi.fn(),
-        clearQueue: vi.fn(),
-        getQueuedMessagesText: vi.fn().mockReturnValue(''),
-        popAllMessages: vi.fn().mockReturnValue(null),
-        drainQueue: vi.fn().mockReturnValue([]),
-        popNextTurn: vi.fn().mockReturnValue(null),
-      });
+    it.each(['INSERT', 'NORMAL'])(
+      'does not fire outer cancel when Vim owns Esc in %s mode',
+      async (mode) => {
+        mockedUseVimModeState.mockReturnValue({
+          vimEnabled: true,
+          vimMode: mode,
+        });
+        const ownsEscape = vi.fn().mockReturnValue(true);
+        mockedUseVim.mockReturnValue({ handleInput: vi.fn(), ownsEscape });
+        const cancelSpy = vi.fn();
+        installCancelCapture({
+          streamingState: 'responding',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: cancelSpy,
+          retryLastPrompt: vi.fn(),
+        });
+        mockedUseTextBuffer.mockReturnValue({
+          text: '',
+          setText: vi.fn(),
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: vi.fn(),
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
 
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
 
-      await Promise.resolve();
-      await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
 
-      const handleKeypress = getGlobalKeypress();
-      expect(handleKeypress).toBeDefined();
+        const handleKeypress = getGlobalKeypress();
+        expect(handleKeypress).toBeDefined();
 
-      handleKeypress!(escKey);
+        handleKeypress!(escKey);
 
-      // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
-      expect(cancelSpy).not.toHaveBeenCalled();
-    });
+        expect(ownsEscape).toHaveBeenCalledOnce();
+        expect(ownsEscape.mock.calls[0][0]).toBe(escKey);
+        // A Vim-owned Esc must not also trigger the outer cancel handler.
+        expect(cancelSpy).not.toHaveBeenCalled();
+      },
+    );
 
     it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
       // Positive counterpart to the vim-INSERT guard above: while the agent

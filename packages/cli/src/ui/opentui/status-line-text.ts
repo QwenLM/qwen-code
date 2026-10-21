@@ -66,6 +66,12 @@ export function statusLineStyledText(
       const n = parts[0];
       if (attributes[n]) chunk.attributes! |= attributes[n];
       else if (n === 38 || n === 48) {
+        if (
+          parts[1] === 5 &&
+          (!Number.isInteger(parts[2]) || parts[2] < 0 || parts[2] > 255)
+        ) {
+          continue;
+        }
         const color =
           parts[1] === 5
             ? RGBA.fromIndex(parts[2])

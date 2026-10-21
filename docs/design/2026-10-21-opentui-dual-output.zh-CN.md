@@ -4,13 +4,13 @@
 
 ## 状态与依赖
 
-**整合源码草案 / 最终候选验证尚未执行。** 本文与 [Vim/history](2026-10-21-opentui-vim-history.zh-CN.md) 是同一后继批次的输出部分，通过 normal merge 合入统一 UI 提交 `4cabbc7f5af1b344d4648d7e316b8c2b574de74a`，保留 B 从 `e5143ba8e4cb431ef48f390f59922216544849fd` 到 `12039c2cb4fe4065fe73c57d392219c8a767cf08` 的历史。ba04 的实际 frozen setup 已通过，依赖/lock 输入与八项已安装工具/hook 身份未变，直接复用，无需重新安装。保留 ba04 两处测试/类型声明导致的构建失败，以及 f93 五个失败案例与六个正控通过的独立复现。声明修正和两处生产修复已提交；最终整合源码的新全量构建、typecheck、focused、native 与产品验证仍为 NOT_RUN。此前证据只对应原源码。原 A 基底 v6 快照与失败保持不变。父提交包含结构化接纳、SteerInput、取消所有权及共享 status-line 状态。不复制 R3 signal 改动；真实安装产物整合仍须重新验证。 reset 先捕获取消回调并收尾已接纳的输出，再失效旧 generation、清理状态并发布 discard；该结果只释放 composer 取消锁，不取队列、恢复旧草稿或重复发出桥事件。
+**STACKED DRAFT / 当前验证检查点。** 本文与 [Vim/history](2026-10-21-opentui-vim-history.zh-CN.md) 是同一 Draft #15067 的输出部分，基于统一 UI `c1f802b0c1d237d9641b8217bdc97e8d37049f51`。已审源码为 `7a1ab30f616c5f688224b1dac1fcf0fc76e26966`；相对实际构建的 `194bfffcdd45e19f007aa28ceeb8dfea8402f84f` 只改四处可见模式夹具等待，字面/12 秒限制不变。生产和依赖输入一致；runtime 测试保留真实 194b stamp 和受守卫产物，不声称重新构建 7a1。本检查点的已记录本地验证已完成：映射的 source/native 门禁、194b 新 build/type/bundle，以及 7a1 全部八个后续阶段。完整三腿 108 个测试行通过，其中 106 个功能通过、两个保留的 Ink deny 缺口；有重叠的 strict 四案另列。prepare 和真实 npm tar 六项执行位检查通过，但不证明统一 R3+B 安装产物或音频录制验收。已接受安装在依赖/工具/runtime 守卫下复用。原 A/v6、ba04/f93、d677、aab54、b4 与 194b 失败均作不可变证据保留。不复制 R3 signal 改动；统一安装产物验证仍未关闭，UI 依赖尚未合并，因此本 PR 保持 Draft。reset 仍在失效前收尾已接纳输出，只通过 discard 释放 composer 取消锁，不取队列或恢复旧草稿。
 
 已验收 A bundle（`8473becd7f80960bc28d9fbb7b0690332609bc28c94f894bb1afaab017bfaf46`）使用 Node 24.19.0 和 Bun 1.3.14 完成基线：Node/Ink 五案通过、一案明确权限缺口；strict OpenTUI 首个 text/thought 案显示回答，却只写 session_start/session_end。后续独立守卫下的 Bun/Ink 参考确认同样的 Esc 全拒绝缺口（request 1 / response 0，原测试 FAIL 保留），active-exit 为 0，双 CtrlC 实测间隔 302.45ms。因此两种 Ink runtime 都使用这个精确拒绝 characterization；strict OpenTUI 仍须返回一次拒绝 response。全部原始失败与冻结夹具版本保留在 R3 的 U4 基线记录中。
 
 ## 问题与证据
 
-既有 OpenTUI runtime 创建并关闭 DualOutputBridge，但实际 prompt/model/tool 循环没有向桥传事件。已验收的 R3 npm 产物完成一次模型请求并显示完整回答，`--json-file` 却只有 `session_start`。同产物 Node/Ink 产生了真实 user/assistant/stream 记录。原 Ink 整案失败是另一项错误的统一退出码断言（实际 0、预期 130）；两份原始失败都保留。
+原 OpenTUI 基线创建并关闭 DualOutputBridge，但实际 prompt/model/tool 循环未向桥传事件。已验收的 R3 npm 产物完成一次模型请求并显示完整回答，`--json-file` 却只有 `session_start`。同产物 Node/Ink 产生了真实 user/assistant/stream 记录。原 Ink 整案失败是另一项错误的统一退出码断言（实际 0、预期 130）；两份原始失败都保留。
 
 该遗漏早于 R3：live loop、runtime 和 bridge 与 R1 底座相同。构造器存在或文件可写不代表事件已经送达。完整实现进入新真实产物并通过验证之前，R3 的 JSON-file ready 门禁持续开放。
 
@@ -78,9 +78,9 @@ MOD 投影用例先在真实 bridge、模型 continuation 和录制消费者处�
 
 准备夹具独立版本化并锁 hash。原 R3 v2 结果与 manifest 不变。基线收集、实现验证、独立审查是不同证据阶段。后续 commit 不可声称旧 R3 tarball 包含变更后的源码。
 
-## 剩余验证
+## 验证检查点与剩余门禁
 
-1. build/typecheck/bundle 与 focused tests 需要协调重型租约，尚未针对此候选执行。
-2. 候选 Node/Ink、Bun/Ink、strict OpenTUI 三腿验证六案；Ink 精确 deny characterization 与 OpenTUI 必须配对 response 分开记录。
-3. 独立验证晚到取消、reset/unmount finalize、权限和 writer close 后完整 JSONL，再做连续两轮全 diff 清审。
-4. 整合 R3 后才能关闭安装产物 JSON-file 门禁。其他 runtime modes、IPC、资源门禁继续独立排期。
+1. 映射的 source/native 门禁和 194b 新 build/type/bundle 已通过。7a1 源码下 strict 四案、变更文件 lint/format、完整 Node/Ink、Bun/Ink、strict OpenTUI 三腿、prepare 及 npm tar 六项执行位检查通过（完整三腿 108 行：106 个功能通过、两个 Ink deny 缺口）。 保留每阶段的 source/artifact 身份；映射早期门禁不等于重新执行 7a1。
+2. 两条 Ink deny 继续记为已刻画缺口，与 strict 配对拒绝 response 区分；exit 130 和清理 HUP 不等于正常 exit 0。
+3. 真实 middleware 重试、通过安装产物真实按键/HTTP/JSON 的 accepted/restored/stale steering 仍为 NOT_RUN；focused carrier 测试不关闭这些门禁。
+4. 整合 R3 后才能关闭安装产物 JSON-file 验收。其他平台、runtime modes、IPC 和资源门禁继续独立排期。

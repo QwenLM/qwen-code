@@ -1438,6 +1438,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 onSubmit={onSubmit}
                 onNotice={notify}
                 preferredEditor={settings.merged.general?.preferredEditor}
+                topRightLabel={host.sessionName ?? undefined}
                 userMessages={userMessages}
                 config={config}
                 focus
