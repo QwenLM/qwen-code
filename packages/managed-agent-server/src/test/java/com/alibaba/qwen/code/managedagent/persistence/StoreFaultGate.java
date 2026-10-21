@@ -23,7 +23,8 @@ public final class StoreFaultGate {
     public enum Phase {
         INTENT, CONFIGURE_DISPATCH, OPERATION_DISPATCH, SETTLED, RELEASING,
         DRAINED, RELEASED,
-        HOOK_INTENT, HOOK_DISPATCH_STARTED, HOOK_SETTLED, HOOK_PLAN_SETTLED
+        HOOK_INTENT, HOOK_DISPATCH_STARTED, HOOK_SETTLED, HOOK_PLAN_SETTLED,
+        HOOK_REGISTRATION_SETTLED
     }
 
     public static final StoreFaultGate INSTANCE = new StoreFaultGate();
@@ -102,7 +103,8 @@ public final class StoreFaultGate {
             String domain = payload.path("domain").asText();
             if (!"mcp_configuration".equals(domain)
                     && !"mcp_operation".equals(domain)
-                    && !"hook_execution".equals(domain)) {
+                    && !"hook_execution".equals(domain)
+                    && !"hook_registration".equals(domain)) {
                 continue;
             }
             StoredResource resource = resources.apply(payload.path("recordRef")
@@ -121,6 +123,8 @@ public final class StoreFaultGate {
         String id = switch (domain) {
             case "mcp_configuration" -> record.path("configurationId").asText();
             case "mcp_operation" -> record.path("operationId").asText();
+            case "hook_registration" ->
+                    record.path("registrationId").asText();
             default -> record.path("hookExecutionId").asText();
         };
         if (target != null && !target.equals(id)) {
@@ -158,6 +162,10 @@ public final class StoreFaultGate {
                     && "__plan__".equals(record.path("hookId").asText())
                     && "PreToolUse".equals(
                             record.path("eventName").asText());
+            case HOOK_REGISTRATION_SETTLED ->
+                    "hook_registration".equals(domain)
+                            && "settled".equals(record.path("run")
+                                    .path("state").asText());
         };
     }
 
