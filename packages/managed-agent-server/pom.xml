@@ -585,8 +585,10 @@
                                  Verify 188 minutes. The FG11d second-fire
                                  refusal cell adds 25 s (2x its measured
                                  12.3 s): healthy 10096 s, fork 10696 s,
-                                 Verify 189 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10696</forkedProcessTimeoutInSeconds>
+                                 Verify 189 minutes. The FG11d cancel-isolation
+                                 cell adds 11 s (2x its measured 5.1 s): healthy
+                                 10107 s, fork 10707 s, Verify 189 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10707</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

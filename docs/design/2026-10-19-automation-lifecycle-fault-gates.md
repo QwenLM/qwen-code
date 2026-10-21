@@ -59,7 +59,11 @@ asserts:
 
 - the cancelled run reaches `cancelled` from its committed proof, and its
   occurrence settles once;
-- the schedule, future slots, sibling runs and foreground work are untouched;
+- the schedule, future slots, sibling runs and foreground work are untouched —
+  delivered for a sibling run: after a parked run is cancelled, the next manual
+  fire is admitted and reaches `completed`, the schedule stays `live`, and each
+  key keeps its own Turn (`fg11dSiblingRunSurvivesACancelOnMySql`). A scheduled
+  future slot and a foreground Turn are outside that arm;
 - a queued input cancelled before any attempt settles with no model call — no
   queued run forms behind an open Turn on either public fire path, so nothing
   reaches that arm: a manual fire arriving while the Session runs this

@@ -1541,6 +1541,45 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-second-retire", 202);
     }
 
+    // FG11d: a cancel stops the run it names and leaves the Session usable. Once
+    // the target settles `cancelled`, the next manual fire is admitted and runs
+    // to completion — the cancelled turn does not leave the Session wedged, and
+    // the schedule and its future fires survive.
+    @Test
+    @Timeout(600)
+    void fg11dSiblingRunSurvivesACancelOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("cancel-isolation");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-iso-base", 202).path("id").asText();
+        String first = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-iso-first", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-iso-first")));
+        JsonNode task = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200)
+                .path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + task.path("id").asText() + "/cancel", null,
+                "fg11d-iso-cancel", 202);
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(first))
+                .as("the target run is cancelled").isEqualTo("cancelled"));
+        // The cancelled turn's model call is still in flight; releasing it must
+        // not revive the run, and the Session has to admit what comes next.
+        heldModel.countDown();
+        String sibling = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-iso-sibling", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(sibling))
+                .as("the sibling run completes").isEqualTo("completed"));
+        assertThat(runState(first)).as("the cancel still stands").isEqualTo("cancelled");
+        assertThat(request("GET", "/v1/agent-automations/" + id, null, null, 200).path("state").asText())
+                .as("the schedule survives both").isEqualTo("live");
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-first"))
+                .as("the cancelled run keeps its one Turn").hasSize(1);
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-sibling"))
+                .as("the sibling runs its own Turn").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-iso-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;

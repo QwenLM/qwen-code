@@ -770,12 +770,14 @@ describe('Hosted real-process gates', () => {
       // cancel-retry cell adds 12 s (2x its measured 5.8 s), moving the fork to
       // 10671 and the step stays 188 minutes; the FG11d second-fire refusal
       // cell adds 25 s (2x its measured 12.3 s), moving the fork to 10696 and
-      // the step to 189 minutes):
+      // the step to 189 minutes; the FG11d cancel-isolation cell adds 11 s (2x
+      // its measured 5.1 s), moving the fork to 10707 and leaving the step at
+      // 189 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10696);
+        expect(forkSeconds).toBe(10707);
       }
     },
   );
@@ -863,12 +865,13 @@ describe('Hosted real-process gates', () => {
   // becomes 10050s; the settled-outcome cell adds 9s (2x its measured 4.5s),
   // so it becomes 10059s; the cancel-retry cell adds 12s (2x its measured 5.8s),
   // so it becomes 10071s; the second-fire refusal cell adds 25s (2x its
-  // measured 12.3s), so it becomes 10096s. The largest
+  // measured 12.3s), so it becomes 10096s; the cancel-isolation cell adds 11s
+  // (2x its measured 5.1s), so it becomes 10107s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10096;
+  const hostedForkHealthySeconds = 10107;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

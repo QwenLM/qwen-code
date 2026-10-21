@@ -48,7 +48,10 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 按 run 的公开 `TASK_CANCEL` 只能停止目标 occurrence。矩阵断言：
 
 - 被取消的 run 依据其已提交的证明进入 `cancelled`，occurrence 恰好结算一次；
-- schedule、未来 slot、兄弟 run 与前台工作不受影响；
+- schedule、未来 slot、兄弟 run 与前台工作不受影响——兄弟 run 已交付：扣住的 run
+  被取消后，下一次手动 fire 被准入并跑到 `completed`，schedule 保持 `live`，两个 key
+  各保留自己的 Turn（`fg11dSiblingRunSurvivesACancelOnMySql`）。排定的未来 slot 与
+  前台 Turn 不在该格覆盖范围内；
 - 在任何尝试之前被取消的排队 input 结算且不调用模型——两条公开点火路径都不会在
   开启的 Turn 之后形成排队 run，因此那一支没有可执行的对象：当 Session 正在跑本
   定义的 Turn 时，第二次手动 fire 被 `409 automation_run_skipped`（`The manual run

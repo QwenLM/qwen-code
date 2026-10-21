@@ -777,8 +777,9 @@ jobs:
     # FG11d retry-reuse cell adds 11 s, moving the fork to 10650 s; the FG11d
     # settled-outcome cell adds 9 s, moving the fork to 10659 s; the FG11d
     # cancel-retry cell adds 12 s, moving the fork to 10671 s; the FG11d
-    # second-fire refusal cell adds 25 s, moving the fork to 10696 s, wrapping
-    # fork + 600 s plus margin (11296 s of fork plus wrap);
+    # second-fire refusal cell adds 25 s, moving the fork to 10696 s; the FG11d
+    # cancel-isolation cell adds 11 s, moving the fork to 10707 s, wrapping
+    # fork + 600 s plus margin (11307 s of fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
