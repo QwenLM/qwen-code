@@ -14,8 +14,12 @@ describe('InteractiveSession visible evidence', () => {
   let session: InteractiveSession | undefined;
 
   afterEach(async () => {
-    await session?.close();
-    vi.unstubAllEnvs();
+    try {
+      await session?.close();
+    } finally {
+      session = undefined;
+      vi.unstubAllEnvs();
+    }
   });
 
   it('distinguishes visible rows from scrollback and preserves raw ANSI', async () => {
@@ -165,9 +169,9 @@ setInterval(() => {}, 1000);`,
     expect(await session.viewport()).not.toContain('OFFSCREEN');
   });
 
-  it.skipIf(process.platform === 'win32')(
-    'waits for the child to finish writing before cleanup can remove its directory',
-    async () => {
+  it.skipIf(process.platform === 'win32').each([150, 5_100])(
+    'waits for the child to finish writing after %i ms before removing its directory',
+    async (delay) => {
       const scratch = mkdtempSync(join(tmpdir(), 'qwen-pty-close-'));
       const marker = join(scratch, 'exited.txt');
       try {
@@ -179,7 +183,7 @@ setInterval(() => {}, 1000);`,
               `process.on('SIGHUP', () => setTimeout(() => {
   require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'finished');
   process.exit(0);
-}, 150));
+}, ${delay}));
 console.log('Type your message');
 setInterval(() => {}, 1000);`,
             ],
@@ -189,6 +193,66 @@ setInterval(() => {}, 1000);`,
         expect(readFileSync(marker, 'utf8')).toBe('finished');
         expect(session.exitResult()?.exitCode).toBe(0);
       } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reaps a HUP-ignoring PTY group and still reports the forced cleanup',
+    async () => {
+      const scratch = mkdtempSync(join(tmpdir(), 'qwen-pty-close-'));
+      const pidFile = join(scratch, 'pids.json');
+      let pids: number[] = [];
+      try {
+        session = await InteractiveSession.start({
+          inheritEnv: false,
+          command: {
+            bin: process.execPath,
+            args: [
+              '-e',
+              `process.on('SIGHUP', () => {});
+const child = require('node:child_process').spawn(process.execPath, ['-e',
+  "process.on('SIGHUP', () => {}); process.send('ready'); setInterval(() => {}, 1000);"
+], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+child.once('message', () => {
+  require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify([process.pid, child.pid]));
+  console.log('Type your message');
+});
+setInterval(() => {}, 1000);`,
+            ],
+          },
+        });
+        pids = JSON.parse(readFileSync(pidFile, 'utf8')) as number[];
+        const started = Date.now();
+        await expect(session.close()).rejects.toThrow(
+          'PTY exceeded its close grace period',
+        );
+        expect(Date.now() - started).toBeLessThan(20_000);
+        expect(session.exitResult()?.signal).toBe(9);
+        for (const pid of pids) {
+          await expect
+            .poll(
+              () => {
+                try {
+                  process.kill(pid, 0);
+                  return true;
+                } catch {
+                  return false;
+                }
+              },
+              { timeout: 2_000 },
+            )
+            .toBe(false);
+        }
+      } finally {
+        for (const pid of pids) {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            // The assertions above, before this fallback, prove cleanup.
+          }
+        }
         rmSync(scratch, { recursive: true, force: true });
       }
     },

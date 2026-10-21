@@ -58,6 +58,12 @@ async function visible(
   do {
     const screen = await session.viewport();
     if (predicate(screen)) return screen;
+    const exit = session.exitResult();
+    if (exit) {
+      throw new Error(
+        `${description}: CLI exited (${JSON.stringify(exit)})\n${screen}`,
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
   throw new Error(
@@ -194,7 +200,7 @@ describe.sequential(`TUI migration (${runtime}+${renderer})`, () => {
         (screen) => screen.includes('Hooks'),
         'Hooks opens',
       );
-      for (const label of ['PreToolUse', 'Matcher:', 'Command:']) {
+      for (const label of ['Matchers', 'Matcher:', 'Command:']) {
         await session.idle(300);
         session.pressKey('\r');
         await visible(
@@ -219,6 +225,9 @@ describe.sequential(`TUI migration (${runtime}+${renderer})`, () => {
         session.resize(cols, rows);
         await session.idle(300);
         frames[`detail-${cols}x${rows}-head`] = await session.viewport();
+        expect(frames[`detail-${cols}x${rows}-head`].split('\n')).toHaveLength(
+          rows,
+        );
         if (renderer === 'opentui') {
           session.pressKey('\x1b[F');
           frames[`detail-${cols}x${rows}-end`] = await visible(
@@ -243,7 +252,7 @@ describe.sequential(`TUI migration (${runtime}+${renderer})`, () => {
           session.pressKey('\x1b[H');
           await visible(
             session,
-            (screen) => screen.includes('Hook details'),
+            (screen) => screen.includes('Event:'),
             `Home returns to the detail head at ${cols}x${rows}`,
           );
         }
@@ -256,6 +265,7 @@ describe.sequential(`TUI migration (${runtime}+${renderer})`, () => {
         (screen) => screen.includes('HOOK_END'),
         'restored terminal retains the full detail',
       );
+      expect(frames['detail-restored'].split('\n')).toHaveLength(30);
       for (const [step, label] of [
         ['handlers', 'Matcher:'],
         ['matchers', 'Matchers'],

@@ -9,7 +9,7 @@ import type { LoadedSettings } from '../src/config/settings.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { testRender } from '@opentui/react/test-utils';
 import { useTerminalDimensions } from '@opentui/react';
 import { ScrollBoxRenderable, type Renderable } from '@opentui/core';
@@ -20,7 +20,7 @@ type Setup = Awaited<ReturnType<typeof testRender>>;
 const settings = { merged: {} } as LoadedSettings;
 const steps = ['events', 'matchers', 'handlers', 'detail'];
 const literal =
-  '§ 甲乙丙 ' +
+  '§ 甲乙丙 カナ 한글 ' +
   Array.from(
     { length: 80 },
     (_, i) => String.fromCharCode(0x400 + i) + ' ' + 'word '.repeat(4),
@@ -152,14 +152,16 @@ async function emptyHooks() {
               (n): n is ScrollBoxRenderable => n instanceof ScrollBoxRenderable,
             );
             assert(sb, 'missing empty scrollbox');
-            const seen = { event: false, 'settings.json': false };
+            const wordFrames: Record<string, string> = {};
+            const words = ['event', 'settings.json'];
             for (let top = 0; top <= sb.scrollHeight; top++) {
               sb.scrollTo(top);
               await ready.renderOnce();
               summary(ready, region);
               const frame = ready.captureCharFrame();
-              for (const word of Object.keys(seen))
-                seen[word as keyof typeof seen] ||= frame.includes(word);
+              for (const word of words) {
+                if (frame.includes(word)) wordFrames[word] ??= frame;
+              }
             }
             console.log(
               JSON.stringify({
@@ -167,12 +169,11 @@ async function emptyHooks() {
                 event,
                 width,
                 region,
-                seen,
-                frame: ready.captureCharFrame(),
+                wordFrames,
               }),
             );
             assert(
-              Object.values(seen).every(Boolean),
+              words.every((word) => wordFrames[word]?.includes(word)),
               'empty 40x15: event/settings.json must be visible as complete words',
             );
           }
@@ -388,6 +389,10 @@ async function main() {
                 '甲',
                 '乙',
                 '丙',
+                'カ',
+                'ナ',
+                '한',
+                '글',
                 '¶',
                 '¤',
                 '※',
@@ -396,10 +401,10 @@ async function main() {
                 ),
               ].map((k) => [k, false]),
             );
-            let settingsWordSeen = false;
+            let settingsWordFrame: string | undefined;
             const scan = () => {
               const f = setup.captureCharFrame();
-              settingsWordSeen ||= f.includes('settings.json');
+              if (f.includes('settings.json')) settingsWordFrame ??= f;
               for (const k of Object.keys(seen))
                 seen[k as keyof typeof seen] ||= f.includes(k);
             };
@@ -409,6 +414,16 @@ async function main() {
               'missing detail scrollbox',
             );
             assert.equal(sb.scrollTop, 0, 'resize resets detail to head');
+            if (region === 1) {
+              assert(
+                setup.captureCharFrame().includes('Event:'),
+                'one-row detail starts with a hook field',
+              );
+              assert(
+                !setup.captureCharFrame().includes('Hook details'),
+                'one-row detail sheds its heading',
+              );
+            }
             for (let top = 0; top <= sb.scrollHeight; top++) {
               sb.scrollTo(top);
               await setup.renderOnce();
@@ -430,12 +445,11 @@ async function main() {
                   case: 'detail-word-boundaries',
                   width,
                   region,
-                  settingsWordSeen,
-                  frame: setup.captureCharFrame(),
+                  frame: settingsWordFrame,
                 }),
               );
               assert(
-                settingsWordSeen,
+                settingsWordFrame?.includes('settings.json'),
                 'detail 29x15: settings.json must be visible as a complete word',
               );
             }
@@ -514,9 +528,11 @@ async function main() {
   }
 }
 const originalCwd = process.cwd();
+const originalGitCeiling = process.env['GIT_CEILING_DIRECTORIES'];
 const emptyCwd = await mkdtemp(join(tmpdir(), 'qwen-hook-content-'));
 try {
   // The non-sandbox case is an empty preview, independent of local changes.
+  process.env['GIT_CEILING_DIRECTORIES'] = dirname(emptyCwd);
   process.chdir(emptyCwd);
   await main();
 } catch (error) {
@@ -524,5 +540,10 @@ try {
   process.exitCode = 1;
 } finally {
   process.chdir(originalCwd);
+  if (originalGitCeiling === undefined) {
+    delete process.env['GIT_CEILING_DIRECTORIES'];
+  } else {
+    process.env['GIT_CEILING_DIRECTORIES'] = originalGitCeiling;
+  }
   await rm(emptyCwd, { recursive: true, force: true });
 }

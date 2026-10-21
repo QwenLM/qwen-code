@@ -374,20 +374,50 @@ export class InteractiveSession {
     } catch {
       // Process may have already exited
     }
-    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const waitForExit = async (milliseconds: number) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.exited,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () =>
+                reject(new Error(`PTY did not exit within ${milliseconds}ms`)),
+              milliseconds,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
     try {
-      await Promise.race([
-        this.exited,
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(
-            () => reject(new Error('PTY did not exit within 5s of close')),
-            5000,
-          );
-        }),
-      ]);
+      try {
+        // The product's cleanup budget is 5s; allow time for signal delivery.
+        await waitForExit(10_000);
+      } catch (error) {
+        if (!this.exitStatus) {
+          try {
+            if (process.platform === 'win32') {
+              this.ptyProcess.kill('SIGKILL');
+            } else {
+              // forkpty owns a session/process group, including its children.
+              process.kill(-this.ptyProcess.pid, 'SIGKILL');
+            }
+          } catch (killError) {
+            if ((killError as NodeJS.ErrnoException).code !== 'ESRCH') {
+              throw killError;
+            }
+          }
+          await waitForExit(5_000);
+        }
+        await this.flush();
+        throw new Error('PTY exceeded its close grace period', {
+          cause: error,
+        });
+      }
       await this.flush();
     } finally {
-      clearTimeout(timeout);
       this.terminal.dispose();
     }
   }

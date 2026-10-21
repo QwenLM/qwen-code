@@ -741,7 +741,13 @@ export function OpenTuiHooksDialog({
         flexShrink={1}
         stickyScroll={false}
       >
-        <DetailText value={t('Hook details')} width={scrollContentWidth} bold />
+        {!bodyLayout.compact ? (
+          <DetailText
+            value={t('Hook details')}
+            width={scrollContentWidth}
+            bold
+          />
+        ) : null}
         {hookDetailFields(row).map(([label, value]) => (
           <box
             key={label}

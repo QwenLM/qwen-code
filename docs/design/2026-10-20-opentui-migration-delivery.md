@@ -48,9 +48,13 @@ manager, or combine default runtime, default renderer, and Ink removal.
 
 The boundaries may move when current-code evidence changes. No artificial
 dependency should serialize independent runtime and UI work. Open at most two
-ready PRs with two draft successors: implement the next cohesive batch while
+ready PRs with four locally accepted draft successors: implement the next cohesive batch while
 review proceeds, then rebase onto the actual merged commit and rerun affected
 validation before marking its successor ready.
+The draft limit was raised on 2026-10-21 so independently verified editor and
+status-line batches can enter CI while the first two reviews remain pending.
+Each draft still requires a complete approximately 2–3k-line scope and author
+plus independent local acceptance; the ready limit and merge gates are unchanged.
 
 Existing #14046 is a size exception because it already has a complete backend
 contract and multiple review rounds. Do not add unrelated work to it. Preserve
