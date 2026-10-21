@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import {
   extensionConsentString,
@@ -422,8 +422,40 @@ describe('requestConsentOrFail', () => {
 });
 
 describe('requestChoicePluginNonInteractive', () => {
+  // prompts() drives a select menu from raw keypresses, so the guard under test
+  // reads `process.stdin.isTTY`. Vitest's stdin is not a TTY, so the happy
+  // paths opt in explicitly and the refusal case opts back out.
+  const originalIsTTY = process.stdin.isTTY;
+  const setIsTTY = (value: boolean | undefined) => {
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value,
+      configurable: true,
+    });
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
+    setIsTTY(true);
+  });
+
+  afterEach(() => {
+    setIsTTY(originalIsTTY);
+  });
+
+  it('should refuse instead of hanging when stdin is not a terminal', async () => {
+    // Measured before the guard: the menu renders and prompts() never settles,
+    // so the process hangs forever with no output and no exit code.
+    setIsTTY(undefined);
+    const marketplace: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [{ name: 'plugin1', version: '1.0.0', source: 'src1' }],
+    };
+
+    await expect(
+      requestChoicePluginNonInteractive(marketplace),
+    ).rejects.toThrow(/needs an interactive terminal/);
+    expect(prompts).not.toHaveBeenCalled();
   });
 
   it('should throw error when plugins array is empty', async () => {

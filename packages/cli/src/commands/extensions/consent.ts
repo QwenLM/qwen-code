@@ -50,6 +50,18 @@ export async function requestChoicePluginNonInteractive(
     throw new Error(t('No plugins available in this marketplace.'));
   }
 
+  // A select menu is driven by raw keypresses, so a piped stdin cannot answer
+  // it: `prompts` renders the list and then waits forever instead of settling.
+  // Refuse up front — unlike the y/n consent prompt, where `echo y |` is a real
+  // answer — and let the caller's catch turn this into a non-zero exit.
+  if (!process.stdin.isTTY) {
+    throw new Error(
+      t(
+        'Selecting a plugin from a marketplace needs an interactive terminal (stdin is not a TTY).',
+      ),
+    );
+  }
+
   // Build choices for prompts select
 
   const choices = plugins.map((plugin) => ({
