@@ -2117,6 +2117,31 @@ describe('subagent.ts', () => {
         expect(scope.getLastError()).toContain('socket hang up');
       });
 
+      it('keeps the folded cause when the cause text is ANSI-dense (#13717)', async () => {
+        // The bound is spent on the cleaned copy of `message`, but the folded
+        // `cause` was handed to `getErrorMessage` raw. A cause made mostly of
+        // escape bytes then spent that same 1 000-RAW-character cap on them,
+        // the 997-character slice landed mid-sequence, and the reason the
+        // parent needs to read was evicted long before the outer 500-char
+        // bound ever applied: a 9-character message retained a 34-char stub.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('short msg'), {
+            cause: Object.assign(
+              new Error('\u001b[31m'.repeat(200) + 'socket hang up'),
+              { code: 'ECONNRESET' },
+            ),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'short msg');
+        const retained = scope.getLastError()!;
+        expect(retained).toContain('ECONNRESET');
+        expect(retained).toContain('socket hang up');
+        expect(retained).not.toContain('\u001b');
+        expect(retained.length).toBeLessThanOrEqual(501);
+      });
+
       it('keeps the folded cause when the message cleans to nothing (#13597)', async () => {
         // A message made only of control characters cleans to '', and falling
         // back to the raw Error there handed `getErrorMessage` a 2 000-character

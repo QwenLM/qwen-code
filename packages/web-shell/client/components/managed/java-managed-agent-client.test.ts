@@ -23,6 +23,277 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('renames through the authenticated WebShell POST using the original key and signal', async () => {
+    const result = { sessionId: 's1', title: 'Confirmed', replayed: false };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(result));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+      fetch: fetchImpl,
+    });
+    const abort = new AbortController();
+    const request = {
+      sessionId: 's1',
+      title: 'Confirmed',
+      idempotencyKey: 'original',
+    };
+    expect(await client.renameSession(request, abort.signal)).toEqual(result);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/sessions/rename',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(abort.signal);
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+  });
+
+  it('does not treat an accepted or refused rename as confirmed', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ sessionId: 's1', title: 'Unconfirmed' }, 202),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: 'session_operation_forbidden',
+              message: 'Forbidden',
+            },
+          },
+          403,
+        ),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const request = {
+      sessionId: 's1',
+      title: 'Name',
+      idempotencyKey: 'original',
+    };
+    await expect(client.renameSession(request)).rejects.toMatchObject({
+      status: 202,
+      code: 'session_rename_unconfirmed',
+    });
+    await expect(client.renameSession(request)).rejects.toMatchObject({
+      status: 403,
+      code: 'session_operation_forbidden',
+    });
+  });
+
+  it('uses authorized Workspace registration POST routes without putting credentials in request bodies', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse({}));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer short-lived' }),
+      credentials: 'include',
+      fetch: fetchImpl,
+    });
+    const abort = new AbortController();
+    await client.listRuntimeNodes(abort.signal);
+    await client.checkWorkspaceDirectory(
+      { nodeId: 'mac', path: '/project' },
+      abort.signal,
+    );
+    await client.registerWorkspace(
+      {
+        nodeId: 'mac',
+        path: '/project',
+        displayName: 'Project',
+        idempotencyKey: 'original',
+      },
+      abort.signal,
+    );
+    await client.getWorkspaceOperation('operation-a', abort.signal);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://product.example/gateway/api/agent/web-shell/v1/runtime-nodes/query',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/check-directory',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/register',
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/operations/get',
+    ]);
+    expect(
+      fetchImpl.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([
+      {},
+      { nodeId: 'mac', path: '/project' },
+      {
+        nodeId: 'mac',
+        path: '/project',
+        displayName: 'Project',
+        idempotencyKey: 'original',
+      },
+      { operationId: 'operation-a' },
+    ]);
+    for (const [, request] of fetchImpl.mock.calls) {
+      expect(request?.method).toBe('POST');
+      expect(request?.credentials).toBe('include');
+      expect(request?.signal).toBe(abort.signal);
+      expect(new Headers(request?.headers).get('authorization')).toBe(
+        'Bearer short-lived',
+      );
+    }
+  });
+
+  it('queries and changes Session models using authenticated cancellable POSTs', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse({}));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant-a' }),
+    });
+    const abort = new AbortController();
+    await client.getSessionModels('session-a', abort.signal);
+    const request = {
+      sessionId: 'session-a',
+      modelId: 'published',
+      expectedRevision: 2,
+      idempotencyKey: 'frozen',
+    };
+    await client.changeModel(request, abort.signal);
+    expect(
+      fetchImpl.mock.calls.map(([url, init]) => [
+        url,
+        JSON.parse(String(init?.body)),
+      ]),
+    ).toEqual([
+      [
+        'https://product.example/api/agent/web-shell/v1/session-models/query',
+        { sessionId: 'session-a' },
+      ],
+      [
+        'https://product.example/api/agent/web-shell/v1/session-models/change',
+        request,
+      ],
+    ]);
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect(init?.method).toBe('POST');
+      expect(init?.credentials).toBe('include');
+      expect(init?.signal).toBe(abort.signal);
+      expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
+    }
+  });
+  it('queries effective Session options for the selected Agent with authenticated headers', async () => {
+    const options = {
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'auto-edit'],
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(options));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant-a' }),
+    });
+    const abort = new AbortController();
+    expect(
+      await client.getSessionOptions('model-specific-agent', abort.signal),
+    ).toEqual(options);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/session-options/query',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      agentId: 'model-specific-agent',
+    });
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(abort.signal);
+    expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
+  });
+  it('creates a Workspace with the frozen name and key through the authenticated POST route', async () => {
+    const workspace = {
+      workspaceId: 'created-a',
+      displayName: 'A',
+      state: 'active',
+      canCreateSession: true,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(workspace));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant-a' }),
+    });
+    const abort = new AbortController();
+    const request = { displayName: 'A', idempotencyKey: 'saved-key' };
+    expect(await client.createWorkspace(request, abort.signal)).toEqual(
+      workspace,
+    );
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/api/agent/web-shell/v1/workspaces/create',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(abort.signal);
+    expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+  });
+  it('uses all existing task POST routes with headers, credentials and cancellation', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        jsonResponse({ data: [], hasMore: false, nextCursor: 'floor' }),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant' }),
+    });
+    const abort = new AbortController();
+    await client.listTasks(
+      { sessionId: 's1', cursor: 'page', limit: 50 },
+      abort.signal,
+    );
+    await client.getTask({ sessionId: 's1', taskId: 'task1' }, abort.signal);
+    await client.listTaskEvents(
+      { sessionId: 's1', taskId: 'task1', after: 'checkpoint', limit: 50 },
+      abort.signal,
+    );
+    await client.cancelTask(
+      {
+        sessionId: 's1',
+        taskId: 'task1',
+        idempotencyKey: 'saved',
+        requestId: 'trace',
+      },
+      abort.signal,
+    );
+    expect(
+      fetchImpl.mock.calls.map(([url]) => String(url).split('/v1')[1]),
+    ).toEqual([
+      '/tasks/query',
+      '/tasks/get',
+      '/tasks/events/query',
+      '/tasks/cancel',
+    ]);
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect(init?.method).toBe('POST');
+      expect(init?.credentials).toBe('include');
+      expect(init?.signal).toBe(abort.signal);
+      expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant');
+    }
+    expect(JSON.parse(String(fetchImpl.mock.calls[2][1]?.body))).toEqual({
+      sessionId: 's1',
+      taskId: 'task1',
+      after: 'checkpoint',
+      limit: 50,
+    });
+  });
   it('binds the default browser fetch to the global object', async () => {
     const fetchImpl = vi.fn(function (this: unknown) {
       if (this !== globalThis) throw new TypeError('Illegal invocation');

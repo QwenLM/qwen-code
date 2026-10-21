@@ -3,7 +3,7 @@ import type {
   ContentBlock,
   PermissionRequest,
   PermissionOptionKind,
-} from './types';
+} from './types.js';
 
 type PermissionTranscriptBlock = Extract<
   DaemonTranscriptBlock,

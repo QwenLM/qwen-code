@@ -49,7 +49,7 @@
   - 二者唯一的调用方是 `SessionLifecycleCoordinator` 中的关闭级联，它会等待 child 的活跃 Turn 自行结束。
   - child 结果中继盯着 child 的 Turn；Turn 为 `CANCELLED`/`FAILED` 时，run 以 `child_failed` 结算为 `failed`。
 - **其余任务类型。**
-  - `background_shell` 与 `monitor` 被 H3 验收门禁（#13532/#13533）挡住，仍未启用。Shell 发布器在 `stopRequested` 之后仍结算为 `exited`，`monitor_run` 没有停止标志。
+  - 撰写本文档时 `background_shell` 与 `monitor` 被 H3 验收门禁（#13532/#13533）挡住、未启用；自 #13856/#13889 启用后，Shell 发布器把被停 run 经 `settleStopRequested` 结算为 `cancelled` / `stop_requested`，绝不 `exited`。`monitor_run` 没有停止标志。
   - `workflow` 没有运行时（H4c 只登记了禁用的类型）。
   - `automation_run` 根本没有停止请求。
 - **channel 投递。** `channel_delivery` 不投影任务，所以一次投递不是任务。H5 的公开 channel 路由只读；变更路由（重发）被推迟，Hosted 的 `cancel_delivery` 动词只在内部使用。
@@ -99,8 +99,11 @@
    - TypeScript 无需改动：现有的 `requestStop` 可安全重放（标志已设时为空操作），终态 run 会拒绝该请求。
 
 5. **有界投递会停放；停放的取消只做对账。**
-   - run 存活而请求仍不可见时，按调度退避重试，最多 16 次。默认 1 秒到 1 分钟的退避下，15 次等待合计约十分钟。
-   - 预算按认领次数（操作的 claim generation）计算，而不是按已完成的重试计算；投递运行期间每过租约的三分之一续租一次。因此一次超过租约的挂起尝试（例如 Harness 冷加载）既不会在自己运行时被重新认领，也逃不出预算；超出预算的认领只按记录停放，不再发送。
+   - run 存活而请求仍不可见时，按调度退避重试，最多 16 次。默认 1 秒到 1 分钟的退避下，15 次等待合计约十分钟。每次尝试都很快失败时，这就是全部上限：真实栈上实测从准入到停放为 608 秒。每次尝试本身还有时限（见下文关于发送的一条），所以在默认超时下，即使每次尝试都挂住，上限也约为一个半小时。
+   - 预算按认领次数（操作的 claim generation）计算，而不是按已完成的重试计算。投递运行期间每过租约的三分之一续租一次，因此比租约更慢的尝试（例如 Harness 冷加载）不会在自己运行时被重新认领。
+   - 发送在单独的线程上进行，投递最多等它五分钟；Harness 请求超时的四倍更长时，按四倍计（`deadlineFor`）。超时后，这次发送按结果未证实处理：投递读取记录，然后重试或停放，并停止续租。所以永不返回的发送也无法让认领越过预算。真实栈上就遇到过这样的发送：Harness 流半开时，客户端关闭卡在了读线程后面。
+   - 被放弃的发送会被中断，并记录它最终如何结束。它之后仍可能落地，记录会像对待任何丢失的应答一样判定它。中断可能让连接器的审批模式校验在冷挂接已缓存 Harness ref 之后抛错，此时连接器会移除该 ref，而不是留给后续调用不经校验地使用。
+   - 超出预算的认领只按记录停放，不再发送。
    - 之后操作变为 `recovery_blocked`，附 `task_cancel_unconfirmed`，`java_durable`、`blocked`。
    - Harness 自身的拒绝（父会话等待恢复时的 `hosted_turn_recovery_required`、`hosted_children_unavailable`）同样不能证明任何一方，因此也消耗同一份预算；在此期间开放的取消占住 Session 的操作槽位，与契约对开放取消的规定一致。
    - `failed` 的取消是终态，但保留契约规定的 `blocked` 投递状态，因此其 `available_at` 移到最大值：任何对 blocked 索引区间的扫描都不会再读到它。
@@ -175,12 +178,15 @@
   - 认领下每种结果写入契约规定的状态字段，且失败的取消永久离开 blocked 扫描区间；
   - 真实 SQL 上的中继证据：只有对 Turn 生效的取消才留下 `turn.cancel.requested`，在已结束的 Turn 上接纳的取消不留任何东西，带空格的内部 key 可正常往返；
   - 停止状态按记录主键从已提交记录体读取。
-- **投递**（`TaskCancelCoordinatorTest`，10 个测试）：
+- **投递**（`TaskCancelCoordinatorTest`，14 个测试）：
   - 从记录得出完成，以及无需发送的合并；
   - 不发送即得出 `task_already_settled`；
   - 拒绝与丢失应答都按记录判定；
   - 有预算的重试，之后停放；超出预算的认领不发送即停放；
   - 慢投递会续租；
+  - 永不返回的发送：到尝试时限即被放弃，认领随之重试并停止续租，预算用尽后停放；
+  - 默认请求超时下与更长请求超时下的尝试时限；
+  - 被放弃的发送（超时或投递被中断）记录其最终结果，事后失败时连同 cause 一起记录；
   - 没有取消路径的类型；
   - 停放对账永不重发；读不到记录的对账等待一整个复查周期。
 - **中继**（`ChildResultRelayTest`，新增 9 个测试）：
@@ -200,18 +206,33 @@
   - `ManagedAgentApiContractTest` 覆盖两条路由：`202`、重放、跨面重放、冲突、动作拒绝、`400`（包括 WebShell 的未知字段，以及答复 `invalid_idempotency_key` 的超长 key）、`404`、租户过滤器的 `403`，以及带 `task_id` 的操作回读。
   - `PlannedTaskContractTest` 现在把两条路由钉为 `partial`，并校验 `requestId` 实例。
   - `SurfaceRegistry` 以新的规则类 `TASK_OPERATOR` 登记两条路由，`SurfaceAdmissionAcceptanceTest` 在两个面上探测：读权限之下为 `404`，reader 得 `403 task_forbidden`，OPERATOR 与 owner 级调用者被准入并得到路由自身的 `409`。同一套件还钉住保留的 key 永远不能绕过当前访问权：准入它的 OPERATOR 可以重放，降为 reader 后得到 `403 task_forbidden`，Session 删除后得到 `404 session_not_found`。
+- **真实栈**（首个改动合入之后，[#13746 上的结果](https://github.com/QwenLM/qwen-code/issues/13746#issuecomment-6100505354)）：
+  - 环境：打包好的整条链路，带真实 Hosted Harness、真实 child Session、脚本化模型，Session 存储与 Harness 前各有一个可注入故障的代理。
+  - 跑过的时序：
+    - 取消应答丢失；
+    - 取消到达时、以及停止请求提交之后杀掉 Harness；
+    - 持续 503 直到预算用尽停放；
+    - 取消与 child 完成竞争；
+    - child 排着一条会话消息；
+    - 父会话关闭与取消竞争；
+    - WebShell 路由。
+  - 发现：
+    - Harness 流半开时投递会挂住。`HarnessEventStream.close()` 要等阻塞中的读线程持有的锁，代际接管时的客户端关闭因此卡死，这次尝试便一直续租。现在 `close()` 不再取这把锁（`HarnessEventStreamCloseTest`），其他可能挂住的发送则由尝试时限兜底。
+    - 取消后紧接着被接纳的关闭不会物理停止 child，见后续工作。
 - **未运行：**
-  - 带真实 Hosted Harness 与真实 child Session 的产品栈运行；
-  - #12380 F 阶段针对该类型的故障轮次（取消应答丢失、结算过程中取消、与父会话关闭竞争的取消、所有者消失后取消）。上述单元套件对照录制的控制面调用覆盖了这些时序，但并非在真实栈上。
-- **与中继共享、本次未改：** 投递经由 child 结果中继所用的同一个 Hosted 挂接到达父会话。凡是阻断这条路径的情况（父会话的创建者失去了执行所需的 Workspace 授权，或该 Session 仍被另一个进程挂接），都会以同样方式阻断中继自己的提交，此时取消在预算用尽后停放。
+  - 所有者消失后的取消；
+  - "已铸造但没有 Turn"的窗口：真实栈上 child 创建被拒后仍会生成一个 Turn，所以只有单元测试能覆盖到它。
+- **与中继共享、本次未改：** 投递经由 child 结果中继所用的同一个 Hosted 挂接到达父会话。凡是阻断这条路径的情况（父会话的创建者失去了执行所需的 Workspace 授权，或该 Session 仍被另一个进程挂接），都会以同样方式阻断中继自己的提交，此时取消在预算用尽后停放。在已缓存的挂接上，child operation 路由不做自己的 Workspace 检查；投递的取消走 channel 路由，它在每次操作时都重新检查，所以对投递而言，无论缓存里有什么，停放都适用（[F3](2026-10-17-managed-delivery-task-cancel.zh-CN.md)）。
 
 ## 后续工作
 
-| 项               | 范围                                                                                                                                                                               |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H3 类型          | `background_shell` 与 `monitor` 启用时：Shell 在请求后以 `stop_requested` 结算（发布器目前结算为 `exited`），Monitor 增加停止请求，二者带上投递分支加入 `CANCELLABLE_TASK_KINDS`。 |
-| workflow、自动化 | 随 workflow 运行时（#13803）与 H6 per_run：先在各自记录上加停止请求，再复用相同的投递与停止分支。                                                                                  |
-| channel 投递取消 | 随 H5 的公开变更路由：复用本切片的操作模型（决策 10）。                                                                                                                            |
-| child 输出       | 把 child 任务关联到其 child Session，或在 `read_output` 之后把其输出作为任务事件转发。                                                                                             |
-| WebShell         | 带取消控件的任务面板，以及任务路由的客户端方法。                                                                                                                                   |
-| F 阶段           | "验证"中列出的产品栈故障轮次。                                                                                                                                                     |
+| 项               | 范围                                                                                                                                                                                                                                                                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H3 类型          | Shell 那一半已由 A8（#13889）交付：平台停止在其请求之后以 `stop_requested` 结算。**已在 [H4f-c](2026-10-17-managed-h3-task-cancel.zh-CN.md) 交付：两类加入 `CANCELLABLE_TASK_KINDS`，其投递经 Runtime Broker 停止进程，Monitor 的 `stop_requested` 结算代替它并不携带的停止请求。**                       |
+| workflow、自动化 | 随 workflow 运行时（#13803）与 H6 per_run：先在各自记录上加停止请求，再复用相同的投递与停止分支。                                                                                                                                                                                                         |
+| channel 投递取消 | **已在 [#13746 F3](2026-10-17-managed-delivery-task-cancel.zh-CN.md) 交付：** 投递投影为其路由 Session 的任务（`channel_delivery`），在尚无适配器认领时走同一条任务取消；不再需要决策 10 所说的独立路由。                                                                                                 |
+| child 输出       | **已由 [child Session 链接](2026-10-17-managed-child-task-session-link.zh-CN.md)（#13746 F2）交付：child 任务给出其 child Session，由该 Session 的路由提供输出。** 没有采用在 `read_output` 之后作为任务事件转发。                                                                                        |
+| WebShell         | 任务面板（#13936）及其客户端方法已为 `child_agent` 任务落地。**它现在列出所有任务类型，并在任务公布取消时提供取消（[面板文档](2026-10-12-managed-child-task-panel.zh-CN.md)）。**                                                                                                                         |
+| F 阶段           | 真实栈轮次剩下的时序：所有者消失后的取消。                                                                                                                                                                                                                                                                |
+| 关闭时停止 child | relay 的停止分支会跳过已不是 `ACTIVE` 的父会话，而关闭级联曾等每个 child 的 Turn 自己结束（H4b），所以取消后紧接着被接纳的关闭会让 child 继续运行。**已由 [#13875](2026-10-14-managed-close-stops-child-turn.zh-CN.md) 交付：级联自己取消每个 child 的活跃 Turn（方案 B），关闭不再等待 Turn 自然结束。** |
+| Hosted 流空闲    | **已由 [#14135](2026-10-18-hosted-event-stream-liveness.zh-CN.md) 交付：** Harness 每 15 秒发一次 keepalive，并以 `event-keepalive/1` 声明。对这样的 Harness，Java 客户端在读取静默 45 秒后以 `HostedHarnessStreamIdleException` 结束这次读，Turn 经由现有的重新挂接重试。                                |

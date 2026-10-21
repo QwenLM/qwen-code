@@ -22,7 +22,9 @@ import * as pty from '@lydell/node-pty';
 import stripAnsi from 'strip-ansi';
 // @xterm/headless is CJS — use default import + destructure
 import xtermHeadless from '@xterm/headless';
+import unicode11 from '@xterm/addon-unicode11';
 const { Terminal } = xtermHeadless;
+const { Unicode11Addon } = unicode11;
 type Terminal = InstanceType<typeof Terminal>;
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +84,8 @@ export interface InteractiveSessionOptions {
   args?: string[];
   /** Spawn this instead of the built CLI bundle (drives stub processes in tests). */
   command?: { bin: string; args: string[] };
+  /** Replace inherited environment for deterministic, credential-free fixtures. */
+  inheritEnv?: boolean;
 }
 
 export class InteractiveSession {
@@ -90,10 +94,18 @@ export class InteractiveSession {
   private rawOutput = '';
   private pendingWrite: Promise<void> = Promise.resolve();
   private closed = false;
+  private readonly exited: Promise<void>;
+  private exitStatus: { exitCode: number; signal?: number } | undefined;
 
   private constructor(ptyProcess: pty.IPty, terminal: Terminal) {
     this.ptyProcess = ptyProcess;
     this.terminal = terminal;
+    this.exited = new Promise((resolve) => {
+      ptyProcess.onExit((status) => {
+        this.exitStatus = status;
+        resolve();
+      });
+    });
 
     ptyProcess.onData((data) => {
       this.rawOutput += data;
@@ -131,7 +143,7 @@ export class InteractiveSession {
     const cwd = options?.cwd ?? join(__dirname, '..', '..');
     const args = options?.args ?? [];
 
-    const baseEnv = { ...process.env };
+    const baseEnv = options?.inheritEnv === false ? {} : { ...process.env };
     delete baseEnv['NO_COLOR'];
     // The renderer matrix pins QWEN_TUI_RENDERER last so a test's own env
     // cannot silently switch the renderer mid-matrix.
@@ -147,6 +159,8 @@ export class InteractiveSession {
       scrollback: 1000,
       allowProposedApi: true,
     });
+    terminal.loadAddon(new Unicode11Addon());
+    terminal.unicode.activeVersion = '11';
 
     const target = options?.command ?? {
       bin: resolveE2eCliCommand(pickE2eRenderer()),
@@ -280,6 +294,31 @@ export class InteractiveSession {
     return lines.join('\n');
   }
 
+  async viewport(): Promise<string> {
+    await this.flush();
+    const buffer = this.terminal.buffer.active;
+    return Array.from(
+      { length: this.terminal.rows },
+      (_, row) =>
+        buffer
+          .getLine(buffer.viewportY + row)
+          ?.translateToString(true, 0, this.terminal.cols) ?? '',
+    ).join('\n');
+  }
+
+  resize(cols: number, rows: number): void {
+    this.terminal.resize(cols, rows);
+    this.ptyProcess.resize(cols, rows);
+  }
+
+  output(): string {
+    return this.rawOutput;
+  }
+
+  exitResult(): { exitCode: number; signal?: number } | undefined {
+    return this.exitStatus;
+  }
+
   /**
    * Poll the screen until `predicate` returns true.
    * Returns the screen text when matched.
@@ -313,6 +352,51 @@ export class InteractiveSession {
     } catch {
       // Process may have already exited
     }
-    this.terminal.dispose();
+    const waitForExit = async (milliseconds: number) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.exited,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () =>
+                reject(new Error(`PTY did not exit within ${milliseconds}ms`)),
+              milliseconds,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+    try {
+      try {
+        // The product's cleanup budget is 5s; allow time for signal delivery.
+        await waitForExit(10_000);
+      } catch (error) {
+        if (!this.exitStatus) {
+          try {
+            if (process.platform === 'win32') {
+              this.ptyProcess.kill('SIGKILL');
+            } else {
+              // forkpty owns a session/process group, including its children.
+              process.kill(-this.ptyProcess.pid, 'SIGKILL');
+            }
+          } catch (killError) {
+            if ((killError as NodeJS.ErrnoException).code !== 'ESRCH') {
+              throw killError;
+            }
+          }
+          await waitForExit(5_000);
+        }
+        await this.flush();
+        throw new Error('PTY exceeded its close grace period', {
+          cause: error,
+        });
+      }
+      await this.flush();
+    } finally {
+      this.terminal.dispose();
+    }
   }
 }

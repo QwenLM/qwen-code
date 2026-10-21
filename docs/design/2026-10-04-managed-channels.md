@@ -222,7 +222,7 @@ route or delivery is not a Session task — and both stay absent from
 `MANAGED_SESSION_ENABLED_DOMAINS` at this slice; H5b admits both domains
 behind the email adapter gate. The byte-level contract lives in
 `packages/core/src/managed-runtime/managed-channel-record.ts`, is mirrored
-by `ManagedChannelRecords` in `packages/sdk-java/managed-agent-server`, and
+by `ManagedChannelRecords` in `packages/managed-agent-server`, and
 is pinned by the shared corpus
 `contracts/managed-channel-record-v1.fixtures.json` (92 shape cases and 57
 successor cases), which TypeScript and Java replay identically.

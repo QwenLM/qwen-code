@@ -39,6 +39,7 @@ import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import type { Mem0Settings } from './mem0-settings.js';
+import type { ModPluginConfigs } from '@qwen-code/qwen-code-core/mods/types.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -945,6 +946,21 @@ const SETTINGS_SCHEMA = {
     description: 'User interface settings.',
     showInDialog: false,
     properties: {
+      allowedApprovalModes: {
+        type: 'array',
+        label: 'Web Shell Approval Modes',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        mergeStrategy: MergeStrategy.REPLACE,
+        description:
+          'Execution approval modes offered by Web Shell. Omit to show default, auto-edit, auto and yolo; an empty list offers none. Host allowedApprovalModes overrides this setting. Presentation only: does not change the current mode or enforce backend permissions. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored with a warning. Edit settings.json directly.',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          enum: ['default', 'auto-edit', 'auto', 'yolo'],
+        },
+      },
       theme: {
         type: 'string',
         label: 'Theme',
@@ -1057,7 +1073,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+          'When true, human submissions containing `workflow` or `ultracode` no longer softly steer the current turn toward the Workflow tool. Applies across terminal, IDE, Web and explicitly human-origin SDK messages when workflows are enabled. Plain headless prompts and automated messages do not trigger this reminder.',
         showInDialog: true,
       },
       showStatusInTitle: {
@@ -1293,6 +1309,16 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
+        showInDialog: true,
+      },
+      arrowKeysScrollTranscript: {
+        type: 'boolean',
+        label: 'Arrow Keys Scroll Transcript (Virtualized History)',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Let a bare ↑/↓ scroll the transcript while the composer is empty in Virtualized History, instead of recalling input history. Off by default: ↑/↓ walk your previous prompts, and the transcript scrolls with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Turn it on only for a terminal or multiplexer that does not pass mouse reporting through and turns wheel/trackpad scrolling into ↑/↓ key presses, where that burst of ↑/↓ would otherwise silently replace the composer with an older prompt. While it is on, use Ctrl+P / Ctrl+N for input history from an empty composer.',
         showInDialog: true,
       },
       showToolCallDetails: {
@@ -1618,6 +1644,42 @@ const SETTINGS_SCHEMA = {
     description:
       'Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.',
     showInDialog: true,
+  },
+
+  pluginConfigs: {
+    type: 'object',
+    label: 'Plugin Configuration',
+    category: 'Extensions',
+    requiresRestart: true,
+    default: {} as ModPluginConfigs,
+    jsonSchemaOverride: {
+      type: 'object',
+      additionalProperties: {
+        type: 'object',
+        properties: {
+          toolDialect: {
+            type: 'string',
+            enum: ['native', 'claude'],
+            description:
+              'Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset.',
+          },
+          options: {
+            type: 'object',
+            additionalProperties: {
+              anyOf: [
+                { type: 'string' },
+                { type: 'number' },
+                { type: 'boolean' },
+                { type: 'array', items: { type: 'string' } },
+              ],
+            },
+          },
+        },
+      },
+    },
+    description:
+      'Mod options and tool dialect keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+    showInDialog: false,
   },
 
   advisorModel: {
@@ -4244,15 +4306,25 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
-      mods: {
+      generatedUi: {
         type: 'boolean',
-        label: 'Claude-compatible Mod commands',
+        label: 'Generated UI',
         category: 'Experimental',
         requiresRestart: true,
         default: false,
         description:
-          'Run the experimental JavaScript Mod command subset from enabled extensions in trusted headless sessions.',
-        showInDialog: false,
+          'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+        showInDialog: true,
+      },
+      mods: {
+        type: 'boolean',
+        label: 'Mods (Experimental)',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+        showInDialog: true,
       },
       liveVoice: {
         type: 'object',

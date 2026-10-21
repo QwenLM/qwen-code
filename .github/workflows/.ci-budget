@@ -1,0 +1,21 @@
+# PR-stage limits: jobs, declared timeout-minutes, jobs without fixed timeout, file.
+# Update the corresponding entry when intentionally increasing a budget.
+1 5 0 assign-pr-owner.yml
+8 300 4 ci.yml
+4 90 1 live-host-release.yml
+1 30 0 live-host.yml
+3 15 1 managed-agent-gate.yml
+2 45 0 mobile-shell.yml
+1 20 0 pnpm-worktree-smoke.yml
+1 5 0 pr-force-push-reminder.yml
+1 5 0 pr-self-report-label.yml
+8 590 0 qwen-autofix.yml
+9 155 4 qwen-code-pr-review.yml
+7 280 2 qwen-triage.yml
+2 55 0 release-managed-agent-reference.yml
+2 0 2 sdk-python.yml
+1 60 0 serve-ab.yml
+2 60 0 tui-parity.yml
+3 70 0 verify-landlock-helper.yml
+1 5 0 web-shell-visuals-cleanup.yml
+1 30 0 web-shell-visuals.yml

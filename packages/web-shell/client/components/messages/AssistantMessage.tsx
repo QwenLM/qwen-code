@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { LightbulbIcon, ThumbsDownIcon, ThumbsUpIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
+import { SelectionCopyMenu } from './SelectionCopyMenu';
 import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
@@ -80,7 +81,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   onSourceOpen,
 }: AssistantMessageProps) {
   const { t } = useI18n();
-  const documentMode = useTranscriptRenderMode() === 'document';
+  const renderMode = useTranscriptRenderMode();
+  const documentMode = renderMode === 'document';
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
@@ -206,13 +208,17 @@ export const AssistantMessage = memo(function AssistantMessage({
             isLocateFlashing ? ` ${flashStyles.flash}` : ''
           }`}
         >
-          <div className={styles.contentBody}>
+          <SelectionCopyMenu
+            className={styles.contentBody}
+            content={content}
+            enabled={renderMode === 'interactive' && !isStreaming}
+          >
             <Markdown
               content={content}
               source="assistant"
               isStreaming={isStreaming}
             />
-          </div>
+          </SelectionCopyMenu>
         </div>
       )}
       {agentMessage?.kind === 'agent_message' && (

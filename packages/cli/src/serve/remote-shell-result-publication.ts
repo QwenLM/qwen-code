@@ -172,6 +172,7 @@ class PublicationClient {
         'X-Qwen-Tenant-Id': String(this.key['tenantId']),
         'X-Qwen-Tool-Publication-Token': this.installed.publicationToken,
         'X-Qwen-Tool-Publication-Operation': operationId,
+        'X-Qwen-Tool-Publication-Async': '1',
         'Cache-Control': 'no-store',
         ...headers,
       },
@@ -279,6 +280,23 @@ class PublicationClient {
       let status = initial;
       while (Date.now() < deadline) {
         if (status['state'] === 'SUCCEEDED') return record(status['receipt']);
+        if (status['state'] === 'FAILED') {
+          const error = record(status['error']);
+          if (
+            !Number.isInteger(error['status']) ||
+            Number(error['status']) < 400 ||
+            Number(error['status']) > 599 ||
+            typeof error['code'] !== 'string' ||
+            !error['code']
+          )
+            throw new Error('Invalid publication failure response.');
+          if (error['code'] === 'managed_tool_publication_quota_exhausted')
+            throw new Error('quota_exhausted');
+          throw new PublicationRejection(
+            Number(error['status']),
+            error['code'],
+          );
+        }
         if (status['state'] === 'RETRYABLE') break;
         if (status['state'] === 'EXPIRED' && recoveries < 3) {
           recoveries++;

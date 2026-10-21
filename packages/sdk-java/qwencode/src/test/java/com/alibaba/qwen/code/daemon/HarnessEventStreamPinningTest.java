@@ -3,15 +3,9 @@ package com.alibaba.qwen.code.daemon;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,91 +25,17 @@ import org.junit.jupiter.api.Timeout;
 // the behavior-level assertion holds there regardless of the locking
 // shape; the discriminative power lives on JDK 21.
 class HarnessEventStreamPinningTest {
-    private static final String BOOT_ID =
-            "11111111-1111-4111-8111-111111111111";
-    private static final String SESSION_ID =
-            "33333333-3333-4333-8333-333333333333";
-    private static final String CLIENT_ID = "client-1";
-    private static final String DIGEST = "sha256:"
-            + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    private static final String EVENT_EPOCH = "epoch-1";
-
-    private HttpServer server;
-    private ExecutorService serverExecutor;
-    private URI baseUri;
-    private CountDownLatch holdStream;
+    private HeldStreamHarness harness;
 
     @BeforeEach
     void setUp() throws IOException {
-        holdStream = new CountDownLatch(1);
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        serverExecutor = Executors.newCachedThreadPool();
-        server.setExecutor(serverExecutor);
-        server.createContext("/capabilities", exchange -> {
-            byte[] bytes = ("{\"v\":1,\"mode\":\"http-bridge\","
-                    + "\"features\":[\"hosted_harness_private_v1\","
-                    + "\"managed_session_journal_delta_v1\"],"
-                    + "\"transports\":[\"rest\"],\"hostedHarness\":{"
-                    + "\"protocolVersions\":{\"current\":1,"
-                    + "\"supported\":[1]},\"bootId\":\"" + BOOT_ID
-                    + "\",\"capabilityDigest\":\"" + DIGEST + "\"}}")
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().set("Content-Type",
-                    "application/json");
-            exchange.sendResponseHeaders(200, bytes.length);
-            exchange.getResponseBody().write(bytes);
-            exchange.close();
-        });
-        server.createContext("/session", exchange -> {
-            byte[] bytes = ("{\"sessionId\":\"" + SESSION_ID
-                    + "\",\"workspaceCwd\":\"/control\","
-                    + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
-                    + "\"}").getBytes(
-                            java.nio.charset.StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().set("Content-Type",
-                    "application/json");
-            exchange.getResponseHeaders().set(
-                    HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-            exchange.sendResponseHeaders(200, bytes.length);
-            exchange.getResponseBody().write(bytes);
-            exchange.close();
-        });
-        // SSE endpoint that answers the headers then holds the body open
-        // with no events — the shape of a held model stream.
-        server.createContext("/session/" + SESSION_ID + "/events",
-                exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
-                    exchange.getResponseBody().flush();
-                    try {
-                        holdStream.await();
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                    }
-                    exchange.close();
-                });
-        server.start();
-        baseUri = URI.create("http://127.0.0.1:"
-                + server.getAddress().getPort());
+        harness = HeldStreamHarness.start();
     }
 
     @AfterEach
     void tearDown() {
-        holdStream.countDown();
-        if (server != null) {
-            server.stop(0);
-        }
-        if (serverExecutor != null) {
-            serverExecutor.shutdownNow();
+        if (harness != null) {
+            harness.stop();
         }
     }
 
@@ -135,22 +55,18 @@ class HarnessEventStreamPinningTest {
         // No try-with-resources: on a pinning runtime, blocked readers keep
         // their stream monitors, so client.close() would wedge this thread
         // on one of them before the assertion can fire.
-        HostedHarnessClient client = HostedHarnessClient.builder()
-                .baseUri(baseUri)
-                .bearerToken("harness-token")
-                .capabilityDigest(DIGEST)
-                .build();
+        HostedHarnessClient client = harness.client();
         try {
             HarnessSessionRef session = client.createSession(
                     CreateHarnessSession.builder()
-                            .harnessSessionId(SESSION_ID)
+                            .harnessSessionId(HeldStreamHarness.SESSION_ID)
                             .build());
             for (int index = 0; index < streamCount; index++) {
                 streams.add(client.streamEvents(
                         StreamHarnessEvents.builder()
                                 .session(session)
                                 .lastEventId(0)
-                                .eventEpoch(EVENT_EPOCH)
+                                .eventEpoch(HeldStreamHarness.EVENT_EPOCH)
                                 .build()));
             }
             marker("streams-opened " + streams.size());
@@ -178,7 +94,7 @@ class HarnessEventStreamPinningTest {
             marker("probe-joined finished=" + probeFinished + " progress="
                     + probeProgress.get());
         } finally {
-            holdStream.countDown();
+            harness.releaseBodies();
             for (Thread reader : readers) {
                 probeJoinUnchecked(reader, 3000);
             }

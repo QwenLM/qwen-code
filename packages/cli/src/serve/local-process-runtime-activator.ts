@@ -58,25 +58,39 @@ export function managedWorkerEnvironment(
   source: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
+  // Windows environment variable names are case-insensitive; match loosely so
+  // e.g. "Path"/"SYSTEMROOT" still reach the worker.
   for (const [key, value] of Object.entries(source)) {
     if (
-      /^(PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|SystemRoot|WINDIR|COMSPEC|PATHEXT|TMP|TEMP|TMPDIR|LANG|LC_[A-Z_]+|TZ|WSL_INTEROP|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|all_proxy|no_proxy|QWEN_HOME|QWEN_CODE_TRUSTED_FOLDERS_PATH)$/.test(
+      /^(PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|SystemRoot|WINDIR|COMSPEC|PATHEXT|TMP|TEMP|TMPDIR|LANG|LC_[A-Z_]+|TZ|WSL_INTEROP|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|QWEN_HOME|QWEN_CODE_TRUSTED_FOLDERS_PATH)$/i.test(
         key,
       )
     )
       result[key] = value;
   }
-  for (const key of ['QWEN_HOME', 'QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
-    if (result[key]) result[key] = path.resolve(result[key]);
+  for (const [key, value] of Object.entries(result)) {
+    if (/^(QWEN_HOME|QWEN_CODE_TRUSTED_FOLDERS_PATH)$/i.test(key) && value)
+      result[key] = path.resolve(value);
   }
   return result;
 }
 
+/**
+ * Local-process ManagedRuntimeActivator for the Hosted Runtime worker fleet.
+ *
+ * Provisional surface: landed with the guarded Hosted Runtime foundations
+ * (PR #12691) ahead of its consumer, the daemon-side gateway factory that
+ * constructs it. Until that wiring lands, this class is exercised only by
+ * its tests — treat the spawn/handshake contract as frozen pending the
+ * follow-up integration.
+ */
 export class LocalProcessRuntimeActivator {
   private readonly incarnation = randomUUID();
   private readonly registry = new ProcessRegistry();
   private readonly generations = new Map<string, Generation>();
   private readonly epochs = new Map<string, number>();
+  private firstCleanupFailure?: unknown;
+  private readonly pendingStops = new Set<Promise<void>>();
   private readonly draining = new Set<WorkspaceRuntime>();
   private readonly revoked = new Set<WorkspaceRuntime>();
   private readonly reloading = new Set<WorkspaceRuntime>();
@@ -104,10 +118,14 @@ export class LocalProcessRuntimeActivator {
     }
     if (!generation) {
       const limit = this.options.maxWorkers ?? 4;
+      // A generation whose cleanup failed is retained in the map (stop()
+      // rethrows a non-ProcessExitError terminate rejection before the
+      // delete), so the map count is the figure that diverges upward.
+      const admitted = this.generations.size;
       let eviction: Promise<void> | undefined;
-      if (this.generations.size > limit)
+      if (admitted > limit)
         return this.unavailable('managed_runtime_capacity_exhausted');
-      if (this.generations.size >= limit) {
+      if (admitted >= limit) {
         const idle = [...this.generations.values()]
           .filter((g) => !g.retiring && g.uses.size === 0 && g.operations === 0)
           .sort((a, b) => a.lastUsed - b.lastUsed)[0];
@@ -262,14 +280,26 @@ export class LocalProcessRuntimeActivator {
   }
   close(): Promise<void> {
     this.closed = true;
-    this.closePromise ??= Promise.all(
-      [...this.generations.values()].map((g) =>
+    this.closePromise ??= (async () => {
+      const stops = [...this.generations.values()].map((g) =>
         this.stop(
           g,
           new ManagedRuntimeReleasedError('Managed Runtime Gateway stopped.'),
         ),
-      ),
-    ).then(() => this.registry.shutdown());
+      );
+      // A stop whose generation already left the map (the slot is freed
+      // before the fallible rm) is awaited by nobody else; pendingStops is.
+      await Promise.allSettled([...stops, ...this.pendingStops]);
+      // A recorded cleanup failure outranks the registry's aggregate: both
+      // describe the same teardown, and the recorded one is the cause.
+      // Cleanup failures that settled before close() was called are not in
+      // the map anymore, so the rejection is instance state, not membership.
+      await this.registry.shutdown().catch((error: unknown) => {
+        if (this.firstCleanupFailure === undefined) throw error;
+      });
+      if (this.firstCleanupFailure !== undefined)
+        throw this.firstCleanupFailure;
+    })();
     return this.closePromise;
   }
   killAllSync(): void {
@@ -427,15 +457,23 @@ export class LocalProcessRuntimeActivator {
           this.log(g, 'terminated');
         }
       }
-      await rm(g.boot.outputRoot, { recursive: true, force: true });
+      // The tree is proven down past this point, so the slot can go even
+      // when the rm below fails. A non-ProcessExitError terminate
+      // rejection leaves the entry — and with it `retiring`, the capacity
+      // count and workspaceActivity() — intact.
       if (this.generations.get(g.key) === g) this.generations.delete(g.key);
+      await rm(g.boot.outputRoot, { recursive: true, force: true });
       this.log(g, 'released');
       g.resolveExit();
     })().catch((error) => {
       g.rejectExit(error);
       this.log(g, 'cleanup_failed');
+      this.firstCleanupFailure ??= error;
       throw error;
     });
+    const pending = g.stop.catch(() => {});
+    this.pendingStops.add(pending);
+    void pending.finally(() => this.pendingStops.delete(pending));
     return g.stop;
   }
   private log(g: Generation, event: string): void {

@@ -1,6 +1,9 @@
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall } from '../../adapters/types.js';
+import { isAskUserQuestionToolName } from '../../constants/toolNames.js';
 
-export { isActiveToolStatus } from '../../adapters/toolClassification';
+export { isAskUserQuestionToolName } from '../../constants/toolNames.js';
+
+export { isActiveToolStatus } from '../../adapters/toolClassification.js';
 
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
@@ -158,11 +161,6 @@ export function localizeToolDisplayName(
   return displayName;
 }
 
-export function isAskUserQuestionToolName(toolName: string): boolean {
-  const normalized = toolName.toLowerCase();
-  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
-}
-
 export function isAdvisorToolName(toolName: string): boolean {
   return toolName.toLowerCase() === 'advisor';
 }
@@ -260,6 +258,17 @@ export function extractText(tool: ACPToolCall): string | null {
     if (b.type === 'content' && b.content?.text) return b.content.text;
   }
   return extractRawOutputText(tool.rawOutput);
+}
+
+export function hasRecordedOutput(tool: ACPToolCall): boolean {
+  return (
+    tool.rawOutput != null ||
+    (tool.content?.some(
+      (block) =>
+        block.type === 'content' && typeof block.content?.text === 'string',
+    ) ??
+      false)
+  );
 }
 
 export function getAdvisorDisplayText(tool: ACPToolCall): string | null {

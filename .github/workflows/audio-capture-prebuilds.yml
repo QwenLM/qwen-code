@@ -77,8 +77,20 @@ jobs:
   collect:
     name: 'collect prebuilds'
     needs: 'build'
-    runs-on: 'ubuntu-latest'
+    # Rides the same dedicated release-only machine as release.yml's publish
+    # job, opted into via ECS_RELEASE_HOST_RUNNER_ENABLED. On that persistent
+    # workspace a leftover prebuilds/ directory would leak into the merged
+    # artifact (download-artifact merge-multiple merges into existing paths),
+    # so the step below clears it first.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     steps:
+      - name: 'Clear stale prebuilds (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        # run steps resolve against defaults.run.working-directory
+        # (packages/audio-capture), unlike the action inputs below which stay
+        # workspace-relative.
+        run: 'rm -rf prebuilds'
+
       - name: 'Merge per-platform prebuilds'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:

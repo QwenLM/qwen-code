@@ -11,14 +11,20 @@ import {
   toTimestamp,
 } from './java-managed-agent-event-projector';
 import { managedRequestId } from './managed-session-storage';
+import { isManagedApprovalMode } from './managed-agent-provider';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
 import type {
+  ManagedAgentCommandOptions,
   ManagedAgentPendingAction,
   ManagedAgentProvider,
   ManagedAgentRuntimeState,
   ManagedAgentSessionPhase,
   ManagedAgentSessionSummary,
+  ManagedTaskCancelOperation,
+  ManagedApprovalMode,
+  ManagedModelContext,
+  ManagedModelSelection,
 } from './managed-agent-provider';
 
 export interface JavaManagedAgentProviderOptions
@@ -28,6 +34,7 @@ export interface JavaManagedAgentProviderOptions
   /** Include tenant and actor identity; replace this scope/provider when either changes. Token refresh alone can use getHeaders. */
   productScope?: string;
   enableWorkspaceBinding?: boolean;
+  modelPresets?: readonly { agentId: string; label: string }[];
   /** Acquire a streaming save target during the user gesture, then call openStream. */
   saveArtifact?: ManagedArtifactSave;
 }
@@ -93,13 +100,266 @@ export function createJavaManagedAgentProvider(
   if (options.enableWorkspaceBinding && !options.productScope?.trim()) {
     throw new Error('Workspace binding requires an explicit productScope');
   }
+  async function createWorkspaceSession(
+    request: {
+      agentId: string;
+      workspaceId: string;
+      cwdRelative: string;
+      text?: string;
+      input?: import('./managed-agent-provider').ManagedInputBlock[];
+      approvalMode?: ManagedApprovalMode;
+      planMode?: boolean;
+      skills?: import('./managed-agent-provider').ManagedSessionSkill[];
+    },
+    command: ManagedAgentCommandOptions,
+  ) {
+    const result = await client.createSession(
+      {
+        requestId: managedRequestId(),
+        idempotencyKey: command.idempotencyKey,
+        agentId: request.agentId,
+        ...(request.skills?.length ? { skills: request.skills } : {}),
+        // Without a title the Session list and header fall back to a UUID
+        // prefix, unlike the standard shell's prompt-derived title.
+        ...(request.text === undefined
+          ? {}
+          : { title: titleFor(request.text) }),
+        ...(request.approvalMode === undefined
+          ? {}
+          : { approvalMode: request.approvalMode }),
+        ...(request.planMode === undefined
+          ? {}
+          : { planMode: request.planMode }),
+        input:
+          request.input ??
+          (request.text === undefined
+            ? []
+            : [{ type: 'input_text', text: request.text }]),
+        metadata: { clientId: command.clientId },
+        workspace: {
+          workspaceId: request.workspaceId,
+          cwdRelative: request.cwdRelative,
+        },
+      },
+      command.signal,
+    );
+    if (!result.sessionId || (request.text !== undefined && !result.turnId))
+      throw new Error(
+        'Managed Agent create response is missing admission identity',
+      );
+    return { sessionId: result.sessionId };
+  }
   return {
     kind: 'java',
     storageKey: storageKey(options),
+    workspaceFiles: {
+      query: (request, command) =>
+        client.queryWorkspaceFiles(request, command.signal),
+      read: (request, command) =>
+        client.readWorkspaceFile(request, command.signal),
+    },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    async renameSession(sessionId, displayName, command) {
+      const result = await client.renameSession(
+        {
+          sessionId,
+          title: displayName,
+          idempotencyKey: command.idempotencyKey,
+        },
+        command.signal,
+      );
+      if (
+        result.sessionId !== sessionId ||
+        typeof result.title !== 'string' ||
+        !result.title.trim()
+      ) {
+        throw new Error('Managed Agent rename response is invalid');
+      }
+      return { displayName: result.title };
+    },
+    skills: {
+      list: (sessionId, request) =>
+        client.getSessionSkills(sessionId, request.signal),
+    },
+    mcp: {
+      list: (sessionId, request) =>
+        client.getSessionMcp(sessionId, request.signal),
+    },
+    tasks: {
+      list: (sessionId, request) =>
+        client.listTasks(
+          { sessionId, cursor: request.cursor, limit: request.limit },
+          request.signal,
+        ),
+      async get(sessionId, taskId, request) {
+        const task = await client.getTask(
+          { sessionId, taskId },
+          request.signal,
+        );
+        if (task.sessionId !== sessionId || task.taskId !== taskId)
+          throw new Error('Task identity mismatch');
+        return task;
+      },
+      listEvents: (sessionId, taskId, request) =>
+        client.listTaskEvents(
+          { sessionId, taskId, after: request.after, limit: request.limit },
+          request.signal,
+        ),
+      ...(options.productScope?.trim()
+        ? {
+            cancel: {
+              async submit(sessionId, taskId, command) {
+                return requireTaskCancelOperation(
+                  await client.cancelTask(
+                    {
+                      sessionId,
+                      taskId,
+                      idempotencyKey: command.idempotencyKey,
+                      requestId: managedRequestId(),
+                    },
+                    command.signal,
+                  ),
+                  sessionId,
+                  taskId,
+                );
+              },
+              async query(sessionId, taskId, operationId, request) {
+                const operation = requireTaskCancelOperation(
+                  await client.queryOperation(
+                    { sessionId, operationId },
+                    request.signal,
+                  ),
+                  sessionId,
+                  taskId,
+                );
+                if (operation.operationId !== operationId)
+                  throw new Error('Task cancel operation identity mismatch');
+                return operation;
+              },
+            },
+          }
+        : {}),
+    },
     ...(options.productScope?.trim()
       ? {
+          approvalChange: {
+            async queryOptions(sessionId, request) {
+              const result = await client.getSessionApproval(
+                sessionId,
+                request.signal,
+              );
+              if (
+                !isManagedApprovalMode(result.approvalMode) ||
+                !Number.isSafeInteger(result.approvalRevision) ||
+                result.approvalRevision < 0 ||
+                typeof result.supported !== 'boolean' ||
+                !Array.isArray(result.availableApprovalModes) ||
+                !result.availableApprovalModes.every(isManagedApprovalMode) ||
+                !result.availableApprovalModes.includes(result.approvalMode)
+              )
+                throw new Error('Invalid Session approval options');
+              return {
+                approvalMode: result.approvalMode,
+                approvalRevision: result.approvalRevision,
+                availableApprovalModes: result.availableApprovalModes,
+                supported: result.supported,
+                ...(result.liveSupported === true
+                  ? { liveSupported: true }
+                  : {}),
+                ...(typeof result.planMode === 'boolean'
+                  ? { planMode: result.planMode }
+                  : {}),
+                ...(typeof result.planModeSupported === 'boolean'
+                  ? { planModeSupported: result.planModeSupported }
+                  : {}),
+              };
+            },
+            async submit(sessionId, request, command) {
+              const result = await client.changeApproval(
+                {
+                  ...request,
+                  sessionId,
+                  idempotencyKey: command.idempotencyKey,
+                  requestId: command.requestId,
+                },
+                command.signal,
+              );
+              if (
+                result.sessionId !== sessionId ||
+                result.approvalMode !== request.approvalMode ||
+                !Number.isSafeInteger(result.approvalRevision) ||
+                result.approvalRevision <= request.expectedRevision ||
+                typeof result.replayed !== 'boolean'
+              )
+                throw new Error('Approval change identity mismatch');
+              return {
+                sessionId: result.sessionId,
+                approvalMode: result.approvalMode,
+                approvalRevision: result.approvalRevision,
+                replayed: result.replayed,
+                ...(typeof result.planMode === 'boolean'
+                  ? { planMode: result.planMode }
+                  : {}),
+              };
+            },
+          },
+          modelChange: {
+            async queryOptions(sessionId, request) {
+              const result = await client.getSessionModels(
+                sessionId,
+                request.signal,
+              );
+              const selection = modelSelection(result.modelSelection);
+              if (
+                !selection ||
+                typeof result.supported !== 'boolean' ||
+                !Array.isArray(result.models) ||
+                result.models.some(
+                  (item) =>
+                    !modelId(item.modelId) ||
+                    typeof item.label !== 'string' ||
+                    !item.label.trim(),
+                ) ||
+                new Set(result.models.map((item) => item.modelId)).size !==
+                  result.models.length
+              )
+                throw new Error('Invalid Session model options');
+              return {
+                supported: result.supported,
+                modelSelection: selection,
+                models: result.models.map(({ modelId, label }) => ({
+                  modelId,
+                  label,
+                })),
+              };
+            },
+            async submit(sessionId, request, command) {
+              const result = await client.changeModel(
+                {
+                  ...request,
+                  sessionId,
+                  idempotencyKey: command.idempotencyKey,
+                  requestId: managedRequestId(),
+                },
+                command.signal,
+              );
+              const selection = modelSelection(result.modelSelection);
+              if (
+                result.sessionId !== sessionId ||
+                !selection ||
+                selection.modelId !== request.modelId ||
+                selection.revision <= request.expectedRevision ||
+                typeof result.replayed !== 'boolean'
+              )
+                throw new Error('Model change identity mismatch');
+              return {
+                sessionId,
+                modelSelection: selection,
+                replayed: result.replayed,
+              };
+            },
+          },
           cwdChange: {
             async submit(sessionId, request, command) {
               return requireCwdOperation(
@@ -163,17 +423,26 @@ export function createJavaManagedAgentProvider(
           command.signal,
         );
         // A cancelled or recovery-blocked operation did not apply the answer,
-        // so the card must stay rather than hide as if it had.
+        // so the card must stay rather than hide as if it had. The failure
+        // code rides the error so the hook can tell an ended Action (no
+        // retry can succeed) from a delivery failure worth retrying.
         if (
           result.status === 'failed' ||
           result.status === 'cancelled' ||
           result.status === 'recovery_blocked'
         ) {
-          throw new Error(
-            `Managed Agent approval answer ${result.status} (${result.failureCode ?? 'unknown'})`,
+          throw Object.assign(
+            new Error(
+              `Managed Agent approval answer ${result.status} (${result.failureCode ?? 'unknown'})`,
+            ),
+            { code: result.failureCode ?? 'unknown' },
           );
         }
       },
+    },
+    toolDetails: {
+      get: (sessionId, itemId, request) =>
+        client.getToolDetails(sessionId, itemId, request.signal),
     },
     toolResults: {
       canDownload: saveArtifact !== undefined,
@@ -202,6 +471,47 @@ export function createJavaManagedAgentProvider(
       ? {
           workspaceBinding: {
             agentId,
+            modelPresets: options.modelPresets,
+            registration: {
+              listNodes: (request) => client.listRuntimeNodes(request.signal),
+              async checkDirectory(request, options) {
+                const checked = await client.checkWorkspaceDirectory(
+                  request,
+                  options.signal,
+                );
+                if (checked.nodeId !== request.nodeId)
+                  throw new Error('Workspace directory identity mismatch');
+                return checked;
+              },
+              async create(request, command) {
+                const operation = await client.registerWorkspace(
+                  {
+                    ...request,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                );
+                if (
+                  operation.type !== 'workspace_create' ||
+                  !operation.operationId
+                )
+                  throw new Error('Workspace operation identity mismatch');
+                return operation;
+              },
+              async query(operationId, request) {
+                const operation = await client.getWorkspaceOperation(
+                  operationId,
+                  request.signal,
+                );
+                if (
+                  operation.type !== 'workspace_create' ||
+                  operation.operationId !== operationId
+                )
+                  throw new Error('Workspace operation identity mismatch');
+                return operation;
+              },
+            },
             async list(request) {
               const page = await client.listWorkspaces(
                 { cursor: request.cursor, limit: request.limit },
@@ -212,33 +522,51 @@ export function createJavaManagedAgentProvider(
                 defaultWorkspace: page.defaultWorkspace,
                 nextCursor: page.nextCursor ?? undefined,
                 supported: page.capabilities?.workspaceBinding === true,
+                canCreateWorkspace:
+                  page.capabilities?.workspaceCreation === true,
+                canSelectDirectory:
+                  page.capabilities?.workspaceDirectorySelection === true,
+                canImportLocalDirectory:
+                  page.capabilities?.localDirectoryImport === true,
+                supportsApprovalModeSelection:
+                  page.capabilities?.approvalModeSelection === true,
               };
             },
             async get(workspaceId, request) {
               return client.getWorkspace(workspaceId, request.signal);
             },
-            async createEmpty(request, command) {
-              const result = await client.createSession(
-                {
-                  requestId: managedRequestId(),
-                  idempotencyKey: command.idempotencyKey,
-                  agentId: request.agentId,
-                  input: [],
-                  metadata: { clientId: command.clientId },
-                  workspace: {
-                    workspaceId: request.workspaceId,
-                    cwdRelative: request.cwdRelative,
-                  },
-                },
+            createWorkspace: (request, command) =>
+              client.createWorkspace(
+                { ...request, idempotencyKey: command.idempotencyKey },
                 command.signal,
-              );
-              if (!result.sessionId) {
-                throw new Error(
-                  'Managed Agent create response is missing sessionId',
-                );
-              }
-              return { sessionId: result.sessionId };
-            },
+              ),
+            directories: (request, command) =>
+              client.workspaceDirectories(request, command.signal),
+            getSessionOptions: (agentId, request) =>
+              client.getSessionOptions(agentId, request.signal),
+            createEmpty: (
+              {
+                agentId,
+                workspaceId,
+                cwdRelative,
+                approvalMode,
+                planMode,
+                skills,
+              },
+              command,
+            ) =>
+              createWorkspaceSession(
+                {
+                  agentId,
+                  workspaceId,
+                  cwdRelative,
+                  approvalMode,
+                  planMode,
+                  skills,
+                },
+                command,
+              ),
+            createSession: createWorkspaceSession,
           },
         }
       : {}),
@@ -288,7 +616,7 @@ export function createJavaManagedAgentProvider(
           // environmentId scopes the storageKey only: the standalone Java
           // server 400s any non-blank value with unsupported_feature.
           title: titleFor(request.text),
-          input: [{ type: 'input_text', text: request.text }],
+          input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
         command.signal,
@@ -304,7 +632,7 @@ export function createJavaManagedAgentProvider(
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           sessionId,
-          input: [{ type: 'input_text', text: request.text }],
+          input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
         command.signal,
@@ -369,8 +697,29 @@ function toSessionSummary(
     Boolean(session.workspace) && session.capabilities?.workspaceTurns === true;
   const errorCode =
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
+  const observation = modelContext(session.modelContext);
+  const selectedModel = modelSelection(session.modelSelection);
   return {
     sessionId: session.sessionId,
+    agentId: session.agentId,
+    ...(typeof session.planMode === 'boolean'
+      ? { planMode: session.planMode }
+      : {}),
+    ...(typeof session.planModeSupported === 'boolean'
+      ? { planModeSupported: session.planModeSupported }
+      : {}),
+    ...(isManagedApprovalMode(session.approvalMode)
+      ? { approvalMode: session.approvalMode }
+      : {}),
+    ...(isManagedApprovalMode(session.initialApprovalMode)
+      ? { initialApprovalMode: session.initialApprovalMode }
+      : {}),
+    ...(Number.isSafeInteger(session.approvalRevision) &&
+    Number(session.approvalRevision) >= 0
+      ? { approvalRevision: session.approvalRevision }
+      : {}),
+    ...(observation ? { modelContext: observation } : {}),
+    ...(selectedModel ? { modelSelection: selectedModel } : {}),
     activeTurnId: session.activeTurn?.turnId,
     title: session.title || session.sessionId,
     workspace: session.workspace,
@@ -383,18 +732,89 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.rename === true ? { canRename: true } : {}),
+      ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
-        sessionActive && !active && (!session.workspace || workspaceTurns),
+        sessionActive &&
+        !active &&
+        (!session.workspace ||
+          (workspaceTurns && session.capabilities?.foregroundShell !== false)),
       // The creator may cancel a running bound Turn after the Workspace stops
       // admitting new work, so cancel is not tied to workspaceTurns; the
       // server refuses anyone else.
       canCancel: sessionActive && active && turnStatus !== 'cancelling',
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
+      ...(session.capabilities?.modelChange === true
+        ? { modelChange: true }
+        : {}),
+      ...(session.capabilities?.approvalModeChange === true
+        ? { approvalModeChange: true }
+        : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
+      ...(session.capabilities?.inputAttachments === true
+        ? { inputAttachments: true }
+        : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
+  };
+}
+
+function modelId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    Boolean(value.trim()) &&
+    new TextEncoder().encode(value).length <= 512 &&
+    !Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || (code >= 127 && code <= 159);
+    })
+  );
+}
+
+function modelSelection(value: unknown): ManagedModelSelection | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const data = value as Record<string, unknown>;
+  if (
+    !Number.isSafeInteger(data['revision']) ||
+    Number(data['revision']) < 0 ||
+    (data['modelId'] !== undefined && !modelId(data['modelId'])) ||
+    (Number(data['revision']) > 0 && data['modelId'] === undefined)
+  )
+    return undefined;
+  return {
+    revision: Number(data['revision']),
+    ...(modelId(data['modelId']) ? { modelId: data['modelId'] } : {}),
+  };
+}
+
+function modelContext(value: unknown): ManagedModelContext | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const data = value as Record<string, unknown>;
+  if (
+    typeof data['modelId'] !== 'string' ||
+    !data['modelId'].trim() ||
+    typeof data['observedAt'] !== 'number' ||
+    !Number.isSafeInteger(data['observedAt']) ||
+    data['observedAt'] < 0
+  )
+    return undefined;
+  const inputTokens = data['inputTokens'];
+  const contextWindowSize = data['contextWindowSize'];
+  return {
+    modelId: data['modelId'],
+    observedAt: data['observedAt'],
+    ...(typeof inputTokens === 'number' &&
+    Number.isSafeInteger(inputTokens) &&
+    inputTokens >= 0
+      ? { inputTokens }
+      : {}),
+    ...(typeof contextWindowSize === 'number' &&
+    Number.isSafeInteger(contextWindowSize) &&
+    contextWindowSize > 0
+      ? { contextWindowSize }
+      : {}),
   };
 }
 
@@ -463,8 +883,34 @@ function toPhase(
 }
 
 function titleFor(text: string): string {
-  const title = text.trim().replace(/\s+/g, ' ');
-  return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
+  // The server refuses C0 control characters and DEL in a title; pasted
+  // terminal output carries ANSI escapes verbatim, so fold them to spaces
+  // beside the whitespace collapse instead of failing the Session create.
+  const title = text
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+  // Slice by code point: a code-unit cut can leave a lone high surrogate, which
+  // no store column keeps, so the server would persist it as '?'.
+  const units = Array.from(title);
+  return units.length <= 80 ? title : `${units.slice(0, 77).join('')}...`;
+}
+
+function requireTaskCancelOperation(
+  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
+  sessionId: string,
+  taskId: string,
+): ManagedTaskCancelOperation {
+  if (
+    operation.type !== 'task_cancel' ||
+    operation.sessionId !== sessionId ||
+    operation.taskId !== taskId ||
+    !operation.operationId ||
+    operation.status === 'cancelled'
+  )
+    throw new Error('Task cancel operation identity mismatch');
+  return operation as ManagedTaskCancelOperation;
 }
 
 function storageKey(options: JavaManagedAgentProviderOptions): string {

@@ -43,6 +43,7 @@ import {
   reviewSourceRoots,
   reviewSourcesDigest,
 } from '../../packages/cli/src/commands/review/lib/stale-bundle.js';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
 
@@ -228,11 +229,12 @@ describe('the build stamp and the staleness check agree', () => {
     }
   });
 
-  // chmod is the only lever this case has: on Windows it is a no-op, and a
-  // root user reads through it, so the branch under test is unreachable
-  // there. The case skips rather than measuring a readable tree and failing
-  // red against the throw-and-nothing-measured assertions.
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  // chmod is the only lever this case has: on Windows it is a no-op, and
+  // root with its DAC capabilities reads through it, so the branch under
+  // test is unreachable there. The case skips rather than measuring a
+  // readable tree and failing red against the throw-and-nothing-measured
+  // assertions.
+  it.skipIf(!arePermissionBitsEnforced())(
     'neither side measures a tree whose subdirectory cannot be listed',
     () => {
       // The unreadable-DIRECTORY case, on both sides of the boundary at once:

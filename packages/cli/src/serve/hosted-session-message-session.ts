@@ -38,6 +38,13 @@ import {
   type HostedChildAgentStore,
 } from './hosted-child-agent-session.js';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
+import {
+  hasPlanModeBlock,
+  HostedChildChains,
+  hostedFirstInputText,
+  hostedOpenTeamChainMember,
+  MEMBER_MESSAGE_ID_PREFIX,
+} from './hosted-member-chain.js';
 
 // H4d-b of #12827: the hosted side of durable session messages between a
 // parent Session and its child Sessions. A sender commits its outbox entry;
@@ -87,6 +94,8 @@ export function sessionMessageNotificationText(params: {
   readonly messageId: string;
   /** The child task the message came from, or none for the parent. */
   readonly fromTaskId: string | null;
+  /** H4e-b2 decision 6: the member name of a child of the open team. */
+  readonly teammate?: string;
   readonly text: string;
 }): string {
   const head = [
@@ -95,9 +104,76 @@ export function sessionMessageNotificationText(params: {
     params.fromTaskId === null
       ? '<from>parent</from>'
       : `<from>child agent ${escapeXml(params.fromTaskId)}</from>`,
+    ...(params.teammate === undefined
+      ? []
+      : [`<teammate>${escapeXml(params.teammate)}</teammate>`]),
     params.fromTaskId === null
       ? '<reply>To answer, use send_message with to "parent".</reply>'
       : `<reply>To answer, use send_message with task_id "${escapeXml(params.fromTaskId)}".</reply>`,
+    '<content>',
+  ].join('\n');
+  return boundedNotificationText(
+    head,
+    '</content>\n</session-message>',
+    params.text,
+    TRUNCATION_MARKER,
+  );
+}
+
+/**
+ * B3c decision 8: the content the lead commits for one member message
+ * under its `msgc_` id. The header line is fixed and the name is the
+ * lead's word (its roster), never the sending member's.
+ */
+export function memberMessageContent(from: string, text: string): string {
+  return `<member-message from="${from}">\n${text}\n</member-message>`;
+}
+
+/** The fixed header/footer slice of the member-message content above. */
+const MEMBER_MESSAGE_HEAD =
+  /^<member-message from="([a-z0-9]+(?:-[a-z0-9]+)*)">\n/;
+const MEMBER_MESSAGE_FOOT = '\n</member-message>';
+
+/**
+ * The sender and text of a member message's content, read on the
+ * recipient's side: the name comes from the header anchored at the
+ * content's start and is limited to the member-name characters. A body
+ * without that shape is not a member message — only the lead mints
+ * `msgc_` ids, so anything else under one is a fault to fall back on.
+ */
+export function parseMemberMessageContent(
+  content: string,
+): { readonly from: string; readonly text: string } | undefined {
+  const head = MEMBER_MESSAGE_HEAD.exec(content);
+  if (head === null) return undefined;
+  const rest = content.slice(head[0].length);
+  if (!rest.endsWith(MEMBER_MESSAGE_FOOT)) return undefined;
+  return {
+    from: head[1]!,
+    text: rest.slice(0, rest.length - MEMBER_MESSAGE_FOOT.length),
+  };
+}
+
+/**
+ * B3c decision 8: what a member message's recipient reads — who wrote,
+ * how to answer (naming the sender, or `"parent"` while the run is in
+ * plan mode), with the header and footer stripped. The wrapper also says
+ * the answer to the leader's last instruction still follows in full.
+ */
+export function memberMessageNotificationText(params: {
+  readonly messageId: string;
+  readonly member: string;
+  readonly text: string;
+  readonly planMode: boolean;
+}): string {
+  const member = escapeXml(params.member);
+  const head = [
+    '<session-message>',
+    `<message-id>${escapeXml(params.messageId)}</message-id>`,
+    `<from>member ${member}</from>`,
+    params.planMode
+      ? `<reply>To answer ${member} while your run is in plan mode, use send_message with to "parent"; then answer the leader's last instruction in full.</reply>`
+      : `<reply>To answer ${member}, use send_message with to "${member}"; then answer the leader's last instruction in full.</reply>`,
     '<content>',
   ].join('\n');
   return boundedNotificationText(
@@ -302,6 +378,7 @@ export class HostedSessionMessageSession {
     readonly contentDigest: string;
   }): Promise<string> {
     return this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const contentDigest = createHash('sha256')
         .update(params.content)
         .digest('hex');
@@ -311,6 +388,7 @@ export class HostedSessionMessageSession {
         );
       }
       let fromTaskId: string | null = null;
+      let teammate: string | undefined;
       if (params.route === 'to_parent') {
         const run = this.store.authority.extensionRecord(
           'child_run',
@@ -328,6 +406,17 @@ export class HostedSessionMessageSession {
           );
         }
         fromTaskId = this.children.taskIdOf(params.childRunId);
+        // H4e-b2 decision 6: a member's message names it while its chain
+        // root is on the open team's roster. The reply hint stays H4d-b's
+        // task id: a later team may reuse both names, and the task id
+        // always reaches the chain that wrote.
+        teammate = hostedOpenTeamChainMember(
+          this.store.authority.extensionRecordsInDomain('team_state'),
+          new HostedChildChains(
+            this.store.authority.extensionRecordsInDomain('child_run'),
+          ),
+          params.childRunId,
+        )?.name;
       } else if (
         this.lineage?.parentSessionId !== params.senderSessionId ||
         this.lineage.parentChildRunId !== params.childRunId
@@ -364,22 +453,37 @@ export class HostedSessionMessageSession {
         contentRef,
       });
       const inputId = sessionMessageInputId(params.messageId);
+      // b3c: a member message (its msgc_ id) renders who wrote it, never
+      // the leader it traveled through (decision 8); a malformed header
+      // falls back to the leader's form, which only the lead could commit.
+      const memberMessage = params.messageId.startsWith(
+        MEMBER_MESSAGE_ID_PREFIX,
+      )
+        ? parseMemberMessageContent(params.content.toString('utf8'))
+        : undefined;
+      const notificationText =
+        memberMessage === undefined ||
+        // The name rides the to_parent render; member messages are to_child.
+        params.route === 'to_parent'
+          ? sessionMessageNotificationText({
+              messageId: params.messageId,
+              fromTaskId,
+              ...(teammate === undefined ? {} : { teammate }),
+              text: params.content.toString('utf8'),
+            })
+          : memberMessageNotificationText({
+              messageId: params.messageId,
+              member: memberMessage.from,
+              text: memberMessage.text,
+              planMode: await this.inPlanMode(),
+            });
       const input: ManagedSessionInputRequest = {
         inputId,
         turnId: inputId,
         source: SESSION_MESSAGE_INPUT_SOURCE,
         contentRef: await this.store.resources.publish(
           'managed-input',
-          Buffer.from(
-            JSON.stringify({
-              text: sessionMessageNotificationText({
-                messageId: params.messageId,
-                fromTaskId,
-                text: params.content.toString('utf8'),
-              }),
-            }),
-            'utf8',
-          ),
+          Buffer.from(JSON.stringify({ text: notificationText }), 'utf8'),
         ),
         deadline: null,
         admissionRef: await this.store.resources.publish(
@@ -399,6 +503,21 @@ export class HostedSessionMessageSession {
   }
 
   /**
+   * b3c decision 9: whether this Session's run is in plan mode — its
+   * first input carries an unescaped plan-mode block. One shared reader
+   * (R1-10) carries the read; an unreadable body still fails closed:
+   * the reply hint that always works is "parent".
+   */
+  private async inPlanMode(): Promise<boolean> {
+    try {
+      const text = await hostedFirstInputText(this.store);
+      return text !== undefined && hasPlanModeBlock(text);
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * The relay's reconciliation of a receipt that stays accepted: consumed
    * once the turn that read it settled completed (the commit after that
    * turn may have been lost), not yet while it has not settled, and never
@@ -406,6 +525,7 @@ export class HostedSessionMessageSession {
    * Harness no longer holds, so its wake pump reads a waiting message.
    */
   async consume(messageId: string): Promise<void> {
+    await this.store.authority.settlePendingAppend();
     const receipt = this.message(messageId);
     if (receipt === undefined || receipt.direction !== 'inbound') {
       throw new ManagedSessionRecordError(

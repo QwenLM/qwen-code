@@ -180,6 +180,7 @@ async function fixture() {
     calls,
     root,
     assets,
+    rows,
     interrupt: () => {
       failComplete = true;
     },
@@ -187,6 +188,84 @@ async function fixture() {
 }
 
 describe('workspace recovery private worker', () => {
+  it('captures and verifies a collected tombstone while preserving its retired authority', async () => {
+    const f = await fixture();
+    const original = f.rows[0].source;
+    const retiredHead = {
+      tenantId: original.binding.tenantId,
+      workspaceId: 'private-key',
+      sessionId: original.sessionId,
+      state: 'DELETED',
+      storageVersion: 1,
+      writerId: null,
+      writerGeneration: 9,
+      writerLeaseUntil: null,
+      journalRevision: 7,
+      committedSequence: 12,
+      lastCommitDigest: 'a'.repeat(64),
+      activationEpoch: 4,
+      latestCheckpointResourceId: null,
+      compactedThroughRevision: 7,
+      recoveryStatus: 'READY',
+      recoveryDetailCode: null,
+    };
+    const source: RecoverySessionSource = {
+      ...original,
+      head: null,
+      retiredHead,
+      publicSession: {
+        ...original.publicSession,
+        status: 'DELETED',
+        deletedAt: 1,
+      },
+      retirement: {
+        tenantId: original.binding.tenantId,
+        sessionId: original.sessionId,
+        operationId: 'delete',
+        generation: 1,
+        retiredAt: 2,
+        recoveryProtected: false,
+      },
+    };
+    const sourceJson = JSON.stringify(source);
+    Object.assign(f.rows[0], {
+      source,
+      sourceJson,
+      sourceDigest: recoveryDigest(sourceJson),
+    });
+    f.context.sourceDigest = recoveryDigest(
+      f.rows.map((row) => `${row.sourceJson}\n`).join(''),
+    );
+    const captured = (await runRecoveryWorker(f.rpc)) as {
+      manifestDigest: string;
+    };
+    const lines = await readFile(
+      join(f.context.request.bundleRoot, '.w1-recovery/sessions.ndjson'),
+      'utf8',
+    );
+    const saved = JSON.parse(lines.split('\n')[0]) as RecoverySessionSource;
+    expect(saved.retiredHead).toEqual(retiredHead);
+    expect(saved.head).toBeNull();
+    f.context.capture = {
+      operationId: f.context.request.operationId,
+      manifestDigest: captured.manifestDigest,
+    };
+    f.context.request.operationId = '00000000-0000-4000-8000-000000000003';
+    f.context.mode = 'verify';
+    await rm(f.context.request.sourceRoot, { recursive: true });
+    const verified = (await runRecoveryWorker(f.rpc)) as {
+      result: Record<string, unknown>;
+    };
+    expect(verified.result).toMatchObject({
+      contentVerified: true,
+      activation: false,
+    });
+    expect(f.calls).not.toContain('transaction');
+    expect(f.calls).not.toContain('resource');
+    expect(source.retiredHead).toEqual(retiredHead);
+    expect(source.publicSession.status).toBe('DELETED');
+  });
+
   it.each(['canonical', 'trailing-slash', 'doubled-slash'])(
     'accepts %s QWEN_HOME at the migration environment gate',
     async (kind) => {
