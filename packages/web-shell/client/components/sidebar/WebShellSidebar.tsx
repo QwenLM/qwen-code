@@ -126,7 +126,7 @@ import {
 } from './sessionSearch';
 import { useSessionContentSearch } from './useSessionContentSearch';
 import { useLivePresence } from '../../live/live-presence';
-import { SessionPrBadge } from '../SessionPrBadge';
+import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -4685,6 +4685,11 @@ export function WebShellSidebar({
         </span>
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
+      // The badge is a click target of its own right before the meta slot, so
+      // its row keeps the slot at the hover actions' width instead of growing
+      // it on hover — growing slid `#N` left and put Pin where it had been.
+      const reserveActionsWidth =
+        openableSessionPrs(session.prs ?? []).length > 0;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
@@ -4767,11 +4772,16 @@ export function WebShellSidebar({
             )}
             {prBadge}
             <div
-              className={styles.sessionMetaSlot}
+              className={cx(
+                styles.sessionMetaSlot,
+                reserveActionsWidth && styles.sessionMetaSlotReserved,
+              )}
               style={
-                hasArchivedActions
-                  ? ({ '--session-actions-width': '26px' } as CSSProperties)
-                  : undefined
+                {
+                  '--session-actions-width': hasArchivedActions
+                    ? '26px'
+                    : '0px',
+                } as CSSProperties
               }
             >
               {scheduledTaskMarker}
@@ -5047,13 +5057,16 @@ export function WebShellSidebar({
               </span>
               {prBadge}
               <div
-                className={styles.sessionMetaSlot}
+                className={cx(
+                  styles.sessionMetaSlot,
+                  reserveActionsWidth && styles.sessionMetaSlotReserved,
+                )}
+                // Always set, so a row without actions does not grow to the
+                // stylesheet's fallback width on hover.
                 style={
-                  sessionActionCount > 0
-                    ? ({
-                        '--session-actions-width': `${sessionActionCount * 26}px`,
-                      } as CSSProperties)
-                    : undefined
+                  {
+                    '--session-actions-width': `${sessionActionCount * 26}px`,
+                  } as CSSProperties
                 }
               >
                 {scheduledTaskMarker}
