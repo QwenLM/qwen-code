@@ -1486,13 +1486,23 @@ class HostedAutomationFaultGatesIT {
                 .path("data").path(0);
         assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
         String taskId = task.path("id").asText();
-        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel", null,
-                "fg11d-cancel-retry", 202);
+        JsonNode first = request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel",
+                null, "fg11d-cancel-retry", 202);
         waiting().atMost(Duration.ofSeconds(120)).untilAsserted(() -> assertThat(runState(run))
                 .as("the run is cancelled").isEqualTo("cancelled"));
-        // The retry reuses the committed cancel instead of acting twice.
-        request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel", null,
-                "fg11d-cancel-retry", 202);
+        // The retry reuses the committed cancel instead of acting twice, and the
+        // answer has to say so: same operation, the task it names, and the
+        // replay flag. Without them "reuses its operation" would rest on the run
+        // state alone, which a second operation could also have produced.
+        JsonNode second = request("POST", "/v1/agents/sessions/" + session + "/tasks/" + taskId + "/cancel",
+                null, "fg11d-cancel-retry", 202);
+        assertThat(first.path("id").asText()).as("the first cancel commits an operation").isNotEmpty();
+        assertThat(second.path("id").asText()).as("the retry answers the same operation")
+                .isEqualTo(first.path("id").asText());
+        assertThat(second.path("task_id").asText()).as("the operation names the cancelled task")
+                .isEqualTo(taskId);
+        assertThat(first.path("replayed").asBoolean()).as("the first cancel is not a replay").isFalse();
+        assertThat(second.path("replayed").asBoolean()).as("the retry is answered as a replay").isTrue();
         assertThat(runState(run)).as("the retry changes nothing").isEqualTo("cancelled");
         assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
                 + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-cancel-retry-run"))
