@@ -364,11 +364,30 @@ class HostedMcpStoreFaultGatesIT {
         String releaseId = configurationId + ":release";
         CloseRef close = prepareClose(session);
         storeFault().arm(StoreFaultGate.Phase.RELEASING, configurationId);
-        HttpResponse<String> refused = rawLifecycle(session, close.operationId(),
-                close.claimGeneration(), "settle_resources");
+        // A settle can be refused before it reaches the releasing commit,
+        // as the released gate observes, so drive the idempotent phase
+        // until the armed fault fires instead of waiting on one request.
+        // The budget leaves room for the kill/reload/settle tail inside
+        // @Timeout(600).
+        long deadline = System.nanoTime() + Duration.ofSeconds(90).toNanos();
+        List<Integer> answers = new ArrayList<>();
+        HttpResponse<String> refused = null;
+        while (storeFault().attempts() == 0
+                && System.nanoTime() < deadline) {
+            refused = rawLifecycle(session, close.operationId(),
+                    close.claimGeneration(), "settle_resources",
+                    Duration.ofSeconds(120));
+            answers.add(refused.statusCode());
+            if (storeFault().attempts() == 0) {
+                Thread.sleep(1_000);
+            }
+        }
+        assertThat(refused).isNotNull();
+        assertThat(storeFault().attempts())
+                .as("the store wrapper fired; settle answers: %s", answers)
+                .isPositive();
         assertThat(refused.statusCode()).as("releasing refusal: %s",
                 refused.body()).isEqualTo(503);
-        waitForRejection();
         assertThat(configuration(session.id()).path("releaseState").asText())
                 .as("the rejected releasing commit leaves the record active")
                 .isEqualTo("active");
@@ -861,9 +880,16 @@ class HostedMcpStoreFaultGatesIT {
     private HttpResponse<String> rawLifecycle(SessionRef session,
             String operationId, long claimGeneration, String phase)
             throws Exception {
+        return rawLifecycle(session, operationId, claimGeneration, phase,
+                Duration.ofSeconds(30));
+    }
+
+    private HttpResponse<String> rawLifecycle(SessionRef session,
+            String operationId, long claimGeneration, String phase,
+            Duration timeout) throws Exception {
         return rawRequest("POST", "/session/" + session.id() + "/lifecycle",
                 json.writeValueAsString(lifecycleBody(session, operationId,
-                        claimGeneration, phase)), session.clientId());
+                        claimGeneration, phase)), session.clientId(), timeout);
     }
 
     private String uuid() {
@@ -1263,13 +1289,33 @@ class HostedMcpStoreFaultGatesIT {
             assertThat(harness.isAlive())
                     .as("Harness log: %s", temporary.resolve("harness.log"))
                     .isTrue();
-            JsonNode capabilities = json.readTree(http.send(
-                    HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
-                            + harnessPort + "/capabilities"))
-                            .timeout(Duration.ofSeconds(2))
-                            .header("Authorization", "Bearer " + TOKEN)
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString()).body());
+            HttpResponse<String> answer;
+            try {
+                answer = http.send(
+                        HttpRequest.newBuilder(URI.create("http://127.0.0.1:"
+                                + harnessPort + "/capabilities"))
+                                .timeout(Duration.ofSeconds(2))
+                                .header("Authorization", "Bearer " + TOKEN)
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+            } catch (IOException notReady) {
+                // AssertionError is what the boot wait retries.
+                throw new AssertionError("capabilities: " + notReady,
+                        notReady);
+            }
+            assertThat(answer.statusCode())
+                    .as("capabilities: %s", answer.body())
+                    .isEqualTo(200);
+            JsonNode capabilities;
+            try {
+                capabilities = json.readTree(answer.body());
+            } catch (IOException notJsonYet) {
+                throw new AssertionError("capabilities: " + answer.body(),
+                        notJsonYet);
+            }
+            assertThat(capabilities)
+                    .as("capabilities: %s", answer.body())
+                    .isNotNull();
             bootId = capabilities.at("/hostedHarness/bootId").asText();
             assertThat(bootId).isNotBlank();
         });

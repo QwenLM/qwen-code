@@ -140,7 +140,7 @@ class SessionRowLockOrderTest {
             "ManagedRuntimeRetentionGuard.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
             "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
-            "ResidentWorkspaces.java",
+            "ResidentWorkspaceRetirementStore.java", "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
             "WakeRecoveryStore.java",
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
@@ -215,6 +215,13 @@ class SessionRowLockOrderTest {
                                     "Source.sessionKey/0")),
                     Map.entry("ManagedWorkspaceRegistry.java",
                             Set.of("ManagedWorkspaceRegistry.findReadable/3")),
+                    // Builder/API receiver calls share local names; retirement
+                    // has no Turn access and unavailable is a pure refusal.
+                    Map.entry("ResidentWorkspaceRetirementMain.java",
+                            Set.of("ResidentWorkspaceRetirementMain.run/1")),
+                    Map.entry("ResidentWorkspaceRetirementStore.java",
+                            Set.of("ResidentWorkspaceRetirementStore.deletePod/3",
+                                    "ResidentWorkspaceRetirementStore.unavailable/0")),
                     Map.entry("SessionMessageRelayStore.java",
                             Set.of("SessionMessageRelayStore.pending/2")),
                     Map.entry("SessionResourceCollectionCollector.java",
@@ -462,7 +469,7 @@ class SessionRowLockOrderTest {
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
-                        "requireTurnForUpdate", "requireIdlePolicyChange", "retractContinuationOutput",
+                        "requireTurnForUpdate", "requirePolicyChange", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "settleTurnCommands",
                         // D7-2's journal evidence for a parked input reads

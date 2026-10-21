@@ -9334,6 +9334,16 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
 
+      vi.mocked(settingsRuntime.reloadEnvironment).mockClear();
+      await workspace!.reloadModelProviders({
+        route: 'POST /workspaces/:workspace/models/reload',
+        workspaceCwd: tmpDir,
+      });
+      expect.soft(settingsRuntime.reloadEnvironment).not.toHaveBeenCalled();
+      expect.soft(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
+      expect.soft(process.env['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
+      expect.soft(process.env['QWEN_TEST_REMOVED_FROM_DOTENV']).toBe('stale');
+
       await workspace!.reload({
         route: 'POST /workspace/reload',
         workspaceCwd: tmpDir,
@@ -9562,11 +9572,11 @@ describe('runQwenServe runtime startup failures', () => {
 
       failReloadRead = true;
       await expect(
-        workspace!.reloadModelProviders({
-          route: 'POST /workspace/auth/provider',
+        workspace!.reload({
+          route: 'POST /workspace/reload',
           workspaceCwd: tmpDir,
         }),
-      ).resolves.toEqual({ status: 'failed' });
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
       expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(reloadEnvironment).toHaveBeenLastCalledWith(
         expect.any(Object),
@@ -22071,6 +22081,8 @@ describe('runQwenServe startup observability', () => {
       expect(stderrWrites.join('')).toMatch(
         /qwen serve: startup timing: processToListenMs=\d+ runQwenServeToListenMs=\d+/,
       );
+      expect(stderrWrites.join('')).toMatch(/qwen daemon status\b/);
+      expect(stderrWrites.join('')).not.toMatch(/qwen daemon status --port/);
       expect(stderrWrites.join('')).not.toContain(
         'qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth.',
       );

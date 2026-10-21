@@ -239,9 +239,9 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
- 'non_blocking_prompt', 'session_language', 'user_language_sync', 'session_rewind',
+ 'non_blocking_prompt', 'session_language', 'user_language_sync', 'session_message_deletion', 'session_rewind',
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
- 'session_branch', 'rate_limit', 'workspace_reload', 'channel_delivery',
+ 'session_branch', 'rate_limit', 'workspace_reload', 'workspace_model_reload', 'channel_delivery',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
  'multi_workspace_session_shell', 'persistent_workspace_registration',
  'workspace_display_name', 'workspace_runtime_removal', 'workspace_runtime',
@@ -254,7 +254,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
-> Conditional tags appear only when their matching deployment toggle is on (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
+> Conditional tags appear only when their deployment or runtime availability condition is met (see the table below). F3's `permission_mediation` tag is always-on and carries `modes: ['first-responder', 'designated', 'consensus', 'local-only']` so SDK clients can introspect the build-supported set; the runtime-active strategy is at `body.policy.permission`.
 
 `session_startup_config` advertises optional `startupConfig: { modelServiceId, reasoningEffort? }` on ordinary and standalone creation. Always preflight this tag: older ordinary-create routes may silently ignore the object. `modelServiceId` is required (1–256 characters); `reasoningEffort` accepts `none`, `default`, `low`, `medium`, `high`, `xhigh`, or `max` when supported by the selected model. Omission applies only the model, without a reasoning setter or implicit `default`. The object cannot be combined with the legacy top-level `modelServiceId` or explicit single scope and implies a new thread. Startup never saves shared defaults; later session behavior is unchanged.
 
@@ -601,6 +601,7 @@ operator diagnostic snapshot documented below.
 | Tag                                      | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `agent_collaboration_v1`                 | at least one registered workspace opted into persistent workspace Agent collaboration via `experimental.agentCollaboration` (any scope, workspace included) or `QWEN_CODE_ENABLE_AGENT_COLLABORATION=1`. Present means `/workspaces/:workspace/agent/*` and the Agent Host transport routes are mounted; `workspaces[].agentCollaborationEnabled` identifies each workspace's opt-in state, and clients must only show or call the collaboration surface for enabled entries. Older daemons omit that workspace field, so clients may fall back to this top-level tag for compatibility. Absent means collaboration is not served on this response — the tag is recomputed per request, not snapshotted at boot — so a client must drop the entry point rather than render it and let the calls 404. First enabling it requires a restart; toggling it for a workspace while another already has it on takes effect on the next request. Distinct from the unconditional `workspace_agents` tag, which is subagent-definition CRUD.                            |
+| `session_message_deletion`               | the private Hosted Harness profile is not active. Lists and deletes message groups through live-session-owner routes; ordinary local daemon sessions support physical deletion, while Managed authoritative storage and SSH workspaces reject it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `hosted_harness_private_v1`              | the private Hosted Harness profile is active; only its authenticated session API is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `managed_session_journal_delta_v1`       | the private Hosted Harness profile is active (same condition as `hosted_harness_private_v1`) and this build can open Managed Session journals containing `message.delta` records. A control plane requires the tag at capability negotiation, so a rolled-back Harness predating those records is refused once there instead of failing every Session open (`managed_session_open_failed`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `require_auth`                           | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every normal API route, including `/health` on loopback binds; channel webhook ingress keeps its independent shared-secret authentication, and Web Shell document and asset routes remain pre-auth.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -2490,6 +2491,43 @@ top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
 
+### `GET /session/:id/tasks/:taskId/runtime`
+
+On-demand detail for one shell task. `GET /session/:id/tasks` carries lifecycle
+facts only; this route reads the captured output file and probes the process
+tree, so an open detail panel asks for it separately.
+
+The ACP method is `_qwen/session/task_runtime`, with `sessionId` and `taskId`
+parameters. Both transports resolve the live session owner; ACP also requires
+the connection to own the session.
+
+The path's `taskId` is resolved against the session's own shell registry;
+callers never pass a file path.
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "taskId": "bg_0123abcd",
+  "runtime": {
+    "memoryBytes": 104857600,
+    "outputBytes": 65536,
+    "outputModifiedAt": 1700000000000,
+    "outputTail": "ready in 120ms\n",
+    "outputTailTruncated": true
+  }
+}
+```
+
+`runtime` is `null` when the task is unknown, has been evicted, or is not a
+shell task. `memoryBytes` is the resident set of the shell's process tree,
+sampled only while the task is running; shared pages are counted once per
+process, and a container sandbox may expose only the wrapper process.
+`outputTail` is capped at the same 8 KiB limit used by the completion
+notification, and `outputTailTruncated` marks a tail that starts mid-file.
+`outputError` is set when the file cannot be read; fields from a part that did
+succeed may still be present.
+
 ### `POST /session/:id/tasks/:taskId/workflow-action`
 
 Controls a workflow run, or starts a new one. The ACP method is
@@ -3013,7 +3051,7 @@ On success the route returns `200` with the replacement session's create-shape r
 
 This route never reads `X-Qwen-Client-Id`, so the replacement spawns unattached — but the success response is not registration-free. A fresh transfer mints an owner-style `clientId` for that spawn, registers it on the replacement, and reports it in the body; an idempotent resume of a committed transfer reports none. The minted id is not an attachment (the replacement's attach count is unchanged, so `killSession` with `requireZeroAttaches` still sees it as unattached), but a live client registration is exactly what holds the daemon's idle cleanup off: detach an id you do not keep using, or the replacement stays live indefinitely — and a replacement that is still live with no marker is the shape a later reset refuses to dismantle. Treat the response as the replacement's identity, and attach it through the normal `POST /session/:id/load` or `/resume` surface when a registered client is required.
 
-The transfer is serialized per checkout against worktree restores and other resets, refuses to run while either session is busy (prompt in flight or a pending interaction), and arms an admission barrier on the superseded session: while it is armed, exactly eight writers are refused with `worktree_reset_active` at admission — `POST /session/:id/prompt`, `/rewind`, `/cd`, `/branch`, `/fork`, `/shell`, `/goal`, and `/tasks/:taskId/workflow-action`. The other seven are fenced because each moves the session cwd or starts work in it without passing prompt admission: a shell command runs in the session's effective cwd, which for a relocated worktree session is the checkout itself; a fork agent runs its tools in that cwd; a rewind restores files relative to it; a cd moves it, including into a subdir of the checkout; a branch mutates the superseded session's persisted history and spawns a derivative session while ownership is in flux; a goal `resume` promotes a queued turn and queues a continuation; and a workflow action runs a saved workflow or a caller-supplied script, or restarts a live run, through the session's own tool registry. `POST /session/:id/continue` is not a ninth gate: it drives an accepted continuation through the fenced prompt admission and is refused there. That list is the whole fence, and the fence is not everything that reaches the child — the release and stop paths stay usable mid-transfer by design (cancelling a task, clearing a goal, detaching a client, killing the session), and the daemon-internal background-notification enqueue — a sub-session's completion acknowledgement to its parent, which no HTTP route calls — is unfenced as well, because it enqueues a notification rather than starting a turn. The transfer's last step severs the superseded session's client registrations, clears its in-memory worktree association, and reports whether the superseded session is actually gone. A survivor — a child that still holds background work, so the idle close the last detach triggers is refused and deferred — is surfaced rather than papered over: the daemon logs it, the barrier stays armed on that entry as the only fence left, and the `200` body carries `supersededSessionLive: true` so the caller knows the superseded id is still live and re-attachable inside the checkout whose ownership just moved. Crash safety is per window, and the write order defines the windows: the old sidecar's `supersededBy` link is written first, then the replacement's sidecar carrying `supersedes`, and the marker flips last. A crash before the flip therefore leaves the old session authoritative in one of three shapes a retry tells apart — no links at all (the replacement is an ordinary orphan and a retry simply starts a fresh transfer), the backward link alone with the replacement's sidecar missing (a retry fails closed with `worktree_reset_invalid_state` and leaves the interrupted state untouched for operator repair), or both links present (a retry rolls the partial transfer back and completes a fresh one — unless the interrupted replacement cannot be removed because a client is still attached to it, in which case the rollback fails closed with `worktree_reset_invalid_state` and keeps both links, so a later retry converges once that client is gone). A crash after the flip leaves the replacement authoritative and a retry resumes as a no-op. The old session is never deleted and the worktree checkout is never removed by reset.
+The transfer is serialized per checkout against worktree restores and other resets, refuses to run while either session is busy (prompt in flight or a pending interaction), and arms an admission barrier on the superseded session: while it is armed, nine writers are refused with `worktree_reset_active` at admission — `POST /session/:id/prompt`, `/rewind`, `/cd`, `/branch`, `/fork`, `/shell`, `/goal`, `/tasks/:taskId/workflow-action`, and `/messages/delete`. The other eight are fenced because each moves the session cwd or starts work in it without passing prompt admission: a shell command runs in the session's effective cwd, which for a relocated worktree session is the checkout itself; a fork agent runs its tools in that cwd; a rewind restores files relative to it; a cd moves it, including into a subdir of the checkout; a branch mutates the superseded session's persisted history and spawns a derivative session while ownership is in flux; a goal `resume` promotes a queued turn and queues a continuation; message deletion rewrites persisted history; and a workflow action runs a saved workflow or a caller-supplied script, or restarts a live run, through the session's own tool registry. `POST /session/:id/continue` is not a tenth gate: it drives an accepted continuation through the fenced prompt admission and is refused there. That list is the whole fence, and the fence is not everything that reaches the child — the release and stop paths stay usable mid-transfer by design (cancelling a task, clearing a goal, detaching a client, killing the session), and the daemon-internal background-notification enqueue — a sub-session's completion acknowledgement to its parent, which no HTTP route calls — is unfenced as well, because it enqueues a notification rather than starting a turn. The transfer's last step severs the superseded session's client registrations, clears its in-memory worktree association, and reports whether the superseded session is actually gone. A survivor — a child that still holds background work, so the idle close the last detach triggers is refused and deferred — is surfaced rather than papered over: the daemon logs it, the barrier stays armed on that entry as the only fence left, and the `200` body carries `supersededSessionLive: true` so the caller knows the superseded id is still live and re-attachable inside the checkout whose ownership just moved. Crash safety is per window, and the write order defines the windows: the old sidecar's `supersededBy` link is written first, then the replacement's sidecar carrying `supersedes`, and the marker flips last. A crash before the flip therefore leaves the old session authoritative in one of three shapes a retry tells apart — no links at all (the replacement is an ordinary orphan and a retry simply starts a fresh transfer), the backward link alone with the replacement's sidecar missing (a retry fails closed with `worktree_reset_invalid_state` and leaves the interrupted state untouched for operator repair), or both links present (a retry rolls the partial transfer back and completes a fresh one — unless the interrupted replacement cannot be removed because a client is still attached to it, in which case the rollback fails closed with `worktree_reset_invalid_state` and keeps both links, so a later retry converges once that client is gone). A crash after the flip leaves the replacement authoritative and a retry resumes as a no-op. The old session is never deleted and the worktree checkout is never removed by reset.
 
 **Errors:**
 
@@ -3650,6 +3688,71 @@ daemon does not reshape it, so the top level carries no `modelId`. Read the
 switch details from `_meta.qwenModelSwitch`.
 
 On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume attempts to restore this session's model before authentication. If the recorded model can no longer be applied (model removed, credentials unavailable), restore uses a same-id registry route when one exists — for a runtime-snapshot record that can be a different endpoint than the recorded binding — and continues on the `settings.model.name` default only when no route resolves. `settings.model.name` is still updated as the default for **new** sessions.
+
+### `GET /session/:id/message-groups`
+
+Capability tag: `session_message_deletion`. Bridge → ACP extMethod `qwen/status/session/message_groups`. This is a live-session-owner read: it resolves the session's owning runtime and never falls back to the primary workspace. The daemon-wide capability does not imply support for every session; SSH workspaces and Managed authoritative storage refuse deletion.
+
+Lists safely attributable prompt/reply or command-display groups in active-history order. It does not acquire a writer lease for an ordinary legacy recorder. The read waits for earlier history mutations; a returned snapshot may become stale as the session changes. Deletion itself requires an idle session.
+
+Response (200):
+
+```json
+{
+  "snapshot": "<opaque selection token>",
+  "groups": [
+    {
+      "id": "<group-id>",
+      "promptId": "<prompt-id>",
+      "recordIds": ["<user-record-id>", "<reply-record-id>"]
+    }
+  ]
+}
+```
+
+`promptId` and `promptIds` are optional prompt identities; `recordIds` identifies the group's saved records. An empty history returns `groups: []`. Treat group IDs and the snapshot as opaque; pass the returned snapshot unchanged when deleting.
+
+Errors include `404` for an unknown session, `400 unsupported_operation` for an SSH workspace, and `422 session_message_deletion_unsupported` for unsupported storage or unavailable recording. Existing writer-integrity errors may also return `409 session_writer_conflict`, `409 session_writer_lost`, `409 session_transcript_changed`, or `503 session_writer_unavailable`.
+
+### `POST /session/:id/messages/delete`
+
+Capability tag: `session_message_deletion`. Bridge → ACP extMethod `qwen/control/session/messages_delete`. Strict mutation gate; live-session-owner scoped with no fallback to the primary workspace. Accepts optional `X-Qwen-Client-Id` for event attribution.
+
+Request:
+
+```json
+{ "snapshot": "<token from message-groups>", "groupIds": ["<group-id>"] }
+```
+
+Both fields are required. `snapshot` must be non-empty; `groupIds` must contain distinct non-empty strings. The selected groups must still exist in that snapshot. The server rejects busy sessions rather than queuing deletion behind a model turn.
+
+Response (200):
+
+```json
+{
+  "deletedGroupIds": ["<group-id>"],
+  "deletedPromptIds": ["<daemon-prompt-id>"]
+}
+```
+
+Selected original records and their owned raw compression context are physically removed from JSONL. Existing summary text, command effects, and project files are preserved. Deleting every group leaves the session available for later prompts.
+
+Errors:
+
+- `400 invalid_message_groups` — malformed, unknown, or duplicate group selection.
+- `400 invalid_client_id` — malformed attribution header.
+- `404` — session unknown.
+- `409 session_busy` — prompt or history mutation active; retry after it finishes.
+- `409 worktree_reset_active` — this session is being superseded by a worktree reset; reattach to the replacement session.
+- `409 message_groups_conflict` — selection snapshot is stale; fetch groups again and require a new selection before retrying.
+- `409 message_history_invalid` — history cannot be safely attributed; changing the selection token alone cannot repair it.
+- `400 unsupported_operation` / `422 session_message_deletion_unsupported` — session/workspace storage does not support this operation; refreshing and repeating the request will not enable it.
+- `409 session_writer_conflict`, `409 session_writer_lost`, `409 session_transcript_changed`, or `503 session_writer_unavailable` — exclusive transcript ownership could not be established or retained.
+- `503 message_deletion_context_unavailable` — deletion **has persisted**, but the live context could not be installed. The JSON body includes `persisted: true`, `deletedGroupIds`, and `deletedPromptIds`. Reconcile the UI from authoritative history and reopen the session before sending another prompt. Do not retry deletion as though nothing was removed; later prompts remain refused until context recovery succeeds.
+
+Subsequent history-dependent mutations and model requests while context recovery is pending return 503 `session_history_context_unavailable` without `persisted` or deletion identities. Loading or resuming the session retries installing authoritative JSONL context; only successful installation reopens model admission. Lifecycle close remains available.
+
+After persistence the session publishes `session_messages_deleted` with data `{sessionId, deletedGroupIds, deletedPromptIds}` and optional `originatorClientId` on the **event envelope**. Internal API-history identities are not published on this wire. This event also occurs for the persisted-503 path. Peers must invalidate cached transcript, navigation, search and selection state and reload authoritative history. The originator must reconcile both successful HTTP responses and `persisted: true` errors; it must not rely on processing its own SSE echo.
 
 ### `POST /session/:id/recap`
 
@@ -4344,6 +4447,10 @@ Staging is bounded at 128 MiB and 32 active uploads across all runtimes in a pro
 The TypeScript SDK automatically uses this protocol for attachments larger than 512 KiB when advertised, with two concurrent files per client and sequential chunks. It uses authenticated REST even with ACP transports, caches valid discovery for 60 seconds, and retains the existing raw endpoint for smaller files and older daemons. Append/completion retry at most twice after network errors, request timeouts or 502/503/504; rate-limit retries honor `Retry-After` within a five-minute operation deadline. Ambiguous creation and capacity failures are not retried. Failed uploads get one independent two-second cleanup attempt. `DaemonAttachmentUploadError` preserves the cause and `httpStatus`; its `status` omits upload-internal 404 so consumers do not mistake it for unsupported legacy attachment routing.
 
 See the [complete design](../design/session-attachment-chunk-upload.md) for lifecycle and compatibility details.
+
+### Model catalog reload
+
+The `workspace_model_reload` capability advertises `POST /workspaces/:workspace/models/reload`. This authenticated, trusted, selected-runtime mutation re-reads user- and workspace-scope settings, refreshes the selected runtime environment overlay, and re-applies the environment in its ACP child before rebuilding model-provider configuration. Environment changes support provider credentials and can include other environment keys; they are not reported in the response or a settings event. The daemon process environment and workflow enablement remain unchanged. It returns `{ "status": "applied" | "deferred" | "failed" }`; `deferred` means no live ACP child applied the catalog. It does not fetch a platform catalog, write settings, switch the active conversation model, or broadcast a settings event. Read an existing session's `/session/:id/context` afterward for its current selectable models; before session creation, read the selected workspace's providers. Unknown, untrusted, draining, or closed runtimes do not fall back to primary.
 
 ## Streaming wire format
 

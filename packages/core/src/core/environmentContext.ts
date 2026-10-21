@@ -7,6 +7,7 @@
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
 import type {
   DeferredToolSummary,
   ToolRegistry,
@@ -25,6 +26,33 @@ const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
 const MAX_DEFERRED_TOOL_DESC_LEN = 160;
+const COMPRESSED_PREFIX_LENGTH = Symbol('compressedPrefixLength');
+
+type CompressedSummary = Content & {
+  [COMPRESSED_PREFIX_LENGTH]?: number;
+};
+
+export function markCompressedHistory(
+  history: Content[],
+  prefixLength?: number,
+): void {
+  const offset = history[0] && isSystemReminderContent(history[0]) ? 1 : 0;
+  const detected = detectCompressedPrefixLength(history, offset);
+  const length =
+    prefixLength !== undefined &&
+    Number.isInteger(prefixLength) &&
+    prefixLength >= offset + 2 &&
+    prefixLength <= Math.min(history.length, offset + 4)
+      ? prefixLength - offset
+      : detected;
+  if (detected > 0 && Number.isInteger(length) && length >= 2 && length <= 4) {
+    // Freeze before later real input can resemble a restoration block.
+    (history[offset] as CompressedSummary)[COMPRESSED_PREFIX_LENGTH] = Math.min(
+      length,
+      3,
+    );
+  }
+}
 // Character threshold for simplifying the session-start <available_skills>
 // snapshot. The snapshot lives in the stable messages prefix; simplifying a
 // large skill set limits cached-prefix growth. Typical small skill sets render
@@ -683,17 +711,25 @@ function detectCompressedPrefixLength(
   const firstEntry = history[offset];
   if (firstEntry?.role !== 'user') return 0;
   const firstText = firstEntry.parts?.[0]?.text;
-  // Post-compression prefix for rewind indexing only. The startup-context
+  const ackText = history[offset + 1]?.parts?.[0]?.text;
+  // Post-compression prefix for turn indexing and recovery. The startup-context
   // refresh/restore paths need compressed history to look like "no startup
   // prelude" so they don't strip or skip the compressed summary.
   if (
     typeof firstText !== 'string' ||
     !firstText.includes('Resume the prior task') ||
     history[offset + 1]?.role !== 'model' ||
-    history[offset + 1]?.parts?.[0]?.text !==
-      'Got it. Thanks for the additional context!'
+    ackText !== 'Got it. Thanks for the additional context!'
   ) {
     return 0;
+  }
+  const remembered = (firstEntry as CompressedSummary)[
+    COMPRESSED_PREFIX_LENGTH
+  ];
+  if (remembered !== undefined) {
+    return remembered === 3 && isModelFunctionCallEntry(history[offset + 3])
+      ? 4
+      : Math.min(remembered, history.length - offset);
   }
   if (isPostCompactAttachmentEntry(history[offset + 2])) {
     if (isModelFunctionCallEntry(history[offset + 3])) return 4;
@@ -704,20 +740,23 @@ function detectCompressedPrefixLength(
 
 function isPostCompactAttachmentEntry(content: Content | undefined): boolean {
   if (content?.role !== 'user') return false;
+  if (getApiHistoryPromptId(content) !== undefined) return false;
   const parts = content.parts ?? [];
   return parts.some(
     (part) =>
       typeof part.text === 'string' &&
-      (part.text.startsWith('<plan-mode-active>') ||
-        part.text.startsWith('<background-tasks>') ||
-        part.text.startsWith(
-          'The following files were recently accessed before context was compacted.',
+      ((part.text.startsWith('<plan-mode-active>\n') &&
+        part.text.endsWith('\n</plan-mode-active>')) ||
+        (part.text.startsWith('<background-tasks>\n') &&
+          part.text.endsWith('\n</background-tasks>')) ||
+        /^The following files were recently accessed before context was compacted\.[^\n]+\n\n- [^\n]+/.test(
+          part.text,
         ) ||
-        part.text.startsWith(
-          'Recently accessed file (full current content embedded):',
+        /^Recently accessed file \(full current content embedded\):\n\n## [^\n]+\n\n(`{3,})[^\n]*\n[\s\S]*\n\1$/.test(
+          part.text,
         ) ||
-        part.text.startsWith(
-          'Recent visual snapshots preserved from before context was compacted',
+        /^Recent visual snapshots preserved from before context was compacted[^\n]+\n\n- turn /.test(
+          part.text,
         )),
   );
 }

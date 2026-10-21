@@ -76,6 +76,8 @@ class HostedMcpRestartFaultGatesIT {
             "workerKillDuringOperationSettlesOutcomeUnknownOnMySql", "fg12c",
             "stdioKillDuringRequestSettlesOutcomeUnknownOnMySql", "fg12c",
             "harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql",
+            "fg12d",
+            "firstReleaseRefusedBeforeForwardingResumesUnderTheSameId",
             "fg12d");
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
@@ -100,6 +102,9 @@ class HostedMcpRestartFaultGatesIT {
     private volatile String replyHoldKind;
     private volatile String replyHoldTarget;
     private volatile CountDownLatch replyParked;
+    private volatile String refuseNextKind;
+    private final java.util.concurrent.atomic.AtomicBoolean refuseArmed =
+            new java.util.concurrent.atomic.AtomicBoolean();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
     private Path cli;
@@ -668,6 +673,11 @@ class HostedMcpRestartFaultGatesIT {
                 .isTrue();
     }
 
+    private void refuseNextControl(String kind) {
+        refuseNextKind = kind;
+        refuseArmed.set(true);
+    }
+
     private void holdNextControl(String kind) {
         controlHoldKind = kind;
         controlHold = new CountDownLatch(1);
@@ -712,6 +722,85 @@ class HostedMcpRestartFaultGatesIT {
     private Map<String, Object> mcpPin(int revision) {
         return Map.of("serverId", "fixture", "serverRevision", revision,
                 "definitionDigest", DigestUtils.sha256Hex(mcpDigest + revision));
+    }
+
+    @Test
+    @Timeout(600)
+    void firstReleaseRefusedBeforeForwardingResumesUnderTheSameId()
+            throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        JsonNode configuration = configuration(session.id());
+        String configurationId = configuration.path("configurationId")
+                .asText();
+        String releaseId = configurationId + ":release";
+        assertThat(configuration.path("run").path("runtime").isObject())
+                .isTrue();
+        assertThat(configuration.path("releaseState").asText())
+                .isEqualTo("active");
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id ="
+                + " ? AND session_id = ?", PROFILE, tenant, session.id());
+        OperationRecord close = admitClose(session);
+        String closeId = close.operationId();
+        long claimGeneration = close.claimGeneration();
+        driveLifecycle(session, closeId, claimGeneration, "effects");
+        jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING' WHERE"
+                + " tenant_id = ? AND harness_session_id = ? AND"
+                + " operation_id = ?", tenant, session.id(), closeId);
+        driveLifecycle(session, closeId, claimGeneration,
+                "prepare_resources");
+        refuseNextControl("mcp-release");
+        HttpResponse<String> settled = null;
+        for (int attempt = 0; attempt < 60 && settled == null; attempt++) {
+            HttpResponse<String> response = rawLifecycle(session, closeId,
+                    claimGeneration, "settle_resources");
+            if (response.statusCode() == 200) {
+                settled = response;
+                break;
+            }
+            JsonNode refusal = json.readTree(response.body());
+            String code = refusal.path("error").asText(
+                    refusal.path("code").asText());
+            if (response.statusCode() == 409
+                    && "hosted_turn_active".equals(code)) {
+                Thread.sleep(500);
+                continue;
+            }
+            assertThat(response.statusCode())
+                    .as("settle: %s", response.body()).isEqualTo(503);
+            Thread.sleep(500);
+        }
+        assertThat(settled).as("settle must complete").isNotNull();
+        List<ProxyCall> releases = controls("mcp-release");
+        assertThat(releases).hasSize(2);
+        assertThat(releases).allMatch(call ->
+                releaseId.equals(call.operationId()));
+        assertThat(releases.getFirst().status()).isEqualTo(503);
+        assertThat(releases.getLast().status()).isEqualTo(200);
+        List<Map<String, Object>> releaseWire = wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .filter(entry -> {
+                    JsonNode request = (JsonNode) entry.get("request");
+                    return request != null
+                            && "mcp-release".equals(request.at(
+                                    "/operation/kind").asText());
+                })
+                .toList();
+        assertThat(releaseWire).hasSize(2);
+        assertThat(releaseWire.getFirst().get("status")).isEqualTo(503);
+        assertThat(((JsonNode) releaseWire.getFirst().get("answer"))
+                .path("result").isMissingNode()).isTrue();
+        assertThat(releaseWire.getLast().get("status")).isEqualTo(200);
+        assertThat(releaseWire).allMatch(entry -> {
+            JsonNode request = (JsonNode) entry.get("request");
+            return releaseId.equals(request.at(
+                    "/operation/operationId").asText());
+        });
+        assertThat(configuration(session.id()).path("releaseState").asText())
+                .isEqualTo("released");
+        assertThat(controls("mcp-configure")).isEmpty();
+        assertThat(controls("mcp-invoke")).isEmpty();
     }
 
     private void baseline(SessionRef session) throws Exception {
@@ -1263,6 +1352,23 @@ class HostedMcpRestartFaultGatesIT {
         entry.put("seq", wireSequence.incrementAndGet());
         if (parsed != null) {
             entry.put("request", parsed);
+        }
+        if (refuseNextKind != null && refuseNextKind.equals(kind)
+                && refuseArmed.compareAndSet(true, false)) {
+            proxyCalls.set(index, call.complete(503));
+            entry.put("status", 503);
+            entry.put("answer", json.createObjectNode()
+                    .put("error", "injected_refusal"));
+            wire.add(entry);
+            byte[] refusal = json.writeValueAsString(
+                    Map.of("error", "injected_refusal"))
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type",
+                    "application/json");
+            exchange.sendResponseHeaders(503, refusal.length);
+            exchange.getResponseBody().write(refusal);
+            exchange.close();
+            return;
         }
         CountDownLatch hold = controlHold;
         if (hold != null && controlHoldKind != null
