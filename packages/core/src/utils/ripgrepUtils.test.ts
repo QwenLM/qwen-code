@@ -11,6 +11,7 @@ import {
   canUseRipgrep,
   getBuiltinRipgrep,
   resolveRipgrep,
+  resolveRipgrepCommand,
   runRipgrep,
 } from './ripgrepUtils.js';
 import { fileExists } from './fileUtils.js';
@@ -240,6 +241,33 @@ describe('ripgrepUtils', () => {
         mode: 'system',
         command: 'rg',
       });
+    });
+  });
+
+  describe('resolveRipgrepCommand', () => {
+    it('returns the bundled command when it exists and runs', async () => {
+      stubInstall({ builtin: true, system: true });
+
+      await expect(resolveRipgrepCommand()).resolves.toBe(getBuiltinRipgrep());
+    });
+
+    it('falls back to system rg when the bundled binary cannot run (#2676)', async () => {
+      stubInstall({ builtin: true, system: true });
+      // The bundled binary is selected by existence alone; its --version
+      // probe is what health-checks it, so fail that probe only.
+      vi.mocked(execCommand).mockResolvedValueOnce({
+        stdout: 'not ripgrep\n',
+        stderr: '',
+        code: 1,
+      });
+
+      await expect(resolveRipgrepCommand()).resolves.toBe('rg');
+    });
+
+    it('returns null when nothing usable is installed', async () => {
+      stubInstall({ builtin: false, system: false });
+
+      await expect(resolveRipgrepCommand()).resolves.toBeNull();
     });
   });
 

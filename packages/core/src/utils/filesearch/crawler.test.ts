@@ -29,11 +29,11 @@ import {
 } from '../../test-utils/file-system-test-helpers.js';
 import type { Ignore } from './ignore.js';
 import { loadIgnoreRules } from './ignore.js';
-import { resolveRipgrep } from '../ripgrepUtils.js';
+import { resolveRipgrepCommand } from '../ripgrepUtils.js';
 
 // The crawler asks the resolver which ripgrep to spawn; the cases below pin
 // that hand-off, while ripgrepUtils' own suite covers the resolution itself.
-vi.mock('../ripgrepUtils.js', () => ({ resolveRipgrep: vi.fn() }));
+vi.mock('../ripgrepUtils.js', () => ({ resolveRipgrepCommand: vi.fn() }));
 
 async function runExecFile(
   command: string,
@@ -165,10 +165,7 @@ describe('crawler', () => {
   beforeEach(() => {
     // Cases that stub the command runner dispatch on the bare `rg` name; the
     // resolver hand-off has its own cases below.
-    vi.mocked(resolveRipgrep).mockResolvedValue({
-      mode: 'system',
-      command: 'rg',
-    });
+    vi.mocked(resolveRipgrepCommand).mockResolvedValue('rg');
   });
 
   afterEach(async () => {
@@ -832,10 +829,7 @@ describe('crawler', () => {
       tmpDir = await createTmpDir({ 'plain.js': '' });
       const bundled = path.join(tmpDir, 'vendor', 'ripgrep', 'rg');
       const commands: string[] = [];
-      vi.mocked(resolveRipgrep).mockResolvedValue({
-        mode: 'builtin',
-        command: bundled,
-      });
+      vi.mocked(resolveRipgrepCommand).mockResolvedValue(bundled);
       __setCommandRunnerForTests(async (command) => {
         commands.push(command);
         return command === bundled
@@ -852,7 +846,7 @@ describe('crawler', () => {
     it('should skip the ripgrep probe when no ripgrep is installed (#14537)', async () => {
       tmpDir = await createTmpDir({ 'plain.js': '' });
       const commands: string[] = [];
-      vi.mocked(resolveRipgrep).mockResolvedValue(null);
+      vi.mocked(resolveRipgrepCommand).mockResolvedValue(null);
       __setCommandRunnerForTests(async (command) => {
         commands.push(command);
         return fail();

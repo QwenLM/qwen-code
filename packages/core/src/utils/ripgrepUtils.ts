@@ -381,6 +381,22 @@ export async function canUseRipgrep(
   return selection !== null;
 }
 
+/**
+ * The command a caller should spawn, resolved through the same health check
+ * `runRipgrep` applies: a bundled binary that exists but cannot execute falls
+ * back to system `rg` (#2676), and null means nothing usable is installed, so
+ * a caller with its own fallback can skip the spawn entirely.
+ */
+export async function resolveRipgrepCommand(
+  useBuiltin: boolean = true,
+): Promise<string | null> {
+  try {
+    return (await resolveHealthyRipgrep(useBuiltin))?.command ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function errorCodeOf(
   error: RipgrepProcessError,
 ): string | number | undefined | null {

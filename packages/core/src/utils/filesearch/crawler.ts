@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { fdir } from 'fdir';
 import type { Ignore } from './ignore.js';
 import * as cache from './crawlCache.js';
-import { resolveRipgrep } from '../ripgrepUtils.js';
+import { resolveRipgrepCommand } from '../ripgrepUtils.js';
 
 export interface CrawlOptions {
   // The directory to start the crawl from.
@@ -1313,29 +1313,16 @@ function buildResultsFromFileSet(
   return ['.', ...Array.from(dirSet), ...Array.from(files)];
 }
 
-/**
- * Which ripgrep this crawl spawns: the bundled binary when the install ships
- * one, system `rg` otherwise, or null when neither exists. The bare `rg` name
- * only reaches the bundled binary when an install happens to put it on PATH,
- * so such a machine degraded to the fdir walk although the package carried a
- * working ripgrep (#14537). A resolution failure counts as "no ripgrep": the
- * crawl already has that fallback, so an unusable probe must not fail it.
- */
-async function resolveCrawlerRipgrepCommand(): Promise<string | null> {
-  try {
-    return (await resolveRipgrep())?.command ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function crawlWithRipgrep(
   stateKey: string,
   crawlDirectory: string,
   cwd: string,
   options: CrawlOptions,
 ): Promise<{ success: boolean; files: string[] }> {
-  const rgCommand = await resolveCrawlerRipgrepCommand();
+  // Not a bare `rg`: that only reaches the bundled binary when an install
+  // happens to put it on PATH, so a machine without system ripgrep degraded
+  // to the fdir walk although the package carried a working one (#14537).
+  const rgCommand = await resolveRipgrepCommand();
   if (!rgCommand) {
     return { success: false, files: [] };
   }
