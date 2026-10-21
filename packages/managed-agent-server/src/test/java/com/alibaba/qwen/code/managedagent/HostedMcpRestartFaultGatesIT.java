@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -116,14 +117,12 @@ class HostedMcpRestartFaultGatesIT {
             ownerReleaseRefuseArmed =
                     new java.util.concurrent.atomic.AtomicBoolean();
     private boolean springSeeded;
-    // A killed Harness cannot release its writer lease, so a replacement
-    // waits it out: cases that kill the Harness keep a short lease. A
-    // lifecycle case that keeps its Harness uses a longer one, because the
-    // store fences ordinary renewals once a v2 close is admitted and a 3 s
-    // lease can lapse before the close's first claimed renewal (#15011).
-    private static final long KILLED_WRITER_LEASE_MS = 3_000;
-    private static final long LIFECYCLE_WRITER_LEASE_MS = 30_000;
-    private long writerLeaseMs = KILLED_WRITER_LEASE_MS;
+    // Once a v2 close is admitted the store fences ordinary writer renewals,
+    // and the Harness renews under the claim only when the first lifecycle
+    // phase reaches it (#15011). A short lease can lapse in that gap, so
+    // every case uses a long one; killHarness() expires the dead writer's
+    // lease instead of making the replacement wait it out.
+    private static final long WRITER_LEASE_MS = 30_000;
     private volatile String acquireHoldSession;
     private volatile String acquireHoldOperation;
     private volatile CountDownLatch acquireHold;
@@ -698,6 +697,12 @@ class HostedMcpRestartFaultGatesIT {
         assertThat(dead.waitFor(10, TimeUnit.SECONDS))
                 .as("the Harness must die before the replacement starts")
                 .isTrue();
+        // A killed Harness cannot release its writer lease. Expiring it
+        // stands in for waiting the lease out, so the replacement can take
+        // over the dead writer at once.
+        jdbc.update("UPDATE ma_session_head SET writer_lease_until = "
+                + ManagedSchemaTime.SQL_NOW + " + -1000 WHERE tenant_id = ?"
+                + " AND writer_lease_until IS NOT NULL", tenant);
     }
 
     private void refuseNextControl(String kind) {
@@ -790,7 +795,6 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void firstReleaseRefusedBeforeForwardingResumesUnderTheSameId()
             throws Exception {
-        writerLeaseMs = LIFECYCLE_WRITER_LEASE_MS;
         SessionRef session = createSession();
         baseline(session);
         JsonNode configuration = configuration(session.id());
@@ -968,7 +972,6 @@ class HostedMcpRestartFaultGatesIT {
     @Timeout(600)
     void ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql()
             throws Exception {
-        writerLeaseMs = LIFECYCLE_WRITER_LEASE_MS;
         SessionRef session = createSession();
         baseline(session);
         jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id ="
@@ -1009,10 +1012,11 @@ class HostedMcpRestartFaultGatesIT {
                 .isEqualTo(runtimeBefore);
         assertThat(storageHolders(session)).isEqualTo(1);
 
-        // The first attempt after the restart can still find the Harness's
-        // Session writer inactive; the lifecycle route answers unsettled
-        // until it is active again, and that attempt sends nothing to the
-        // Broker.
+        // The writer lease outlasts the restart, so the first attempt
+        // normally settles. If the Harness's writer is still inactive, the
+        // route answers unsettled; only that and hosted_turn_active are
+        // retried, and the exact wire assertion below still holds for any
+        // such attempt.
         HttpResponse<String> settled = null;
         for (int attempt = 0; attempt < 30 && settled == null; attempt++) {
             HttpResponse<String> response = rawLifecycle(session, closeId,
@@ -1388,7 +1392,7 @@ class HostedMcpRestartFaultGatesIT {
         store.put("tenantId", tenant);
         store.put("workspaceId", "workspace");
         store.put("writerId", bootId);
-        store.put("leaseDurationMs", writerLeaseMs);
+        store.put("leaseDurationMs", WRITER_LEASE_MS);
         return store;
     }
 
