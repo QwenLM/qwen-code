@@ -43,7 +43,10 @@ import {
 } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import { DEFAULT_LOOP_PROTECTION } from '../services/loop-protection.js';
+import {
+  DEFAULT_LOOP_PROTECTION,
+  isLoopProtectionMode,
+} from '../services/loop-protection.js';
 import type { LoopProtectionMode } from '../services/loop-protection.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
 import {
@@ -3669,7 +3672,10 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
-    this.loopProtection = params.loopProtection ?? DEFAULT_LOOP_PROTECTION;
+    // Embedders bypass the CLI's check; an unknown mode would act as `off`.
+    this.loopProtection = isLoopProtectionMode(params.loopProtection)
+      ? params.loopProtection
+      : DEFAULT_LOOP_PROTECTION;
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
       params.maxToolCallsPerTurn,
     );

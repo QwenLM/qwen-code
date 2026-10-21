@@ -2579,6 +2579,42 @@ ${boardState}
       expect(decisions()).toEqual([`${IDENTICAL}:observed`]);
     });
 
+    it("keeps the turn's pending reminder across a side query's reset", () => {
+      withMode('warn');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      service.reset('side-prompt', { keepReminders: true });
+      expect(service.takeLoopReminder()).toContain('3 times in a row');
+      const [[, event]] = vi.mocked(loggers.logLoopProtection).mock.calls;
+      expect(event.decision).toBe('reminded');
+      expect(event.prompt_id).toBe('loop-protection');
+    });
+
+    it('drops pending reminders on a new prompt', () => {
+      withMode('warn');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      service.reset('next-prompt');
+      expect(service.takeLoopReminder()).toBeUndefined();
+    });
+
+    it('records but does not remind a stateful read with no result evidence under warn', () => {
+      withMode('warn');
+      const queued = reminders(TOOL_CALL_LOOP_THRESHOLD, () =>
+        guardTool('task_list', { status: 'open' }),
+      );
+      expect(queued).toEqual(Array(TOOL_CALL_LOOP_THRESHOLD).fill(undefined));
+      expect(decisions()).toEqual([`${IDENTICAL}:observed`]);
+    });
+
+    it('still stops a stateful read with no result evidence under stop', () => {
+      withMode('stop');
+      for (let i = 1; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        expect(guardTool('task_list', { status: 'open' })).toBe(false);
+      }
+      expect(guardTool('task_list', { status: 'open' })).toBe(true);
+    });
+
     it('drops the pending reminder on retry and queues it again on replay', () => {
       withMode('stop');
       reminders(2, same);

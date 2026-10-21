@@ -80,7 +80,9 @@ non-inspection command ends a shell streak, and the cap and invalid-params
 counts last for the turn. A successful result does not end a streak. For
 stateful read tools (`task_list`) the consecutive-identical reminder needs the
 same unchanged-result evidence as the stop, so productive polling is not
-reminded.
+reminded. When results are missing, `stop` still stops at the 5th call, while
+`warn` records an `observed` decision instead of a reminder that could be
+wrong.
 
 If one batch reaches both points, or a call has already repeated 6 times when
 the turn passes the soft cap, `stop` stops as today and the queued reminder is
@@ -98,8 +100,8 @@ carries tool results, where the exploration and todo reminders already go:
 Reminders of different patterns queued in the same batch go out together. A
 retry discards the attempt's queued reminders, because the replayed calls
 queue them again. A concurrent `/btw` side query neither queues, takes nor
-discards the running turn's reminders, including through its stateful tool
-results and its retries, and under `off` it records no `observed` decision for
+discards the running turn's reminders, including through its start, its
+stateful tool results and its retries, and under `off` it records no `observed` decision for
 the turn. The reminder names the detector, the tool and what to change, and
 under `stop` it says that continuing will stop the turn.
 

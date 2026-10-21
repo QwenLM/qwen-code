@@ -11155,6 +11155,39 @@ Other open files:
       expect(request[0]).toHaveProperty('functionResponse');
     });
 
+    it('keeps the loop-protection reminder across a concurrent side query', async () => {
+      const promptId = 'prompt-id-loop-reminder-btw';
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+
+      // A /btw side query starts before the turn's tool results go out.
+      mockTurnRunFn.mockReturnValueOnce(textTurn('side answer'));
+      await run([{ text: '/btw unrelated question' }], `${promptId}-btw`, {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run(
+        [fnResponse('run_shell_command', { output: 'repeated' })],
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      expect(request.at(-1)).toEqual({
+        text: expect.stringContaining(
+          '`run_shell_command` has been called 3 times in a row',
+        ),
+      });
+    });
+
     describe('retry sendMessageType', () => {
       /** A retry-capable chat stub; `overrides` replace any default. */
       const retryChat = <T extends object>(overrides: T = {} as T) =>

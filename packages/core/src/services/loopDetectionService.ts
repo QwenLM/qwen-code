@@ -504,10 +504,16 @@ export class LoopDetectionService {
   private loopProtectionHandled = new Set<string>();
 
   // Reminders waiting for the next request that carries tool results, keyed
-  // by the pattern that queued them so a retry can undo them.
+  // by the pattern that queued them so a retry can undo them. Each keeps the
+  // prompt id that queued it, since a side query's reset moves promptId.
   private pendingReminders = new Map<
     string,
-    { text: string; loopType: LoopType; detail: LoopStopDetail }
+    {
+      text: string;
+      loopType: LoopType;
+      detail: LoopStopDetail;
+      promptId: string;
+    }
   >();
 
   // False while a concurrent side query feeds the detectors: its calls and
@@ -571,8 +577,8 @@ export class LoopDetectionService {
     this.pendingReminders.clear();
     // Logged on delivery, so a reminder dropped by a retry or never sent
     // before a stop is not counted.
-    for (const { loopType, detail } of pending) {
-      this.logLoopProtectionDecision(loopType, 'reminded', detail);
+    for (const { loopType, detail, promptId } of pending) {
+      this.logLoopProtectionDecision(loopType, 'reminded', detail, promptId);
     }
     return pending.map(({ text }) => text).join('\n\n');
   }
@@ -601,11 +607,12 @@ export class LoopDetectionService {
     loopType: LoopType,
     decision: 'reminded' | 'stopped' | 'observed',
     detail: LoopStopDetail,
+    promptId = this.promptId,
   ): void {
     logLoopProtection(
       this.config,
       new LoopProtectionEvent({
-        prompt_id: this.promptId,
+        prompt_id: promptId,
         loop_type: loopType,
         decision,
         mode: this.config.getLoopProtection(),
@@ -626,6 +633,7 @@ export class LoopDetectionService {
       text: buildLoopReminder(input),
       loopType: input.loopType,
       detail,
+      promptId: this.promptId,
     });
   }
 
@@ -1197,6 +1205,16 @@ export class LoopDetectionService {
             this.loopProtectionHandled.delete('identical');
             return false;
           }
+        }
+        // Without that evidence the stop still fails safe, but a `warn`
+        // reminder would tell the model a result that may be changing will
+        // not change, so it is only recorded.
+        if (
+          this.config.getLoopProtection() === 'warn' &&
+          !this.statefulResultsUnchanged(key)
+        ) {
+          this.observe('identical', repeated.loopType, {});
+          return false;
         }
       }
       return this.onAlwaysOnStopPoint('identical', repeated);
@@ -2002,9 +2020,11 @@ export class LoopDetectionService {
   }
 
   /**
-   * Resets all loop detection state.
+   * Resets all loop detection state. A concurrent side query passes
+   * `keepReminders` so the running turn keeps its queued reminders and its
+   * reminded/observed/stopped decisions.
    */
-  reset(promptId: string): void {
+  reset(promptId: string, { keepReminders = false } = {}): void {
     this.promptId = promptId;
     this.resetToolCallCount();
     this.resetContentTracking();
@@ -2029,6 +2049,7 @@ export class LoopDetectionService {
     this.statefulRepeatState.clear();
     this.statefulConsecutiveResults.clear();
     this.requestByCallId.clear();
+    if (keepReminders) return;
     this.loopProtectionHandled.clear();
     this.pendingReminders.clear();
     this.loopProtectionStopLogged = false;

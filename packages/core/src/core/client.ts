@@ -3984,7 +3984,9 @@ export class LlmClient {
         ? partToString(request)
         : undefined;
     if (startsInteraction) {
-      this.loopDetector.reset(prompt_id);
+      this.loopDetector.reset(prompt_id, {
+        keepReminders: options?.isConcurrentSideQuery,
+      });
       this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
       // must not move the running turn's starting point or drop its target —
