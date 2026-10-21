@@ -69,4 +69,4 @@ catalog 格丢弃 worker 的 `hook-catalog` 回复，让第一次准入在注册
 证据来自 Linux 上的 `hosted-harness-mysql` 车道，MySQL 8.4 与委派的 cgroup
 v2 根。`managed-agent-gate.yml` 在 `pull_request` 上只选 `fast` 档；完整套件
 由维护者对 head 提交的首次批准触发。本格给共享 fork 增加 150 s：healthy
-10489 s、fork 11089 s、Verify 195 分钟。
+10500 s、fork 11100 s、Verify 195 分钟。
