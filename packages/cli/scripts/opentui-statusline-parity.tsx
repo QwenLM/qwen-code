@@ -321,6 +321,27 @@ await scenario('styles-rgb-bg-dim-reset-osc8', async ({ mount }) => {
   assert.equal(indexed.chunks.find((c) => c.text.includes('Z'))?.fg, undefined);
   assert.equal(indexed.chunks.find((c) => c.text.includes('Z'))?.bg, undefined);
   await mount(<text content={indexed} />, 24, 8);
+  for (const [sgr, slot] of [
+    ['\x1b[38;5;0m', 0],
+    ['\x1b[38;5;255m', 255],
+    ['\x1b[38;5;256m', null],
+    ['\x1b[38;5;999m', null],
+    ['\x1b[48:5:300m', null],
+  ] as const) {
+    const value = statusLineStyledText(`${sgr}X\x1b[0mZ`, { dim: false });
+    assert.equal(value.chunks.map((c) => c.text).join(''), 'XZ');
+    if (slot !== null) {
+      assert.equal(value.chunks[0]?.fg?.intent, 'indexed');
+      assert.equal(value.chunks[0]?.fg?.slot, slot);
+    } else {
+      assert.equal(value.chunks[0]?.fg, undefined);
+      assert.equal(value.chunks[0]?.bg, undefined);
+    }
+    assert.equal(value.chunks.at(-1)?.fg, undefined);
+    assert.equal(value.chunks.at(-1)?.bg, undefined);
+    const rendered = await mount(<text content={value} />, 20, 4);
+    assert.match(frame(rendered), /XZ/);
+  }
 });
 
 await scenario(

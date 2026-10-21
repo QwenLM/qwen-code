@@ -256,6 +256,7 @@ export interface InputPromptProps {
   onCancelCommand?: () => boolean;
   approvalMode?: ApprovalMode;
   placeholder?: string;
+  topRightLabel?: string;
   focus?: boolean;
   /** Reports the double-Esc armed state (the footer hint). */
   onEscapeArmedChange?: (armed: boolean) => void;
@@ -308,6 +309,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onCancelCommand,
     approvalMode,
     placeholder = DEFAULT_PLACEHOLDER,
+    topRightLabel,
     focus = true,
     onEscapeArmedChange,
     queueLength = 0,
@@ -1561,19 +1563,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
     }
-    if (
-      selected < 0 &&
-      key.name === 'up' &&
-      !key.ctrl &&
-      !key.shift &&
-      !searchActiveRef.current &&
-      el.scrollY + el.visualCursor.visualRow === 0 &&
-      draftRef.current.attachments.length > 0
-    ) {
-      setSelectedAttachment(draftRef.current.attachments.length - 1);
-      key.preventDefault();
-      return;
-    }
     if (handleEditorKey(el, bufferRef.current, key)) {
       setTextVersion((v) => v + 1);
       return;
@@ -1766,8 +1755,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         const popped = onPopQueue?.();
         if (popped) {
           restoreSubmission(popped, '\n');
+          return;
         }
-        return;
       }
       const effect = escapeRef.current!.handleEscape(bufferRef.current.text);
       if (effect === 'arm') {
@@ -1795,7 +1784,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     const showing = !searchActiveRef.current && suggestions.length > 0;
 
-    if (showing && (navigationUp || navigationDown)) {
+    if (showing && suggestions.length > 1 && (navigationUp || navigationDown)) {
       key.preventDefault();
       // Navigation marks the dropdown as user-driven: with a perfect command
       // match, Enter then accepts the highlighted suggestion instead of
@@ -1810,6 +1799,21 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         next = prev >= last ? 0 : prev + 1;
       }
       setActiveIndex(next);
+      return;
+    }
+
+    if (
+      selected < 0 &&
+      !shellModeActive &&
+      !searchActiveRef.current &&
+      key.name === 'up' &&
+      !key.ctrl &&
+      !key.shift &&
+      el.scrollY + el.visualCursor.visualRow === 0 &&
+      draftRef.current.attachments.length > 0
+    ) {
+      setSelectedAttachment(draftRef.current.attachments.length - 1);
+      key.preventDefault();
       return;
     }
 
@@ -1989,7 +1993,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }, []);
 
   const columns = Math.max(width, 1);
-  const dashLine = '─'.repeat(columns);
+  const renderedLabel = truncateToWidth(
+    sanitizeTerminalLine(topRightLabel ?? ''),
+    columns - 5,
+  );
+  const labelWidth = renderedLabel
+    ? getCachedStringWidth(renderedLabel) + 4
+    : 0;
+  const dashLine = '─'.repeat(columns - labelWidth);
+  const topBorderLine = renderedLabel
+    ? `${dashLine} ${renderedLabel} ──`
+    : dashLine;
   const { visible, startIndex, hasMoreAbove, hasMoreBelow } = suggestionWindow(
     suggestions,
     activeIndex,
@@ -2058,7 +2072,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           ))}
         </box>
       )}
-      <text fg={borderColor}>{dashLine}</text>
+      <text fg={borderColor}>{topBorderLine}</text>
       <box
         flexDirection="row"
         border={['bottom']}

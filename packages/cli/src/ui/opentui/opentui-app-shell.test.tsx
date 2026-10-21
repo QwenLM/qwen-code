@@ -420,6 +420,25 @@ describe('OpenTuiApp shell wiring', () => {
     expect(screen.getByText('input-prompt')).toBeTruthy();
   });
 
+  it('updates and clears the composer title from the same session host', async () => {
+    renderApp();
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    expect(host.sessionName).toBeNull();
+    expect(mocks.state.inputProps?.['topRightLabel']).toBeUndefined();
+
+    act(() => host.setSessionName('owned session'));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBe('owned session');
+
+    act(() => host.setSessionName('renamed session'));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBe('renamed session');
+
+    act(() => host.setSessionName(null));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBeUndefined();
+    expect(mocks.state.host).toBe(host);
+    expect(mocks.state.dispatcherConstructions).toBe(1);
+  });
+
   it('routes composer cancellation to the running command without interrupting the model', async () => {
     const onInterrupt = vi.fn();
     renderApp({ onInterrupt });

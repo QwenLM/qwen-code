@@ -382,9 +382,15 @@ export function useOpenTuiLiveTurn(
           setBusy(false);
           if (activeTurnRef.current === active) activeTurnRef.current = null;
           if (abort.signal.aborted) {
-            active.onCancelSettled?.({
+            const settled = active.onCancelSettled;
+            const queued = settled ? popQueue() : null;
+            queueRef.current = queueRef.current.filter(
+              (entry) => !entry.generated,
+            );
+            syncQueue();
+            settled?.({
               kind: 'cancelled',
-              queued: popQueue(),
+              queued,
               prompt: active.toolStarted ? null : (active.prompt ?? null),
             });
           } else {
