@@ -241,7 +241,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
  'non_blocking_prompt', 'session_language', 'user_language_sync', 'session_message_deletion', 'session_rewind',
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
- 'session_branch', 'rate_limit', 'workspace_reload', 'channel_delivery',
+ 'session_branch', 'rate_limit', 'workspace_reload', 'workspace_model_reload', 'channel_delivery',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
  'multi_workspace_session_shell', 'persistent_workspace_registration',
  'workspace_display_name', 'workspace_runtime_removal', 'workspace_runtime',
@@ -2492,6 +2492,43 @@ top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
 
+### `GET /session/:id/tasks/:taskId/runtime`
+
+On-demand detail for one shell task. `GET /session/:id/tasks` carries lifecycle
+facts only; this route reads the captured output file and probes the process
+tree, so an open detail panel asks for it separately.
+
+The ACP method is `_qwen/session/task_runtime`, with `sessionId` and `taskId`
+parameters. Both transports resolve the live session owner; ACP also requires
+the connection to own the session.
+
+The path's `taskId` is resolved against the session's own shell registry;
+callers never pass a file path.
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "taskId": "bg_0123abcd",
+  "runtime": {
+    "memoryBytes": 104857600,
+    "outputBytes": 65536,
+    "outputModifiedAt": 1700000000000,
+    "outputTail": "ready in 120ms\n",
+    "outputTailTruncated": true
+  }
+}
+```
+
+`runtime` is `null` when the task is unknown, has been evicted, or is not a
+shell task. `memoryBytes` is the resident set of the shell's process tree,
+sampled only while the task is running; shared pages are counted once per
+process, and a container sandbox may expose only the wrapper process.
+`outputTail` is capped at the same 8 KiB limit used by the completion
+notification, and `outputTailTruncated` marks a tail that starts mid-file.
+`outputError` is set when the file cannot be read; fields from a part that did
+succeed may still be present.
+
 ### `POST /session/:id/tasks/:taskId/workflow-action`
 
 Controls a workflow run, or starts a new one. The ACP method is
@@ -4428,6 +4465,10 @@ Staging is bounded at 128 MiB and 32 active uploads across all runtimes in a pro
 The TypeScript SDK automatically uses this protocol for attachments larger than 512 KiB when advertised, with two concurrent files per client and sequential chunks. It uses authenticated REST even with ACP transports, caches valid discovery for 60 seconds, and retains the existing raw endpoint for smaller files and older daemons. Append/completion retry at most twice after network errors, request timeouts or 502/503/504; rate-limit retries honor `Retry-After` within a five-minute operation deadline. Ambiguous creation and capacity failures are not retried. Failed uploads get one independent two-second cleanup attempt. `DaemonAttachmentUploadError` preserves the cause and `httpStatus`; its `status` omits upload-internal 404 so consumers do not mistake it for unsupported legacy attachment routing.
 
 See the [complete design](../design/session-attachment-chunk-upload.md) for lifecycle and compatibility details.
+
+### Model catalog reload
+
+The `workspace_model_reload` capability advertises `POST /workspaces/:workspace/models/reload`. This authenticated, trusted, selected-runtime mutation re-reads user- and workspace-scope settings, refreshes the selected runtime environment overlay, and re-applies the environment in its ACP child before rebuilding model-provider configuration. Environment changes support provider credentials and can include other environment keys; they are not reported in the response or a settings event. The daemon process environment and workflow enablement remain unchanged. It returns `{ "status": "applied" | "deferred" | "failed" }`; `deferred` means no live ACP child applied the catalog. It does not fetch a platform catalog, write settings, switch the active conversation model, or broadcast a settings event. Read an existing session's `/session/:id/context` afterward for its current selectable models; before session creation, read the selected workspace's providers. Unknown, untrusted, draining, or closed runtimes do not fall back to primary.
 
 ## Streaming wire format
 

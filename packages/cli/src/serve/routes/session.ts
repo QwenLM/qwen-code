@@ -7057,6 +7057,25 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/tasks/:taskId/runtime',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/runtime',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionTaskRuntime(sessionId, taskId));
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/agents',
     withOwnerReadSession(
       'GET /session/:id/agents',
