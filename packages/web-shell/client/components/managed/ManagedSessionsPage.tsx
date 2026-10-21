@@ -8,6 +8,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
+import { useManagedRecoveryText } from './managed-recovery-messages';
 import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
 import {
@@ -38,6 +39,13 @@ import {
 import { useManagedFileReferences } from './use-managed-file-references';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
+import { useManagedRecovery } from './use-managed-recovery';
+import { useManagedTurnCancel } from './use-managed-turn-cancel';
+import { ManagedRecoveryPanel } from './ManagedRecoveryPanel';
+import {
+  buildManagedRecoveryHandoff,
+  type ManagedRecoveryHandoff,
+} from './managed-recovery-handoff';
 import { useManagedSessionRename } from './use-managed-session-rename';
 import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
@@ -256,6 +264,7 @@ function ManagedSessionsContent({
   navigationSearch: string;
 }) {
   const { t } = useI18n();
+  const recoveryText = useManagedRecoveryText();
   const home = navigationTarget !== undefined;
   const ContextContainer = home ? 'details' : 'div';
   const clientId = useMemo(
@@ -263,6 +272,22 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const recovery = useManagedRecovery(
+    provider,
+    clientId,
+    detail.summary,
+    interactive,
+    detail.refreshSummary,
+  );
+  const turnCancel = useManagedTurnCancel(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    interactive,
+    detail.refreshSummary,
+  );
+  const [handoff, setHandoff] = useState<ManagedRecoveryHandoff>();
   const sessionWorkspaceId =
     sessionId && detail.summary?.sessionId === sessionId
       ? (detail.summary.workspace?.workspaceId ?? null)
@@ -650,7 +675,9 @@ function ManagedSessionsContent({
     if (!attempt) {
       if (
         (!submittedText.trim() && !images?.length && !files?.length) ||
-        (sessionId && !detail.summary?.capabilities.canSend)
+        (sessionId &&
+          (!detail.summary?.capabilities.canSend ||
+            recovery.value?.nextTurnAllowed === false))
       )
         return;
       let input: ManagedInputBlock[];
@@ -780,6 +807,7 @@ function ManagedSessionsContent({
   }
 
   const summary = detail.summary;
+  const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
     if (
@@ -787,29 +815,40 @@ function ManagedSessionsContent({
       !summary.activeTurnId ||
       !cancellationEnabled ||
       busy ||
+      turnCancelBusy ||
       !abort ||
       abort.signal.aborted
     )
       return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await provider.cancel(summary.sessionId, summary.activeTurnId, {
-        clientId,
-        idempotencyKey: managedRequestId(),
-        signal: abort.signal,
-      });
-      if (!abort.signal.aborted && selection.current === summary.sessionId)
-        reloadSession();
-    } catch (failure) {
-      if (!abort.signal.aborted && selection.current === summary.sessionId)
-        setError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      if (!abort.signal.aborted) setBusy(false);
-    }
-  }, [summary, reloadSession, cancellationEnabled, busy, provider, clientId]);
+    await requestTurnCancel();
+  }, [summary, cancellationEnabled, busy, turnCancelBusy, requestTurnCancel]);
 
   const currentSummary = summary?.sessionId === sessionId ? summary : undefined;
+  function prepareHandoff() {
+    if (
+      !currentSummary ||
+      !recovery.value?.actions.continueInNewSession ||
+      !provider.workspaceBinding?.createSession
+    )
+      return;
+    const draft = buildManagedRecoveryHandoff(
+      { ...currentSummary, recovery: recovery.value },
+      detail.events,
+      {
+        introduction: recoveryText('managed.recovery.handoff.introduction'),
+        source: recoveryText('managed.recovery.handoff.source'),
+        task: recoveryText('managed.recovery.handoff.task'),
+        confirmed: recoveryText('managed.recovery.handoff.confirmed'),
+        uncertain: recoveryText('managed.recovery.handoff.uncertain'),
+        truncated: recoveryText('managed.recovery.handoff.truncated'),
+      },
+      Boolean(detail.olderCursor) ||
+        detail.loading ||
+        detail.events.length === 0,
+    );
+    setHandoff(draft);
+    onSelectSession(undefined, draft.workspaceId);
+  }
   const modelContext = currentSummary?.modelContext;
   const selectedModel = currentSummary?.modelSelection?.modelId;
   const displayedModel =
@@ -1288,10 +1327,57 @@ function ManagedSessionsContent({
               {summary.failure.message}
             </p>
           )}
+          {recovery.value && (
+            <ManagedRecoveryPanel
+              recovery={recovery.value}
+              busy={!interactive || recovery.busy || turnCancel.busy}
+              error={recovery.error}
+              onRecheck={() => void recovery.recheck()}
+              onCancel={
+                cancellationEnabled && summary?.capabilities.canCancel
+                  ? () => void cancel()
+                  : undefined
+              }
+              onHandoff={
+                provider.workspaceBinding?.createSession
+                  ? prepareHandoff
+                  : undefined
+              }
+            />
+          )}
+          {turnCancel.status && (
+            <div role="status" className="flex items-center gap-2 text-sm">
+              <span>
+                {recoveryText(`managed.recovery.cancel.${turnCancel.status}`)}
+              </span>
+              {turnCancel.pending && turnCancel.status === 'unconfirmed' && (
+                <Button
+                  variant="outline"
+                  disabled={!interactive || turnCancel.busy}
+                  onClick={() => void turnCancel.retry()}
+                >
+                  {recoveryText('managed.recovery.recheck')}
+                </Button>
+              )}
+            </div>
+          )}
           {provider.workspaceBinding &&
             (!sessionId || workspaceCreationOpen) && (
               <WorkspaceBindingCreator
+                key={
+                  !sessionId ? (handoff?.sourceSessionId ?? 'new') : 'workspace'
+                }
                 provider={provider}
+                handoff={!sessionId ? handoff : undefined}
+                onOpenHandoffSource={
+                  handoff
+                    ? () =>
+                        onSelectSession(
+                          handoff.sourceSessionId,
+                          handoff.workspaceId,
+                        )
+                    : undefined
+                }
                 workspaceCreationOpen={workspaceCreationOpen}
                 onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
                 onOpenLocalWorkspace={onOpenLocalWorkspace}
@@ -1313,6 +1399,7 @@ function ManagedSessionsContent({
                   onWorkspaceCreated?.(id);
                 }}
                 onCreated={(createdId, createdWorkspaceId) => {
+                  setHandoff(undefined);
                   setListRevision((current) => current + 1);
                   onSelectSession(createdId, createdWorkspaceId);
                 }}
@@ -1744,7 +1831,11 @@ function ManagedSessionsContent({
                   modelChange.blocked ||
                   compression.blocked ||
                   approvalChange.blocked ||
-                  Boolean(sessionId && !summary?.capabilities.canSend)
+                  Boolean(
+                    sessionId &&
+                      (!summary?.capabilities.canSend ||
+                        recovery.value?.nextTurnAllowed === false),
+                  )
                 }
                 placeholderText={t('managed.prompt')}
               />
