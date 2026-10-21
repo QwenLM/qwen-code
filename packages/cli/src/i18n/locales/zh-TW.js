@@ -714,6 +714,9 @@ export default {
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
   'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
+  'Mods (Experimental)': 'Mods（實驗性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本機互動終端和無介面工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
