@@ -73,10 +73,12 @@ async function worker(root, node, bun, expectedHost) {
   const originalCwd = process.cwd();
   const tmp = path.join(root, 'tmp');
   const home = path.join(root, 'home');
+  const compileCache = path.join(root, 'node-compile-cache');
   for (const dir of [tmp, home]) fs.mkdirSync(dir);
   Object.assign(process.env, {
     HOME: home,
     QWEN_HOME: path.join(home, '.qwen'),
+    NODE_COMPILE_CACHE: compileCache,
     TMPDIR: tmp,
     TMP: tmp,
     TEMP: tmp,
@@ -84,6 +86,7 @@ async function worker(root, node, bun, expectedHost) {
     QWEN_REQUIRE_SIGNATURE: '0',
     QWEN_UPDATE_TEST_ENV: 'preserved',
   });
+  delete process.env.NODE_DISABLE_COMPILE_CACHE;
   // Observe allocations before importing the real built module. Bun 1.3.14
   // does not synchronize named builtin bindings; only claim zero allocations
   // on a host whose successful update passes the positive control below.
@@ -673,6 +676,21 @@ async function worker(root, node, bun, expectedHost) {
             }
           }
           assert.deepEqual({ ...process.env }, parentEnv);
+          if (
+            runtime === 'node' &&
+            mode === 'direct' &&
+            actualVersion === '1.2.3'
+          ) {
+            assert.ok(
+              fs
+                .readdirSync(compileCache, {
+                  recursive: true,
+                  withFileTypes: true,
+                })
+                .some((entry) => entry.isFile()),
+              'Node payload probes must create compile-cache files',
+            );
+          }
           assert.deepEqual(fs.readdirSync(tmp), []);
           assert.deepEqual(
             fs.readdirSync(dir).sort(),
