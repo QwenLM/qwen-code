@@ -152,7 +152,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         || sessionStore.getBaseUrl().isBlank()
                         || StringUtils.isBlank(workspaceId))) {
             throw new IllegalStateException("Enabled Managed Session Store"
-                    + " requires base URL and Runtime workspace ID");
+                    + " requires base URL and Runtime workspace ID; set"
+                    + " QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL and"
+                    + " QWEN_MANAGED_AGENT_WORKSPACE_CWD or"
+                    + " QWEN_MANAGED_AGENT_WORKSPACE_ID");
         }
         String runtimeWorkspaceId = properties.getRuntimeBroker()
                 .getWorkspaceId();
