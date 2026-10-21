@@ -7234,6 +7234,10 @@ class HostedHarnessClientTest {
                             .build())) {
                 long expectedTickMillis =
                         HarnessEventStream.idleWatchdogIntervalMillis(2000L);
+                // The fixture's 2000 ms budget fixes the tick at 200 ms; a
+                // formula mutation must not silently loosen the bound this
+                // test derives from it.
+                assertEquals(200L, expectedTickMillis);
                 ScheduledThreadPoolExecutor scheduler = client.scheduler();
                 // A periodic task is off the delay queue while it runs, so
                 // the queue is read on the single scheduler thread, where
