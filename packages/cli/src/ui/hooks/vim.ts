@@ -358,6 +358,7 @@ export function useVim(
   const [state, setState] = useState(initialVimState);
   const bufferRef = useRef(buffer);
   const stateRef = useRef(initialVimState);
+  const lastHandledEscapeKeyRef = useRef<Key | null>(null);
   bufferRef.current = buffer;
 
   const dispatch = useCallback((action: VimAction) => {
@@ -1144,10 +1145,27 @@ export function useVim(
     [getCurrentCount, executeCommand, dispatch],
   );
 
+  const ownsEscape = useCallback(
+    (key: Key): boolean => {
+      if (!vimEnabled || key.name !== 'escape') {
+        return false;
+      }
+      const s = stateRef.current;
+      return (
+        lastHandledEscapeKeyRef.current === key ||
+        s.mode === 'INSERT' ||
+        s.pendingCharRead !== null ||
+        s.pendingOperator !== null
+      );
+    },
+    [vimEnabled],
+  );
+
   // ── Main key handler ──
 
   const handleInput = useCallback(
     (key: Key): boolean => {
+      lastHandledEscapeKeyRef.current = null;
       if (!vimEnabled) {
         return false;
       }
@@ -1164,12 +1182,17 @@ export function useVim(
 
       // ── INSERT mode ──
       if (s.mode === 'INSERT') {
-        return handleInsertModeInput(normalizedKey);
+        const handled = handleInsertModeInput(normalizedKey);
+        if (handled && normalizedKey.name === 'escape') {
+          lastHandledEscapeKeyRef.current = key;
+        }
+        return handled;
       }
 
       // ── Pending char read (r, f, F, t, T) ──
       if (s.pendingCharRead && s.mode === 'NORMAL') {
         if (normalizedKey.name === 'escape') {
+          lastHandledEscapeKeyRef.current = key;
           dispatch({ type: 'CLEAR_PENDING_STATES' });
           return true;
         }
@@ -1196,6 +1219,7 @@ export function useVim(
 
         if (normalizedKey.name === 'escape') {
           if (s.pendingOperator) {
+            lastHandledEscapeKeyRef.current = key;
             dispatch({ type: 'CLEAR_PENDING_STATES' });
             return true;
           }
@@ -1936,5 +1960,6 @@ export function useVim(
     mode: state.mode,
     vimModeEnabled: vimEnabled,
     handleInput,
+    ownsEscape,
   };
 }
