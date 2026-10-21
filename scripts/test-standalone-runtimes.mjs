@@ -304,6 +304,18 @@ async function worker(root, node, bun, expectedHost) {
       );
       filename = `qwen-code-${target}${runtime === 'bun' ? '-opentui-preview' : ''}.tar.gz`;
       archive = path.join(root, filename);
+      const packArchive = () => {
+        const uncompressedArchive = archive.slice(0, -3);
+        run('tar', [
+          '-cf',
+          uncompressedArchive,
+          '-C',
+          path.dirname(payload),
+          'qwen-code',
+        ]);
+        run('gzip', ['-1', '-f', uncompressedArchive]);
+        sums = `${sha(archive)}  ${filename}\n`;
+      };
       const pack = (source, version = '1.2.3') => {
         fs.writeFileSync(
           path.join(payload, 'manifest.json'),
@@ -315,8 +327,7 @@ async function worker(root, node, bun, expectedHost) {
           }),
         );
         fs.writeFileSync(cli, source);
-        run('tar', ['-czf', archive, '-C', path.dirname(payload), 'qwen-code']);
-        sums = `${sha(archive)}  ${filename}\n`;
+        packArchive();
       };
       pack(
         "if(process.env.QWEN_UPDATE_TEST_ENV!=='preserved')process.exit(19);console.log('1.2.3');",
@@ -736,14 +747,7 @@ async function worker(root, node, bun, expectedHost) {
             fs.rmSync(cli);
           }
           if (state !== 'syntax-error') {
-            run('tar', [
-              '-czf',
-              archive,
-              '-C',
-              path.dirname(payload),
-              'qwen-code',
-            ]);
-            sums = `${sha(archive)}  ${filename}\n`;
+            packArchive();
           }
           if (state !== 'launcher-error')
             assert.equal(
