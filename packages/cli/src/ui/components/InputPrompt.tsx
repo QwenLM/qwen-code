@@ -811,7 +811,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       const pasteExpansions =
         pendingPastes.size > 0 ? new Map(pendingPastes) : undefined;
       let finalValue = submittedValue;
+      let humanText = submittedValue;
       if (pendingPastes.size > 0) {
+        humanText = expandPendingPastePlaceholders(
+          submittedValue,
+          pendingPastes,
+        );
         // The framing decision is made here, not at paste time: the map holds
         // raw text, and the shell-mode read that also gates shell history
         // decides whether the expanded value is framed for the model. A slash
@@ -824,11 +829,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         finalValue =
           shellModeActive ||
           (attachments.length === 0 && isSlashCommand(submittedValue.trim()))
-            ? expandPendingPastePlaceholders(finalValue, pendingPastes)
+            ? humanText
             : framePasteExpansion(finalValue, pendingPastes);
         clearPendingPastes();
       }
-      const humanInput = { text: finalValue };
+      // The framing is model-facing only; human-origin intent reads what
+      // the user submitted, pastes expanded raw.
+      const humanInput = { text: humanText };
       if (shellModeActive) {
         shellHistory.addCommandToHistory(finalValue);
       }

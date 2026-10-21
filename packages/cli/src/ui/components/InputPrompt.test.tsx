@@ -6053,7 +6053,7 @@ describe('InputPrompt', () => {
         act(() => stdin.write('\r'));
         await flush();
         expect(props.onSubmit).toHaveBeenCalledWith(
-          `${literal}\n${originalBody}\nappend instruction ${nextBody}`,
+          `${literal}\n${wrapClipboardPaste(originalBody)}\nappend instruction\n${wrapClipboardPaste(nextBody)}\n${CLIPBOARD_PASTE_FRAMING}`,
           {
             deferUntilIdle: false,
             submittedPrompt: edited,
@@ -6212,6 +6212,11 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith(markedPaste(largeContent), {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
+          displayText: '[Pasted Content 1001 chars]',
+          humanInput: { text: largeContent },
+          pasteExpansions: new Map([
+            ['[Pasted Content 1001 chars]', largeContent],
+          ]),
         });
         expect(mockShellHistory.addCommandToHistory).not.toHaveBeenCalled();
       } finally {
@@ -6255,6 +6260,11 @@ describe('InputPrompt', () => {
           {
             deferUntilIdle: false,
             submittedPrompt: 'before [Pasted Content 1001 chars] after',
+            displayText: 'before [Pasted Content 1001 chars] after',
+            humanInput: { text: `before ${largeContent} after` },
+            pasteExpansions: new Map([
+              ['[Pasted Content 1001 chars]', largeContent],
+            ]),
           },
         );
         // The attribution is scoped to the delimited block: no sentence after
@@ -6349,6 +6359,11 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith('run the tests', {
           deferUntilIdle: false,
           submittedPrompt: 'run the tests',
+          displayText: 'run the tests',
+          humanInput: { text: 'run the tests' },
+          pasteExpansions: new Map([
+            ['[Pasted Content 1001 chars]', largeContent],
+          ]),
         });
       } finally {
         vi.useRealTimers();
@@ -6457,6 +6472,11 @@ describe('InputPrompt', () => {
           {
             deferUntilIdle: false,
             submittedPrompt: '/remember [Pasted Content 1001 chars]',
+            displayText: '/remember [Pasted Content 1001 chars]',
+            humanInput: { text: `/remember ${largeContent}` },
+            pasteExpansions: new Map([
+              ['[Pasted Content 1001 chars]', largeContent],
+            ]),
           },
         );
       } finally {
@@ -6586,6 +6606,11 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
+          displayText: '[Pasted Content 1001 chars]',
+          humanInput: { text: largeContent },
+          pasteExpansions: new Map([
+            ['[Pasted Content 1001 chars]', largeContent],
+          ]),
         });
       } finally {
         vi.useRealTimers();
