@@ -781,13 +781,14 @@ jobs:
     # and Verify to 191 minutes; the FG13a dispatch ack-loss cell adds 150 s,
     # moving the fork to 10983 s and Verify to 194 minutes; the FG13a
     # registration-settle ack-loss cell adds 150 s, moving the fork to
-    # 11133 s and Verify to 196 minutes, wrapping fork + 600 s plus margin
-    # (11733 s of fork plus wrap);
+    # 11133 s and Verify to 196 minutes; the FG11e stream cells add 42 s,
+    # moving the fork to 11175 s and Verify to 197 minutes, wrapping fork +
+    # 600 s plus margin (11775 s of fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 286 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 299
+    # checks): 287 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 300
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -887,8 +888,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11133 s, so the step wraps to fork + 600 s plus margin (196 min).
-        timeout-minutes: 196
+        # 11175 s, so the step wraps to fork + 600 s plus margin (197 min).
+        timeout-minutes: 197
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
