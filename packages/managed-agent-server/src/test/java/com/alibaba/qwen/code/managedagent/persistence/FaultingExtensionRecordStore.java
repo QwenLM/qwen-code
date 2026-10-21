@@ -28,8 +28,11 @@ public class FaultingExtensionRecordStore
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources, long committedAt) {
         gate.inspect(recordBytes, resources);
-        return super.apply(tenantId, workspaceId, sessionId, firstSequence,
-                eventCount, recordBytes, resources, committedAt);
+        ApplyResult result = super.apply(tenantId, workspaceId, sessionId,
+                firstSequence, eventCount, recordBytes, resources,
+                committedAt);
+        gate.afterApply(recordBytes, resources);
+        return result;
     }
 
     @Override
@@ -38,8 +41,10 @@ public class FaultingExtensionRecordStore
             byte[] recordBytes, Function<String, StoredResource> resources,
             long committedAt) {
         gate.inspect(recordBytes, resources);
-        return super.applyNative(tenantId, workspaceId, sessionId,
-                firstSequence, eventCount, recordBytes, resources,
+        ApplyResult result = super.applyNative(tenantId, workspaceId,
+                sessionId, firstSequence, eventCount, recordBytes, resources,
                 committedAt);
+        gate.afterApply(recordBytes, resources);
+        return result;
     }
 }

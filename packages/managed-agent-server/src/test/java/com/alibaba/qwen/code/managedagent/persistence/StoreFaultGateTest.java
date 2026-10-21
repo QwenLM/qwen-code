@@ -74,6 +74,28 @@ class StoreFaultGateTest {
         assertThat(StoreFaultGate.INSTANCE.attempts()).isEqualTo(1);
     }
 
+    @Test
+    void ackModeLandsTheCommitBeforeReportingTheFailure() {
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_SETTLED, null);
+        StoreFaultGate.INSTANCE.inspect(EVENT, record("pre", "settled"));
+        assertThat(StoreFaultGate.INSTANCE.attempts()).isZero();
+        assertThatThrownBy(() -> StoreFaultGate.INSTANCE.afterApply(
+                EVENT, record("pre", "settled")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Store ack lost");
+        assertThat(StoreFaultGate.INSTANCE.attempts()).isEqualTo(1);
+    }
+
+    @Test
+    void ackModeLeavesThePlanMarkerAlone() {
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_PLAN_SETTLED, null);
+        StoreFaultGate.INSTANCE.afterApply(
+                EVENT, record("__plan__", "settled", "SessionStart"));
+        assertThat(StoreFaultGate.INSTANCE.attempts()).isZero();
+    }
+
     private static Function<String, StoredResource> record(
             String hookId, String execution) {
         return record(hookId, execution, "PreToolUse");

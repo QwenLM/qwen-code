@@ -27,6 +27,7 @@ public final class StoreFaultGate {
 
     private volatile Phase phase;
     private volatile String target;
+    private volatile boolean loseAck;
     private final AtomicInteger attempts = new AtomicInteger();
 
     private StoreFaultGate() {
@@ -35,12 +36,23 @@ public final class StoreFaultGate {
     public void arm(Phase next, String recordId) {
         attempts.set(0);
         target = recordId;
+        loseAck = false;
         phase = next;
+    }
+
+    /**
+     * FG13a: land the commit first and only then report the failure, so the
+     * caller sees a lost acknowledgement over a durable record.
+     */
+    public void armAck(Phase next, String recordId) {
+        arm(next, recordId);
+        loseAck = true;
     }
 
     public void clear() {
         phase = null;
         target = null;
+        loseAck = false;
     }
 
     public int attempts() {
@@ -49,6 +61,20 @@ public final class StoreFaultGate {
 
     void inspect(byte[] recordBytes,
             Function<String, StoredResource> resources) {
+        if (!loseAck) {
+            fault(recordBytes, resources, "Store fault injected: ");
+        }
+    }
+
+    void afterApply(byte[] recordBytes,
+            Function<String, StoredResource> resources) {
+        if (loseAck) {
+            fault(recordBytes, resources, "Store ack lost: ");
+        }
+    }
+
+    private void fault(byte[] recordBytes,
+            Function<String, StoredResource> resources, String message) {
         Phase expected = phase;
         if (expected == null) {
             return;
@@ -78,8 +104,7 @@ public final class StoreFaultGate {
                 continue;
             }
             attempts.incrementAndGet();
-            throw new IllegalStateException(
-                    "Store fault injected: " + expected);
+            throw new IllegalStateException(message + expected);
         }
     }
 

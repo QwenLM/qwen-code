@@ -574,8 +574,11 @@
                                  healthy 10021 s, fork 10621 s, Verify 188
                                  minutes. The FG12d cancel-before-dispatch cell
                                  adds 18 s (2x its measured 9.1 s): healthy
-                                 10039 s, fork 10639 s, Verify 188 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10639</forkedProcessTimeoutInSeconds>
+                                 10039 s, fork 10639 s, Verify 188 minutes. The
+                                 FG13a result store ack-loss cell adds 150 s:
+                                 healthy 10189 s, fork 10789 s, Verify 190
+                                 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10789</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

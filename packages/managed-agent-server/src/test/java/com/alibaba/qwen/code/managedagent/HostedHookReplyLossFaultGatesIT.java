@@ -621,6 +621,45 @@ class HostedHookReplyLossFaultGatesIT {
 
     @Test
     @Timeout(300)
+    void fg13aHookResultStoreAckLossSettlesWithoutASecondCallOnMySql()
+            throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_SETTLED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(),
+                "definition", 202);
+        String session = createSession(definition.path("id").asText(),
+                "initial");
+        submit(session, "FG13_ACK_SETTLE");
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts())
+                .isGreaterThanOrEqualTo(1));
+        // The commit landed; only its acknowledgement was lost.
+        waitFor(() -> assertThat(hookExecution(session).at("/run/state")
+                .asText()).isEqualTo("settled"));
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        HarnessAttach attach = attachment(
+                spring.getBean(HarnessConnector.class), session);
+        assertThat(attach).as("Session attachment").isNotNull();
+        String executionId = hookExecution(session)
+                .path("hookExecutionId").asText();
+        StoreFaultGate.INSTANCE.clear();
+        // A later read returns the settled record without a second call.
+        waitFor(() -> {
+            var status = hookStatus(session, executionId, attach);
+            assertThat(status.statusCode())
+                    .as("hook status: %s", status.body()).isEqualTo(200);
+            assertThat(json.readTree(status.body()).path("state").asText())
+                    .isEqualTo("settled");
+        });
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        assertThat(hookResult(session).path("outcome").asText())
+                .isEqualTo("success");
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
     void fg13bHookPlanResultStoreRejectionRebuildsTheMarkerOnMySql() throws Exception {
         boot("60000", "1000", "hook-solo");
         StoreFaultGate.INSTANCE.clear();
