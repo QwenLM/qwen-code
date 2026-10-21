@@ -101,6 +101,6 @@ Decisions:
 
 Mutation witness: disabling the #13673 branch (`if (false && record.isActive() && …isManagedContext() …)`) turns the case red: every retry forwards the owner release, the restarted Broker answers 503, and the holder stays booked, which is the R1-1 symptom #13109 recorded. Three runs, all red at the recovery assertion; the restored control is green.
 
-Budget: the case measures 11.4–11.9 s inside the nine-case class run (103.4–103.8 s, two runs) on JDK 21, MySQL 8.4.6 and Linux aarch64, and passed five standalone runs in a row. It adds 24 s (2x) to the shared healthy sum (10039 → 10063 s), so the `hosted-harness-mysql` fork moves to 10663 s and the 188-minute Verify step still wraps it (11263 s of fork plus wrap); the job ceiling stays 291.
+Budget: the case measures 11.4–11.9 s inside the nine-case class run (103.4–103.8 s, two runs) on JDK 21, MySQL 8.4.6 and Linux aarch64, and passed five standalone runs in a row. It adds 24 s (2x) to the shared healthy sum (10050 → 10074 s), so the `hosted-harness-mysql` fork moves to 10674 s and the 188-minute Verify step still wraps it (11274 s of fork plus wrap, 6 s of margin); the job ceiling stays 291. The next cell added to this fork must raise the Verify step and the job ceiling as well.
 
 Not covered: a Broker killed during the owner release itself (the request reaches a Broker that dies before answering), a Spring restart before `drained` (FG12c's split-out Spring cells; the same seeding change unblocks them), and cross-host recovery.

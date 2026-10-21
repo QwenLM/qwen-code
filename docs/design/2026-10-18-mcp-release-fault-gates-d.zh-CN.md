@@ -101,6 +101,6 @@ JDK 21 实测（加入应答 hold 之后）：六格整类在 MySQL 8.0.46 上 3
 
 变异见证：关掉 #13673 的分支（`if (false && record.isActive() && …isManagedContext() …)`）后，该格变红：每次重试都会转发 owner 释放，重启后的 Broker 回答 503，holder 一直被占用，正是 #13109 记录的 R1-1 症状。共 3 次运行，全部在恢复断言处变红；恢复后的对照为绿。
 
-预算：该格在九格整类运行（103.4–103.8 s，两次，JDK 21、MySQL 8.4.6、Linux aarch64）中实测 11.4–11.9 s，单独连续运行 5 次均通过。按 2× 计入共享 healthy 24 s（10039 → 10063 s），因此 `hosted-harness-mysql` fork 移到 10663 s，188 分钟的 Verify step 仍能包住（fork 加包裹共 11263 s）；job 上限保持 291。
+预算：该格在九格整类运行（103.4–103.8 s，两次，JDK 21、MySQL 8.4.6、Linux aarch64）中实测 11.4–11.9 s，单独连续运行 5 次均通过。按 2× 计入共享 healthy 24 s（10050 → 10074 s），因此 `hosted-harness-mysql` fork 移到 10674 s，188 分钟的 Verify step 仍能包住（fork 加包裹共 11274 s，余量 6 s）；job 上限保持 291。下一个加入该 fork 的格必须同时提高 Verify step 与 job 上限。
 
 未覆盖：在 owner 释放过程中杀掉 Broker（请求已到达 Broker，但它在应答前死亡）、`drained` 之前的 Spring 重启（FG12c 拆出的 Spring 格；同样的"只种一次"改动可以解开它们）、以及跨主机恢复。
