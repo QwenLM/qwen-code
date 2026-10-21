@@ -249,13 +249,32 @@ describe('ci.yml disk-pressure evidence', () => {
     // instead of pinning its text: the grep pattern is only worth anything if
     // the fields actually reach the artifact. The stub rejects any option
     // cluster carrying T — `df -hT` arrives as ONE argument, so matching on
-    // `-T` alone would let it through and fake the fallback — answers -h, and
-    // stays silent for -i so STUB-DF-H is attributable to the retry.
+    // `-T` alone would let it through and fake the fallback. That arm must stay
+    // ahead of `-h`, and must mark its own output: otherwise "retried after
+    // -hT failed" and "never tried -hT" are indistinguishable.
+    //
+    // The three sibling dumps carry the same two fields and no equality pin
+    // reaches them ('Dump disk state on failure' is this lane's alone). Pin
+    // them textually like the sampler loop above — not executed, because
+    // test_windows greps /proc/meminfo, which Git Bash lacks.
+    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+      const leg = ciJobs[jobName].steps.find(
+        (candidate) => candidate.name === 'Run tests and generate reports',
+      );
+      assert.ok(leg, `missing run-tests step in ${jobName}`);
+      assert.match(
+        leg.run,
+        /df -hT .* \|\| df -h /,
+        `${jobName} lost the df -h retry`,
+      );
+      assert.match(leg.run, /SwapTotal\|SwapFree/, `${jobName} lost swap`);
+    }
+
     const root = mkdtempSync(join(tmpdir(), 'ci-disk-pressure-'));
     const df = join(root, 'df');
     writeFileSync(
       df,
-      '#!/usr/bin/env bash\ncase "$*" in\n  *T*) exit 1 ;;\n  *-h*) echo STUB-DF-H ;;\nesac\n',
+      '#!/usr/bin/env bash\ncase "$*" in\n  *T*) echo STUB-DF-HT; exit 1 ;;\n  *-h*) echo STUB-DF-H ;;\nesac\n',
     );
     chmodSync(df, 0o755);
 
@@ -296,6 +315,24 @@ describe('ci.yml disk-pressure evidence', () => {
         `swap exhaustion is invisible in the artifact\nstdout: ${result.stdout}`,
       );
       assert.match(samples, /^SwapFree:/m);
+      // All four fields share the one edited grep line, so a pattern narrowed
+      // to swap alone must go red here. `MemAvailable` has to keep the exact
+      // spelling the sampler's `awk '/MemAvailable/'` uses, or the two stop
+      // being comparable.
+      assert.match(
+        samples,
+        /^MemTotal:/m,
+        `RAM total is invisible in the artifact\nstdout: ${result.stdout}`,
+      );
+      assert.match(samples, /^MemAvailable:/m, 'RAM available is invisible');
+      // -hT must be ATTEMPTED, not merely tolerated: a `df -h || true`
+      // collapse or a reorder still yields STUB-DF-H, silently losing the
+      // filesystem Type column.
+      assert.match(
+        samples,
+        /^STUB-DF-HT$/m,
+        `df -hT was never attempted first\nstdout: ${result.stdout}`,
+      );
       assert.match(
         samples,
         /^STUB-DF-H$/m,
