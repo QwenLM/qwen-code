@@ -450,11 +450,14 @@ jobs:
     # single step that runs both Maven commands. Run 39353663670's verify
     # acquisition waited the full 90 minutes after the install step released
     # the lock, so a per-step lock let this job lose its place in the host
-    # queue between installing and verifying. The ceiling absorbs that wait,
-    # the ~60 minutes of measured Maven work, and 30 minutes of uncapped
-    # setup plus 20 minutes of margin: 200. Hosted lanes never take the lock
+    # queue between installing and verifying. The ceiling must cover that
+    # 90-minute wait, the ~75 minutes of measured Maven work, the bounded
+    # cache write-back, and ~30 minutes of uncapped setup. 280 leaves margin
+    # for a loaded host; run 39563394993 was cancelled at the old 200-minute
+    # ceiling after a 54-minute queue wait, 75 minutes of Maven work and a
+    # 60-minute unbounded cache write-back. Hosted lanes never take the lock
     # and inherit this ceiling as a bound, not as an expected duration.
-    timeout-minutes: 200
+    timeout-minutes: 280
     services:
       mariadb:
         image: 'mariadb:10.11.18'
@@ -709,10 +712,14 @@ jobs:
           # (the hosted-only cache no longer restores it), so create it
           # before the write-back or every job re-resolves through the
           # egress proxy instead of bootstrapping the shared repository.
+          # Bound the write-back: on a loaded host this tar grew to 60
+          # minutes and pushed the job into its ceiling (run 39563394993).
+          # The cache is an optimization, so skip it rather than spend the
+          # budget; the next job re-resolves the missing artifacts.
           mkdir -p "${HOME}/.m2/repository"
-          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
+          timeout 300 tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
             | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
-            || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+            || echo "::warning::Maven cache write-back skipped after 300 s or failed; the gate result above is unaffected"
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
       # .mvn/maven.config, so compare what ran with the source tree.

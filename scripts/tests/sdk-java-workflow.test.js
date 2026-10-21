@@ -769,6 +769,18 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     );
   });
 
+  it('bounds the Maven cache write-back so it cannot spend the job budget', () => {
+    // Run 39563394993 spent 60 minutes tarring the host-shared ~/.m2 and
+    // was cancelled at the job ceiling. The cache is an optimization: skip
+    // it after five minutes and let the next job re-resolve.
+    expect(workflow).toContain('timeout 300 tar');
+    // The ceiling must cover the 90-minute lock wait plus the measured
+    // ~75-minute Maven pass, the bounded write-back and setup headroom.
+    expect(
+      parse(workflow).jobs['mysql-integration']['timeout-minutes'],
+    ).toBeGreaterThanOrEqual(240);
+  });
+
   it('installs and verifies against one job-local Maven repository', () => {
     // The fixed 0.1.0-alpha release coordinates must not resolve from the
     // host-shared ~/.m2: the job-local repo is seeded from that cache, and
@@ -803,7 +815,7 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       'tar -C "${HOME}/.m2/repository" --skip-old-files -xf -',
     );
     expect(step.run).toContain(
-      '|| echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
+      '|| echo "::warning::Maven cache write-back skipped after 300 s or failed; the gate result above is unaffected"',
     );
     // One body replaced the two-step split, so only these positions still
     // order the phases: the write-back runs against a directory the seed has
