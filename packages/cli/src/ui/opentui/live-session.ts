@@ -25,6 +25,7 @@ import {
   InteractiveModToolScheduler,
   type InteractiveCompletedToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { appendFileSync } from 'node:fs';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
@@ -117,6 +118,7 @@ export interface LivePromptOptions {
    * documented rule that continuations carry no provenance.
    */
   submittedPrompt?: string;
+  humanInput?: HumanPromptInput;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
@@ -745,6 +747,7 @@ export async function* livePromptEvents(
     const sendOptions = first
       ? {
           type: SendMessageType.UserQuery,
+          ...(options?.humanInput ? { humanInput: options.humanInput } : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
           ...(options?.submittedPrompt
             ? { submittedPrompt: options.submittedPrompt }
