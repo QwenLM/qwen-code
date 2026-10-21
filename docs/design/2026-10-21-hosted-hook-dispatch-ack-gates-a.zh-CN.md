@@ -24,18 +24,16 @@ FG13b 的派发格在 `dispatch_started` 提交应用之前拒绝，事务回滚
 | 步骤 | 发生什么                                          |
 | ---- | ------------------------------------------------- |
 | 1    | `dispatch_started` 提交落库，随后缝报告确认丢失。 |
-| 2    | 用例读取失败留下的记录。                          |
-| 3    | 清除门禁，等待静默。                              |
-| 4    | 用例给恢复可发出的物理调用设上界。                |
+| 2    | store 客户端重试，已提交的命令走重放。            |
+| 3    | Hook 从这份已落库的派发执行一次并结算。           |
+| 4    | 用例断言故障只触发一次、结果已结算。              |
 
 期望：
 
-- 已落库记录是 `dispatch_started` 且无结果——这正是它与 FG13b 拒绝格（停在
-  `intent`）的分界。
-- 物理调用至多一次：确认在派发发出之前丢失，恢复可以复用这个已落库的派发
-  一次，绝不会执行两次。
-- 前进方向的恢复路径（对已落库的 `dispatch_started` 重新 `fire()` 恰好发出
-  一次派发）由 TypeScript 层钉住。
+- 故障恰好触发一次：重试走重放，不再经过记录 store；若是回滚，重试会再次
+  提交派发并二次触发故障。
+- 物理调用与 allow 各一次，记录以结果结算。
+- 对已有 `dispatch_started` 重新 `fire()` 走的是 `lookup` 分支，本格不覆盖。
 
 ## 接缝
 
@@ -47,9 +45,9 @@ FG13b 的派发格在 `dispatch_started` 提交应用之前拒绝，事务回滚
 
 - FG13b 钉住拒绝：回滚让记录停在 `intent`，且不产生派发。
 - 本格钉住已落库的提交：记录持久存在，失败不能被读成「没有派发记录」。
-- 前进方向的恢复路径——对已落库的 `dispatch_started` 重新 `fire()` 恰好发出
-  一次派发——由 TypeScript 层 `hosted-hook-session.test.ts` 的
-  `dispatches a recovered intent through its original Runtime Session` 钉住。
+- 对已有 `dispatch_started` 重新 `fire()` 走 `lookup` 分支而非再次派发，本格
+  不覆盖该路径；TypeScript 的 `dispatches a recovered intent through its
+original Runtime Session` 只覆盖 `intent` 窗口。
 
 ## 变异见证
 

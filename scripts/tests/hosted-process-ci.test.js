@@ -528,9 +528,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (195 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (196 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 285, 298],
+    ['hosted-harness-mysql', 286, 299],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -765,17 +765,18 @@ describe('Hosted real-process gates', () => {
       // the step to 188 minutes; the FG12d cancel-before-dispatch cell adds
       // 18 s (2x its measured 9.1 s), so the fork moves to 10639; the FG11d
       // retry-reuse cell adds 11 s (2x its measured 5.3 s), moving the fork to
-      // 10650 and the step stays 188 minutes; the FG13a result store ack-loss
-      // cell adds 150 s, moving the fork to 10800 and the step to 190
-      // minutes; the FG13a dispatch ack-loss cell adds 150 s, moving the fork
-      // to 10950 and the step to 193 minutes; the FG13a registration-settle
-      // ack-loss cell adds 150 s, moving the fork to 11100 and the step to
-      // 195 minutes):
+      // 10650 and the step stays 188 minutes; the FG12d Spring-restart
+      // owner-release cell adds 24 s (2x its measured 11.9 s), moving the fork
+      // to 10674; the FG13a result store ack-loss cell adds 150 s, moving the
+      // fork to 10824 and the step to 191 minutes; the FG13a dispatch
+      // ack-loss cell adds 150 s, moving the fork to 10974 and the step to
+      // 193 minutes; the FG13a registration-settle ack-loss cell adds 150 s,
+      // moving the fork to 11124 and the step to 196 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11100);
+        expect(forkSeconds).toBe(11124);
       }
     },
   );
@@ -860,15 +861,16 @@ describe('Hosted real-process gates', () => {
   // FG13f MessageDisplay reload cell adds 150s, so it becomes 10021s; the
   // FG12d cancel-before-dispatch cell adds 18s (2x its measured 9.1s), so it
   // becomes 10039s; the retry-reuse cell adds 11s (2x its measured 5.3s), so it
-  // becomes 10050s; the FG13a result store ack-loss cell adds 150s, so it
-  // becomes 10200s; the FG13a dispatch ack-loss cell adds 150s, so it becomes
-  // 10350s; the FG13a registration-settle ack-loss cell adds 150s, so it
-  // becomes 10500s. The largest
+  // becomes 10050s; the FG12d Spring-restart owner-release cell adds 24s (2x
+  // its measured 11.9s), so it becomes 10074s; the FG13a result store ack-loss
+  // cell adds 150s, so it becomes 10224s; the FG13a dispatch ack-loss cell
+  // adds 150s, so it becomes 10374s; the FG13a registration-settle ack-loss
+  // cell adds 150s, so it becomes 10524s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10500;
+  const hostedForkHealthySeconds = 10524;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
