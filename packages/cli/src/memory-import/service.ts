@@ -19,6 +19,7 @@ import {
   scanAutoMemorySnapshot,
   parseAutoMemoryTopicDocument,
 } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
+import { tokenizeMemoryRecallText } from '@qwen-code/qwen-code-core/memory/recall.js';
 import { rebuildAutoMemoryIndexAtRoot } from '@qwen-code/qwen-code-core/memory/indexer.js';
 import {
   validateMemoryImportBatchProposal,
@@ -201,11 +202,12 @@ function publicTask(task: StoredTask): ImportTask {
 }
 function selectImportContext(
   existing: MemoryImportModelInput['existing'],
-  source: string,
+  sources: readonly string[],
 ): MemoryImportModelInput['existing'] {
-  const terms = new Set(
-    source.toLowerCase().match(/[\p{L}\p{N}_-]{4,}/gu) ?? [],
-  );
+  const queries = sources.map((source) => ({
+    text: source.normalize('NFKC').toLowerCase(),
+    terms: new Set(tokenizeMemoryRecallText(source)),
+  }));
   const index = existing.map((item) => {
     const parsed = parseAutoMemoryTopicDocument('existing.md', item.content);
     if (!parsed)
@@ -220,18 +222,22 @@ function selectImportContext(
       keywords: parsed.keywords,
       usage_scenarios: parsed.usageScenarios,
     });
-    const words = new Set(
-      [
-        parsed.title,
-        parsed.description,
-        ...parsed.keywords,
-        ...parsed.usageScenarios,
-      ]
-        .join(' ')
-        .toLowerCase()
-        .match(/[\p{L}\p{N}_-]{4,}/gu) ?? [],
+    const words = tokenizeMemoryRecallText(
+      [parsed.title, ...parsed.keywords].join(' '),
     );
-    const relevant = [...words].filter((word) => terms.has(word)).length >= 2;
+    const anchors = [parsed.title, parsed.description]
+      .map((text) => text.normalize('NFKC').toLowerCase().trim())
+      .filter((text) => tokenizeMemoryRecallText(text).length >= 2);
+    const body = parsed.body.normalize('NFKC').toLowerCase().trim();
+    const relevant = queries.some(({ text, terms }) => {
+      if (
+        anchors.some((anchor) => text.includes(anchor)) ||
+        (body.length > 0 && text.includes(body))
+      )
+        return true;
+      const shared = words.filter((word) => terms.has(word));
+      return shared.length >= 2 && shared.length >= words.length / 2;
+    });
     return {
       ref: item.ref,
       content: relevant ? item.content : metadata,
@@ -731,7 +737,7 @@ export class MemoryImportService {
         sources: batch.map(({ id, content }) => ({ id, content })),
         existing: selectImportContext(
           before.existing,
-          batch.map((item) => item.content).join('\n'),
+          batch.map((item) => item.content),
         ),
       };
       const reserved = memoryImportReservation(input);
@@ -988,10 +994,16 @@ export class MemoryImportService {
               'Project knowledge cannot be imported into user memory.',
             );
           const bodyDigest = digest(parsed.body.trim());
-          for (const record of Object.values(ledger)) {
+          for (const [sourceId, record] of Object.entries(ledger)) {
             if (
               record.outputs.some((output) => output.bodyDigest === bodyDigest)
             ) {
+              if (
+                record.phase === 'intent' &&
+                (await exists(path.join(scopeState, record.stage))) &&
+                !(await exists(path.join(root, 'imported', sourceId)))
+              )
+                continue;
               for (const output of record.outputs) {
                 const file = await resolveTrustedMemoryFile(
                   root,

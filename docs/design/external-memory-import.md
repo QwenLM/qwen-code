@@ -86,7 +86,9 @@ copy of every existing body. The local full snapshot still protects against edit
 and forgetting. The index is bounded to the context budget: index-only entries that
 do not fit are omitted. If relevant evidence cannot fit, fail with an actionable
 context-limit result rather than silently dropping it. Index-only entries are
-explicitly identified; uncertain overlap must produce a conflict.
+explicitly identified; uncertain overlap must produce a conflict. Relevance compares each selected source separately with native script-aware recall tokens (up to 64 head/tail terms, including CJK bigrams). An exact body or multi-term title/description match retains full evidence; otherwise at least two shared terms must cover half of the title and keyword terms. Generic overlap in descriptions or usage scenarios alone does not expand a full body; those fields remain available in the metadata index. This remains a lexical heuristic, not a semantic guarantee, and it does not demote oversized relevant evidence to fit the budget.
+
+Cross-source edit/forget protection ignores an intent only when its staging directory still exists and its native destination does not. An intent whose rename already happened remains protected even if its committed-ledger update was interrupted; deleting or editing the published content must not recreate it.
 
 Offline preview estimates calls and input/output tokens by source project group,
 reserving the maximum existing-context allowance because preview does not read native

@@ -125,7 +125,7 @@ function normalizeRecallText(text: string): string {
   return text.normalize('NFKC').toLowerCase();
 }
 
-function tokenize(text: string): string[] {
+export function tokenizeMemoryRecallText(text: string): string[] {
   const normalized = normalizeRecallText(text);
   const edgeSize = MAX_HEURISTIC_QUERY_TOKENS / 2;
   const headTokens = new Set<string>();
@@ -359,7 +359,7 @@ function isStrongFastMatch(
 ): boolean {
   if (matchesTitleOrKeyword(query, doc)) return true;
 
-  const queryTokens = tokenize(query);
+  const queryTokens = tokenizeMemoryRecallText(query);
   const metadata = normalizeRecallText(
     [doc.title, doc.description, ...doc.keywords, ...doc.usageScenarios].join(
       ' ',
@@ -382,7 +382,7 @@ export function selectRelevantAutoMemoryDocuments(
   limit = MAX_RELEVANT_DOCS,
   useStructuredMetadata = true,
 ): ScannedAutoMemoryDocument[] {
-  const queryTokens = tokenize(query);
+  const queryTokens = tokenizeMemoryRecallText(query);
   if (queryTokens.length === 0) {
     return [];
   }

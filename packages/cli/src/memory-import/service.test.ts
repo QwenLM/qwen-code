@@ -668,6 +668,63 @@ describe('durable memory import', () => {
         edited,
       );
     }));
+  it.each([
+    'unpublished',
+    'published-edited',
+    'published-forgotten',
+    'committed-forgotten',
+  ])(
+    'distinguishes %s records when another source proposes the same body',
+    (state) =>
+      context(async () => {
+        const original = fs.rename;
+        const rename = vi
+          .spyOn(fs, 'rename')
+          .mockImplementation(async (from, to) => {
+            if (
+              path.basename(String(from)).startsWith('stage-') &&
+              state !== 'committed-forgotten'
+            ) {
+              if (state !== 'unpublished') await original(from, to);
+              throw new Error('Synthetic interruption at publication');
+            }
+            return original(from, to);
+          });
+        const svc = service();
+        const first = await svc.submit(source, selection(), 'first-source');
+        expect((await svc.idle(first.id)).items[0].status).toBe(
+          state === 'committed-forgotten' ? 'added' : 'failed',
+        );
+        rename.mockRestore();
+        const memory = getImportedProjectMemoryRoot(project);
+        const file = path.join(memory, 'imported', selection()[0].id, '0.md');
+        if (state === 'published-edited')
+          await fs.appendFile(file, '\nUser edit.\n');
+        if (state.endsWith('forgotten')) await fs.unlink(file);
+        const nextSource = {
+          ...source,
+          files: [
+            {
+              path: 'MEMORY.md',
+              content:
+                '# Another source\ncwd: /synthetic/project\nRemember the migration rollback requirement.',
+            },
+          ],
+        };
+        const next = await svc.submit(
+          nextSource,
+          [{ id: previewSource(nextSource).sections[0].id, scope: 'project' }],
+          'second-source',
+        );
+        expect((await svc.idle(next.id)).items[0].status).toBe(
+          state === 'unpublished' ? 'added' : 'conflict',
+        );
+        if (state === 'published-edited')
+          expect(await fs.readFile(file, 'utf8')).toBe(doc + '\nUser edit.\n');
+        if (state.endsWith('forgotten'))
+          await expect(fs.stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+      }),
+  );
   it('honors cancellation from another service instance before publication', () =>
     context(async () => {
       let entered!: () => void;
@@ -958,6 +1015,94 @@ describe('bounded project batches', () => {
         true,
       );
       expect(propose).toHaveBeenCalledTimes(1);
+    }));
+  it.each(['exact-body', 'reordered-terms'])(
+    'includes CJK evidence for %s sources',
+    (mode) =>
+      context(async () => {
+        const memory = getUserAutoMemoryRoot();
+        await fs.mkdir(memory, { recursive: true });
+        const body = '先检查蓝色图表，再确认灰色背景。';
+        const content =
+          '---\nname: 发布流程\ndescription: 上线检查与回滚验证\ntype: user\ncategory: testing_standard\nkeywords: [回滚验证, 上线检查]\nusage_scenarios: [上线检查]\n---\n' +
+          body +
+          '\n';
+        await fs.writeFile(path.join(memory, 'existing.md'), content);
+        const input = {
+          version: 1,
+          source: 'codex',
+          files: [
+            {
+              path: 'MEMORY.md',
+              content:
+                '# 新偏好\n' +
+                (mode === 'exact-body' ? body : '先做回滚验证再进行上线检查。'),
+            },
+          ],
+        };
+        const propose = vi.fn(async (request: MemoryImportModelInput) =>
+          skipped(request),
+        );
+        const svc = new MemoryImportService({
+          projectRoot: project,
+          assertActive: () => {},
+          propose,
+        });
+        const task = await svc.submit(
+          input,
+          [{ id: previewSource(input).sections[0].id, scope: 'user' }],
+          'cjk',
+        );
+        expect((await svc.idle(task.id)).items[0].status).toBe('skipped');
+        expect(propose).toHaveBeenCalledTimes(1);
+        expect(propose.mock.calls[0][0].existing).toEqual([
+          { ref: 'user:existing.md', content, indexOnly: false },
+        ]);
+      }),
+  );
+  it('does not expand unrelated mature-store bodies for generic shared words', () =>
+    context(async () => {
+      const memory = getUserAutoMemoryRoot();
+      await fs.mkdir(memory, { recursive: true });
+      for (let i = 0; i < 40; i++) {
+        const content =
+          `---\nname: Database migration ${i}\ndescription: Review project changes before release and verify database migrations\ntype: user\ncategory: testing_standard\nkeywords: [database migration, rollback verification]\nusage_scenarios: [Review project configuration before release]\n---\n` +
+          'Check transactional constraints and restore ordering. '.repeat(24);
+        await fs.writeFile(path.join(memory, `existing-${i}.md`), content);
+      }
+      const input = {
+        version: 1,
+        source: 'codex',
+        files: [
+          {
+            path: 'MEMORY.md',
+            content:
+              '# Chart preferences\nReview project changes before release and verify forest green charts on a white background.',
+          },
+        ],
+      };
+      const propose = vi.fn(async (request: MemoryImportModelInput) =>
+        skipped(request),
+      );
+      const svc = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose,
+      });
+      const task = await svc.submit(
+        input,
+        [{ id: previewSource(input).sections[0].id, scope: 'user' }],
+        'generic-words',
+      );
+      expect((await svc.idle(task.id)).items[0].status).toBe('skipped');
+      expect(propose).toHaveBeenCalledTimes(1);
+      expect(propose.mock.calls[0][0].existing).toHaveLength(40);
+      expect(
+        propose.mock.calls[0][0].existing.every((item) => item.indexOnly),
+      ).toBe(true);
+      expect(JSON.stringify(propose.mock.calls[0][0].existing)).not.toContain(
+        'transactional constraints',
+      );
     }));
   it('bounds the metadata index when a mature memory store exceeds the context budget', () =>
     context(async () => {
