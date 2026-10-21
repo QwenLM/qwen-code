@@ -124,7 +124,8 @@ public class WorkspaceStorageGuard {
             markerStatus = "unavailable";
         }
         boolean held = row.holderKey() != null || row.bindingId() != null
-                || row.runtimeGeneration() != null || row.runtimeSessionId() != null;
+                || row.runtimeGeneration() != null || row.runtimeSessionId() != null
+                || WorkspaceExecutionStore.hasExecutionMembers(jdbc, physical);
         boolean valid = "READY".equals(row.state()) && row.revision() > 0
                 && row.operationId() == null && validId(row.completedOperationId())
                 || "FENCED".equals(row.state()) && row.revision() > 0
@@ -150,7 +151,7 @@ public class WorkspaceStorageGuard {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             String physical = LocalStorageOwners.lockCovered(jdbc, tenantId, storageId);
             Registration saved = row(physical, true);
-            requireFenced(saved, revision, operationId);
+            requireFenced(saved, physical, revision, operationId);
             Path original = root(tenantId, storageId);
             requireMatching(saved, identity(original), tenantId, storageId);
             if (!marker(saved).equals(readMarker(original))) {
@@ -166,7 +167,7 @@ public class WorkspaceStorageGuard {
             WorkspaceStorageKindGuard.lockDomain(jdbc, expected.tenantId());
             String physical = LocalStorageOwners.lockCovered(jdbc, expected.tenantId(), expected.storageId());
             Registration saved = row(physical, true);
-            requireFenced(saved, expected.mountRevision(), expected.fenceOperationId());
+            requireFenced(saved, physical, expected.mountRevision(), expected.fenceOperationId());
             var metadata = new RecoveryRegistration(expected.tenantId(), expected.storageId(), saved.registrationId(),
                     saved.revision(), saved.operationId(), saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime());
             if (!metadata.equals(expected) || !physical.equals(LocalStorageOwners.physicalKey(new Identity(
@@ -184,12 +185,12 @@ public class WorkspaceStorageGuard {
         return transaction.execute(status -> action.get());
     }
 
-    private static void requireFenced(Registration saved, long revision, String operationId) {
+    private void requireFenced(Registration saved, String physical, long revision, String operationId) {
         if (saved == null || !"FENCED".equals(saved.state()) || saved.revision() != revision
                 || !operationId.equals(saved.operationId()) || saved.holderKey() != null
                 || saved.bindingId() != null || saved.runtimeGeneration() != null
                 || saved.runtimeSessionId() != null || !validId(saved.registrationId())
-                || saved.completedOperationId() != null) {
+                || saved.completedOperationId() != null || WorkspaceExecutionStore.hasExecutionMembers(jdbc, physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -282,6 +283,7 @@ public class WorkspaceStorageGuard {
                     + " ON DUPLICATE KEY UPDATE storage_key = storage_key",
                     key, key, tenantId, storageId);
             Registration row = row(key, true);
+            requireNoExecutionMembers(key);
             if (row == null || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -326,6 +328,7 @@ public class WorkspaceStorageGuard {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             Registration row = row(key, true);
+            requireNoExecutionMembers(key);
             if (row == null || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -397,6 +400,7 @@ public class WorkspaceStorageGuard {
             }
             String physical = LocalStorageOwners.lockCovered(jdbc, tenantId, storageId);
             Registration current = row(physical, true);
+            requireNoExecutionMembers(physical);
             if (current != null && "FENCED".equals(current.state())
                     && current.revision() == revision && operationId.equals(current.operationId())) {
                 return;
@@ -439,6 +443,7 @@ public class WorkspaceStorageGuard {
                 }
                 return;
             }
+            requireNoExecutionMembers(physical);
             if (row == null || !"FENCED".equals(row.state())
                     || row.revision() != revision || !operationId.equals(row.operationId())
                     || row.holderKey() != null || row.bindingId() != null
@@ -482,6 +487,12 @@ public class WorkspaceStorageGuard {
                 throw WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException | IllegalArgumentException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private void requireNoExecutionMembers(String physical) {
+        if (WorkspaceExecutionStore.hasExecutionMembers(jdbc, physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
