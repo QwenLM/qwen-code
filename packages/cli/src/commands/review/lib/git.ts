@@ -354,7 +354,6 @@ export function gitProbe(...args: string[]): {
   }
 }
 
-/** True iff a ref (branch / tag / commit) exists locally. */
 /**
  * Absolute path of the repository's main worktree, whichever worktree the
  * command runs in. The watch probes keep their cursors and the autofix
@@ -368,6 +367,7 @@ export function repoRoot(): string {
   return first.slice('worktree '.length);
 }
 
+/** True iff a ref (branch / tag / commit) exists locally. */
 export function refExists(ref: string): boolean {
   return gitOpt('rev-parse', '--verify', '--quiet', ref) !== null;
 }
