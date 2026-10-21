@@ -675,39 +675,25 @@ class HostedHookReplyLossFaultGatesIT {
                 .isGreaterThanOrEqualTo(1));
         // The dispatch commit landed; only its acknowledgement was lost, so
         // the record survives at the phase the worker was never told about.
-        // That is what separates this cell from the FG13b rejection, where
-        // the rollback leaves the record at intent.
-        waitFor(() -> {
-            JsonNode execution = hookExecution(session);
-            assertThat(execution.at("/run/execution").asText())
-                    .isEqualTo("dispatch_started");
-            assertThat(execution.path("resultRef").isNull()).isTrue();
-        });
-        // The acknowledgement is lost before the dispatch is issued, so no
-        // command ever reaches the worker.
+        // That is what separates this cell from the FG13b rejection, whose
+        // rollback leaves intent. The read is taken before the gate clears,
+        // so no recovery can have moved the record yet.
+        JsonNode execution = hookExecution(session);
+        assertThat(execution.at("/run/execution").asText())
+                .isEqualTo("dispatch_started");
+        assertThat(execution.path("resultRef").isNull())
+                .as("unsettled dispatch").isTrue();
+        StoreFaultGate.INSTANCE.clear();
+        // The acknowledgement was lost before the dispatch was issued, so a
+        // recovery may resume that durable dispatch once; it must never run
+        // the Hook twice. The forward resume itself is pinned by the
+        // TypeScript case `dispatches a recovered intent through its
+        // original Runtime Session`.
         await().pollDelay(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(3))
                 .until(() -> true);
-        assertThat(events("hook.call")).as("physical calls").isEmpty();
-        // The turn parks instead of guessing: the model never receives a
-        // tool result it could read as the Hook's answer.
-        HarnessAttach attach = attachment(
-                spring.getBean(HarnessConnector.class), session);
-        assertThat(attach).as("Session attachment").isNotNull();
-        waitFor(() -> {
-            var probe = harnessStatus(session, attach);
-            assertThat(probe.statusCode())
-                    .as("harness status: %s", probe.body()).isEqualTo(200);
-            JsonNode body = json.readTree(probe.body());
-            assertThat(body.path("hasActivePrompt").asBoolean()).isFalse();
-            assertThat(body.path("recoveryBlocked").asBoolean()).isTrue();
-        });
-        assertThat(modelRequests.toString()).doesNotContain(PROOF);
-        // Clearing the gate cannot turn the durable dispatch into a second
-        // attempt: the record still names the only dispatch anyone issued.
-        StoreFaultGate.INSTANCE.clear();
-        await().pollDelay(Duration.ofSeconds(3)).atMost(Duration.ofSeconds(5))
-                .until(() -> true);
         assertThat(events("hook.call")).as("physical calls")
+                .hasSizeLessThanOrEqualTo(1);
+        assertThat(events("hook.allow")).as("allow decisions")
                 .hasSizeLessThanOrEqualTo(1);
         assertThat(modelFailure.get()).isNull();
         StoreFaultGate.INSTANCE.clear();
