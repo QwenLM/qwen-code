@@ -44,7 +44,11 @@ import {
   MODIFIER_CTRL_BIT,
   MODIFIER_SUPER_BIT,
 } from '../utils/platformConstants.js';
-import { clipboardHasImage } from '../utils/clipboardUtils.js';
+import {
+  clipboardHasImage,
+  formatClipboardFileReference,
+  readClipboardFiles,
+} from '../utils/clipboardUtils.js';
 
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 
@@ -128,6 +132,7 @@ export interface Key {
   kittyProtocol?: boolean;
   pasteImage?: boolean;
   clipboardImageUnavailable?: boolean;
+  clipboardFiles?: string[];
 }
 
 export type KeypressHandler = (key: Key) => void;
@@ -776,6 +781,32 @@ export function KeypressProvider({
       }
     };
 
+    const broadcastClipboardPaste = async () => {
+      let clipboardImageUnavailable = false;
+      const onUnavailable = () => {
+        clipboardImageUnavailable = true;
+      };
+      const clipboardFiles = await readClipboardFiles(onUnavailable);
+      const hasImage =
+        clipboardFiles.length === 0 && !clipboardImageUnavailable
+          ? await clipboardHasImage(onUnavailable)
+          : false;
+      broadcast({
+        name: '',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: true,
+        pasteImage: hasImage,
+        clipboardImageUnavailable,
+        clipboardFiles:
+          clipboardFiles.length > 0
+            ? clipboardFiles.map(formatClipboardFileReference)
+            : undefined,
+        sequence: '',
+      });
+    };
+
     // Matches terminal query responses (DA1, DA2, Kitty protocol query)
     // that may arrive late from startup detection in kittyProtocolDetector.
     // These are never valid user input.
@@ -927,20 +958,7 @@ export function KeypressProvider({
             sequence: buffered,
           });
         } else {
-          let clipboardImageUnavailable = false;
-          const hasImage = await clipboardHasImage(() => {
-            clipboardImageUnavailable = true;
-          });
-          broadcast({
-            name: '',
-            ctrl: false,
-            meta: false,
-            shift: false,
-            paste: true,
-            pasteImage: hasImage,
-            clipboardImageUnavailable,
-            sequence: buffered,
-          });
+          await broadcastClipboardPaste();
         }
         return;
       }
@@ -1411,24 +1429,8 @@ export function KeypressProvider({
           sequence: text,
         });
       } else {
-        // Empty paste — check for clipboard image (async, but fine here).
-        // Mirror the keypress-level paste-end path: surface whether the
-        // native clipboard module was unavailable.
-        let clipboardImageUnavailable = false;
-        void clipboardHasImage(() => {
-          clipboardImageUnavailable = true;
-        }).then((hasImage) => {
-          broadcast({
-            name: '',
-            ctrl: false,
-            meta: false,
-            shift: false,
-            paste: true,
-            pasteImage: hasImage,
-            clipboardImageUnavailable,
-            sequence: '',
-          });
-        });
+        // Empty paste — check copied files, then image data asynchronously.
+        void broadcastClipboardPaste();
       }
     };
 
