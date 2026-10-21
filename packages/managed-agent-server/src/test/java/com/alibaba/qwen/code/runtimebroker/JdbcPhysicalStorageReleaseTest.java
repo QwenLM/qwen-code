@@ -1,30 +1,42 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
 
 import javax.sql.DataSource;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcPhysicalStorageReleaseTest {
     @Test
-    void aliasesReleaseOnlyTheirMatchingPhysicalHolder() throws Exception {
+    void aliasesReleaseOnlyTheirMatchingExecutionMember() throws Exception {
         var source = new JdbcDataSource();
         source.setURL(
                 "jdbc:h2:mem:physical-release-"
@@ -35,10 +47,25 @@ class JdbcPhysicalStorageReleaseTest {
 
     static void verify(DataSource source) throws Exception {
         ManagedSchema.initialize(source);
+        verifyCleanupOrdering(source, false, false);
+        verifyCleanupOrdering(source, false, true);
+        verifyCleanupOrdering(source, true, false);
+        for (boolean ssh : new boolean[] {false, true}) {
+            Fixture shared = new Fixture(source, ssh);
+            shared.sessions.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", "neighbor", "bootstrap",
+                    shared.binding.getRequest().getScope()), shared.binding.getBindingId(), shared.binding.getGeneration(),
+                    RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+            shared.execute("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?", shared.physical,
+                    shared.binding.getBindingId().getBytes(StandardCharsets.UTF_8));
+            assertEquals(RuntimeSessionRecord.State.RELEASED, shared.release().getState());
+            assertNull(shared.text("SELECT execution_storage_key FROM ma_runtime_session WHERE binding_id = ? AND runtime_session_id = X'6f726967696e616c'",
+                    shared.binding.getBindingId().getBytes(StandardCharsets.UTF_8)));
+            assertEquals(shared.physical, shared.text("SELECT execution_storage_key FROM ma_runtime_session WHERE binding_id = ? AND runtime_session_id = X'6e65696768626f72'",
+                    shared.binding.getBindingId().getBytes(StandardCharsets.UTF_8)));
+        }
         Fixture matched = new Fixture(source);
-        matched.holder(matched.binding.getBindingId(), matched.binding.getGeneration());
         assertEquals(RuntimeSessionRecord.State.RELEASED, matched.release().getState());
-        assertNull(matched.holder());
+        assertNull(matched.member());
         assertEquals(
                 2L,
                 matched.scalar(
@@ -81,14 +108,14 @@ class JdbcPhysicalStorageReleaseTest {
                         "SELECT storage_alias_key FROM ma_runtime_binding WHERE binding_id=?",
                         frozen.binding.getBindingId().getBytes(StandardCharsets.UTF_8)));
 
-        Fixture successor = new Fixture(source);
-        successor.holder(successor.binding.getBindingId(), successor.binding.getGeneration() + 1);
-        String original = successor.holder();
+        Fixture mismatched = new Fixture(source);
+        mismatched.execute("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?",
+                "f".repeat(64), mismatched.binding.getBindingId().getBytes(StandardCharsets.UTF_8));
         assertEquals(
                 "workspace_close_identity_unverified",
-                assertThrows(RuntimeBrokerException.class, successor::release).getCode());
-        assertEquals(original, successor.holder());
-        successor.unreleased();
+                assertThrows(RuntimeBrokerException.class, mismatched::release).getCode());
+        assertEquals("f".repeat(64), mismatched.member());
+        mismatched.unreleased();
 
         Fixture missing = new Fixture(source);
         missing.execute("DELETE FROM ma_storage_owner WHERE storage_key=?", missing.physical);
@@ -96,14 +123,103 @@ class JdbcPhysicalStorageReleaseTest {
         missing.unreleased();
 
         Fixture wrongScope = new Fixture(source);
-        wrongScope.holder(wrongScope.binding.getBindingId(), wrongScope.binding.getGeneration());
         wrongScope.execute(
                 "UPDATE ma_storage SET tenant_id=? WHERE alias_key=?",
                 "other-tenant".getBytes(StandardCharsets.UTF_8),
                 JdbcRuntimeBindingRepository.storageAliasKey(wrongScope.tenant, "second"));
         assertThrows(RuntimeBrokerException.class, wrongScope::release);
-        assertNotNull(wrongScope.holder());
+        assertEquals(wrongScope.physical, wrongScope.member());
         wrongScope.unreleased();
+    }
+
+    private static void verifyCleanupOrdering(DataSource source, boolean ssh, boolean lost) throws Exception {
+        var observing = new CleanupDataSource(source);
+        var fixture = new Fixture(observing, ssh);
+        RuntimeBindingRecord cleanup = fixture.binding;
+        if (lost) {
+            var seed = cleanup.getProvisionSeed();
+            var loss = new RuntimeRecoveryEvidence("lost", RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
+                    "test-reboot", Instant.now(), "original-boot", seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                    seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), cleanup.getResourceHandle());
+            var stop = new RuntimeRecoveryEvidence("stopped", RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED,
+                    "test-reboot", Instant.now(), "original-boot", seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(),
+                    seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), cleanup.getResourceHandle());
+            cleanup = fixture.bindings.compareAndSet(cleanup, cleanup.withRecoveryEvidence(loss, stop, Instant.now()));
+            assertNotNull(cleanup);
+        }
+        var original = cleanup;
+        try (var pool = Executors.newSingleThreadExecutor(); var holder = source.getConnection()) {
+            holder.setAutoCommit(false);
+            try (var lock = holder.prepareStatement("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
+                lock.setString(1, fixture.physical);
+                try (var rows = lock.executeQuery()) {
+                    assertTrue(rows.next());
+                }
+            }
+            observing.armed = true;
+            var pending = pool.submit(() -> {
+                if (lost) {
+                    new WorkspaceExecutionStore(new ManagedSchemaJdbcTemplate(observing),
+                            new DataSourceTransactionManager(observing)).releaseLost(original);
+                } else {
+                    fixture.release();
+                }
+            });
+            assertTrue(observing.ownerRequested.await(5, TimeUnit.SECONDS));
+            // Another tenant holding this physical owner must still be able to scan its members.
+            try (var scan = holder.prepareStatement("SELECT execution_storage_key FROM ma_runtime_session WHERE binding_id = ?"
+                    + " AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE NOWAIT")) {
+                scan.setBytes(1, original.getBindingId().getBytes(StandardCharsets.UTF_8));
+                scan.setLong(2, original.getGeneration());
+                scan.setBytes(3, fixture.session.getRuntimeSessionId().getBytes(StandardCharsets.UTF_8));
+                try (var rows = scan.executeQuery()) {
+                    assertTrue(rows.next());
+                    assertEquals(fixture.physical, rows.getString(1));
+                }
+            }
+            assertFalse(pending.isDone());
+            holder.commit();
+            pending.get(5, TimeUnit.SECONDS);
+        }
+        assertNull(fixture.text("SELECT execution_storage_key FROM ma_runtime_session WHERE binding_id = ?",
+                original.getBindingId().getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static final class CleanupDataSource extends DelegatingDataSource {
+        private final CountDownLatch ownerRequested = new CountDownLatch(1);
+        private volatile boolean armed;
+
+        CleanupDataSource(DataSource source) {
+            super(source);
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            var actual = super.getConnection();
+            return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {Connection.class},
+                    (proxy, method, arguments) -> {
+                        try {
+                            Object result = method.invoke(actual, arguments);
+                            if (result instanceof PreparedStatement statement && arguments[0] instanceof String sql
+                                    && sql.contains("FROM ma_storage_owner") && sql.contains("storage_key = ?") && sql.contains("FOR UPDATE")) {
+                                return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {PreparedStatement.class},
+                                        (unused, operation, values) -> {
+                                            if (armed && operation.getName().equals("executeQuery")) {
+                                                ownerRequested.countDown();
+                                            }
+                                            try {
+                                                return operation.invoke(statement, values);
+                                            } catch (InvocationTargetException failure) {
+                                                throw failure.getCause();
+                                            }
+                                        });
+                            }
+                            return result;
+                        } catch (InvocationTargetException failure) {
+                            throw failure.getCause();
+                        }
+                    });
+        }
     }
 
     private static final class Fixture {
@@ -115,9 +231,15 @@ class JdbcPhysicalStorageReleaseTest {
         private final JdbcToolExecutionRepository executions;
         private final RuntimeBindingRecord binding;
         private final RuntimeSessionRecord session;
+        private final String storageKind;
 
         Fixture(DataSource source) throws Exception {
+            this(source, false);
+        }
+
+        Fixture(DataSource source, boolean ssh) throws Exception {
             this.source = source;
+            storageKind = ssh ? "SSH_LOCAL" : "LOCAL";
             bindings =
                     new JdbcRuntimeBindingRepository(
                             source, new AesGcmSecretProtector("release", new byte[32]));
@@ -128,9 +250,10 @@ class JdbcPhysicalStorageReleaseTest {
             execute(
                     "INSERT INTO"
                         + " ma_storage_owner(storage_key,physical_key,storage_kind,tenant_id,storage_id,mount_state)"
-                        + " VALUES(?,?,'LOCAL',?,?,'READY')",
+                        + " VALUES(?,?,?,?,?,'READY')",
                     physical,
                     physical,
+                    storageKind,
                     (tenant + "-first").getBytes(StandardCharsets.UTF_8),
                     "first".getBytes(StandardCharsets.UTF_8));
             var scope =
@@ -144,7 +267,7 @@ class JdbcPhysicalStorageReleaseTest {
             var initial =
                     bindings.findOrCreate(
                             new RuntimeProvisionRequest(
-                                    scope, "harness", "local-process", "second"));
+                                    scope, "harness", ssh ? "ssh-process" : "local-process", "second"));
             var claim =
                     bindings.claimOperation(initial.getBindingId(), "setup", Duration.ofMinutes(1));
             var seed = claim.getProvisionSeed();
@@ -161,8 +284,8 @@ class JdbcPhysicalStorageReleaseTest {
                             claim.withAttestation(
                                     lease,
                                     new RuntimeResourceHandle(
-                                            "local-process",
-                                            2,
+                                            ssh ? "ssh-process" : "local-process",
+                                            ssh ? 1 : 2,
                                             Map.of("resource", initial.getBindingId())),
                                     Instant.now(),
                                     Instant.now()));
@@ -206,6 +329,8 @@ class JdbcPhysicalStorageReleaseTest {
                                             draining.getProvisionSeed().getProvisionRequestId(),
                                             draining.getResourceHandle(),
                                             Instant.now())));
+            execute("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?",
+                    physical, binding.getBindingId().getBytes(StandardCharsets.UTF_8));
         }
 
         private String text(String sql, Object parameter) throws Exception {
@@ -225,50 +350,22 @@ class JdbcPhysicalStorageReleaseTest {
             execute(
                     "INSERT INTO"
                         + " ma_storage(alias_key,tenant_key,storage_key,tenant_id,storage_id,physical_key,registration_state,storage_kind,registration_revision,registration_json)"
-                        + " VALUES(?,?,?,?,?,?,'REGISTERED','LOCAL',1,'{}')",
+                        + " VALUES(?,?,?,?,?,?,'REGISTERED',?,1,'{}')",
                     JdbcRuntimeBindingRepository.storageAliasKey(aliasTenant, storage),
                     JdbcRuntimeBindingRepository.storageFenceKey(aliasTenant),
                     JdbcRuntimeBindingRepository.storageFenceKey(storage),
                     aliasTenant.getBytes(StandardCharsets.UTF_8),
                     storage.getBytes(StandardCharsets.UTF_8),
-                    physical);
-        }
-
-        private void holder(String bindingId, long generation) throws Exception {
-            String holder =
-                    HexFormat.of()
-                            .formatHex(
-                                    MessageDigest.getInstance("SHA-256")
-                                            .digest(
-                                                    (bindingId + "\0" + generation + "\0original")
-                                                            .getBytes(StandardCharsets.UTF_8)));
-            execute(
-                    "UPDATE ma_storage_owner SET"
-                            + " holder_key=?,binding_id=?,runtime_generation=?,runtime_session_id=?"
-                            + " WHERE storage_key=?",
-                    holder,
-                    bindingId.getBytes(StandardCharsets.UTF_8),
-                    generation,
-                    "original".getBytes(StandardCharsets.UTF_8),
-                    physical);
+                    physical, storageKind);
         }
 
         private RuntimeSessionRecord release() {
             return bindings.completeStoppedSessionRelease(sessions, executions, session, binding);
         }
 
-        private String holder() throws Exception {
-            try (var connection = source.getConnection();
-                    var statement =
-                            connection.prepareStatement(
-                                    "SELECT holder_key FROM ma_storage_owner WHERE"
-                                            + " storage_key=?")) {
-                statement.setString(1, physical);
-                try (var row = statement.executeQuery()) {
-                    assertEquals(true, row.next());
-                    return row.getString(1);
-                }
-            }
+        private String member() throws Exception {
+            return text("SELECT execution_storage_key FROM ma_runtime_session WHERE binding_id = ?"
+                    + " AND runtime_session_id = X'6f726967696e616c'", binding.getBindingId().getBytes(StandardCharsets.UTF_8));
         }
 
         private void unreleased() {
