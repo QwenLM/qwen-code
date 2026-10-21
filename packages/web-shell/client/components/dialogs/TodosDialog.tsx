@@ -118,7 +118,9 @@ export function TodosDialog() {
       key: string,
       patch: { status?: DaemonTodoStatus; dueDate?: string | null },
     ) => {
-      const [sessionId, todoId] = key.split(':');
+      const sep = key.indexOf(':');
+      const sessionId = key.substring(0, sep);
+      const todoId = key.substring(sep + 1);
       setBusyKey(key);
       try {
         await actions.updateTodo(sessionId, todoId, patch);
@@ -163,7 +165,9 @@ export function TodosDialog() {
       setBusyKey('bulk');
       try {
         for (const key of selected) {
-          const [sessionId, todoId] = key.split(':');
+          const sep = key.indexOf(':');
+          const sessionId = key.substring(0, sep);
+          const todoId = key.substring(sep + 1);
           await actions.updateTodo(sessionId, todoId, patch);
         }
         setSelected(new Set());

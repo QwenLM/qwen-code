@@ -17,15 +17,20 @@
  *
  * Project attribution: the live session registry (`sessionId` → `cwd`)
  * first, then the per-project chat runtime records
- * (`<globalQwenDir>/projects/<encoded>/chats/<sessionId>.runtime.json`,
+ * (`<runtimeBaseDir>/projects/<encoded>/chats/<sessionId>.runtime.json`,
  * field `work_dir`) as the fallback for sessions that are no longer live.
  * Sessions with no resolvable project group under `(unmapped project)`.
  *
  * Due dates live in a sidecar overlay (`todos/due-dates.json`, keyed
- * `sessionId:todoId` → `YYYY-MM-DD`) rather than inside the native todo
- * files: `todo_write` rewrites its whole file from the agent's list, so any
- * extra field stored there would be silently dropped on the next write.
+ * `sessionId:planId:todoId` → `YYYY-MM-DD`) rather than inside the native
+ * todo files: `todo_write` rewrites its whole file from the agent's list, so
+ * any extra field stored there would be silently dropped on the next write.
+ * The overlay key includes the `planId` because `todo_write` reuses simple
+ * IDs (like `1`) when a completed plan is replaced — without planId scoping,
+ * a deadline set on the old plan's `1` would leak into the new plan's `1`.
  * The overlay is merged into the aggregate and never touches native files.
+ * Overlay writes are serialized so concurrent updates cannot silently
+ * overwrite each other.
  *
  * Reads never mutate anything. The write path uses the non-strict
  * `mutate()` gate — flipping one status is the same capability class as
@@ -89,12 +94,38 @@ const UNMAPPED_PROJECT = '(unmapped project)';
 const DUE_DATES_FILENAME = 'due-dates.json';
 const DUE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * Session IDs are UUIDs or `default` — alphanumeric with hyphens. Rejecting
+ * anything else prevents path-traversal via crafted IDs like `../outside`
+ * reaching `<runtimeBaseDir>/outside.json`.
+ */
+const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
 function getTodoDir(): string {
   return path.join(Storage.getRuntimeBaseDir(), 'todos');
 }
 
 function getDueDatesPath(): string {
   return path.join(getTodoDir(), DUE_DATES_FILENAME);
+}
+
+/**
+ * Serializes read-modify-write cycles on the due-dates overlay. Without
+ * this, two concurrent `POST /todos/update` requests both read the same
+ * overlay snapshot, each applies its own edit, and the second write
+ * silently discards the first — both return 200 while only one edit
+ * survives. The chain swallows rejections so one failed write does not
+ * wedge the queue for subsequent requests.
+ */
+let overlayWriteChain: Promise<void> = Promise.resolve();
+
+function withOverlayLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = overlayWriteChain.then(fn, fn);
+  overlayWriteChain = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
 }
 
 async function readDueDates(): Promise<Record<string, string>> {
@@ -153,6 +184,10 @@ async function readTodoPlan(
  * Resolves `sessionId → project cwd` for the given ids. Live registry
  * records win; for the rest the per-project chat runtime record is read
  * (`work_dir`). Unresolvable ids are simply absent from the map.
+ *
+ * The scan uses the same `getRuntimeBaseDir()` root the todo files live
+ * under, so a custom `QWEN_RUNTIME_DIR` relocates both halves together
+ * instead of reading todos from one root and chat records from another.
  */
 async function resolveSessionCwds(
   sessionIds: readonly string[],
@@ -174,7 +209,7 @@ async function resolveSessionCwds(
   }
   if (missing.size === 0) return cwds;
 
-  const chatsRoot = path.join(Storage.getGlobalQwenDir(), 'projects');
+  const chatsRoot = path.join(Storage.getRuntimeBaseDir(), 'projects');
   let projects: string[] = [];
   try {
     projects = await fs.readdir(chatsRoot);
@@ -250,6 +285,7 @@ export function registerTodosRoutes(
         const plan = await readTodoPlan(todoDir, fileSessionId);
         if (!plan || plan.todos.length === 0) continue;
         const sessionId = plan.sessionId ?? fileSessionId;
+        const overlayPrefix = `${sessionId}:${plan.planId ?? ''}:`;
         sessions.push({
           sessionId,
           cwd: null,
@@ -258,7 +294,7 @@ export function registerTodosRoutes(
             .sort((a, b) => Number(a.id) - Number(b.id))
             .map((todo) => ({
               ...todo,
-              dueDate: dueDates[`${sessionId}:${todo.id}`] ?? null,
+              dueDate: dueDates[`${overlayPrefix}${todo.id}`] ?? null,
             })),
         });
       }
@@ -352,6 +388,13 @@ export function registerTodosRoutes(
       });
       return;
     }
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      res.status(400).json({
+        error: 'sessionId must be alphanumeric with hyphens/underscores only',
+        code: 'todos_bad_session_id',
+      });
+      return;
+    }
     if (status === undefined && !hasDueDate) {
       res.status(400).json({
         error: 'nothing to update: provide status and/or dueDate',
@@ -382,46 +425,63 @@ export function registerTodosRoutes(
       return;
     }
 
+    // Narrow validated body fields to their runtime types — the `unknown`
+    // from safeBody does not flow into the async closure below.
+    const validatedStatus =
+      status !== undefined && typeof status === 'string'
+        ? (status as TodoStatus)
+        : undefined;
+    const validatedDueDate: string | null | undefined = hasDueDate
+      ? dueDate === null
+        ? null
+        : String(dueDate)
+      : undefined;
+
     void (async () => {
       const todoDir = getTodoDir();
       const filePath = path.join(todoDir, `${sessionId}.json`);
       try {
+        // Always read the plan file: the overlay key needs the planId, and
+        // the todo must exist before either edit is applied.
+        const content = await fs.readFile(filePath, 'utf-8');
+        const data = JSON.parse(content) as Record<string, unknown>;
+        if (!data || !Array.isArray(data['todos'])) {
+          throw Object.assign(new Error(`not a todo store file: ${filePath}`), {
+            code: 'todos_not_found',
+          });
+        }
+        const todos = data['todos'] as Array<Record<string, unknown>>;
+        const todo = todos.find((t) => String(t['id']) === todoId);
+        if (!todo) {
+          res.status(404).json({
+            error: `todo ${todoId} not found in session ${sessionId}`,
+            code: 'todos_not_found',
+          });
+          return;
+        }
+        const planId = typeof data['planId'] === 'string' ? data['planId'] : '';
+
         let before: string | null = null;
-        if (status !== undefined) {
-          const content = await fs.readFile(filePath, 'utf-8');
-          const data = JSON.parse(content) as Record<string, unknown>;
-          if (!data || !Array.isArray(data['todos'])) {
-            throw Object.assign(
-              new Error(`not a todo store file: ${filePath}`),
-              { code: 'todos_not_found' },
-            );
-          }
-          const todos = data['todos'] as Array<Record<string, unknown>>;
-          const todo = todos.find((t) => String(t['id']) === todoId);
-          if (!todo) {
-            res.status(404).json({
-              error: `todo ${todoId} not found in session ${sessionId}`,
-              code: 'todos_not_found',
-            });
-            return;
-          }
+        if (validatedStatus !== undefined) {
           before = typeof todo['status'] === 'string' ? todo['status'] : null;
-          todo['status'] = status;
+          todo['status'] = validatedStatus;
           await fs.mkdir(todoDir, { recursive: true });
           await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
         }
 
         let appliedDueDate: string | null = null;
-        if (hasDueDate) {
-          const map = await readDueDates();
-          const key = `${sessionId}:${todoId}`;
-          if (dueDate === null) {
-            delete map[key];
-          } else {
-            map[key] = dueDate;
-          }
-          await writeDueDates(map);
-          appliedDueDate = dueDate === null ? null : (dueDate as string);
+        if (validatedDueDate !== undefined) {
+          appliedDueDate = await withOverlayLock(async () => {
+            const map = await readDueDates();
+            const key = `${sessionId}:${planId}:${todoId}`;
+            if (validatedDueDate === null) {
+              delete map[key];
+            } else {
+              map[key] = validatedDueDate;
+            }
+            await writeDueDates(map);
+            return validatedDueDate;
+          });
         }
 
         res.status(200).json({
@@ -430,7 +490,7 @@ export function registerTodosRoutes(
           sessionId,
           todoId,
           before,
-          after: status ?? undefined,
+          after: validatedStatus ?? undefined,
           dueDate: appliedDueDate,
         });
       } catch (err) {
