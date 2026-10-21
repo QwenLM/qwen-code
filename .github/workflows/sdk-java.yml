@@ -690,8 +690,9 @@ jobs:
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
-          # fast tier's 90-minute wait would expire behind it (run 39593018205
-          # waited 15:54-18:57 behind run 39628985638's integration hold).
+          # fast tier's 90-minute wait would expire behind it (run 39628985638
+          # held the lock 15:54-18:57 while run 39593018205's fast-tier job
+          # waited 17:26-18:56 and failed before Maven).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           cd packages/managed-agent-server
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
