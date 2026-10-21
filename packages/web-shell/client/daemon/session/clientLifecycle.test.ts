@@ -169,7 +169,7 @@ describe('detachDaemonClient', () => {
       expect.objectContaining({
         method: 'POST',
         keepalive: true,
-        headers: expect.objectContaining({
+        headers: new Headers({
           'X-Qwen-Client-Id': 'client-1',
           Authorization: 'Bearer tok',
         }),

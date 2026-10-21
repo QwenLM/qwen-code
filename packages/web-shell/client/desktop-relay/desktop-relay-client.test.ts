@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { DaemonClient } from '@qwen-code/sdk/daemon';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DESKTOP_RELAY_INSTALL_COMMAND,
@@ -33,10 +34,14 @@ function respond(status: number, body: unknown) {
   );
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('DESKTOP_RELAY_INSTALL_COMMAND', () => {
   it('aborts the pending approval request when its session is left', async () => {
+    const dispose = vi.spyOn(DaemonClient.prototype, 'dispose');
     const controller = new AbortController();
     let approvalSignal: AbortSignal | undefined;
     const fetchImpl = vi.fn<FetchLike>(async (url, init) => {
@@ -58,6 +63,7 @@ describe('DESKTOP_RELAY_INSTALL_COMMAND', () => {
     controller.abort();
     await expect(pending).resolves.toMatchObject({ ok: false });
     expect(approvalSignal?.aborted).toBe(true);
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it('pins the published node-repl version instead of @latest', () => {
@@ -138,6 +144,7 @@ describe('probeDesktopRelay', () => {
 
 describe('connectDesktopRelay', () => {
   it('allows a 60-second cold runtime startup before minting a credential or asking for local approval', async () => {
+    const dispose = vi.spyOn(DaemonClient.prototype, 'dispose');
     vi.useFakeTimers();
     const fetchImpl = vi.fn<FetchLike>(async (url, init) => {
       if (url.endsWith('/runtime/ensure')) {
@@ -163,9 +170,11 @@ describe('connectDesktopRelay', () => {
       const pending = connectDesktopRelay(request, fetchImpl);
       await vi.advanceTimersByTimeAsync(59_999);
       expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(dispose).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
       await expect(pending).resolves.toEqual({ ok: true });
       expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(dispose).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }
@@ -192,17 +201,21 @@ describe('connectDesktopRelay', () => {
     expect(fetchImpl.mock.calls[0]?.[0]).toBe(
       'https://devbox:4170/workspaces/%2Fw/runtime/ensure',
     );
-    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toEqual({
-      authorization: 'Bearer t',
-      'content-type': 'application/json',
-    });
+    expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers)).toEqual(
+      new Headers({
+        authorization: 'Bearer t',
+        'content-type': 'application/json',
+      }),
+    );
     expect(fetchImpl.mock.calls[1]?.[0]).toBe(
       'https://devbox:4170/desktop-relay/credential',
     );
-    expect(fetchImpl.mock.calls[1]?.[1]?.headers).toEqual({
-      authorization: 'Bearer t',
-      'content-type': 'application/json',
-    });
+    expect(new Headers(fetchImpl.mock.calls[1]?.[1]?.headers)).toEqual(
+      new Headers({
+        authorization: 'Bearer t',
+        'content-type': 'application/json',
+      }),
+    );
     expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
       sessionId: 's1',
       workspace: { kind: 'cwd', value: '/w' },
@@ -231,6 +244,7 @@ describe('connectDesktopRelay', () => {
   });
 
   it('does not send the daemon token when credential minting fails', async () => {
+    const dispose = vi.spyOn(DaemonClient.prototype, 'dispose');
     const fetchImpl = vi.fn<FetchLike>(async (input) =>
       input.includes('/runtime/ensure')
         ? new Response(JSON.stringify({ ok: true }))
@@ -244,9 +258,11 @@ describe('connectDesktopRelay', () => {
       message: 'Unauthorized',
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it('does not mint a scoped credential when bearer-authenticated prewarm fails', async () => {
+    const dispose = vi.spyOn(DaemonClient.prototype, 'dispose');
     const fetchImpl = respond(401, { error: 'Unauthorized' });
     await expect(connectDesktopRelay(request, fetchImpl)).resolves.toEqual({
       ok: false,
@@ -254,9 +270,11 @@ describe('connectDesktopRelay', () => {
       message: 'Unauthorized',
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it('reports an unreachable relay', async () => {
+    const dispose = vi.spyOn(DaemonClient.prototype, 'dispose');
     const refused = vi.fn<FetchLike>(async () => {
       throw new TypeError('Failed to fetch');
     });
@@ -267,6 +285,7 @@ describe('connectDesktopRelay', () => {
       code: 'unreachable',
       message: 'Failed to fetch',
     });
+    expect(dispose).toHaveBeenCalledOnce();
   });
 });
 

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import { createDaemonRestRequest } from '../../daemon/rest-request.js';
 import type {
   AgentConfigPatch,
   NewWorkspaceAgent,
@@ -59,11 +61,12 @@ export function createThreadsHttpApi(
   baseUrl: string,
   token: string | undefined,
   workspaceCwd: string,
+  client?: DaemonClient,
 ): ThreadsApi {
-  const serverUrl = baseUrl.replace(/\/+$/, '');
-  const root = `${serverUrl}/workspaces/${encodeURIComponent(workspaceCwd)}/agent`;
+  const root = `/workspaces/${encodeURIComponent(workspaceCwd)}/agent`;
+  const rest = createDaemonRestRequest(baseUrl, token, client);
   const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
-    const response = await fetch(`${root}${path}`, {
+    const response = await rest(`${root}${path}`, {
       ...init,
       headers: {
         ...(init?.body ? { 'content-type': 'application/json' } : {}),

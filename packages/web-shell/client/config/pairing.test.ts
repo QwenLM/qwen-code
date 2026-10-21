@@ -31,7 +31,7 @@ describe('pairing bootstrap', () => {
       `${window.location.origin}/web-shell/pairing/exchange`,
       expect.objectContaining({
         method: 'POST',
-        headers: { Authorization: 'Bearer one-time' },
+        headers: new Headers({ Authorization: 'Bearer one-time' }),
         redirect: 'error',
       }),
     );

@@ -572,7 +572,7 @@ describe('DaemonStatusDialog', () => {
         expect(fetchMock).toHaveBeenCalledWith(
           'http://localhost:4170/capabilities',
           expect.objectContaining({
-            headers: { Authorization: 'Bearer bad-token' },
+            headers: new Headers({ Authorization: 'Bearer bad-token' }),
           }),
         );
         expect(onChangeTarget).not.toHaveBeenCalled();

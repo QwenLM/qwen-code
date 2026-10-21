@@ -11,6 +11,12 @@ import type {
   DaemonLiveSetupUpdate,
 } from '@qwen-code/sdk';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
+import { useI18n } from '../i18n';
 
 const POLL_INTERVAL_MS = 1_000;
 // After an install/launch the host app needs a few seconds to say hello; stop
@@ -38,6 +44,11 @@ export function useLiveVoiceSetup(
   active = true,
 ): UseLiveVoiceSetupResult {
   const workspace = useWorkspace();
+  const availability = useDaemonAvailability();
+  const availabilityController = useDaemonAvailabilityController();
+  const { t } = useI18n();
+  const translateRef = useRef(t);
+  translateRef.current = t;
   const [status, setStatus] = useState<DaemonLiveSetupStatus>();
   const [loading, setLoading] = useState(false);
   const [mutating, setMutating] = useState(false);
@@ -59,7 +70,13 @@ export function useLiveVoiceSetup(
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!supported || !active) return;
+    if (
+      !supported ||
+      !active ||
+      (availabilityController &&
+        availabilityController.getSnapshot() !== 'available')
+    )
+      return;
     const generation = generationRef.current;
     if (mutationRef.current === generation) return;
     if (requestRef.current?.generation === generation) {
@@ -76,7 +93,11 @@ export function useLiveVoiceSetup(
       } catch (cause) {
         if (mountedRef.current && generationRef.current === generation) {
           setRefreshError(
-            cause instanceof Error ? cause : new Error(String(cause)),
+            isDaemonUnavailableError(cause)
+              ? new Error(translateRef.current('daemon.connection.unavailable'))
+              : cause instanceof Error
+                ? cause
+                : new Error(String(cause)),
           );
         }
       } finally {
@@ -90,7 +111,7 @@ export function useLiveVoiceSetup(
     })();
     requestRef.current = { generation, promise: request };
     return await request;
-  }, [supported, active, workspace.client]);
+  }, [supported, active, workspace.client, availabilityController]);
 
   useEffect(() => {
     if (
@@ -109,6 +130,12 @@ export function useLiveVoiceSetup(
   }, [supported, workspace.client]);
 
   useEffect(() => {
+    if (availability !== 'available') {
+      generationRef.current += 1;
+      requestRef.current = undefined;
+      setLoading(false);
+      return;
+    }
     if (!supported || !active) return undefined;
     void refresh();
     const onVisible = () => {
@@ -120,7 +147,7 @@ export function useLiveVoiceSetup(
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [refresh, supported, active, workspace.client]);
+  }, [availability, refresh, supported, active, workspace.client]);
 
   const hostWaiting = Boolean(
     status?.enabled &&
@@ -146,12 +173,13 @@ export function useLiveVoiceSetup(
     INSTALLING_STATES.has(status.install.state) ||
     (hostWaiting && !hostWaitExpired);
   useEffect(() => {
-    if (!supported || !active || !statusPending) return;
+    if (!supported || !active || !statusPending || availability !== 'available')
+      return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh();
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [supported, active, statusPending, refresh]);
+  }, [availability, supported, active, statusPending, refresh]);
 
   const mutate = useCallback(
     async (operation: () => Promise<DaemonLiveSetupStatus>): Promise<void> => {
@@ -172,8 +200,11 @@ export function useLiveVoiceSetup(
           setStatus(next);
         }
       } catch (cause) {
-        const nextError =
-          cause instanceof Error ? cause : new Error(String(cause));
+        const nextError = isDaemonUnavailableError(cause)
+          ? new Error(translateRef.current('daemon.connection.unavailable'))
+          : cause instanceof Error
+            ? cause
+            : new Error(String(cause));
         if (
           mountedRef.current &&
           generationRef.current === mutationGeneration
@@ -210,7 +241,16 @@ export function useLiveVoiceSetup(
     status,
     loading,
     mutating,
-    error: mutationError ?? refreshError,
+    error:
+      availability === 'available'
+        ? (mutationError ?? refreshError)
+        : new Error(
+            t(
+              availability === 'auth-required'
+                ? 'daemon.connection.authRequired'
+                : 'daemon.connection.unavailable',
+            ),
+          ),
     refresh,
     update,
     retryInstall,

@@ -84,6 +84,66 @@ describe('SessionCatalogStore', () => {
     });
   });
 
+  it('preserves the catalog while paused and refreshes subscribers after recovery', async () => {
+    legacy.mockResolvedValue(page('cached'));
+    const target = query('/work');
+    const unsubscribe = store.subscribe(target, vi.fn(), {
+      autoLoad: true,
+      pollIntervalMs: 10_000,
+    });
+    await flushMicrotasks();
+    expect(store.getSnapshot(target).page?.sessions[0].sessionId).toBe(
+      'cached',
+    );
+    store.setPaused(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot(target).page?.sessions[0].sessionId).toBe(
+      'cached',
+    );
+    await expect(store.refresh(target)).rejects.toMatchObject({
+      name: 'DaemonUnavailableError',
+    });
+    legacy.mockResolvedValue(page('fresh'));
+    store.setPaused(false);
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot(target).page?.sessions[0].sessionId).toBe('fresh');
+    unsubscribe();
+  });
+
+  it.each(['success', 'failure'])(
+    'queues a recovery read behind an old in-flight %s without polling',
+    async (completion) => {
+      const old = deferred<DaemonSessionListPage>();
+      legacy.mockReturnValueOnce(old.promise).mockResolvedValue(page('fresh'));
+      const target = query('/work');
+      const unsubscribe = store.subscribe(target, vi.fn(), {
+        autoLoad: true,
+        maxAgeMs: 1_000,
+      });
+      await flushMicrotasks();
+      expect(legacy).toHaveBeenCalledOnce();
+      store.setPaused(true);
+      store.setPaused(false);
+      expect(legacy).toHaveBeenCalledOnce();
+
+      if (completion === 'success') old.resolve(page('old'));
+      else old.reject(new TypeError('offline'));
+      await flushMicrotasks();
+      expect(legacy).toHaveBeenCalledTimes(2);
+      expect(store.getSnapshot(target).page?.sessions[0].sessionId).toBe(
+        'fresh',
+      );
+      expect(store.getSnapshot(target).stale).toBe(false);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(legacy).toHaveBeenCalledTimes(2);
+      unsubscribe();
+    },
+  );
+
   it('keys every wire-affecting option and route kind', () => {
     const base = query('/work');
     expect(getSessionCatalogQueryKey(base)).toBe(

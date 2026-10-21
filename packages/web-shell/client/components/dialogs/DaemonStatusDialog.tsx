@@ -1,3 +1,4 @@
+import { createDaemonRestRequest } from '../../daemon/rest-request.js';
 import {
   useCallback,
   useContext,
@@ -847,7 +848,12 @@ function DaemonStatusDialogInner({
             // reports "the daemon did not answer".
             const owned = (): boolean =>
               probeControllerRef.current === controller;
-            void fetch(`${daemonOrigin}/capabilities`, {
+            void createDaemonRestRequest(
+              daemonOrigin,
+              token,
+              undefined,
+              true,
+            )('/capabilities', {
               headers: token ? { Authorization: `Bearer ${token}` } : {},
               signal: controller.signal,
             })

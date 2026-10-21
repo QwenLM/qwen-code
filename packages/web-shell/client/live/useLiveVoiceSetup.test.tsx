@@ -4,6 +4,9 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonLiveSetupStatus } from '@qwen-code/sdk';
+import { offlineDaemon } from '../daemon/availability.test-fixtures.js';
+import { DaemonAvailabilityContext } from '../daemon/availability-context.js';
+import { I18nProvider } from '../i18n';
 import {
   useLiveVoiceSetup,
   type UseLiveVoiceSetupResult,
@@ -52,6 +55,64 @@ afterEach(() => {
 });
 
 describe('useLiveVoiceSetup', () => {
+  it('parks offline setup, localizes the warning and refreshes once on recovery', async () => {
+    vi.useFakeTimers();
+    const { server, availability } = offlineDaemon('https://daemon.example', [
+      'realtime_voice',
+    ]);
+    let resolveOld!: (value: DaemonLiveSetupStatus) => void;
+    mocks.client.liveSetupStatus
+      .mockReturnValueOnce(new Promise((resolve) => (resolveOld = resolve)))
+      .mockResolvedValue(status(true));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let setup!: UseLiveVoiceSetupResult;
+    function Harness() {
+      setup = useLiveVoiceSetup(true);
+      return <>{setup.error?.message ?? 'ok'}</>;
+    }
+    try {
+      await act(async () =>
+        root.render(
+          <DaemonAvailabilityContext.Provider value={availability}>
+            <I18nProvider language="zh-CN">
+              <Harness />
+            </I18nProvider>
+          </DaemonAvailabilityContext.Provider>,
+        ),
+      );
+      expect(mocks.client.liveSetupStatus).toHaveBeenCalledOnce();
+      await act(async () => availability.check(true));
+      expect(container.textContent).toBe('无法连接 daemon。');
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'));
+        await setup.refresh();
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(mocks.client.liveSetupStatus).toHaveBeenCalledOnce();
+      expect(setup.loading).toBe(false);
+
+      server.healthy = true;
+      await act(async () => availability.check(true));
+      expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(2);
+      expect(setup.status).toEqual(status(true));
+      expect(container.textContent).toBe('ok');
+      await act(async () => {
+        resolveOld(status(false));
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(setup.status).toEqual(status(true));
+      expect(mocks.client.liveSetupStatus).toHaveBeenCalledTimes(2);
+      expect(mocks.client.updateLiveSetup).not.toHaveBeenCalled();
+      expect(mocks.client.retryLiveHostInstall).not.toHaveBeenCalled();
+      expect(mocks.client.launchLiveHost).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      availability.dispose();
+    }
+  });
+
   it('loads on opening, polls only during installation, and stops when closed', async () => {
     vi.useFakeTimers();
     mocks.client.liveSetupStatus.mockResolvedValue(status(false));

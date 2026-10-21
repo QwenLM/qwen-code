@@ -1,3 +1,4 @@
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   confirmDaemonTarget,
@@ -64,10 +65,12 @@ export async function fetchRemotePathSuggestions(
   prefix: string,
 ): Promise<RemotePathSuggestions> {
   const query = new URLSearchParams({ daemon: daemonOrigin, prefix });
-  const res = await fetch(
-    `/remote-workspace-path-suggestions?${query.toString()}`,
-    { headers: remoteProxyHeaders(daemonOrigin) },
-  );
+  const res = await createDaemonRestRequest(
+    '',
+    getDaemonToken(window.location.origin),
+  )(`/remote-workspace-path-suggestions?${query.toString()}`, {
+    headers: remoteProxyHeaders(daemonOrigin),
+  });
   if (!res.ok) {
     if (res.status === 401) recoverRejectedTargetCredential(daemonOrigin);
     throw new DaemonHttpError(
@@ -92,7 +95,10 @@ export async function addWorkspaceToDaemon(
   persist: boolean,
   displayName?: string,
 ): Promise<void> {
-  const res = await fetch('/remote-workspaces', {
+  const res = await createDaemonRestRequest(
+    '',
+    getDaemonToken(window.location.origin),
+  )('/remote-workspaces', {
     method: 'POST',
     headers: remoteProxyHeaders(daemonOrigin, {
       'Content-Type': 'application/json',
