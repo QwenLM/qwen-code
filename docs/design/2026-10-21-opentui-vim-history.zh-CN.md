@@ -4,20 +4,21 @@
 
 ## 状态与基线
 
-本文是同一交互与实时输出后继批次的输入部分，通过 normal merge 合入统一 UI 提交
-`4cabbc7f5af1b344d4648d7e316b8c2b574de74a`，保留 B 从
-`e5143ba8e4cb431ef48f390f59922216544849fd` 到
-`12039c2cb4fe4065fe73c57d392219c8a767cf08` 的历史。本批整合冻结 B v3 和
-[dual-output v6](2026-10-21-opentui-dual-output.zh-CN.md) 草案，不分别交付。
-原 A 基底设计与证据保留作来源。输入接纳、附件与取消沿用既有所有者；下述 Unicode
-修复将编辑/undo 所有者替换为现有 Ink buffer。
+本文是完整交互/实时输出 Draft #15067 的输入部分，与
+[dual output](2026-10-21-opentui-dual-output.zh-CN.md) 一起交付，已通过 normal merge
+合入 UI `c1f802b0c1d237d9641b8217bdc97e8d37049f51`。已审源码检查点为
+`7a1ab30f616c5f688224b1dac1fcf0fc76e26966`；原 A 基底、B v3 与 U4 v6 快照只作
+历史来源，不分别交付。输入接纳、附件和取消沿用既有所有者；普通与 Vim 编辑
+都由现有 Ink buffer 管理文字、码点光标和 undo。
 
-ba04 的实际 frozen setup 已通过；依赖/lock 输入和八项已安装工具/hook 身份未变，
-允许复用，无需重新安装。ba04 构建因两处测试/类型声明失败；f93 源码独立复现了
-五个失败回归案例，六个正控通过，原始失败均保留。声明修正和两处生产修复现已提交。
-后续 d677 候选通过了四项初始 build/type/unit 门禁，但 native Unicode 门禁和独立
-诊断失败，详见下文。当前 Unicode 修复仍为 **源码编写 / 验证 NOT_RUN**；旧通过
-结果不能证明已变更的所有者。OpenTUI 保持 `0.5.10`，Bun 保持 `1.3.14`。
+实际 runtime 产物构建于 `194bfffcdd45e19f007aa28ceeb8dfea8402f84f`；7a1 只将四处
+夹具等待改为观察可见模式，字面与 12 秒限制不变。生产和依赖输入逐字一致；测试
+使用 7a1 源码和受守卫的 194b 产物，不声称重新构建了 7a1。
+本检查点的已记录本地验证已完成：映射的 source/native 门禁、194b 新 build/type/bundle，以及 7a1 全部八个后续阶段。完整三腿 108 个测试行通过，其中 106 个功能通过、两个保留的 Ink deny 缺口；有重叠的 strict 四案另列。prepare 和真实 npm tar 六项执行位检查通过，但不证明统一 R3+B 安装产物或音频录制验收。
+已接受安装在依赖/工具/runtime 守卫下复用。原 ba04/f93 声明/源码失败、d677
+Unicode 失败、aab54 Escape 失败、b4 过期 `/vim` 提示和 194b raw-wait 失败均保留，
+不重标为通过。OpenTUI 保持 `0.5.10`，Bun 保持 `1.3.14`。
+父 UI 尚未合并；该检查点不使 stacked PR 变为 Ready。
 
 父提交的 reset discard 结果只释放取消锁，不取回队列或恢复旧草稿；本批保留此
 合同，以及旧 generation 不得触碰后继输入的保护。
@@ -99,9 +100,8 @@ Native widthMethod、换行、滚动和 resize 仍是真实视图边界；combin
 
 必验项包括原三条严格序列、普通输入与选区替换/undo/redo、鼠标后输入、小/大/图片
 paste、IME 提交分块及真实焦点/光标、外部编辑和同文导入、Vim 热切换、换行/resize
-移动、queue/session 后继。真实设备 IME 和未执行平台仍为 NOT_RUN。本修复当前仅
-源码编写；fresh build/type/focused/native/product 收据前，旧 d677 unit 通过不证明
-新 owner 已验收。
+移动、queue/session 后继。真实设备 IME 和未执行平台仍为 NOT_RUN。上方检查点
+记录真实 owner 验证；不以旧 d677 unit 通过证明已变更 owner。
 
 ## 历史、搜索与模式消费者
 
@@ -124,7 +124,7 @@ paste、IME 提交分块及真实焦点/光标、外部编辑和同文导入、V
 现有 Vim provider、`/vim` action、设置与可见模式提示已有真实生产者/消费者。
 统一父提交提供共享 status-line hook：entry 的已启用模式同时传给 footer 和 hook
 的 `vimMode` 输入。NORMAL、INSERT、关闭状态有 collocated 接线回归，既有 hook
-测试覆盖 JSON 生成。这些源码接线仍须整合后的 native 与产品验收，不复制 U3 实现。
+测试覆盖 JSON 生成。检查点按声明范围记录整合后的 native/产品证据，不复制 U3 实现。
 
 ## 交付与验收
 
@@ -139,5 +139,5 @@ bridge 接线一起交付。原 B v3 草案为 3137 变更行，U4 v6 为 1869�
 shell 历史和 resize；同时覆盖 A 的输入/附件/取消回归。unit callback 不能证明
 decoder、剪贴板、native 所有权或 HTTP 行为。冻结完整 source/dist/fixture/runtime
 身份，保留首败并核实 owned cleanup。构建/typecheck、受影响门禁及两次全 diff
-干净自审完成后再独立验收。最终整合源码的新验证仍为 **NOT_RUN**；已接受的安装复用
-见上文。
+干净自审完成后再独立验收。当前检查点及 source/artifact 映射见上文。统一 R3+B 安装产物、真实 middleware
+和未执行平台仍是独立门禁。

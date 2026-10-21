@@ -4,25 +4,24 @@
 
 ## Status and baseline
 
-This is the input half of one interaction and live-output successor based on
-unified UI commit `4cabbc7f5af1b344d4648d7e316b8c2b574de74a` by normal merge,
-preserving B history from `e5143ba8e4cb431ef48f390f59922216544849fd` through
-`12039c2cb4fe4065fe73c57d392219c8a767cf08`. It integrates the frozen B v3 and
-[dual-output v6](2026-10-21-opentui-dual-output.md) drafts; they are not separate
-deliveries. The earlier A-based designs and evidence remain provenance. Input
-admission, attachments and cancellation retain their existing owners. The Unicode
-repair below replaces the native editing/undo owner with the existing Ink buffer.
+This is the input half of the complete interaction/live-output Draft #15067,
+with [dual output](2026-10-21-opentui-dual-output.md), normally merged with UI
+`c1f802b0c1d237d9641b8217bdc97e8d37049f51`. The reviewed source checkpoint is
+`7a1ab30f616c5f688224b1dac1fcf0fc76e26966`; earlier A-based, B v3 and U4 v6
+snapshots remain historical, not separate deliveries. Input admission,
+attachments and cancellation retain their existing owners; the existing Ink
+buffer now owns text, code-point cursor and undo for ordinary and Vim editing.
 
-The actual frozen setup on ba04 passed. Its unchanged dependency/lock inputs
-and eight installed tool/hook identities permit reuse; no reinstall is required.
-The ba04 build failed on two test/type declarations, and the f93 source reproduced
-five failing regression cases with six positive controls. Those original failures
-remain preserved. The declaration corrections and two production fixes are now
-committed. The later d677 candidate passed its four initial build/type/unit gates,
-but its native Unicode gate and independent diagnostics failed as recorded below.
-The current Unicode repair is **SOURCE AUTHORING / VALIDATION NOT_RUN**; those
-older passes do not certify the changed owner. OpenTUI remains `0.5.10`, Bun
-`1.3.14`.
+The actual runtime artifact was built at `194bfffcdd45e19f007aa28ceeb8dfea8402f84f`;
+7a1 changes only four fixture waits to observe the visible mode, with the same
+literals and 12 s limits. Production and dependency inputs are byte-identical;
+tests use source 7a1 and the guarded 194b artifact, not a claimed 7a1 rebuild.
+Recorded local validation is complete for this checkpoint: mapped source/native gates, the fresh 194b build/type/bundle, and all eight 7a1 continuation stages. The three full legs have 108 passing test rows: 106 functional passes and two retained Ink deny gaps; the overlapping strict four-case gate is separate. Prepare and the actual npm tar six-entry executable-mode check passed; neither establishes installed R3+B or audio capture acceptance.
+The accepted installation is reused under dependency/tool/runtime guards.
+Original ba04/f93 declaration/source failures, d677 Unicode failures, aab54
+Escape failure, b4 stale `/vim` message and 194b raw-wait failure remain preserved.
+They are not relabelled as passing. OpenTUI remains `0.5.10`, Bun `1.3.14`.
+The parent UI is not merged; this checkpoint does not make the stacked PR Ready.
 
 The parent reset discard outcome releases only the cancellation latch, without
 popping queues or restoring old drafts. This batch retains that contract and
@@ -128,9 +127,9 @@ Mandatory verification includes the original three strict sequences, ordinary
 input and selection replacement/undo/redo, mouse then typing, small/large/image
 paste, IME committed chunks and physical focus/caret, external editor and
 same-text imports, hot Vim toggles, wrapped/resize motion, and queue/session
-successors. Real-device IME and unexecuted platform legs remain NOT_RUN. This
-repair is source authoring only until fresh build/type/focused/native/product
-results are recorded; earlier d677 unit passes do not certify the new owner.
+successors. Real-device IME and unexecuted platform legs remain NOT_RUN. The
+checkpoint above records actual owner validation; earlier d677 unit passes are
+not reused to certify the changed owner.
 
 ## History, search and mode consumers
 
@@ -160,8 +159,8 @@ The existing Vim provider, `/vim` action, settings and visible mode hint have
 real producers/consumers. The unified parent supplies the shared status-line
 hook: the entry's enabled mode now reaches both the footer and the hook's
 `vimMode` input. NORMAL, INSERT and disabled wiring have collocated regressions;
-the existing hook tests cover JSON generation. These source connections still
-require combined native and product validation; no U3 implementation is copied.
+the existing hook tests cover JSON generation. The checkpoint records combined
+native/product evidence within its stated scope; no U3 implementation is copied.
 
 ## Delivery and acceptance
 
@@ -180,5 +179,6 @@ resize. Include A's input/attachment/cancel regressions. Unit callbacks do not
 prove decoder, clipboard, native ownership or HTTP behavior. Freeze complete
 source/dist/fixture/runtime identities; retain first failures and verify owned
 cleanup. Build/typecheck, affected gates and two clean full-diff audits precede
-independent acceptance. Fresh validation of the final combined source remains
-**NOT_RUN**; the accepted installation reuse is recorded above.
+independent acceptance. The current checkpoint and its source/artifact mapping
+are recorded above. Installed R3+B, real middleware and unexecuted platforms
+remain separate gates.
