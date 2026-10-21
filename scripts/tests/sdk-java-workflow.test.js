@@ -100,26 +100,37 @@ describe('SDK Java self-hosted workflow guards', () => {
       (s) => s.name === 'Install Node.js dependencies',
     );
     expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
+    expect(steps.map((s) => s.name).indexOf('Build Qwen Code')).toBeGreaterThan(
+      steps.map((s) => s.name).indexOf('Install Node.js dependencies'),
+    );
+  });
+
+  it.each([
+    ['.github/workflows/sdk-java.yml', 'daemon-e2e'],
+    ['.github/workflows/release-sdk-java.yml', 'release'],
+  ])('%s %s pins the explicit Build/Bundle/Run steps', (file, jobName) => {
+    const steps = parse(readFileSync(file, 'utf8')).jobs[jobName].steps;
     const names = steps.map((s) => s.name);
-    expect(names.indexOf('Build Qwen Code')).toBeGreaterThan(
-      names.indexOf('Install Node.js dependencies'),
-    );
-    expect(names.indexOf('Bundle Qwen Code')).toBeGreaterThan(
-      names.indexOf('Build Qwen Code'),
-    );
-    expect(names.indexOf('Run Java daemon E2E')).toBeGreaterThan(
-      names.indexOf('Bundle Qwen Code'),
-    );
+    let previous = -1;
     for (const [name, run] of [
       ['Build Qwen Code', 'npm run build'],
       ['Bundle Qwen Code', 'npm run bundle'],
       ['Run Java daemon E2E', 'npx tsx scripts/run-java-daemon-sdk-e2e.ts'],
     ]) {
-      const explicit = steps.find((s) => s.name === name);
-      expect(explicit.run, name).toBe(run);
-      expect(explicit['continue-on-error'], name).toBeUndefined();
-      expect(explicit.if, name).toBeUndefined();
+      const index = names.indexOf(name);
+      expect(index, `${jobName}: ${name}`).toBeGreaterThan(previous);
+      previous = index;
+      expect(steps[index].run, name).toBe(run);
+      expect(steps[index]['continue-on-error'], name).toBeUndefined();
+      expect(steps[index].if, name).toBeUndefined();
     }
+  });
+
+  it('keeps the pinned build steps pointed at files that exist', () => {
+    const scripts = JSON.parse(readFileSync('package.json', 'utf8')).scripts;
+    expect(existsSync('scripts/run-java-daemon-sdk-e2e.ts')).toBe(true);
+    expect(scripts.build).toBeTruthy();
+    expect(scripts.bundle).toBeTruthy();
   });
 
   it('serializes latency-sensitive tests on each physical ECS host', () => {
@@ -1113,14 +1124,27 @@ describe('setup-java Maven cache stays on hosted runners', () => {
 // For the five installs that do not set QWEN_SKIP_PREPARE, each attempt
 // re-runs prepare's build (~4m32s observed), not just backoff; daemon-e2e
 // skips the build and only runs `npm run generate` on each attempt.
+// Scope is sdk-java.yml: release-sdk-java.yml's install is a bare one-liner
+// with no retry loop or prepare skip, so these assertions do not describe it;
+// its explicit Build/Bundle/Run steps are pinned separately above.
 describe('SDK Java install-transient retry', () => {
-  const installs = Object.entries(parse(workflow).jobs).flatMap(
+  // Mirrors scripts/prepare.js, which skips on '1' or 'true' case-insensitively;
+  // Actions merges workflow/job env into the step environment.
+  const installSkipsPrepare = (step, inheritedEnv = {}) =>
+    ['1', 'true'].includes(
+      String(
+        { ...inheritedEnv, ...step.env }.QWEN_SKIP_PREPARE ?? '',
+      ).toLowerCase(),
+    );
+
+  const parsedWorkflow = parse(workflow);
+  const installs = Object.entries(parsedWorkflow.jobs).flatMap(
     ([jobName, job]) =>
       (job.steps ?? [])
         .filter(
           (s) => typeof s.run === 'string' && s.run.includes('pnpm install'),
         )
-        .map((s) => [jobName, s]),
+        .map((s) => [jobName, s, { ...parsedWorkflow.env, ...job.env }]),
   );
 
   it('finds every install step', () => {
@@ -1136,15 +1160,32 @@ describe('SDK Java install-transient retry', () => {
 
   it.each(installs)(
     "%s install warning matches the step's prepare behaviour",
-    (jobName, step) => {
-      const skips = step.env?.QWEN_SKIP_PREPARE === '1';
-      expect(step.run, jobName).toContain(
-        skips
-          ? "this step skips prepare's build"
-          : "this step also runs prepare's build",
+    (jobName, step, inheritedEnv) => {
+      const skips = installSkipsPrepare(step, inheritedEnv);
+      expect(step.run, jobName).toMatch(
+        new RegExp(
+          '::warning::[^\\n]*' +
+            (skips
+              ? "this step skips prepare's build"
+              : "this step also runs prepare's build"),
+        ),
       );
     },
   );
+
+  it('classifies prepare-skip spellings the way scripts/prepare.js does', () => {
+    for (const value of ['1', 'true', 'TRUE', 1]) {
+      expect(installSkipsPrepare({ env: { QWEN_SKIP_PREPARE: value } })).toBe(
+        true,
+      );
+      expect(installSkipsPrepare({}, { QWEN_SKIP_PREPARE: value })).toBe(true);
+    }
+    for (const value of [undefined, '', '0', 'false']) {
+      expect(installSkipsPrepare({ env: { QWEN_SKIP_PREPARE: value } })).toBe(
+        false,
+      );
+    }
+  });
 
   it.each(installs)('%s retries a transient install', (jobName, step) => {
     for (const fragment of [
