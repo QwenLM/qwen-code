@@ -187,6 +187,20 @@ public interface AgentStateStore {
                 approvalMode, approvalSelectionSupported);
     }
 
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest,
+            WorkspaceSelection selection, String approvalMode, boolean approvalSelectionSupported,
+            Boolean planMode, boolean planModeSupported, List<Map<String, Object>> skills) {
+        if (!skills.isEmpty()) {
+            throw new UnsupportedOperationException("Session Skills are unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported);
+    }
+
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
 
@@ -644,6 +658,14 @@ public interface AgentStateStore {
 
     default WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
             String promptId) { return null; }
+
+    default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean planMode, boolean planModeSupported,
+            boolean liveSupported) {
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, planMode, planModeSupported);
+    }
 
     /**
      * The latest environment event of each Session's latest Turn, in one

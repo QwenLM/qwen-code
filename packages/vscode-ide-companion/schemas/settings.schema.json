@@ -383,7 +383,7 @@
           "default": false
         },
         "disableWorkflowKeywordTrigger": {
-          "description": "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
+          "description": "When true, human submissions containing `workflow` or `ultracode` no longer softly steer the current turn toward the Workflow tool. Applies across terminal, IDE, Web and explicitly human-origin SDK messages when workflows are enabled. Plain headless prompts and automated messages do not trigger this reminder.",
           "type": "boolean",
           "default": false
         },
@@ -4483,6 +4483,11 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
+        "generatedUi": {
+          "description": "Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.",
+          "type": "boolean",
+          "default": false
+        },
         "mods": {
           "description": "Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.",
           "type": "boolean",
