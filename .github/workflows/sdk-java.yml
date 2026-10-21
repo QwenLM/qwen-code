@@ -596,7 +596,10 @@ jobs:
       # jobs, and a mysqld that reserves native AIO contexts can exhaust it
       # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
       # Service containers cannot take a command, so MySQL starts here
-      # instead, with native AIO disabled and its datadir on tmpfs.
+      # instead, with native AIO disabled and its datadir on tmpfs. MySQL 8
+      # also binary-logs by default into that uncapped tmpfs, and this
+      # disposable container has no replica and nothing reads the log.
+      # The only schema is the one the JDBC URL creates on first connect.
       - name: 'Start MySQL without native AIO'
         shell: 'bash'
         run: |-
@@ -604,9 +607,8 @@ jobs:
           docker run --detach --name "${MYSQL_CONTAINER}" \
             --publish '127.0.0.1::3306' \
             --mount type=tmpfs,destination=/var/lib/mysql \
-            --env MYSQL_DATABASE='runtime_broker_test' \
             --env MYSQL_ROOT_PASSWORD='runtime-broker' \
-            mysql:8.4.6 --innodb-use-native-aio=0
+            mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin
           for attempt in {1..60}; do
             if docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent >/dev/null 2>&1; then
               break
@@ -712,9 +714,9 @@ jobs:
       - name: 'Check that every non-Hosted integration test class ran'
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server'
 
-      # The host's docker cleanup service reaps qwen-code-* containers only
-      # after a 24h age gate, so a cancelled job would strand a running mysqld
-      # on the shared pool for up to a day.
+      # The host's docker cleanup service fires once a day and reaps qwen-code-*
+      # containers only past a strict 24h age gate, so a cancelled job can strand
+      # a running mysqld on the shared pool for up to ~48h.
       - name: 'Remove the MySQL container'
         if: '${{ always() }}'
         shell: 'bash'
@@ -722,7 +724,7 @@ jobs:
           set -uo pipefail
           if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
             docker rm --force "${MYSQL_CONTAINER}" ||
-              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it after 24h"
+              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it within ~48h"
           fi
 
   hosted-harness-mysql:

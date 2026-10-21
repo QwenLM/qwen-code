@@ -755,12 +755,17 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     );
     const cleanup = mysql.steps.at(-1);
     expect(start.shell).toBe('bash');
-    expect(start.run).toContain('mysql:8.4.6 --innodb-use-native-aio=0');
+    expect(start.run).toContain(
+      'mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin',
+    );
     expect(start.run).toContain("--publish '127.0.0.1::3306'");
     expect(start.run).toContain(
       '--mount type=tmpfs,destination=/var/lib/mysql',
     );
-    expect(start.run).toContain("--env MYSQL_DATABASE='runtime_broker_test'");
+    // The lane's only consumer is the JDBC URL below, which owns its schema
+    // through createDatabaseIfNotExist; a declared-but-unconsumed database
+    // here would invite dropping that flag and dying on first connect.
+    expect(start.run).not.toContain('MYSQL_DATABASE');
     expect(start.run).toContain("--env MYSQL_ROOT_PASSWORD='runtime-broker'");
     expect(start.run).toContain('for attempt in {1..60}');
     expect(start.run).toContain('sleep 2');
@@ -869,7 +874,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         expect(result.error).toBeUndefined();
         const trace = readFileSync(join(dir, 'trace'), 'utf8');
         expect(trace).toContain(
-          'run --detach --name qwen-code-sdk-java-mysql-123-2 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_DATABASE=runtime_broker_test --env MYSQL_ROOT_PASSWORD=runtime-broker mysql:8.4.6 --innodb-use-native-aio=0',
+          'run --detach --name qwen-code-sdk-java-mysql-123-2 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin',
         );
         if (mode === 'ready') {
           expect(result.status, result.stderr).toBe(0);
@@ -939,7 +944,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       ).toBe(mode !== 'missing');
       expect(
         result.stdout.includes(
-          '::warning::could not remove qwen-code-sdk-java-mysql-123-2; the host cleanup service reaps it after 24h',
+          '::warning::could not remove qwen-code-sdk-java-mysql-123-2; the host cleanup service reaps it within ~48h',
         ),
       ).toBe(mode === 'removal-fails');
     },
