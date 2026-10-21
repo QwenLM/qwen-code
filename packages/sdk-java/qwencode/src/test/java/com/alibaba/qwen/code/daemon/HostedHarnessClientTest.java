@@ -7185,14 +7185,14 @@ class HostedHarnessClientTest {
         // R4-4: the published abort window — between the budget and the
         // budget plus max(100 ms, a tenth of the budget) — is what an
         // integrator sizes an outer supervisor deadline against, so the
-        // watchdog interval formula is pinned here: with a 2000 ms budget
-        // the abort must land before 2000 + 200 ms (plus scheduling
-        // slack). The ticks run from the stream's creation, so a park
-        // right after it sits on a tick of a half-budget 1000 ms interval
-        // too, and a tick a few ms late aborts that one at ~2000 ms.
-        // Parking 300 ms in puts the park mid-interval for both: the
-        // shipped 200 ms tick aborts at 2100 ms, a 1000 ms tick not
-        // before 2700 ms.
+        // watchdog interval formula is pinned here. The queue probe pins
+        // the tick directly: the abort's wall-clock upper side also
+        // carries the scheduler's own latency, which a loaded runner can
+        // stretch past any fixed ceiling, while the tick value is fixed
+        // when the stream is created. Parking 300 ms in puts the park
+        // mid-interval for the shipped 200 ms tick, whose abort lands at
+        // ~2100 ms; the lower bound below still proves the budget is
+        // charged before anything fires.
         advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch release = new CountDownLatch(1);
@@ -7222,6 +7222,13 @@ class HostedHarnessClientTest {
                             .session(session)
                             .eventEpoch(EVENT_EPOCH)
                             .build())) {
+                Delayed nextTick =
+                        (Delayed) client.scheduler().getQueue().peek();
+                assertNotNull(nextTick,
+                        "the idle watchdog was not scheduled");
+                assertTrue(nextTick.getDelay(TimeUnit.MILLISECONDS) <= 250,
+                        "watchdog tick interval exceeds a tenth of the "
+                                + "budget");
                 Thread.sleep(300);
                 long parkedAt = System.nanoTime();
                 DaemonTransportException failure = assertThrows(
@@ -7234,8 +7241,11 @@ class HostedHarnessClientTest {
                         failure.getMessage());
                 assertTrue(elapsedMillis >= 1950,
                         "aborted before the budget: " + elapsedMillis);
-                assertTrue(elapsedMillis < 2400,
-                        "aborted outside the published window: "
+                // The queue probe above pins the window's upper side;
+                // this ceiling only catches a watchdog that never fires,
+                // not a tick the scheduler ran late.
+                assertTrue(elapsedMillis < 5000,
+                        "the idle watchdog did not fire within 5 s: "
                                 + elapsedMillis);
             }
         } finally {
