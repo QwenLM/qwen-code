@@ -24,6 +24,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, useState, useRef, useMemo } from 'react';
+import type { KeyEvent } from '@opentui/core';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type { VimBuffer } from '../hooks/vim.js';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -57,6 +58,7 @@ interface FakeEditor {
   plainText: string;
   width: number;
   cursorOffset: number;
+  handleKeyPress(key: KeyEvent): boolean;
   deleteCharBackwardCalls: number;
   deleteWordBackwardCalls: number;
   newLineCalls: number;
@@ -151,6 +153,7 @@ const mocks = vi.hoisted(() => {
         setColFromDisplay(offset);
       },
       width: 78,
+      handleKeyPress: vi.fn<(key: KeyEvent) => boolean>(() => true),
       getSelection: () => null,
       clearSelection: vi.fn(),
       editBuffer: {
@@ -877,6 +880,62 @@ describe('OpenTuiInputPrompt printable fallback', () => {
     }
     expect(editor.insertCalls).toEqual([]);
     expect(editor.plainText).toBe('');
+    expect(editor.handleKeyPress).toHaveBeenCalledTimes(2);
+    expect(editor.handleKeyPress).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ name: 'a', super: true }),
+    );
+    expect(editor.handleKeyPress).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ name: 'a', ctrl: true, shift: true }),
+    );
+  });
+
+  it('synchronizes the owner after native selection handles a key without inserting text', async () => {
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
+    await typeText('abcd');
+    const editor = currentEditor();
+    vi.mocked(editor.handleKeyPress).mockImplementationOnce(() => {
+      editor.cursorOffset = 2;
+      return true;
+    });
+    const preventDefault = vi.fn();
+    const key = baseKeyEvent({
+      name: 'left',
+      sequence: '\x1b[1;2D',
+      shift: true,
+      preventDefault,
+    });
+    await act(async () => lastKeyboardHandler()(key));
+    expect(editor.handleKeyPress).toHaveBeenCalledExactlyOnceWith(key);
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(currentBuffer().text).toBe('abcd');
+    expect(currentBuffer().cursor).toEqual([0, 2]);
+    expect(editor.plainText).toBe('abcd');
+    expect(editor.cursorOffset).toBe(2);
+    expect(editor.insertCalls).toEqual([]);
+  });
+
+  it('leaves a native-declined selection key unconsumed without moving the owner', async () => {
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
+    await typeText('abcd');
+    const editor = currentEditor();
+    vi.mocked(editor.handleKeyPress).mockReturnValue(false);
+    const preventDefault = vi.fn();
+    const key = baseKeyEvent({
+      name: 'left',
+      sequence: '\x1b[1;2D',
+      shift: true,
+      preventDefault,
+    });
+    await act(async () => lastKeyboardHandler()(key));
+    expect(editor.handleKeyPress).toHaveBeenCalledWith(key);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(currentBuffer().text).toBe('abcd');
+    expect(currentBuffer().cursor).toEqual([0, 4]);
+    expect(editor.plainText).toBe('abcd');
+    expect(editor.cursorOffset).toBe(4);
+    expect(editor.insertCalls).toEqual([]);
   });
 
   it('rejects release events', async () => {
