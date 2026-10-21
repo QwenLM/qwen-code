@@ -29,7 +29,7 @@ Qwen Code sends no such header, so its traffic on these platforms is not attribu
 | `tags.t1` | `qwen-code`, stable across versions                                                              |
 | `tags.t2` | `payg` on pay-as-you-go endpoints; omitted on Token Plan endpoints                               |
 
-The site is derived from the request's host. Qwen Code is an Alibaba-owned Agent, hence `inner-agents`.
+The site is derived from the request's host. `inner-agents` is provisional: the guide does not classify Qwen Code, and it is inferred from Qwen Code being published by the Alibaba-run QwenLM organization, like `qoder` in the guide's `inner` example. It awaits confirmation with the platform (see Open questions); switching to `outer-agents` changes only the two channel strings.
 
 ## Scope
 
@@ -82,5 +82,7 @@ Any of these can call `withDashScopeSourceConfig` once they reach QwenCloud.
 
 ## Open questions
 
+- Whether Qwen Code is classified as an Alibaba-affiliated internal Agent (`inner-agents`) or an external ecosystem Agent (`outer-agents`). The guide asks each Agent team to confirm ownership before integration and does not list Qwen Code; the upstream tracking plan it cites may define the rule but was not accessible.
 - Whether `qwen-code` must be registered in the platform's channel list before it is counted.
+- Whether omitting `t2` on Token Plan endpoints is acceptable to the platform.
 - Whether Batch submission headers propagate to the batch's model calls.

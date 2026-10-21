@@ -29,7 +29,7 @@ Qwen Code 目前不发送这个头，所以它在这两个平台上的调用量�
 | `tags.t1` | `qwen-code`，不随版本变化                                            |
 | `tags.t2` | 按量付费端点为 `payg`；Token Plan 端点不填                           |
 
-站点根据请求的 host 判断。Qwen Code 是阿里自有的 Agent，所以用 `inner-agents`。
+站点根据请求的 host 判断。`inner-agents` 是暂定值：接入指南没有对 Qwen Code 归类，这里是根据 Qwen Code 由阿里运营的 QwenLM 组织发布推断的，与指南中 `inner` 示例里的 `qoder` 情况相同。该取值待与平台确认（见待确认问题）；若改为 `outer-agents`，只需修改两处 channel 字符串。
 
 ## 范围
 
@@ -82,5 +82,7 @@ Qwen Code 目前不发送这个头，所以它在这两个平台上的调用量�
 
 ## 待确认问题
 
+- Qwen Code 应归为阿里系内部 Agent（`inner-agents`）还是外部生态 Agent（`outer-agents`）。接入指南要求各 Agent 团队在接入前确认归属，且没有列出 Qwen Code；它引用的上游埋点方案可能定义了规则，但无法访问。
 - `qwen-code` 是否需要先在平台的渠道清单中登记，才会被计入统计。
+- Token Plan 端点不填 `t2` 是否为平台所接受。
 - Batch 提交请求上的头能否传递到该批次的模型调用。
