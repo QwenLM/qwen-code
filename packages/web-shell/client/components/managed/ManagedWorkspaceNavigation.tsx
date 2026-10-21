@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { FolderClosedIcon, FolderOpenIcon, PlusIcon } from 'lucide-react';
+import { FolderClosedIcon, FolderOpenIcon, SquarePenIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
 import {
@@ -264,7 +264,7 @@ function ManagedWorkspaceGroup({
             title={t('sidebar.newTask')}
             onClick={() => onSelectWorkspace(workspaceId)}
           >
-            <PlusIcon size={14} aria-hidden="true" />
+            <SquarePenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
           </button>
         )}
       </div>
