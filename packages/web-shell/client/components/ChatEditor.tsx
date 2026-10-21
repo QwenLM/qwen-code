@@ -226,6 +226,7 @@ interface ChatEditorProps {
   availableModes?: readonly string[];
   planMode?: boolean;
   modeControlsDisabled?: boolean;
+  planControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   sessionWorkflowEnabled?: boolean;
   currentModel?: string;
@@ -1432,6 +1433,7 @@ export const ChatEditor = memo(
       availableModes = EXECUTION_APPROVAL_MODES,
       planMode = false,
       modeControlsDisabled = false,
+      planControlsDisabled = modeControlsDisabled,
       onTogglePlan,
       currentModel = '',
       modelControlsDisabled = false,
@@ -2309,9 +2311,10 @@ export const ChatEditor = memo(
     // entry is not selectable while mode controls are busy, and the host
     // rejects a toggle that races a mode transition.
     const handlePlanMenuToggle = useCallback(() => {
+      if (planControlsDisabled) return;
       onTogglePlan?.();
       core.focus();
-    }, [onTogglePlan, core]);
+    }, [onTogglePlan, core, planControlsDisabled]);
 
     const handleModelSelect = useCallback(
       (modelId: string) => {
@@ -3510,7 +3513,7 @@ export const ChatEditor = memo(
                         showPlanInAddMenu
                           ? {
                               checked: planMode,
-                              disabled: modeControlsDisabled,
+                              disabled: planControlsDisabled,
                               onToggle: handlePlanMenuToggle,
                             }
                           : undefined
@@ -3606,7 +3609,7 @@ export const ChatEditor = memo(
                             // inside the chip's own click, and a focused button
                             // that becomes disabled loses focus to the body
                             // there and then.
-                            aria-disabled={modeControlsDisabled || undefined}
+                            aria-disabled={planControlsDisabled || undefined}
                             onFocus={() => {
                               planChipHadFocusRef.current = true;
                             }}
@@ -3617,7 +3620,7 @@ export const ChatEditor = memo(
                               // Inert while busy; the click still reaches the
                               // composer surface, as one on a bare part of the
                               // toolbar would.
-                              if (modeControlsDisabled) return;
+                              if (planControlsDisabled) return;
                               onTogglePlan?.();
                               // The chip unmounts once Plan is off, so it
                               // hands focus on rather than dropping it to the
@@ -3670,7 +3673,7 @@ export const ChatEditor = memo(
                             className={`${styles.toolBtn} ${styles.planControl}`}
                             data-web-shell-plan-control
                             data-disabled={
-                              modeControlsDisabled ? '' : undefined
+                              planControlsDisabled ? '' : undefined
                             }
                           >
                             {showPlanLabel ? (
@@ -3689,7 +3692,7 @@ export const ChatEditor = memo(
                               aria-label={planLabel}
                               aria-describedby={planDescriptionId}
                               checked={planMode}
-                              disabled={modeControlsDisabled}
+                              disabled={planControlsDisabled}
                               onCheckedChange={onTogglePlan}
                             />
                           </label>

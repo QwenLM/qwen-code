@@ -4168,7 +4168,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId))) {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_model", "The model is not published by this host");
         }
-        requireIdlePolicyChange(session);
+        requirePolicyChange(session, false);
         long current = jdbc.queryForObject("SELECT model_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
         if (current != expectedRevision || current >= 9_007_199_254_740_991L) {
@@ -4272,6 +4272,16 @@ public class ManagedAgentStore implements AgentStateStore {
     public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, requestedPlanMode, planModeSupported, false);
+    }
+
+    @Override
+    @Transactional
+    public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
+            boolean liveSupported) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
@@ -4320,7 +4330,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (planMode && (!planModeSupported || !supportsPlanMode(session))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Plan mode is unavailable");
         }
-        requireIdlePolicyChange(session);
+        requirePolicyChange(session, liveSupported && requestedPlanMode == null);
         long current = jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id = ?"
                 + " AND session_id = ?", Long.class, tenantId, sessionId);
         if (current != expectedRevision || current >= 9_007_199_254_740_991L
@@ -4344,19 +4354,22 @@ public class ManagedAgentStore implements AgentStateStore {
         return new WebShellApprovalChangeResult(sessionId, mode, revision, false, planMode);
     }
 
-    private void requireIdlePolicyChange(SessionRecord session) {
+    private void requirePolicyChange(SessionRecord session, boolean live) {
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ACTIVE");
         requireCwdChangeRegistryFacts(session);
-        if (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session)) {
+        if (!live && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval");
         }
-        if (hasOpenOperation(tenantId, sessionId) || hasPendingRenameDelivery(tenantId, sessionId)
-                || hasRetainedRuntimeSession(tenantId, sessionId)
+        if ((live ? hasOpenExecutionOperation(tenantId, sessionId) : hasOpenOperation(tenantId, sessionId))
+                || hasPendingRenameDelivery(tenantId, sessionId)
+                || !live && hasRetainedRuntimeSession(tenantId, sessionId)
                 || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
-                        + " AND status = 'RECOVERY_BLOCKED' LIMIT 1", tenantId, sessionId).isEmpty()
+                        + " AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING')"
+                        + " AND error_code IN (?, ?)) LIMIT 1", tenantId, sessionId,
+                        AgentStateStore.RUNTIME_RECOVERY_BLOCKED, AgentStateStore.WORKFLOW_RECOVERY_BLOCKED).isEmpty()
                 || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
                         + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
                         + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {

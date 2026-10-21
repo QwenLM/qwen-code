@@ -45,6 +45,7 @@ export interface ManagedSessionApproval extends ManagedSessionOptions {
   approvalRevision: number;
   supported: boolean;
   planMode?: boolean;
+  liveSupported?: boolean;
 }
 
 export interface ManagedApprovalChangeResult {

@@ -8,6 +8,7 @@ import {
   parseHostedApprovalSelection,
   readHostedTurnApprovalSelection,
   hostedTurnApproval,
+  createHostedLiveApprovalReader,
   type HostedApprovalSelection,
 } from './hosted-approval-selection.js';
 import {
@@ -46,6 +47,7 @@ import {
   hostedActionDenied,
   endHostedAction,
   parseHostedActionOptions,
+  hostedLiveApprovalPoll,
 } from './hosted-tool-approval.js';
 
 import {
@@ -297,6 +299,7 @@ import {
   type HostedWorkspaceContextSlot,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
+  type HostedApprovalTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
 import {
@@ -603,6 +606,40 @@ interface HostedSession {
    * close. `hostedRuntimeSessionId` is idempotent, so the close's drain
    * maps either kind back to itself. */
   readonly heldRuntimeTurns: Set<string>;
+}
+
+async function hostedApprovalForTurn(
+  session: HostedSession,
+  promptId: string,
+): Promise<HostedApprovalTurnOptions | undefined> {
+  if (!session.approval) return undefined;
+  const settings = (await hostedTurnApproval(
+    session.managed,
+    promptId,
+    session.approval,
+  ))!;
+  const live =
+    session.stores &&
+    !session.definition?.['lineage'] &&
+    [
+      'hosted-workspace-files/1',
+      'hosted-workspace-shell/1',
+      'hosted-workspace-shell/2',
+    ].includes(session.toolProfile ?? '');
+  return {
+    settings,
+    waiters: session.waiters,
+    isBlocked: () => session.blocked,
+    ...(live
+      ? {
+          readSettings: createHostedLiveApprovalReader(
+            settings,
+            await readHostedTurnApprovalSelection(session.managed, promptId),
+            () => session.stores!.approvalSelection(),
+          ),
+        }
+      : {}),
+  };
 }
 
 /**
@@ -3094,15 +3131,34 @@ async function executeHostedTurn(
       const actionId = plan.actionId!;
       const original = authority.action(actionId)!;
       const options = await readHostedActionOptions(session.managed, original);
-      onResumeReady?.();
-      await session.waiters.wait(
-        actionId,
-        options.expiresAt,
-        abort.signal,
-        () =>
-          authority.action(actionId)?.state !== 'requested' ||
-          authority.writesStopped,
-      );
+      try {
+        const liveApproval =
+          options.toolName !== 'exit_plan_mode'
+            ? await hostedApprovalForTurn(session, promptId)
+            : undefined;
+        onResumeReady?.();
+        await session.waiters.wait(
+          actionId,
+          options.expiresAt,
+          abort.signal,
+          () =>
+            authority.action(actionId)?.state !== 'requested' ||
+            authority.writesStopped,
+          liveApproval?.readSettings
+            ? hostedLiveApprovalPoll(
+                session.managed,
+                session.waiters,
+                options,
+                liveApproval.readSettings,
+                abort.signal,
+                false,
+                liveApproval.isBlocked,
+              )
+            : undefined,
+        );
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
       if (authority.action(actionId)?.state === 'requested')
         await endHostedAction(
           session.managed,
@@ -3315,14 +3371,7 @@ async function executeHostedTurn(
                   HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
                 session.publication,
                 session.shell,
-                session.approval && {
-                  settings: (await hostedTurnApproval(
-                    session.managed,
-                    promptId,
-                    session.approval,
-                  ))!,
-                  waiters: session.waiters,
-                },
+                await hostedApprovalForTurn(session, promptId),
                 {
                   mcp: session.mcp,
                   hooks: session.hooks,
@@ -8776,14 +8825,7 @@ export function registerHostedHarnessSessionRoutes(
             ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
           session.publication,
           session.shell,
-          session.approval && {
-            settings: (await hostedTurnApproval(
-              session.managed,
-              promptId,
-              session.approval,
-            ))!,
-            waiters: session.waiters,
-          },
+          await hostedApprovalForTurn(session, promptId),
           {
             mcp: session.mcp,
             skills: session.skills,

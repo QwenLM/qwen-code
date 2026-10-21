@@ -659,6 +659,14 @@ public interface AgentStateStore {
     default WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
             String promptId) { return null; }
 
+    default WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String digest, String mode, long expectedRevision,
+            boolean supported, boolean agentDefinitionSupported, Boolean planMode, boolean planModeSupported,
+            boolean liveSupported) {
+        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, planMode, planModeSupported);
+    }
+
     /**
      * The latest environment event of each Session's latest Turn, in one
      * round trip.

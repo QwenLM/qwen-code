@@ -70,7 +70,8 @@ import {
   SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
-import { getApiHistoryPromptId } from './session-api-history.js';
+import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import {
   deleteTranscriptMessageGroups,
@@ -669,6 +670,7 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  contextPrefixLength?: number;
   /** Generated summary and restore entries preceding any retained raw input. */
   summaryPrefixLength?: number;
   /** Prompt identities parallel to compressedHistory. */
@@ -3267,6 +3269,9 @@ export class ChatRecordingService {
         systemPayload: {
           ...payload,
           compressedHistory,
+          contextPrefixLength: getStartupContextLength(compressedHistory, {
+            includeCompressed: true,
+          }),
           summaryPrefixLength,
           ...(promptIds.some(Boolean) ? { promptIds } : {}),
         },

@@ -1390,6 +1390,21 @@ function ManagedSessionsContent({
                 contextUsageAlwaysVisible={Boolean(sessionId)}
                 currentMode={summary?.approvalMode ?? ''}
                 planMode={summary?.planMode === true}
+                planControlsDisabled={
+                  !interactive ||
+                  !approvalChange.supported ||
+                  !approvalChange.options?.supported ||
+                  approvalChange.optionsLoading ||
+                  approvalChange.isBlocked() ||
+                  busy ||
+                  Boolean(active) ||
+                  Boolean(pendingApproval) ||
+                  Boolean(pending) ||
+                  cwd.blocked ||
+                  modelChange.isBlocked() ||
+                  approvalChange.options.approvalRevision !==
+                    (summary?.approvalRevision ?? 0)
+                }
                 onTogglePlan={
                   summary?.planModeSupported && summary.approvalMode
                     ? () => {
@@ -1421,8 +1436,9 @@ function ManagedSessionsContent({
                   approvalChange.busy ||
                   approvalChange.blocked ||
                   busy ||
-                  Boolean(active) ||
-                  Boolean(pendingApproval) ||
+                  ((Boolean(active) || Boolean(pendingApproval)) &&
+                    !approvalChange.options.liveSupported) ||
+                  summary?.phase === 'cancelling' ||
                   Boolean(pending) ||
                   cwd.blocked ||
                   modelChange.blocked ||
@@ -1438,8 +1454,9 @@ function ManagedSessionsContent({
                           busy ||
                           encoding.current ||
                           pendingRef.current ||
-                          active ||
-                          pendingApproval ||
+                          ((active || pendingApproval) &&
+                            !approvalChange.options?.liveSupported) ||
+                          summary?.phase === 'cancelling' ||
                           cwd.isBlocked() ||
                           modelChange.isBlocked()
                         )
@@ -1559,7 +1576,9 @@ function ManagedSessionsContent({
                               ? 'managed.approvalChange.loading'
                               : approvalChange.optionsError
                                 ? 'managed.approvalChange.optionsError'
-                                : 'managed.approvalChange.nextTurn',
+                                : approvalChange.options?.liveSupported
+                                  ? 'managed.approvalChange.live'
+                                  : 'managed.approvalChange.nextTurn',
                       )}
                     </span>
                     {approvalChange.pending && (

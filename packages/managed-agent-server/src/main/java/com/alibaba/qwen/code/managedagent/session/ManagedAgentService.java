@@ -287,7 +287,7 @@ public class ManagedAgentService {
                 summary.approvalRevision() == null ? 0 : summary.approvalRevision(),
                 supported ? List.of("default", "auto-edit", "yolo")
                         : summary.approvalMode() == null ? List.of() : List.of(summary.approvalMode()), supported,
-                summary.planMode(), summary.planModeSupported());
+                summary.planMode(), summary.planModeSupported(), supported && harness.supportsLiveApprovalSelection());
     }
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
@@ -307,7 +307,7 @@ public class ManagedAgentService {
         String digest = digests.digest(semantic);
         return store.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode,
                 expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection(),
-                planMode, harness.supportsPlanMode());
+                planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection());
     }
 
     private static void requireModelActor(String actorId) {

@@ -2010,6 +2010,44 @@ describe('WorkspaceBindingCreator', () => {
     expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
   });
 
+  it.each([
+    { configuredAgent: 'agent-a', selectedAgent: 'agent-a' },
+    { configuredAgent: 'server-default', selectedAgent: 'agent-b' },
+  ])(
+    'creates with a named model when the configured default is $configuredAgent',
+    async ({ configuredAgent, selectedAgent }) => {
+      const createSession = directCreation();
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        agentId: configuredAgent,
+        modelPresets: [
+          { agentId: 'agent-b', label: 'Model B' },
+          { agentId: 'agent-a', label: 'Model A' },
+        ],
+      };
+      getSession.mockResolvedValue({
+        sessionId: 'session-a',
+        agentId: selectedAgent,
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await render();
+      expect(editorMocks.props!.availableModels).toEqual([
+        { id: 'agent-b', label: 'Model B' },
+        { id: 'agent-a', label: 'Model A' },
+      ]);
+      expect(editorMocks.props!.currentModel).toBe(selectedAgent);
+      await sendInitial('Read README');
+      expect(createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          agentId: selectedAgent,
+          text: 'Read README',
+        }),
+        expect.any(Object),
+      );
+      expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
+    },
+  );
+
   it('freezes the selected model across an unconfirmed create and checks the returned Agent identity', async () => {
     provider = {
       ...provider,

@@ -687,6 +687,62 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('changes approval during a live Turn without enabling Plan or changing the draft', async () => {
+    let session = switchableSession({
+      approvalMode: 'default',
+      approvalRevision: 0,
+      phase: 'agent_running',
+      planModeSupported: true,
+      capabilities: {
+        canSend: true,
+        canCancel: true,
+        workspaceTurns: true,
+        approvalModeChange: true,
+      },
+    });
+    mocks.client.getSession.mockImplementation(async () => session);
+    provider.approvalChange = {
+      queryOptions: vi.fn(async () => ({
+        supported: true,
+        liveSupported: true,
+        approvalMode: session.approvalMode!,
+        approvalRevision: session.approvalRevision!,
+        availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        planModeSupported: true,
+      })),
+      submit: vi.fn(async () => {
+        session = { ...session, approvalMode: 'yolo', approvalRevision: 1 };
+        return {
+          sessionId: 's1',
+          approvalMode: 'yolo',
+          approvalRevision: 1,
+          replayed: false,
+        };
+      }),
+    };
+    await render('s1');
+    await input('Keep my next message');
+    expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
+    expect(mocks.editorProps?.planControlsDisabled).toBe(true);
+    await act(async () => {
+      mocks.editorProps!.onTogglePlan!();
+    });
+    expect(provider.approvalChange.submit).not.toHaveBeenCalled();
+    await act(async () => {
+      mocks.editorProps!.onSelectMode!('yolo');
+      await flush();
+    });
+    expect(provider.approvalChange.submit).toHaveBeenCalledOnce();
+    expect(mocks.editorProps?.currentMode).toBe('yolo');
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Keep my next message',
+    );
+    expect(container.textContent).toContain(
+      'subsequent tool calls in this turn',
+    );
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
   it.each(['agent_running', 'cancelling'] as const)(
     'refuses approval callbacks during a %s Turn',
     async (phase) => {

@@ -323,7 +323,8 @@ public final class ApiModels {
     }
 
     public record WebShellSessionApproval(String approvalMode, long approvalRevision,
-            List<String> availableApprovalModes, boolean supported, boolean planMode, boolean planModeSupported) {}
+            List<String> availableApprovalModes, boolean supported, boolean planMode, boolean planModeSupported,
+            boolean liveSupported) {}
 
     public record WebShellSessionApprovalRequest(@NotBlank @Size(max = 128) String sessionId) {}
 

@@ -466,6 +466,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsLiveApprovalSelection() {
+        try {
+            var features = client().capabilities().getFeatures();
+            return features.contains("approval-selection/1")
+                    && features.contains("live-approval-selection/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsAgentDefinitionApprovalSelection() {
         try {
             var features = client().capabilities().getFeatures();
@@ -1386,6 +1397,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 var policy = sessions.findTurnApprovalSelection(session.tenantId(), session.sessionId(), activeTurn.promptId());
                 if (policy == null) {
                     throw new IllegalStateException("The active Turn approval snapshot is missing");
+                }
+                if (policy.revision() < selected.revision() && !supportsLiveApprovalSelection()) {
+                    throw new IllegalStateException("Hosted live approval selection is unavailable");
                 }
                 if (policy.planMode() && !supportsPlanMode()) {
                     throw new IllegalStateException("Hosted Plan mode is unavailable");

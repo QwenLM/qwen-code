@@ -6117,7 +6117,10 @@ describe('task activity key', () => {
         .click(),
     );
     await flush();
-    expect(container.textContent).toContain('Historical window');
+    expect(
+      container.querySelector('[data-testid="trajectory-follow-status"]')
+        ?.textContent,
+    ).toBe('Earlier window');
     const input = container.querySelector<HTMLInputElement>(
       'input[type="search"]',
     )!;
@@ -6134,9 +6137,9 @@ describe('task activity key', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
         .click(),
     );
-    const selected = container.querySelector(
-      '[data-testid="trajectory-selected"]',
-    )!.textContent;
+    const selected = container
+      .querySelector('[data-testid="trajectory-row-request"]')!
+      .getAttribute('data-row-key');
     const rows = container.querySelector<HTMLElement>(
       '[data-testid="trajectory-rows"]',
     )!;
@@ -6173,22 +6176,32 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledTimes(
       8,
     );
-    expect(container.textContent).toContain('Historical window');
+    expect(
+      container.querySelector('[data-testid="trajectory-follow-status"]')
+        ?.textContent,
+    ).toBe('Earlier window');
     expect(
       container.querySelector<HTMLInputElement>('input[type="search"]')!.value,
     ).toBe('qwen-test');
     expect(
-      container.querySelector('[data-testid="trajectory-selected"]')!
-        .textContent,
+      container
+        .querySelector('[data-selected="true"]')
+        ?.getAttribute('data-row-key'),
     ).toBe(selected);
     expect(container.querySelector('[data-testid="trajectory-rows"]')).toBe(
       rows,
     );
     expect(rows.scrollTop).toBe(118);
-    expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).toContain('History may have changed while disconnected');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-warnings"]',
+        )!
+        .click(),
+    );
+    expect(document.body.textContent).toContain(
+      'History may have changed while disconnected',
+    );
     expect(
       Array.from(
         container.querySelectorAll('[role="tablist"] [role="tab"]'),
@@ -6198,15 +6211,14 @@ describe('task activity key', () => {
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-window-latest"]',
+          '[data-testid="trajectory-follow-status"]',
         )!
         .click(),
     );
     await flush();
     expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).not.toContain('History may have changed while disconnected');
+      container.querySelector('[data-testid="trajectory-warnings"]'),
+    ).toBeNull();
   });
 
   it('drops a restored trajectory tab when the host stopped listing it', async () => {
