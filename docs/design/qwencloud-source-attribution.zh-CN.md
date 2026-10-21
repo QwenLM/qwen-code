@@ -53,15 +53,18 @@ Qwen Code 目前不发送这个头，所以它在这两个平台上的调用量�
 ## 设计决策
 
 - **精确匹配 host。** 先解析 URL，再精确比较 hostname，所以仿冒域名（`maas.qwencloudapi.com.evil.example`）和把域名放在路径里的写法都不会命中。忽略大小写和端口。
-- **Token Plan 不填 `t2`。** Token Plan 的个人版和团队版 key 都以 `sk-sp-` 开头，客户端分不出来。接入指南说明平台可以按 API Key 反查付费方式，不填可以避免报错。
+- **Token Plan 不填 `t2`。** Token Plan 的个人版和团队版 key 都以 `sk-sp-` 开头，客户端分不出来。接入指南说明平台可以按 API Key 反查付费方式，不填可以避免错报。
 - **第一方取值优先。** `customHeaders` 中同名的项（不区分大小写）会被移除，所以来源标识既不会被覆盖，也不会重复发送。
 - **不加配置项。** 取值完全由 host 推导，没有需要用户配置的内容。
-- **单一 leaf 模块。** `packages/core/src/core/dashscope-source-config.ts` 不依赖任何模块，provider、Responses 链路和 WebSearch 都可以引用它，不会形成循环依赖。
+- **单一 leaf 模块。** `packages/core/src/core/dashscope-source-config.ts` 不依赖任何模块，并维护 host 列表（`QWENCLOUD_MAAS_HOSTS`，由 DashScope provider 再导出），provider、Responses 链路和 WebSearch 都可以引用它，不会形成循环依赖。
+- **按配置的 host 判断，而非运行时 host。** 判断依据是配置的 `baseUrl`。Qwen OAuth 会在运行时替换客户端的端点，但它配置的 `baseUrl` 是无法解析的占位符 `DYNAMIC_QWEN_OAUTH_BASE_URL`，因此永远不会带上来源标识；有测试固定这一点。
 
 ## 不在范围内
 
+- **模型发现。** QwenCloud 预设列出模型时，`GET {baseUrl}/models` 会打到这些 host，但它不是模型调用，而接入指南要求标识的是模型调用。
 - **Batch。** Batch 任务由平台在后台异步执行，提交请求上带的头能否计入后续的模型调用，尚未确认。
-- **omni 媒体工具。** 属于实验功能，默认关闭，且除非用户改端点，否则打的是百炼。
+- **omni 媒体工具。** 属于实验功能，默认关闭。caption、OCR 和转写工具默认打百炼。在 QwenCloud 模型上开启 omni 时，旧版临时上传通道会复用该模型的端点；它用于上传媒体，不带来源标识。
+- **Responses embeddings。** Responses 生成器的 embedding 客户端只发送 `customHeaders`；目前产品中没有任何地方调用它。
 - **语音转写和 Qwen Live。** 它们的端点校验不接受 QwenCloud 的 host。
 - **Anthropic 协议。** 没有 QwenCloud 预设使用它；用户手动配置、指向这些 host 的 Anthropic 条目不会带上来源标识。
 - **代理。** 经由代理 host（如 `DASHSCOPE_PROXY_BASE_URL`）发出的请求不会带上来源标识，因为客户端看不到真实的平台 host。

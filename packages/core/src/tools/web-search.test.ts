@@ -1274,7 +1274,7 @@ describe('WebSearchTool execute', () => {
           dsModel({
             baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
             generationConfig: {
-              customHeaders: { 'X-DashScope-Source-Config': 'user' },
+              customHeaders: { 'x-dashscope-source-config': 'user' },
             },
           }),
         ],
@@ -1286,6 +1286,7 @@ describe('WebSearchTool execute', () => {
     expect(opts.defaultHeaders['X-DashScope-Source-Config']).toBe(
       '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code","t2":"payg"}}',
     );
+    expect(opts.defaultHeaders).not.toHaveProperty('x-dashscope-source-config');
   });
 
   it('installs dynamic header expansion on the search client fetch', async () => {

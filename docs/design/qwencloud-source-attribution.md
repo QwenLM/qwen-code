@@ -56,12 +56,15 @@ Three request paths can reach these hosts in a default setup, and all three send
 - **No `t2` on Token Plan.** Token Plan keys share the `sk-sp-` prefix across the Personal and Team editions, so the client cannot tell them apart. The guide states the platform can resolve the plan from the API key; omitting the field avoids misreporting.
 - **First-party value wins.** A `customHeaders` entry with the same name, in any casing, is removed, so the attribution can neither be overridden nor sent twice.
 - **No setting.** The value is fully derived; there is nothing to configure.
-- **One leaf module.** `packages/core/src/core/dashscope-source-config.ts` has no imports, so the provider, the Responses wire and WebSearch can all use it without an import cycle.
+- **One leaf module.** `packages/core/src/core/dashscope-source-config.ts` has no imports and owns the host list (`QWENCLOUD_MAAS_HOSTS`, re-exported by the DashScope provider), so the provider, the Responses wire and WebSearch can all use it without an import cycle.
+- **Configured host, not runtime host.** The decision reads the configured `baseUrl`. Qwen OAuth swaps the client's endpoint at runtime, but its configured `baseUrl` is the unparseable placeholder `DYNAMIC_QWEN_OAUTH_BASE_URL`, so it is never attributed; a test pins this.
 
 ## Out of scope
 
+- **Model discovery.** `GET {baseUrl}/models` reaches these hosts when the QwenCloud presets list models, but it is not a model invocation, which is what the guide asks to attribute.
 - **Batch.** Batch jobs run asynchronously on the platform; whether a header on the submission request is attributed to the resulting model calls is unconfirmed.
-- **Omni media tools.** They are experimental, off by default, and target Bailian unless the user repoints them.
+- **Omni media tools.** They are experimental and off by default. The caption, OCR and transcription tools default to Bailian. When omni is enabled on a QwenCloud model, the legacy temporary-upload channel reuses that model's endpoint; it uploads media and is not attributed.
+- **Responses embeddings.** The Responses generator's embedding client sends only `customHeaders`; nothing in the product calls it today.
 - **Voice transcription and Qwen Live.** Their endpoint checks do not accept QwenCloud hosts.
 - **Anthropic protocol.** No QwenCloud preset uses it; a hand-configured Anthropic entry pointing at these hosts is not attributed.
 - **Proxies.** A request routed through a proxy host (for example `DASHSCOPE_PROXY_BASE_URL`) is not attributed, because the platform host is not visible to the client.

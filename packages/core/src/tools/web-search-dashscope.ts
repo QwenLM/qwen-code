@@ -252,7 +252,8 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
       defaultHeaders: withDashScopeSourceConfig(
         {
           'User-Agent': `QwenCode/${this.config.getCliVersion() || 'unknown'} (${process.platform}; ${process.arch})`,
-          // Entry-declared headers win, matching the providers' merge order.
+          // Entry-declared headers win, matching the providers' merge order;
+          // only the source attribution below takes precedence over them.
           ...(backend.customHeaders ?? {}),
         },
         backend.baseUrl,

@@ -6,12 +6,19 @@
 
 const DASHSCOPE_SOURCE_CONFIG_HEADER = 'X-DashScope-Source-Config';
 
-// Literals rather than an import of QWENCLOUD_MAAS_HOSTS: provider/dashscope.ts
-// imports this leaf, so importing back would create a cycle.
 const SITE_CHANNELS: ReadonlyArray<readonly [host: string, channel: string]> = [
   ['maas.qianwenaiapi.com', 'qianwenai-inner-agents'],
   ['maas.qwencloudapi.com', 'qwencloud-inner-agents'],
 ];
+
+/**
+ * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. Both the
+ * pay-as-you-go endpoints and the `token-plan.`-prefixed subscription
+ * endpoints are subdomains of these, so one suffix match covers all four.
+ */
+export const QWENCLOUD_MAAS_HOSTS: readonly string[] = SITE_CHANNELS.map(
+  ([host]) => host,
+);
 
 /**
  * The 千问AI平台 / QwenCloud usage-attribution header value for a request
