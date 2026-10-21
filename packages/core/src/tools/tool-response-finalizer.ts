@@ -347,8 +347,8 @@ export function enforceFunctionResponseBudget(
       partIndex++
     ) {
       const part = reduced[index].responseParts[partIndex];
-      // The only caller is the chat send boundary; stamp the real source so
-      // the injection event does not attribute the cut to the batch layer.
+      // Attribute this fallback to the model send policy, including when a
+      // Hosted Skill applies it before saving its model-facing result.
       if (part !== entries[index].responseParts[partIndex])
         updateToolOutputBudget([part], budget, 'send_guard');
     }

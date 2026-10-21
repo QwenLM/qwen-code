@@ -17,6 +17,7 @@ import type {
 } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
+import { getSlashCommandCompletionResult } from '../../completions/slashCompletion';
 import type { ComponentProps } from 'react';
 import {
   ToolDetailsContext,
@@ -385,6 +386,15 @@ describe('ManagedSessionsPage', () => {
     );
     expect(mocks.editorProps?.skills).toEqual(skills);
     expect(mocks.editorProps?.skillsLoaded).toBe(true);
+    const completion = getSlashCommandCompletionResult(
+      '/rev',
+      4,
+      mocks.editorProps?.commands ?? [],
+    );
+    expect(completion?.items).toMatchObject([
+      { label: '/review', apply: '/review ' },
+    ]);
+    expect(completion?.items[0]?.autoSubmit).not.toBe(true);
   });
 
   it('connects MCP independently of file attachments without enabling daemon features', async () => {

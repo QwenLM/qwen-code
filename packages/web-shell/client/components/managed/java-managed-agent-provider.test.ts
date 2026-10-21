@@ -1294,7 +1294,16 @@ describe('createJavaManagedAgentProvider', () => {
     );
   });
 
-  it('derives the same title for a Workspace-bound create', async () => {
+  it('preserves creation Skills and the prompt-derived title for a Workspace-bound create', async () => {
+    const skills = [
+      {
+        name: 'review',
+        description: 'Review the current change.',
+        body: 'Check the current change for regressions.',
+        userInvocable: true,
+        disableModelInvocation: false,
+      },
+    ];
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
       jsonResponse({
         sessionId: 'session-1',
@@ -1318,12 +1327,15 @@ describe('createJavaManagedAgentProvider', () => {
         workspaceId: 'ws-default',
         cwdRelative: 'services/api',
         text: '\u001b[31mERROR\u001b[0m the build failed',
+        skills,
       },
       { clientId: 'client-1', idempotencyKey: 'key-1' },
     );
 
     const body = JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body));
     expect(body.title).toBe('[31mERROR [0m the build failed');
+    expect(body.skills).toEqual(skills);
+    expect(body.idempotencyKey).toBe('key-1');
     expect(body.workspace).toEqual({
       workspaceId: 'ws-default',
       cwdRelative: 'services/api',

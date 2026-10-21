@@ -14,6 +14,8 @@ import type {
 } from './managed-agent-provider';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import * as pendingStorage from './managed-pending-storage';
+import type { ManagedCreationSkillsSource } from './managed-creation-skills';
+import { getSlashCommandCompletionResult } from '../../completions/slashCompletion';
 
 const editorMocks = vi.hoisted(() => ({
   props: undefined as
@@ -78,6 +80,7 @@ describe('WorkspaceBindingCreator', () => {
   let onCreated: ReturnType<typeof vi.fn>;
   let onAbandoned: ReturnType<typeof vi.fn>;
   let provider: ManagedAgentProvider;
+  let creationSkills: ManagedCreationSkillsSource | undefined;
 
   async function flush() {
     for (let index = 0; index < 8; index++) await Promise.resolve();
@@ -93,6 +96,7 @@ describe('WorkspaceBindingCreator', () => {
             onCreated={onCreated}
             onAbandoned={onAbandoned}
             interactive={interactive}
+            creationSkills={creationSkills}
           />
         </I18nProvider>
       );
@@ -153,6 +157,7 @@ describe('WorkspaceBindingCreator', () => {
   }
 
   beforeEach(() => {
+    creationSkills = undefined;
     vi.clearAllMocks();
     editorMocks.props = undefined;
     sessionStorage.clear();
@@ -1047,6 +1052,181 @@ describe('WorkspaceBindingCreator', () => {
     );
     await sendInitial('Legacy request');
     expect(createSession.mock.calls[0][0]).not.toHaveProperty('approvalMode');
+  });
+
+  it('offers Skills before creating a Session when other add-menu capabilities are absent', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: true,
+    });
+    const list = vi
+      .fn()
+      .mockResolvedValue([
+        { name: 'manual-review', description: 'Enabled manual Skill.' },
+      ]);
+    const load = vi.fn();
+    creationSkills = { workspaceCwd: '/explicit-source', list, load };
+    await render();
+    expect(editorMocks.props?.visibleToolbarActions).toContain('addMenu');
+    expect(editorMocks.props?.onSkillsOpenChange).toBeTypeOf('function');
+    expect(list).not.toHaveBeenCalled();
+    await act(async () => editorMocks.props!.onSkillsOpenChange!(true));
+    expect(editorMocks.props?.skills).toEqual([
+      { name: 'manual-review', description: 'Enabled manual Skill.' },
+    ]);
+    expect(editorMocks.props?.skillsLoaded).toBe(true);
+    expect(editorMocks.props?.skillsLoadError).toBe(false);
+    const completion = getSlashCommandCompletionResult(
+      '/manual',
+      7,
+      editorMocks.props?.commands ?? [],
+    );
+    expect(completion?.items).toMatchObject([
+      { label: '/manual-review', apply: '/manual-review ' },
+    ]);
+    expect(completion?.items[0]?.autoSubmit).not.toBe(true);
+    expect(load).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+    });
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(editorMocks.props?.onSkillsOpenChange).toBeUndefined();
+    expect(editorMocks.props?.visibleToolbarActions).not.toContain('addMenu');
+  });
+
+  it.each([undefined, false, true])(
+    'imports creation Skills only when supported (%s)',
+    async (skillsSupported) => {
+      const { createSession, getSessionOptions } = approvalSelection();
+      getSessionOptions.mockResolvedValue({
+        approvalMode: 'default',
+        availableApprovalModes: ['default'],
+        ...(skillsSupported === undefined ? {} : { skillsSupported }),
+      });
+      const catalog = [
+        { name: 'review', description: 'Review', body: 'Review changes.' },
+      ];
+      const load = vi.fn().mockResolvedValue(catalog);
+      creationSkills = {
+        workspaceCwd: '/source',
+        list: vi.fn().mockResolvedValue([]),
+        load,
+      };
+      await render();
+      expect(Boolean(editorMocks.props?.onSkillsOpenChange)).toBe(
+        Boolean(skillsSupported),
+      );
+      expect(
+        container.textContent?.includes('Enabled Skills on the Skills page'),
+      ).toBe(Boolean(skillsSupported));
+      await sendInitial('Compatible creation');
+      expect(createSession).toHaveBeenCalledOnce();
+      expect(load).toHaveBeenCalledTimes(skillsSupported ? 1 : 0);
+      if (skillsSupported)
+        expect(createSession.mock.calls[0]![0].skills).toEqual(catalog);
+      else expect(createSession.mock.calls[0]![0]).not.toHaveProperty('skills');
+    },
+  );
+
+  it('imports all enabled Skills and keeps the exact snapshot when retrying after reload', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: true,
+    });
+    const skills = Array.from({ length: 42 }, (_, i) => ({
+      name: `skill-${i}`,
+      description: 'Enabled',
+      body: 'FROZEN_SESSION_SKILL',
+      ...(i === 1 ? { model_invocable: false } : {}),
+    }));
+    const load = vi.fn().mockResolvedValue(skills);
+    creationSkills = {
+      workspaceCwd: '/explicit-source',
+      list: vi.fn().mockResolvedValue([]),
+      load,
+    };
+    createSession.mockRejectedValue(new Error('lost response'));
+    await render();
+    expect(container.textContent).toContain(
+      'Enabled Skills on the Skills page',
+    );
+    expect(container.textContent).not.toContain('Add Skill');
+    await act(async () => {
+      await editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledOnce();
+    const first = createSession.mock.calls[0]!;
+    expect(first[0].skills).toEqual(skills);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    load.mockResolvedValue([]);
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: false,
+    });
+    await render();
+    expect(container.textContent).toContain('42 Skills are saved');
+    await click('Retry the same request');
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[1]![0].skills).toEqual(first[0].skills);
+    expect(createSession.mock.calls[1]![1].idempotencyKey).toBe(
+      first[1].idempotencyKey,
+    );
+  });
+
+  it('does not admit stale or unavailable Skill sources', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: true,
+    });
+    let finish!: (skills: never[]) => void;
+    creationSkills = {
+      workspaceCwd: '/old-source',
+      list: vi.fn().mockResolvedValue([]),
+      load: vi.fn(
+        () =>
+          new Promise<never[]>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    };
+    await render();
+    let submitted!: Promise<unknown>;
+    await act(async () => {
+      submitted = editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    creationSkills = {
+      workspaceCwd: '/new-source',
+      list: vi.fn().mockResolvedValue([]),
+      load: vi.fn().mockRejectedValue(new Error('source unavailable')),
+    };
+    await render();
+    await act(async () => {
+      finish([]);
+      await submitted;
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Skills source changed');
+    await act(async () => {
+      await editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('source unavailable');
   });
 
   it('freezes selected policy on lost response and restores the exact mode after refresh', async () => {
