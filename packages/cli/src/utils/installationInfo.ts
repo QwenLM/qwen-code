@@ -50,13 +50,21 @@ export function getNpmCliPath(
     // script qwen hands to `process.execPath` — `npm_config_prefix` is already
     // in INHERITED_LOADER_ENV_KEYS for exactly that reason, and this resolver
     // must not reopen the same channel under a different name. It matters more
-    // here than for a plain lookup because the chosen npm also runs
-    // `npm install -g`, not just a read-only `npm view`.
+    // here than for a plain lookup because the chosen npm also runs the staged
+    // `npm install --prefix <stagingDir> --global=false` in managed-npm-update,
+    // which still executes lifecycle scripts, not just a read-only `npm view`.
+    //
+    // APPDATA is the same class of input, so it is guarded twice rather than
+    // trusted: it is a hardcoded project-.env rejection (shared-env-keys.ts
+    // PROJECT_ENV_HARDCODED_EXCLUSIONS), and only an absolute value can select a
+    // file here — a relative one would resolve against whatever cwd the caller
+    // happens to have, which differs between the probe and the spawn that
+    // follows it.
     //
     // A machine that never self-updated npm has no such file, so the probe falls
     // through to the bundled copy and behaviour is unchanged.
     const appData = process.env['APPDATA'];
-    if (appData) {
+    if (appData && path.win32.isAbsolute(appData)) {
       const userNpmCliJs = path.win32.join(
         appData,
         'npm',
@@ -65,8 +73,16 @@ export function getNpmCliPath(
         'bin',
         'npm-cli.js',
       );
-      if (fs.existsSync(userNpmCliJs)) return userNpmCliJs;
+      if (fs.existsSync(userNpmCliJs)) {
+        debugLogger.debug(
+          `getNpmCliPath: win32 using the npm in the global prefix at ${userNpmCliJs}`,
+        );
+        return userNpmCliJs;
+      }
     }
+    debugLogger.debug(
+      `getNpmCliPath: win32 using the npm bundled with node at ${bundledNpmCliJs}`,
+    );
     return bundledNpmCliJs;
   }
   // Prefer the npm symlink that sits next to the node binary and resolve it to
