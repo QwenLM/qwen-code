@@ -3862,7 +3862,8 @@ export class DaemonClient {
   }
 
   /**
-   * Read the current in-memory runtime status for one live daemon session.
+   * Read one live session's runtime status and optional persisted
+   * summary metadata.
    */
   async sessionStatus(
     sessionId: string,

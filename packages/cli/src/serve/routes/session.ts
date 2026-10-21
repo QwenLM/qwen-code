@@ -6212,8 +6212,14 @@ export function registerSessionRoutes(
     '/session/:id/status',
     withOwnerReadSession(
       'GET /session/:id/status',
-      (_req, res, sessionId, runtime) => {
-        res.status(200).json(runtime.bridge.getSessionSummary(sessionId));
+      async (_req, res, sessionId, runtime) => {
+        const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
+        summary.lastUserPromptAt =
+          await createWorkspaceRuntimeSessionService(
+            runtime,
+          ).getLastUserPromptAt(sessionId);
+        runtime.generationGuard?.assertOpen();
+        res.status(200).json(summary);
       },
     ),
   );

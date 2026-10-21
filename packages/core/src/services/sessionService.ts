@@ -2815,6 +2815,27 @@ export class SessionService {
     };
   }
 
+  async getLastUserPromptAt(
+    sessionId: string,
+    archiveState: SessionArchiveState = 'active',
+  ): Promise<string | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
+    if (
+      !(await this.readProjectSessionHead(
+        sessionId,
+        this.getSessionFilePath(sessionId, archiveState),
+      ))
+    )
+      return undefined;
+    return this.transcriptReader.getLastUserPromptAt(sessionId, archiveState, {
+      validateFirstRecord: (record) =>
+        typeof record.sessionId === 'string' &&
+        typeof record.cwd === 'string' &&
+        record.sessionId.toLowerCase() === sessionId.toLowerCase() &&
+        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+    });
+  }
+
   async getSessionListItem(
     sessionId: string,
     archiveState: SessionArchiveState = 'active',

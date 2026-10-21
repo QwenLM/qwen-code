@@ -28,6 +28,7 @@ import type {
   BranchSessionRequest,
   DaemonCapabilities,
   DaemonSessionCatalogResult,
+  DaemonSessionSummary,
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
@@ -6467,6 +6468,45 @@ describe('DaemonClient', () => {
       expect(calls.map((call) => call.url)).toEqual([
         'http://daemon/workspaces/workspace%2Fid/session-info',
       ]);
+    });
+
+    it('preserves optional last user prompt time across summary read APIs', async () => {
+      const summary: DaemonSessionSummary = {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        lastUserPromptAt: '2026-01-02T00:00:00.000Z',
+        updatedAt: '2026-01-03T00:00:00.000Z',
+      };
+      const legacy: DaemonSessionSummary = {
+        sessionId: 's-legacy',
+        workspaceCwd: '/work/a',
+        updatedAt: summary.updatedAt,
+      };
+      const sessions = [summary, legacy];
+      const { fetch } = recordingFetch(({ url }) => {
+        if (url.endsWith('/sessions/catalog')) {
+          return jsonResponse(200, {
+            workspaces: [{ workspace: '/work/a', sessions }],
+          });
+        }
+        return jsonResponse(
+          200,
+          url.endsWith('/status') ? summary : { sessions },
+        );
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const listed = await client.listWorkspaceSessions('/work/a');
+      expect(listed).toEqual(sessions);
+      expect(
+        (await client.workspaceByCwd('/work/a').listWorkspaceSessionsPage())
+          .sessions,
+      ).toEqual(sessions);
+      expect(
+        (await client.listSessionsCatalog({ workspaces: 'all' })).workspaces[0],
+      ).toEqual({ workspace: '/work/a', sessions });
+      expect(await client.sessionStatus('s-1')).toEqual(summary);
+      expect(listed[1]).not.toHaveProperty('lastUserPromptAt');
     });
 
     it('GETs /workspace/:id/sessions and returns the array', async () => {

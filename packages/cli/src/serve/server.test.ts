@@ -26265,6 +26265,35 @@ describe('createServeApp', () => {
   });
 
   describe('GET /session/:id/status', () => {
+    it('enriches the live owner summary with its recorded user time', async () => {
+      const summary: BridgeSessionSummary = {
+        sessionId: 's-time',
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        updatedAt: '2026-05-17T14:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: true,
+      };
+      const timestamp = '2026-05-17T12:30:00.000Z';
+      const read = vi
+        .spyOn(SessionService.prototype, 'getLastUserPromptAt')
+        .mockResolvedValueOnce(timestamp);
+      const bridge = fakeBridge({ summaryImpl: () => summary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/s-time/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ...summary, lastUserPromptAt: timestamp });
+      expect(read).toHaveBeenCalledWith('s-time');
+      expect(read.mock.instances[0]?.getProjectRoot()).toBe(WS_BOUND);
+      read.mockRestore();
+    });
+
     it('200 with the live session summary', async () => {
       const summary: BridgeSessionSummary = {
         sessionId: 's-1',
