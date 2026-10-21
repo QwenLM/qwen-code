@@ -1555,7 +1555,8 @@ class HostedAutomationFaultGatesIT {
     // FG11d: a cancel stops the run it names and leaves the Session usable. Once
     // the target settles `cancelled`, the next manual fire is admitted and runs
     // to completion — the cancelled turn does not leave the Session wedged, and
-    // the schedule and its future fires survive.
+    // the definition stays `live`. A scheduled future slot is outside this arm:
+    // the definition's cron never comes due inside it.
     @Test
     @Timeout(600)
     void fg11dSiblingRunSurvivesACancelOnMySql() throws Exception {
@@ -1584,6 +1585,18 @@ class HostedAutomationFaultGatesIT {
         assertThat(runState(first)).as("the cancel still stands").isEqualTo("cancelled");
         assertThat(request("GET", "/v1/agent-automations/" + id, null, null, 200).path("state").asText())
                 .as("the schedule survives both").isEqualTo("live");
+        // Every sibling cancel cell pins the occurrence ledger; without it a
+        // regression that re-drives or double-settles either key would pass on
+        // the run state and prompt counts alone.
+        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-iso-first"))
+                .as("the cancelled key keeps its one fired occurrence").containsEntry("outcome", "fired");
+        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-iso-sibling"))
+                .as("the sibling key fires its own occurrence").containsEntry("outcome", "fired");
+        assertThat(jdbc.queryForList("SELECT occurrence_key FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ?", String.class, tenant, id))
+                .as("neither key is re-driven").hasSize(2);
         assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-first"))
                 .as("the cancelled run keeps its one Turn").hasSize(1);
         assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("manual:fg11d-iso-sibling"))

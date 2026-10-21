@@ -785,7 +785,7 @@ jobs:
     # 11145 s; the FG11d second-fire refusal cell adds 25 s, moving the fork
     # to 11170 s; the FG11d cancel-isolation cell adds 11 s, moving the fork
     # to 11181 s and leaving Verify at 197 minutes, wrapping fork + 600 s plus
-    # margin (11770 s of fork plus wrap);
+    # margin (11781 s of fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
