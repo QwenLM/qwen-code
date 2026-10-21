@@ -4486,6 +4486,47 @@ describe('AppContainer State Management', () => {
       expect(mockQueueMessage).not.toHaveBeenCalled();
     });
 
+    it('keeps a vim composer submit displayed as typed while the model reads the framed paste', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const framed = `<clipboard-paste>\n${body}\n</clipboard-paste>\nattribution`;
+      const queue = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      // What the composer's submit path hands over for a collapsed paste.
+      // Vim drops the submittedPrompt projection, so the transcript, the
+      // session log and a cancel-restore read the display text instead.
+      act(() => {
+        capturedUIActions.handleFinalSubmit(framed, {
+          deferUntilIdle: false,
+          submittedPrompt: placeholder,
+          displayText: placeholder,
+          humanInput: { text: body },
+          pasteExpansions,
+        });
+      });
+      expect(queue).toHaveBeenCalledWith(framed, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
     it('keeps Vim-modified composer text ineligible after Vim is disabled', () => {
       const mockQueueMessage = vi.fn();
       let setVimEnabled: ((enabled: boolean) => void) | undefined;
