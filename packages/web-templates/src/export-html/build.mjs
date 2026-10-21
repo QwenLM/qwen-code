@@ -74,7 +74,11 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate), leaving 3,417 bytes below this ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_045_000;
+// #13771 adds the bounded-diff paths to the transcript renderer — the source
+// layer's CRLF verdict, the merge-escape pair gate, and the marker localizer —
+// and measures 2,046,055 on top of that baseline, so the ceiling moves by
+// 5,000 (0.24%) and keeps 3,945 bytes of slack rather than none.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_050_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
