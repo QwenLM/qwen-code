@@ -250,7 +250,7 @@ describe('guards (ink handleSlashCommand parity)', () => {
       const recordSlashCommand = vi.fn();
       const config = makeFakeConfig({});
       config.getChatRecordingService = () =>
-        ({ recordSlashCommand }) as ReturnType<
+        ({ recordSlashCommand }) as unknown as ReturnType<
           Config['getChatRecordingService']
         >;
       const host = createFakeHost();

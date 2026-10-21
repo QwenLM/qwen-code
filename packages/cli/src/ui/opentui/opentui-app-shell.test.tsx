@@ -489,17 +489,21 @@ describe('OpenTuiApp shell wiring', () => {
         config.getContextFilePaths = () => [];
         config.storage.getProjectTempCheckpointsDir = () => scratch;
         config.getChatRecordingService = () =>
-          ({ recordSlashCommand: vi.fn() }) as ReturnType<
+          ({ recordSlashCommand: vi.fn() }) as unknown as ReturnType<
             Config['getChatRecordingService']
           >;
         config.getFileHistoryService = () =>
-          ({ rewind }) as ReturnType<Config['getFileHistoryService']>;
-        config.getFileReadCache = () =>
-          ({ clear: vi.fn() }) as ReturnType<Config['getFileReadCache']>;
-        config.getMemoryManager = () =>
-          ({ restoreMemoryBodiesPresentInHistory: vi.fn() }) as ReturnType<
-            Config['getMemoryManager']
+          ({ rewind }) as unknown as ReturnType<
+            Config['getFileHistoryService']
           >;
+        config.getFileReadCache = () =>
+          ({ clear: vi.fn() }) as unknown as ReturnType<
+            Config['getFileReadCache']
+          >;
+        config.getMemoryManager = () =>
+          ({
+            restoreMemoryBodiesPresentInHistory: vi.fn(),
+          }) as unknown as ReturnType<Config['getMemoryManager']>;
         config.clearActiveTodoReminders = vi.fn();
         const client = new LlmClient(config);
         const chat = {
