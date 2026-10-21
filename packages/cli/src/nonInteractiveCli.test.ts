@@ -3752,6 +3752,7 @@ describe('runNonInteractive', () => {
       mockSettings,
       'Use a tool',
       'prompt-id-2',
+      { humanInput: { text: 'ultracode use a tool' } },
     );
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
@@ -3773,6 +3774,7 @@ describe('runNonInteractive', () => {
         type: SendMessageType.UserQuery,
         modelOverride: undefined,
         submittedPrompt: 'Use a tool',
+        humanInput: { text: 'ultracode use a tool' },
       },
     );
     // Verify second call (after tool execution) has type: ToolResult
