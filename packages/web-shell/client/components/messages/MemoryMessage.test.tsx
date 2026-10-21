@@ -38,6 +38,7 @@ const autoMemory = vi.hoisted(() => ({
 const settingsState = vi.hoisted(() => ({
   settings: [] as unknown[],
   setValue: vi.fn(),
+  reload: vi.fn(),
 }));
 
 const connectionState = vi.hoisted(() => ({
@@ -71,6 +72,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
     useSettings: () => ({
       settings: settingsState.settings,
       setValue: settingsState.setValue,
+      reload: settingsState.reload,
     }),
     useConnection: () => connectionState,
   };
@@ -150,7 +152,10 @@ beforeEach(() => {
   autoMemory.openAutoMemoryFolder.mockReset();
   settingsState.settings = [];
   settingsState.setValue.mockReset().mockResolvedValue(undefined);
-  connectionState.capabilities.features = [];
+  settingsState.reload.mockReset().mockResolvedValue(undefined);
+  // The suite exercises the Auto tab, so the default daemon advertises
+  // the matching capability; the gate test overrides this per case.
+  connectionState.capabilities.features = ['workspace_auto_memory'];
 });
 
 afterEach(() => {
@@ -370,5 +375,27 @@ describe('MemoryMessage auto tab', () => {
     await flush();
     expect(container.textContent).toContain('QWEN.md');
     expect(button('Edit')).toBeDefined();
+  });
+
+  it('hides the Auto tab when the daemon lacks the workspace_auto_memory tag', async () => {
+    connectionState.capabilities.features = [];
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(buttons.some((item) => item.textContent === 'Auto memory')).toBe(
+      false,
+    );
+    expect(container.textContent).not.toContain('Project memory');
   });
 });

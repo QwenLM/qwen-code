@@ -58,7 +58,7 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
     readAutoMemoryFile,
     openAutoMemoryFolder,
   } = useAutoMemory({ autoLoad: true });
-  const { settings, setValue } = useSettings({ autoLoad: true });
+  const { settings, setValue, reload } = useSettings({ autoLoad: true });
 
   // Host-local affordance: the daemon opens the folder on ITS host, so the
   // button is only honest when the browser sits on that same machine.
@@ -66,7 +66,9 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
     connection.capabilities?.features?.includes('workspace_local_open') &&
     isLocalDaemon();
 
-  const [togglingKey, setTogglingKey] = useState<string | null>(null);
+  const [togglingKeys, setTogglingKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [notice, setNotice] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [content, setContent] = useState<string | null>(null);
@@ -77,6 +79,9 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
 
   const projectEntries = entries.filter((entry) => entry.scope === 'project');
   const userEntries = entries.filter((entry) => entry.scope === 'user');
+  const scanErrors = (status?.errors ?? [])
+    .map((cell) => cell.error)
+    .filter((cell): cell is string => Boolean(cell));
 
   const toggleValue = useCallback(
     (key: string) =>
@@ -85,9 +90,26 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
   );
 
   const handleToggle = (key: string, next: boolean) => {
-    setTogglingKey(key);
+    setTogglingKeys((current) => new Set(current).add(key));
     setNotice(null);
-    setValue('user', key, next)
+    // The switch renders values.effective, where a workspace-scope value
+    // wins over user. Writing at user scope under an existing workspace
+    // value would answer 200 without changing the displayed value, so
+    // write the scope that currently defines it (workspace when present,
+    // user otherwise).
+    const descriptor = settings.find((item) => item.key === key);
+    const scope =
+      descriptor?.values?.workspace !== undefined ? 'workspace' : 'user';
+    setValue(scope, key, next)
+      .then(async () => {
+        // Refresh so the controlled switch reflects the persisted value;
+        // a failed refresh is non-fatal, the write already resolved.
+        try {
+          await reload();
+        } catch {
+          // the written value wins over a failed refresh
+        }
+      })
       .catch((toggleError: unknown) => {
         const text =
           toggleError instanceof Error
@@ -96,7 +118,13 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
         setNotice(text);
         onMessage?.(text, 'error');
       })
-      .finally(() => setTogglingKey(null));
+      .finally(() => {
+        setTogglingKeys((current) => {
+          const done = new Set(current);
+          done.delete(key);
+          return done;
+        });
+      });
   };
 
   const handleOpen = (scope: 'project' | 'user') => {
@@ -112,7 +140,9 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
   };
 
   const handleSelect = (entry: DaemonAutoMemoryFile) => {
-    if (entry.path === selectedPath) return;
+    // A repeated click on an entry whose last read failed must retry;
+    // only a re-select of a successfully loaded entry is a no-op.
+    if (entry.path === selectedPath && !contentError) return;
     const loadSeq = ++loadSeqRef.current;
     setSelectedPath(entry.path);
     setContent(null);
@@ -207,8 +237,12 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
         {TOGGLES.map((toggle) => (
           <div key={toggle.key} className={styles.autoToggleRow}>
             <Switch
+              aria-label={t(toggle.labelKey)}
               checked={toggleValue(toggle.key)}
-              disabled={togglingKey === toggle.key || settings.length === 0}
+              disabled={
+                togglingKeys.has(toggle.key) ||
+                !settings.some((item) => item.key === toggle.key)
+              }
               onCheckedChange={(next) => handleToggle(toggle.key, next)}
             />
             <div className={styles.autoToggleText}>
@@ -221,9 +255,13 @@ export function AutoMemoryPanel({ onMessage }: AutoMemoryPanelProps) {
         ))}
       </div>
 
-      {(notice || error?.message) && (
-        <div className={styles.status}>{notice ?? error?.message}</div>
-      )}
+      <div role="status" aria-live="polite">
+        {(notice || error?.message || scanErrors.length > 0) && (
+          <div className={styles.status}>
+            {notice ?? error?.message ?? scanErrors.join('; ')}
+          </div>
+        )}
+      </div>
 
       {!status && loading && (
         <div className={styles.status}>{t('memory.loading')}</div>

@@ -1599,3 +1599,42 @@ describe('Web Shell approval mode allowlist settings', () => {
     ).toMatchObject({ effective: 3, user: 3, workspace: 9 });
   });
 });
+
+describe('managed auto-memory toggles on the settings surface', () => {
+  it('serves both auto-memory toggles in GET /workspace/settings', async () => {
+    const { app } = makeApp();
+
+    const response = await request(app).get('/workspace/settings');
+
+    expect(response.status).toBe(200);
+    const keys = response.body.settings.map(
+      (setting: { key: string }) => setting.key,
+    );
+    expect(keys).toContain('memory.enableManagedAutoMemory');
+    expect(keys).toContain('memory.enableManagedAutoDream');
+  });
+
+  it('persists a user-scope write of an auto-memory toggle', async () => {
+    const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+
+    const response = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'memory.enableManagedAutoMemory',
+      value: false,
+    });
+
+    expect(response.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      SettingScope.User,
+      'memory.enableManagedAutoMemory',
+      false,
+    );
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'memory.enableManagedAutoMemory',
+      false,
+      'user',
+      undefined,
+    );
+  });
+});

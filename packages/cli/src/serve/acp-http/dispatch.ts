@@ -4412,6 +4412,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}workspace/auto-memory`: {
           const result = await collectWorkspaceAutoMemoryStatus(
             this.boundWorkspace,
+            { trusted: this.isWorkspaceTrusted() },
           );
           assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
@@ -4435,21 +4436,26 @@ export class AcpDispatcher {
             const result = await readWorkspaceAutoMemoryFile(
               this.boundWorkspace,
               filePath,
+              { trusted: this.isWorkspaceTrusted() },
             );
             assertGenerationOpen?.();
             this.replyConn(conn, id, result as unknown);
           } catch (err) {
             if (id === undefined) return;
-            const message = err instanceof Error ? err.message : String(err);
-            conn.sendConn(
-              error(
-                id,
-                err instanceof AutoMemoryPathError
-                  ? RPC.INVALID_PARAMS
-                  : RPC.INTERNAL_ERROR,
-                message,
-              ),
-            );
+            if (err instanceof AutoMemoryPathError) {
+              // Client-fault mapping only: AutoMemoryPathError is absent
+              // from toRpcError's switch. Everything else is rethrown so
+              // the outer mapper keeps the coded, client-safe envelope
+              // (and the stderr log) it owns.
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, err.message, {
+                  errorKind: err.code,
+                  httpStatus: err.code === 'not_found' ? 404 : 400,
+                }),
+              );
+              return;
+            }
+            throw err;
           }
           return;
         }

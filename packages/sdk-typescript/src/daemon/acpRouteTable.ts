@@ -694,7 +694,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/workspace\/auto-memory\/file\/?$/,
     mapping: {
       method: '_qwen/workspace/auto-memory/file',
-      extractParams: (_s, _b, _m, q) => ({ path: strParam(q, 'path') }),
+      extractParams: (_s, _b, _m, q) => ({ ...strParam(q, 'path') }),
     },
   },
   // POST /workspace/memory → _qwen/workspace/memory/write

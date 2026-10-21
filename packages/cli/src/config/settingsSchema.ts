@@ -2522,7 +2522,11 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Enable Managed Auto-Memory',
         category: 'Memory',
-        requiresRestart: false,
+        // Config snapshots this flag into a private readonly field at
+        // construction; no live setter exists, so an already-running
+        // session keeps its original value until it is re-created.
+        // requiresRestart keeps the served descriptor honest.
+        requiresRestart: true,
         default: true,
         description:
           'Enable background extraction of memories from conversations.',
@@ -2532,7 +2536,10 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Enable Managed Auto-Dream',
         category: 'Memory',
-        requiresRestart: false,
+        // Same snapshot-at-construction semantics as
+        // memory.enableManagedAutoMemory: the change applies to newly
+        // created sessions only.
+        requiresRestart: true,
         default: true,
         description:
           'Enable automatic consolidation (dream) of collected memories.',

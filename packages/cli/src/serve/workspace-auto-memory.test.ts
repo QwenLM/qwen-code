@@ -10,7 +10,10 @@ import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearAutoMemoryRootCache } from '@qwen-code/qwen-code-core/memory/paths.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+} from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   collectWorkspaceAutoMemoryStatus,
   mountWorkspaceAutoMemoryRoutes,
@@ -88,7 +91,9 @@ describe('collectWorkspaceAutoMemoryStatus', () => {
     await writeFile(projectDir, 'notes.md', 'no frontmatter\n');
     await writeFile(userDir, 'preferences.md', 'prefs\n');
 
-    const status = await collectWorkspaceAutoMemoryStatus(workspace);
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
 
     expect(status.initialized).toBe(true);
     expect(status.fileCount).toBe(3);
@@ -125,21 +130,117 @@ describe('collectWorkspaceAutoMemoryStatus', () => {
     await fs.writeFile(outside, 'outside\n');
     await fs.symlink(outside, path.join(projectDir, 'link.md'));
 
-    const status = await collectWorkspaceAutoMemoryStatus(workspace);
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
 
     expect(status.entries.map((entry) => path.basename(entry.path))).toEqual([
       'real.md',
     ]);
   });
 
-  it('stops scanning below the depth limit', async () => {
+  it('scans the full tree without a depth limit', async () => {
     await writeFile(projectDir, 'a/b/c/at-limit.md', 'deep but listed\n');
-    await writeFile(projectDir, 'a/b/c/d/below-limit.md', 'too deep\n');
+    await writeFile(
+      projectDir,
+      'a/b/c/d/below-limit.md',
+      'deeper, still listed\n',
+    );
 
-    const status = await collectWorkspaceAutoMemoryStatus(workspace);
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
 
-    expect(status.entries.map((entry) => entry.path)).toEqual([
-      path.join(projectDir, 'a/b/c/at-limit.md'),
+    expect(status.entries.map((entry) => entry.path).sort()).toEqual(
+      [
+        path.join(projectDir, 'a/b/c/at-limit.md'),
+        path.join(projectDir, 'a/b/c/d/below-limit.md'),
+      ].sort(),
+    );
+  });
+
+  it('refuses a symlinked project root: no entries, error recorded, read rejected', async () => {
+    const outside = path.join(tmp, 'outside-mem');
+    await writeFile(outside, 'secret.md', 'top secret\n');
+    // A repo-shipped .qwen/memory symlink pointing outside the workspace.
+    await fs.mkdir(path.dirname(projectDir), { recursive: true });
+    await fs.symlink(outside, projectDir);
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+    expect(status.entries).toEqual([]);
+    expect(
+      status.errors?.some((error) => error.errorKind === 'symlinked_root'),
+    ).toBe(true);
+
+    await expect(
+      readWorkspaceAutoMemoryFile(
+        workspace,
+        path.join(projectDir, 'secret.md'),
+        { trusted: true },
+      ),
+    ).rejects.toMatchObject({ code: 'outside' });
+  });
+
+  it('lists both project roots for a trusted workspace in non-local mode', async () => {
+    // Non-local mode: the configured root lives under the memory base
+    // dir and the repo-local root under the workspace; core exposes
+    // both to a trusted workspace, and the listing must walk both.
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const configuredRoot = getAutoMemoryRoot(workspace);
+    await writeFile(configuredRoot, 'notes.md', 'configured note\n');
+    await writeFile(projectDir, 'repo-local.md', 'repo local note\n');
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+
+    expect(status.fileCount).toBe(2);
+    expect(status.entries.map((entry) => entry.scope)).toEqual([
+      'project',
+      'project',
+    ]);
+
+    const result = await readWorkspaceAutoMemoryFile(
+      workspace,
+      path.join(projectDir, 'repo-local.md'),
+      { trusted: true },
+    );
+    expect(result.scope).toBe('project');
+    expect(result.content).toBe('repo local note\n');
+  });
+
+  it('records a stat-failed root and keeps the scope initialized', async () => {
+    await writeFile(projectDir, 'note.md', 'note\n');
+    await writeFile(userDir, 'prefs.md', 'prefs\n');
+    const originalStat = fs.stat.bind(fs);
+    vi.spyOn(fs, 'stat').mockImplementation((target) =>
+      String(target) === userDir
+        ? Promise.reject(
+            Object.assign(new Error('EACCES: permission denied, stat'), {
+              code: 'EACCES',
+            }),
+          )
+        : originalStat(target),
+    );
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+
+    expect(status.initialized).toBe(true);
+    expect(status.entries.map((entry) => path.basename(entry.path))).toEqual([
+      'note.md',
+    ]);
+    expect(status.errors).toEqual([
+      expect.objectContaining({
+        kind: 'auto_memory_file',
+        status: 'error',
+        hint: userDir,
+        errorKind: 'stat_failed',
+      }),
     ]);
   });
 });
@@ -150,7 +251,7 @@ describe('readWorkspaceAutoMemoryFile', () => {
     await fs.writeFile(outside, 'secret\n');
 
     await expect(
-      readWorkspaceAutoMemoryFile(workspace, outside),
+      readWorkspaceAutoMemoryFile(workspace, outside, { trusted: true }),
     ).rejects.toMatchObject({ code: 'outside' });
   });
 
@@ -161,7 +262,9 @@ describe('readWorkspaceAutoMemoryFile', () => {
     await fs.symlink(outside, path.join(projectDir, 'link.md'));
 
     await expect(
-      readWorkspaceAutoMemoryFile(workspace, path.join(projectDir, 'link.md')),
+      readWorkspaceAutoMemoryFile(workspace, path.join(projectDir, 'link.md'), {
+        trusted: true,
+      }),
     ).rejects.toMatchObject({ code: 'outside' });
   });
 
@@ -172,6 +275,7 @@ describe('readWorkspaceAutoMemoryFile', () => {
       readWorkspaceAutoMemoryFile(
         workspace,
         path.join(projectDir, 'missing.md'),
+        { trusted: true },
       ),
     ).rejects.toMatchObject({ code: 'not_found' });
   });
@@ -180,7 +284,7 @@ describe('readWorkspaceAutoMemoryFile', () => {
     await fs.mkdir(projectDir, { recursive: true });
 
     await expect(
-      readWorkspaceAutoMemoryFile(workspace, projectDir),
+      readWorkspaceAutoMemoryFile(workspace, projectDir, { trusted: true }),
     ).rejects.toMatchObject({ code: 'not_a_file' });
   });
 
@@ -188,7 +292,9 @@ describe('readWorkspaceAutoMemoryFile', () => {
     const file = path.join(projectDir, 'note.md');
     await writeFile(projectDir, 'note.md', 'hello\n');
 
-    const result = await readWorkspaceAutoMemoryFile(workspace, file);
+    const result = await readWorkspaceAutoMemoryFile(workspace, file, {
+      trusted: true,
+    });
 
     expect(result).toEqual({
       scope: 'project',
@@ -203,7 +309,9 @@ describe('readWorkspaceAutoMemoryFile', () => {
     const file = path.join(projectDir, 'big.md');
     await writeFile(projectDir, 'big.md', Buffer.alloc(ONE_MIB + 16, 0x61));
 
-    const result = await readWorkspaceAutoMemoryFile(workspace, file);
+    const result = await readWorkspaceAutoMemoryFile(workspace, file, {
+      trusted: true,
+    });
 
     expect(result.truncated).toBe(true);
     expect(result.content).toBe('a'.repeat(ONE_MIB));
@@ -224,13 +332,16 @@ describe('readWorkspaceAutoMemoryFile', () => {
       Buffer.from([0xff, 0xfe, 0xfd, 0xfc, 0x00, 0x01]),
     );
 
-    const bomResult = await readWorkspaceAutoMemoryFile(workspace, bomFile);
+    const bomResult = await readWorkspaceAutoMemoryFile(workspace, bomFile, {
+      trusted: true,
+    });
     expect(bomResult.content).toBeUndefined();
     expect(bomResult.bytes).toBe(8);
 
     const binaryResult = await readWorkspaceAutoMemoryFile(
       workspace,
       binaryFile,
+      { trusted: true },
     );
     expect(binaryResult.content).toBeUndefined();
     expect(binaryResult.bytes).toBe(6);
@@ -250,10 +361,32 @@ describe('readWorkspaceAutoMemoryFile', () => {
         : originalLstat(target),
     );
 
-    const result = await readWorkspaceAutoMemoryFile(workspace, file);
+    const result = await readWorkspaceAutoMemoryFile(workspace, file, {
+      trusted: true,
+    });
 
     expect(result.content).toBeUndefined();
     expect(result.bytes).toBe(7);
+  });
+
+  it('classifies a non-searchable root directory as read_failed, not outside', async () => {
+    const file = path.join(projectDir, 'note.md');
+    await writeFile(projectDir, 'note.md', 'hello\n');
+    const originalRealpath = fs.realpath.bind(fs);
+    vi.spyOn(fs, 'realpath').mockImplementation((target) =>
+      String(target) === file
+        ? Promise.reject(
+            Object.assign(
+              new Error(`EACCES: permission denied, realpath '${file}'`),
+              { code: 'EACCES' },
+            ),
+          )
+        : originalRealpath(target),
+    );
+
+    await expect(
+      readWorkspaceAutoMemoryFile(workspace, file, { trusted: true }),
+    ).rejects.toMatchObject({ code: 'read_failed' });
   });
 });
 
@@ -323,6 +456,30 @@ describe('mountWorkspaceAutoMemoryRoutes', () => {
     expect(notFound.body.code).toBe('not_found');
   });
 
+  it('answers 404 not_found when the file vanishes before the open', async () => {
+    // The entry was admitted and lstat'ed, then rotated away before
+    // openNoFollow: a GONE file is a 404, not a 500 with a stack dump.
+    const file = path.join(projectDir, 'note.md');
+    await writeFile(projectDir, 'note.md', 'served\n');
+    const canonicalFile = await fs.realpath(file);
+    const originalLstat = fs.lstat.bind(fs);
+    vi.spyOn(fs, 'lstat').mockImplementation(async (target) => {
+      const result = await originalLstat(target);
+      if (String(target) === canonicalFile) {
+        await fs.rm(file, { force: true });
+      }
+      return result;
+    });
+    const app = mountApp({ boundWorkspace: workspace, trusted: true });
+
+    const res = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: file });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('not_found');
+  });
+
   it('refuses a relative path input instead of resolving it against a managed root', async () => {
     // The entry exists in the project root, so a relative `?path=` that were
     // resolved against either root would be served; with the process cwd
@@ -336,5 +493,64 @@ describe('mountWorkspaceAutoMemoryRoutes', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('outside');
+  });
+
+  it('serves a project entry created after an earlier read warmed the cache with the literal root', async () => {
+    // The bound workspace is reached THROUGH A SYMLINK so the literal
+    // project-root path differs from its canonical form (a portable stand-in
+    // for /tmp -> /private/tmp). Reading a user entry first, while the
+    // project root does not exist yet, must not pin a stale literal that
+    // later refuses the now-existing project root.
+    const realWs = path.join(tmp, 'real-ws');
+    await fs.mkdir(realWs, { recursive: true });
+    const wsLink = path.join(tmp, 'ws-link');
+    await fs.symlink(realWs, wsLink);
+    const app = mountApp({ boundWorkspace: wsLink, trusted: true });
+
+    // Warm the canonicalization cache with the absent project root via a
+    // user-scope read.
+    await writeFile(userDir, 'user-note.md', 'user memory\n');
+    const userRes = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(userDir, 'user-note.md') });
+    expect(userRes.status).toBe(200);
+    expect(userRes.body.content).toBe('user memory\n');
+
+    // The project root is created afterwards; its entry must still be served
+    // (the stale literal must not have pinned the containment boundary).
+    await writeFile(
+      path.join(realWs, '.qwen', 'memory'),
+      'note.md',
+      'project memory\n',
+    );
+    const projectRes = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(wsLink, '.qwen', 'memory', 'note.md') });
+    expect(projectRes.status).toBe(200);
+    expect(projectRes.body.content).toBe('project memory\n');
+    expect(projectRes.body.scope).toBe('project');
+  });
+
+  it('resolves the roots under the runtime storage scope when a runtime is mounted', async () => {
+    // With the memory-base env cleared, the ambient user root is the global
+    // qwen dir; the mounted runtime's session base dir must pin a different
+    // one, and the listing must reflect it.
+    delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    clearAutoMemoryRootCache();
+    const runtimeBase = path.join(tmp, 'runtime-base');
+    await writeFile(path.join(runtimeBase, 'memories'), 'prefs.md', 'prefs\n');
+    const app = express();
+    mountWorkspaceAutoMemoryRoutes(app, {
+      boundWorkspace: workspace,
+      isWorkspaceTrusted: () => true,
+      runtime: { sessionRuntimeBaseDir: runtimeBase },
+    });
+
+    const res = await request(app).get('/workspace/auto-memory');
+
+    expect(res.status).toBe(200);
+    expect(res.body.userDir).toBe(path.join(runtimeBase, 'memories'));
+    expect(res.body.fileCount).toBe(1);
+    expect(res.body.entries[0].title).toBe('prefs');
   });
 });
