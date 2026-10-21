@@ -1091,6 +1091,25 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     });
   });
 
+  it('does not let a prose mention of the parameter tag unmask a comment', () => {
+    // An unclosed parameter opener only makes the region behind it value data
+    // when a call opener the stream never closed precedes it. A bare prose
+    // mention is unclosed too, and must not disable the comment mask.
+    const mention =
+      'The dialect writes ' + PARAM_OPEN + ' name="value"> for arguments.';
+    const text =
+      mention +
+      '\n\n<!--\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
   it('rejects a block whose parameter names repeat', () => {
     // The advance can pull a stray element behind a quoted value into the
     // block; a duplicate name would silently overwrite the argument.

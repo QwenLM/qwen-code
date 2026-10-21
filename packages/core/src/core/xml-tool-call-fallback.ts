@@ -393,6 +393,26 @@ function closedParameterSpans(
 }
 
 /**
+ * Offsets of call openers the stream never closed, matched by depth.
+ *
+ * An unclosed parameter opener is only evidence of a truncated value when a
+ * call opener the stream never closed precedes it. A prose mention of the tag
+ * shape is unclosed too, and counting it would treat the whole remainder of
+ * the turn as value data.
+ */
+function unclosedCallOpenerOffsets(text: string): number[] {
+  const tags =
+    /<invoke\s+name=["'][^"']+["']>|<function=[^\s<>]+>|<\/(invoke|function)>/g;
+  const open: number[] = [];
+  let tag: RegExpExecArray | null;
+  while ((tag = tags.exec(text)) !== null) {
+    if (tag[0][1] === '/') open.pop();
+    else open.push(tag.index);
+  }
+  return open;
+}
+
+/**
  * Documentation regions the fence and `<example>` guards cannot see: HTML
  * comments and CommonMark indented code blocks. A call there is shown to the
  * model, not emitted by it, so it must not dispatch. See #13492.
@@ -531,11 +551,18 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     ownedValueRanges.push([start, end]);
     if (hasBalancedQuotedCalls(value)) quotedValueRanges.push([start, end]);
   }
+  const unclosedCallStarts = unclosedCallOpenerOffsets(text);
   const hiddenDocs = hiddenDocumentationRanges(
     text,
     valueSpans,
     parameterRanges,
-    unclosedParameterStarts,
+    // Containment, not precedence: an unclosed parameter opener only marks
+    // the region behind it as value data when a call opener the stream never
+    // closed precedes it. A prose mention of the tag shape is unclosed too,
+    // and letting it stand disables the comment mask for the whole remainder.
+    unclosedParameterStarts.filter((start) =>
+      unclosedCallStarts.some((callStart) => callStart < start),
+    ),
   );
   const tagPositions = exampleTagPositions(text, parameterRanges);
   const exampleRanges = computeExampleRanges(
