@@ -312,6 +312,7 @@ export QWEN_MANAGED_AGENT_HARNESS_ENABLED='true'
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4170'
 export QWEN_MANAGED_AGENT_HARNESS_TOKEN='replace-me'
 export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='sha256:replace-with-64-hex-characters'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 
 mvn spring-boot:run
 ```
@@ -496,8 +497,10 @@ Restore transaction pages are bounded to 8 MiB of unencoded record bytes even
 when the requested item limit is larger. Unknown head states, unsafe counters,
 or missing transaction revisions fail closed as storage corruption.
 
-The routes are disabled by default. Enable them only on a private service
-listener or trusted service network:
+The routes follow `qwen.managed-agent.harness.enabled` by default, because
+the Hosted Harness requires them; `QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED`
+overrides that default. Serve them only on a private service listener or
+trusted service network. The explicit settings are:
 
 ```bash
 export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
@@ -507,16 +510,25 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 ```
 
 `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` must be reachable from the Hosted
-Harness. When both the Harness and Store are enabled, Java includes a scoped
+Harness. When it is blank and the store listener — the internal listener when
+`internal-server.port` is set, otherwise the public one — binds a blank,
+`127.0.0.1`, `0.0.0.0`, `::` or `::1` address on a fixed port, the server
+uses that listener's loopback `http://` URL. A public listener that serves TLS
+through `server.ssl`, or any other listener, needs an explicit URL.
+When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
 HTTP adapter with the descriptor's broker-issued writer credential (or a
 self-generated secret when no binding key is configured). Workspace-bound Sessions use
 their persisted Workspace ID for the Store scope; unbound Sessions use
 `QWEN_MANAGED_AGENT_WORKSPACE_ID`. The public Session, private journal and Runtime
-binding retain one `(tenantId, workspaceId, sessionId)` identity. The global ID
-must still be set explicitly when enabling the Session Store; if the Runtime
-Broker also has an explicit ID, startup rejects a mismatch.
+binding retain one `(tenantId, workspaceId, sessionId)` identity. When the
+global store ID is blank, the store uses the Runtime Broker's ID: its configured
+ID, otherwise the hash a local-process or Kubernetes Broker derives from
+`QWEN_MANAGED_AGENT_WORKSPACE_CWD`, even while the Broker is disabled. If the
+Runtime Broker also has an explicit ID, startup rejects a mismatch. Keep an
+existing deployment's ID unchanged, since unbound Sessions resolve their store
+scope from it.
 
 This activates the durable create and cold-load paths for newly created Hosted
 Sessions. The load path rebuilds the Harness state from the scoped Store and
@@ -669,23 +681,19 @@ QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \
 qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web
 ```
 
-— and Spring must point at it with the matching base URL. Spring's HTTP
-Session Store stays off by default, and the Hosted Harness rejects every
-attach without a store descriptor, so Spring also needs the three values
-the one-shot launcher writes into `spring.env` — the connector refuses to
-start when the store is enabled with a blank base URL or workspace ID.
-Export all four together:
+— and Spring must point at it with the matching base URL. The Hosted
+Harness rejects every attach without a store descriptor; the HTTP Session
+Store follows the Harness, defaults to this server's loopback listener and is
+scoped by the workspace ID exported in Prerequisites, so only the Harness URL
+changes:
 
 ```bash
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
-export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
-export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'
-export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 ```
 
-All four are read once at JVM startup, so if `mvn spring-boot:run` is
-already up on the 4170 value exported in Prerequisites, restart it with the
-overrides in place.
+It is read once at JVM startup, so if `mvn spring-boot:run` is already up
+on the 4170 value exported in Prerequisites, restart it with the override in
+place.
 
 `--port` is a request, not a guarantee: `qwen serve` moves to the next free
 port on a collision, and 4171 is exactly where a daemon displaced from 4170
