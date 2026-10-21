@@ -2058,27 +2058,93 @@ function isDynamicShellPath(word: string): boolean {
   return word.includes('$') || word.includes('`');
 }
 
+// Local to the HOME tracking: `HOME+=…` appends to the value, so it changes
+// `HOME` just like `HOME=…` does, but the shared `isEnvAssignmentToken` (used
+// elsewhere to strip command prefixes) deliberately does not match the `+`.
+const ANY_ASSIGNMENT_TOKEN = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
+const HOME_ASSIGNMENT_TOKEN = /^HOME\+?=/;
+const HOME_EXPORTING_BUILTINS = new Set([
+  'export',
+  'declare',
+  'local',
+  'typeset',
+  'readonly',
+]);
+
+function isHomeAssignmentToken(word: string): boolean {
+  return HOME_ASSIGNMENT_TOKEN.test(word);
+}
+
 /**
  * Whether a segment reassigns `HOME`, which forfeits the analyzer process's own
  * `HOME` for a bare `cd` later in the same compound command: bash expands the
- * value the command just set, not the one the analyzer inherited. Only forms
- * that change the value count — `HOME=…` (a leading assignment, or after
- * `export` / `declare` / `local`) and `unset HOME` — since a bare `export HOME`
- * or a read of the variable leaves the value alone.
+ * value the command just set, not the one the analyzer inherited.
+ *
+ * Only forms that leave the shell's value changed count. A bare assignment
+ * statement (`HOME=/x` with no command word after the leading run) persists, as
+ * does an assignment after `export` / `declare` / `local` / `typeset` /
+ * `readonly`, and `unset` clears every listed name. A command-scoped prefix
+ * (`HOME=/x npm test`, `HOME=/x cd`, `env HOME=/x node`) and a quoted string the
+ * tokenizer unquotes do not persist in bash, so they must not latch — treating
+ * them as reassignments mis-attributes a later bare `cd` and can downgrade a
+ * user's hard `deny` to a confirmation prompt.
  */
 function segmentReassignsHome(command: string): boolean {
   const words = tokenize(command);
-  if (
-    words.some((word) => isEnvAssignmentToken(word) && word.startsWith('HOME='))
-  ) {
-    return true;
-  }
-  return words.some(
-    (word, index) =>
-      word === 'unset' &&
-      (words[index + 1] === 'HOME' ||
-        (words[index + 1] === '-v' && words[index + 2] === 'HOME')),
+
+  const firstCommandWord = words.findIndex(
+    (word) => !ANY_ASSIGNMENT_TOKEN.test(word),
   );
+  const leadingAssignments =
+    firstCommandWord === -1 ? words.length : firstCommandWord;
+  if (leadingAssignments > 0 && leadingAssignments === words.length) {
+    return words.some(isHomeAssignmentToken);
+  }
+
+  for (const [index, word] of words.entries()) {
+    if (!HOME_EXPORTING_BUILTINS.has(word)) continue;
+    let next = index + 1;
+    while (words[next] !== undefined && words[next]!.startsWith('-')) next++;
+    for (
+      ;
+      words[next] !== undefined && ANY_ASSIGNMENT_TOKEN.test(words[next]!);
+      next++
+    ) {
+      if (isHomeAssignmentToken(words[next]!)) return true;
+    }
+  }
+
+  // `unset A HOME` clears every listed name; flags such as `-v` are skipped.
+  for (const [index, word] of words.entries()) {
+    if (word !== 'unset') continue;
+    for (let next = index + 1; next < words.length; next++) {
+      const candidate = words[next]!;
+      if (candidate.startsWith('-')) continue;
+      if (candidate === 'HOME') return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Whether the segment scopes a `HOME` assignment to the command it prefixes,
+ * e.g. `HOME=/repo/.qwen cd`. Bash applies that value to the command — so a
+ * bare `cd` there does not go to the analyzer's `HOME` — but leaves the
+ * parent shell's `HOME` unchanged, so it must not latch for later segments.
+ */
+function segmentPrefixesHome(command: string): boolean {
+  const words = tokenize(command);
+  let index = 0;
+  let homeAssigned = false;
+  while (
+    words[index] !== undefined &&
+    ANY_ASSIGNMENT_TOKEN.test(words[index]!)
+  ) {
+    if (isHomeAssignmentToken(words[index]!)) homeAssigned = true;
+    index++;
+  }
+  return homeAssigned && index < words.length;
 }
 
 function resolveCdTargetCwd(
@@ -2086,9 +2152,17 @@ function resolveCdTargetCwd(
   cwd: string,
   cwdUnknown: boolean,
   homeReassigned: boolean,
+  homePrefixed: boolean,
 ): CdResolution {
   const words = tokenize(command);
   extractRedirects(words, cwd);
+
+  // A command-scoped prefix such as `HOME=/x cd` applies to the `cd` builtin
+  // itself, so strip the assignments the same way `extractShellOperations`
+  // does before the cd dispatch; otherwise the cd is never resolved at all.
+  while (words.length > 0 && ANY_ASSIGNMENT_TOKEN.test(words[0]!)) {
+    words.shift();
+  }
 
   if (words[0] === 'popd') return { kind: 'dynamic' };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
@@ -2114,11 +2188,17 @@ function resolveCdTargetCwd(
     targetIndex++;
   }
 
-  // A bare `cd` goes to bash's `$HOME`. Once an earlier segment in the same
-  // compound command reassigned `HOME`, the analyzer process's own value is not
-  // what bash expands, so the target is unknown rather than the parent's HOME.
+  // A bare `cd` goes to bash's `$HOME`, and `~` / `~/…` expands it, so once
+  // this compound command reassigned `HOME` — or the segment scopes a `HOME`
+  // assignment to this `cd` — the analyzer process's own value is not what bash
+  // expands and the target is unknown rather than the parent's HOME.
   const explicitTarget = words[targetIndex];
-  if (explicitTarget === undefined && homeReassigned) {
+  const homeIsUnknown = homeReassigned || homePrefixed;
+  const expandsHome =
+    explicitTarget === undefined ||
+    explicitTarget === '~' ||
+    explicitTarget.startsWith('~/');
+  if (homeIsUnknown && expandsHome) {
     return { kind: 'dynamic' };
   }
 
@@ -2310,8 +2390,14 @@ function walkCompoundCommand(
     // `cd /tmp & echo {} > settings.json` the write lands in the *original*
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
+    // `( export HOME=/x )` is a subshell too: bash applies the assignment in a
+    // child shell, so the parent's HOME is unchanged.
+    const inSubshell = /^\s*\(/.test(sub);
 
-    if (segmentReassignsHome(sub)) {
+    // `HOME=/x & …` runs the assignment in a background subshell and
+    // `HOME=/x cmd` scopes it to one command; neither leaves the parent
+    // shell's HOME changed, so only a foreground persistent form latches.
+    if (!backgrounded && !inSubshell && segmentReassignsHome(sub)) {
       homeReassigned = true;
     }
 
@@ -2320,6 +2406,7 @@ function walkCompoundCommand(
       effectiveCwd,
       cwdUnknown,
       homeReassigned,
+      segmentPrefixesHome(sub),
     );
     if (cdTarget.kind === 'static') {
       if (!backgrounded) {
@@ -2358,11 +2445,15 @@ function walkCompoundCommand(
     }
 
     const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
-      ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
-    } else {
-      ops.push(...subOps);
+    let annotatedOps = cwdUnknown
+      ? markCwdUnknownOps(subOps, sub, effectiveCwd)
+      : subOps;
+    // `~` expands bash's HOME, which this command reassigned, so an operation
+    // resolved through it points at a directory the analyzer cannot know.
+    if (homeReassigned) {
+      annotatedOps = markHomeUnknownOps(annotatedOps, sub, effectiveCwd);
     }
+    ops.push(...annotatedOps);
   }
 
   return ops;
@@ -2405,5 +2496,43 @@ function markCwdUnknownOps(
         op.filePath,
       ),
     };
+  });
+}
+
+/**
+ * Whether any `~` / `~/…` token in the segment resolves to `filePath`. Used
+ * once the compound command has reassigned `HOME`: bash expands those tokens
+ * against the new value, so a path resolved through them is not the one the
+ * analyzer computed.
+ */
+function hasHomeTokenForOperation(
+  command: string,
+  cwd: string,
+  filePath: string,
+): boolean {
+  for (const token of tokenize(command)) {
+    const redirectTarget = token.match(
+      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+    )?.[1];
+    const candidate = redirectTarget ?? token;
+    if (
+      (candidate === '~' || candidate.startsWith('~/')) &&
+      resolvePath(candidate, cwd) === filePath
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function markHomeUnknownOps(
+  ops: ShellOperation[],
+  command: string,
+  cwd: string,
+): ShellOperation[] {
+  return ops.map((op) => {
+    if (!op.filePath) return op;
+    if (!hasHomeTokenForOperation(command, cwd, op.filePath)) return op;
+    return { ...op, cwdUnknown: true, pathMayDependOnCwd: true };
   });
 }
