@@ -110,6 +110,7 @@ describe('EditTool', () => {
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
       getFileHistoryService: () => mockFileHistoryService,
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     // Default to not skipping confirmation
@@ -769,6 +770,117 @@ describe('EditTool', () => {
       expect(writeSpy).toHaveBeenCalledWith(
         expect.objectContaining({ toolWriteOrigin: 'edit' }),
       );
+    });
+
+    describe('session artifacts', () => {
+      beforeEach(() => {
+        (mockConfig.isRecordArtifactEnabled as Mock).mockReturnValue(true);
+      });
+
+      it('records an edited artifact-like file', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(edit(csvPath, 'old', 'newer-col'));
+
+        expect(result.llmContent).toContain(
+          'automatically recorded as a workspace artifact with workspacePath "orders.csv"',
+        );
+        expect(result.llmContent).toMatch(
+          /recorded as a workspace artifact[^]*Showing lines/,
+        );
+        expect(result.artifacts).toEqual([
+          {
+            title: 'orders.csv',
+            kind: 'file',
+            storage: 'workspace',
+            workspacePath: 'orders.csv',
+            mimeType: 'text/csv',
+            sizeBytes: fs.statSync(csvPath).size,
+          },
+        ]);
+      });
+
+      it('records an artifact-like file created by edit', async () => {
+        const notePath = path.join(rootDir, 'notes', 'summary.md');
+        autoEditOnce();
+
+        const result = await run(edit(notePath, '', '# Summary\n'));
+
+        expect(result.llmContent).toMatch(/Created new file/);
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            title: 'summary.md',
+            kind: 'file',
+            workspacePath: 'notes/summary.md',
+          }),
+        ]);
+        expect(result.artifacts?.[0]).not.toHaveProperty('updateOnly');
+      });
+
+      it('only refreshes an existing artifact when record_as_artifact is false', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(
+          edit(csvPath, 'old', 'new', { record_as_artifact: false }),
+        );
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'orders.csv',
+            updateOnly: true,
+          }),
+        ]);
+      });
+
+      it('only refreshes an existing artifact for other files', async () => {
+        const sourcePath = path.join(rootDir, 'src', 'index.ts');
+        fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+        seedFile(sourcePath, 'export const old = 1;\n');
+
+        const result = await run(edit(sourcePath));
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'src/index.ts',
+            updateOnly: true,
+          }),
+        ]);
+      });
+
+      it('does not record files outside the workspace', async () => {
+        const outsidePath = path.join(tempDir, 'outside.csv');
+        seedFile(outsidePath, 'old\n');
+
+        const result = await run(edit(outsidePath));
+
+        expect(readText(outsidePath)).toBe('new\n');
+        expect(result.artifacts).toBeUndefined();
+      });
+
+      it('does not record anything when the edit fails', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,value\n');
+
+        const result = await run(edit(csvPath, 'missing', 'replacement'));
+
+        expect(result.error).toBeDefined();
+        expect(result.artifacts).toBeUndefined();
+      });
+
+      it('does not record anything when artifact recording is disabled', async () => {
+        (mockConfig.isRecordArtifactEnabled as Mock).mockReturnValue(false);
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n');
+
+        const result = await run(edit(csvPath));
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toBeUndefined();
+      });
     });
 
     // trackEdit is best-effort: a FileHistoryService failure (disk full,

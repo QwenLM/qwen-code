@@ -8,9 +8,14 @@ import semver from 'semver';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getPackageJson } from '../../utils/package.js';
-import { getNpmCliPath } from '../../utils/installationInfo.js';
+import {
+  getInstallationInfo,
+  getNpmCliPath,
+} from '../../utils/installationInfo.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { isBunRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { t } from '../../i18n/index.js';
+import { getGlobalNpmRegistryConfig } from '../../utils/npm-registry-config.js';
 
 const debugLogger = createDebugLogger('UPDATE_CHECK');
 
@@ -76,6 +81,7 @@ export function classifyUpdateCheckError(
 ): UpdateCheckFailureReason {
   if (error instanceof UpdateCheckTimeoutError) return 'timeout';
   if (error instanceof Error) {
+    if (error.name === 'TimeoutError') return 'timeout';
     if (
       'killed' in error &&
       error.killed === true &&
@@ -165,6 +171,60 @@ export async function fetchGlobalNpmUpdateInfo(
   distTag: 'latest' | 'nightly',
   run: typeof execFileAsync = execFileAsync,
 ): Promise<UpdateInfo> {
+  if (isBunRuntime() && getInstallationInfo('', false).isStandalone) {
+    const { registry, authorization } = getGlobalNpmRegistryConfig(packageName);
+    let url = new URL(
+      `-/package/${encodeURIComponent(packageName)}/dist-tags`,
+      registry,
+    );
+    const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+    let auth = authorization;
+    let response: Response;
+    for (let redirects = 0; ; redirects++) {
+      response = await fetch(url, {
+        signal,
+        headers: auth ? { Authorization: auth } : undefined,
+        redirect: 'manual',
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get('location');
+      await response.body?.cancel();
+      if (!location || redirects === 5) {
+        throw new Error('Invalid npm registry redirect');
+      }
+      let next: URL;
+      try {
+        next = new URL(location, url);
+      } catch {
+        throw new Error('Invalid npm registry redirect');
+      }
+      if (
+        !['https:', 'http:'].includes(next.protocol) ||
+        next.username ||
+        next.password
+      ) {
+        throw new Error('Invalid npm registry redirect');
+      }
+      if (next.origin !== url.origin) auth = undefined;
+      url = next;
+    }
+    if (!response.ok)
+      throw new Error(`Registry returned HTTP ${response.status}`);
+    const tags: unknown = await response.json();
+    if (typeof tags !== 'object' || tags === null || Array.isArray(tags)) {
+      throw new Error('Invalid registry dist-tags response');
+    }
+    const latest = Reflect.get(tags, distTag);
+    if (latest !== undefined && typeof latest !== 'string') {
+      throw new Error(`Invalid registry ${distTag} version response`);
+    }
+    return {
+      latest: latest ?? currentVersion,
+      current: currentVersion,
+      type: 'latest',
+      name: packageName,
+    };
+  }
   const output = await runGlobalNpm(
     ['view', packageName, `dist-tags.${distTag}`, '--json', '--global'],
     run,
@@ -256,12 +316,8 @@ export async function checkForUpdatesDetailed(
     const { name, version } = packageJson;
     currentVersion = version;
     const isNightly = version.includes('nightly');
-    // Always resolve via `npm view` (see fetchGlobalNpmUpdateInfo), regardless
-    // of installation type. update-notifier's fetchInfo() requests the
-    // abbreviated metadata format (Accept: application/vnd.npm.install-v1+json),
-    // which registry.npmjs.org now answers with an empty HTTP 406 response,
-    // breaking the check for every non-global install. `npm view` doesn't send
-    // that header and is unaffected. Related: #7515.
+    // npm view and Bun standalone's dist-tags endpoint avoid the abbreviated
+    // metadata Accept header that caused update-notifier's HTTP 406 (#7515).
     const createNotifier = (distTag: 'latest' | 'nightly') => ({
       fetchInfo: () => fetchGlobalNpm(name, version, distTag),
     });

@@ -62,7 +62,7 @@ export function collectSuccessfulNodeReplCalls(
   for (const { id, name, input } of toolUses(events)) {
     if (
       typeof id === 'string' &&
-      name === 'mcp__node-repl__node_repl' &&
+      name === 'mcp__node-repl__js' &&
       isRecord(input) &&
       typeof input.code === 'string'
     ) {
@@ -91,7 +91,7 @@ export function collectSuccessfulNodeReplCalls(
   return successful;
 }
 
-// The bundled SDK loads its own dependencies. A run that registered a module
+// The preloaded SDK loads its own dependencies. A run that registered a module
 // directory would pass even if that stopped working, so it does not count.
 export function moduleDirectoryRegistrationRequested(
   events: unknown[],

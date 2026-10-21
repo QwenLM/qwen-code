@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,12 +21,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -41,8 +40,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedProcessCrashIT {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final List<String> CASES = List.of("harness-prepare", "harness-start", "harness-result",
-            "spring-kill", "worker-kill", "worker-stop");
+    private static final List<String> CASES = List.of("harness-prepare", "harness-start", "harness-unknown",
+            "harness-result", "spring-kill", "worker-kill", "worker-stop");
     @TempDir
     private Path temporary;
 
@@ -57,7 +56,7 @@ class HostedProcessCrashIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         source.setConnectionProperties(timeouts);
-        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         var database = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
         try (var connection = source.getConnection()) {
@@ -94,7 +93,7 @@ class HostedProcessCrashIT {
         timeouts.setProperty("connectTimeout", "5000");
         timeouts.setProperty("socketTimeout", "10000");
         source.setConnectionProperties(timeouts);
-        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(source);
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         try (var fixture = new CoordinatorRestartFixture(jdbc)) {
             fixture.run();
@@ -359,13 +358,13 @@ class HostedProcessCrashIT {
 
         private void run() throws Exception {
             startSpring();
-            if ("Linux".equals(System.getProperty("os.name"))) {
+            if (List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
                 var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
                 storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
                 storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
                         new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                                 tenant, "storage", root.resolve("workspace").toString())));
-                new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+                new com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard(jdbc,
                         new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
                         .register(tenant, "storage", UUID.randomUUID().toString());
             }
@@ -486,9 +485,15 @@ class HostedProcessCrashIT {
         }
 
         private Map<String, Object> owner() throws Exception {
-            return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+            return jdbc.queryForMap("SELECT m.binding_id, m.runtime_generation, m.runtime_session_id,"
+                    + " m.execution_storage_key, m.execution_exclusive, o.storage_key, o.holder_key, o.maintenance_id"
+                    + " FROM ma_runtime_session m JOIN ma_storage s ON s.tenant_id = m.tenant_id"
+                    + " AND s.physical_key = m.execution_storage_key"
+                    + " JOIN ma_storage_owner o ON o.storage_key = s.physical_key"
+                    + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?"
+                    + " AND m.harness_session_id = ?",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
-                    tenant, "storage");
+                    tenant, "storage", ready.path("sessionId").asText());
         }
 
         private void captureOwner(Map<String, Object> execution) throws Exception {
@@ -505,9 +510,10 @@ class HostedProcessCrashIT {
             assertThat(owner.get("binding_id")).isEqualTo(execution.get("binding_id"));
             assertThat(owner.get("runtime_generation")).isEqualTo(execution.get("runtime_generation"));
             assertThat(owner.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
-            assertThat(owner.get("holder_key")).isEqualTo(sha256((execution.get("binding_id") + "\u0000"
-                    + execution.get("runtime_generation") + "\u0000" + execution.get("runtime_session_id"))
-                    .getBytes(StandardCharsets.UTF_8)));
+            assertThat(owner.get("execution_storage_key")).isEqualTo(owner.get("storage_key"));
+            assertThat(owner.get("execution_exclusive")).isEqualTo(false);
+            assertThat(owner.get("holder_key")).isNull();
+            assertThat(owner.get("maintenance_id")).isNull();
         }
 
         private void assertLedger(JsonNode report) throws Exception {
@@ -523,7 +529,7 @@ class HostedProcessCrashIT {
             assertThat(execution.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
             assertThat(execution.get("turn_id")).isEqualTo(report.path("promptId").asText());
             boolean prepared = fault.equals("harness-prepare");
-            boolean settled = List.of("harness-start", "harness-result").contains(fault);
+            boolean settled = List.of("harness-start", "harness-result", "harness-unknown").contains(fault);
             assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(prepared ? 0 : 1);
             assertThat(execution.get("execution_state")).isEqualTo(prepared ? "PREPARED" : settled ? "SETTLED"
                     : fault.equals("spring-kill") ? "EXECUTING" : "UNKNOWN");
@@ -575,8 +581,11 @@ class HostedProcessCrashIT {
             assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
             assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
             Object checkpointId = head.get("latest_checkpoint_resource_id");
+            // Led by the indexed session scope key, as in HostedGateTestSupport:
+            // the raw tenant+session form scans the lane's accumulated ma_resource rows.
             byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class, tenant, session, checkpointId);
+                    + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                    byte[].class, ManagedSessionStore.sessionScopeKey(tenant, session), checkpointId, tenant, session);
             JsonNode saved = JSON.readTree(checkpoint);
             assertThat(saved.path("continuation").path("phase").asText()).isEqualTo(prepared ? "before_model" : "await_runtime");
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("input.accepted")
@@ -585,8 +594,9 @@ class HostedProcessCrashIT {
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("turn.settled"))).isEmpty();
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("message.committed")
                     && event.path("payload").path("role").asText().equals("tool_result"))).isEmpty();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ?"
-                    + " AND session_id = ? AND kind = 'managed-tool-outcome'", Integer.class, tenant, session))
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_scope_key = ?"
+                    + " AND kind = 'managed-tool-outcome' AND tenant_id = ? AND session_id = ?",
+                    Integer.class, ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session))
                     .isZero();
             JsonNode target = report.path("target");
             if (fault.equals("harness-result")) {
@@ -664,10 +674,6 @@ class HostedProcessCrashIT {
             assertThat(System.nanoTime()).as(description).isLessThan(deadline);
             Thread.sleep(20);
         }
-    }
-
-    private static String sha256(byte[] bytes) throws Exception {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     }
 
     private static String required(String key) {

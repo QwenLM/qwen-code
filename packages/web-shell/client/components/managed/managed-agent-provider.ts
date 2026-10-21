@@ -20,6 +20,10 @@ export type ManagedAgentRuntimeState =
   | 'failed';
 
 export type ManagedApprovalMode = 'default' | 'auto-edit' | 'yolo';
+export type ManagedInputBlock = components['schemas']['InputBlock'];
+export type ManagedSessionSkills =
+  components['schemas']['WebShellSessionSkills'];
+export type ManagedSessionMcp = components['schemas']['PublicMcpCatalog'];
 
 export function isManagedApprovalMode(
   value: unknown,
@@ -27,14 +31,21 @@ export function isManagedApprovalMode(
   return value === 'default' || value === 'auto-edit' || value === 'yolo';
 }
 
+export type ManagedSessionSkill = components['schemas']['SessionCreationSkill'];
+
 export interface ManagedSessionOptions {
   approvalMode: ManagedApprovalMode;
   availableApprovalModes: ManagedApprovalMode[];
+  planModeSupported?: boolean;
+  inputAttachments?: boolean;
+  skillsSupported?: boolean;
 }
 
 export interface ManagedSessionApproval extends ManagedSessionOptions {
   approvalRevision: number;
   supported: boolean;
+  planMode?: boolean;
+  liveSupported?: boolean;
 }
 
 export interface ManagedApprovalChangeResult {
@@ -42,6 +53,7 @@ export interface ManagedApprovalChangeResult {
   approvalMode: ManagedApprovalMode;
   approvalRevision: number;
   replayed: boolean;
+  planMode?: boolean;
 }
 
 export interface ManagedModelContext {
@@ -74,6 +86,8 @@ export interface ManagedAgentSessionSummary {
   approvalMode?: ManagedApprovalMode;
   initialApprovalMode?: ManagedApprovalMode;
   approvalRevision?: number;
+  planMode?: boolean;
+  planModeSupported?: boolean;
   modelContext?: ManagedModelContext;
   modelSelection?: ManagedModelSelection;
   activeTurnId?: string;
@@ -94,6 +108,7 @@ export interface ManagedAgentSessionSummary {
   capabilities: {
     canSend: boolean;
     canCancel: boolean;
+    canRename?: boolean;
     actions?: boolean;
     tasks?: boolean;
     artifacts?: boolean;
@@ -102,6 +117,7 @@ export interface ManagedAgentSessionSummary {
     cwdChange?: boolean;
     modelChange?: boolean;
     approvalModeChange?: boolean;
+    inputAttachments?: boolean;
   };
   failure?: { code: string; message: string };
 }
@@ -220,6 +236,18 @@ export interface ManagedAgentProvider {
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  readonly skills?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionSkills>;
+  };
+  readonly mcp?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionMcp>;
+  };
   /** Present when the provider can serve Hosted permission Actions. */
   readonly actions?: {
     listPending(
@@ -233,6 +261,13 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly toolDetails?: {
+    get(
+      sessionId: string,
+      itemId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellToolDetails']>;
+  };
   readonly tasks?: {
     list(
       sessionId: string,
@@ -281,7 +316,11 @@ export interface ManagedAgentProvider {
     ): Promise<ManagedSessionApproval>;
     submit(
       sessionId: string,
-      request: { approvalMode: ManagedApprovalMode; expectedRevision: number },
+      request: {
+        approvalMode: ManagedApprovalMode;
+        expectedRevision: number;
+        planMode?: boolean;
+      },
       options: ManagedAgentCommandOptions & { requestId: string },
     ): Promise<ManagedApprovalChangeResult>;
   };
@@ -295,6 +334,16 @@ export interface ManagedAgentProvider {
       request: { modelId: string; expectedRevision: number },
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedModelChangeResult>;
+  };
+  readonly workspaceFiles?: {
+    query(
+      request: components['schemas']['WebShellWorkspaceFileQueryRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFilePage']>;
+    read(
+      request: components['schemas']['WebShellWorkspaceFileReadRequest'],
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
   };
   readonly workspaceBinding?: {
     readonly agentId: string;
@@ -310,6 +359,7 @@ export interface ManagedAgentProvider {
       supported: boolean;
       canCreateWorkspace?: boolean;
       canSelectDirectory?: boolean;
+      canImportLocalDirectory?: boolean;
       supportsApprovalModeSelection?: boolean;
     }>;
     get(
@@ -321,11 +371,14 @@ export interface ManagedAgentProvider {
         displayName: string;
         sourceWorkspaceId?: string;
         cwdRelative?: string;
+        localPath?: string;
       },
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedAgentWorkspace>;
     directories?(
-      request: { workspaceId: string; cwdRelative: string },
+      request:
+        | { workspaceId: string; cwdRelative: string; localPath?: never }
+        | { localPath: string; workspaceId?: never; cwdRelative?: never },
       options: ManagedAgentRequestOptions,
     ): Promise<components['schemas']['WebShellWorkspaceDirectoryPage']>;
     getSessionOptions?(
@@ -338,6 +391,8 @@ export interface ManagedAgentProvider {
         workspaceId: string;
         cwdRelative: string;
         approvalMode?: ManagedApprovalMode;
+        planMode?: boolean;
+        skills?: ManagedSessionSkill[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
@@ -347,7 +402,10 @@ export interface ManagedAgentProvider {
         workspaceId: string;
         cwdRelative: string;
         text: string;
+        input?: ManagedInputBlock[];
         approvalMode?: ManagedApprovalMode;
+        planMode?: boolean;
+        skills?: ManagedSessionSkill[];
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
@@ -366,6 +424,11 @@ export interface ManagedAgentProvider {
     sessionId: string,
     options: ManagedAgentRequestOptions,
   ): Promise<ManagedAgentSessionSummary>;
+  renameSession?(
+    sessionId: string,
+    displayName: string,
+    options: ManagedAgentCommandOptions,
+  ): Promise<{ displayName: string }>;
   getTranscript(
     sessionId: string,
     options: ManagedAgentRequestOptions & {
@@ -374,12 +437,16 @@ export interface ManagedAgentProvider {
     },
   ): Promise<ManagedAgentSessionTranscript>;
   createSession(
-    request: { text: string; workspaceCwd?: string },
+    request: {
+      text: string;
+      workspaceCwd?: string;
+      input?: ManagedInputBlock[];
+    },
     options: ManagedAgentCommandOptions,
   ): Promise<ManagedAgentTurnAdmission>;
   submitPrompt(
     sessionId: string,
-    request: { text: string },
+    request: { text: string; input?: ManagedInputBlock[] },
     options: ManagedAgentCommandOptions,
   ): Promise<ManagedAgentTurnAdmission>;
   cancel(

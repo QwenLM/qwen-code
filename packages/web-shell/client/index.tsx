@@ -17,6 +17,7 @@ import { normalizeLanguage, type WebShellLanguage } from './i18n';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
+export type { WebShellApprovalMode } from './utils/planMode';
 export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
 export {
   JavaManagedAgentClient,

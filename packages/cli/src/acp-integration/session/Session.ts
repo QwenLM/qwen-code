@@ -4,10 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
+import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
+import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  logLoopProtection,
+  logWorkflowKeyword,
+} from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import {
+  WorkflowKeywordEvent,
+  LoopProtectionEvent,
+  LoopReason,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import {
+  getTurnToolCallCapHalt,
+  shouldRemindTurnToolCallCap,
+} from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
+import {
+  buildLoopReminder,
+  INVALID_PARAMS_REMINDER_AT,
+} from '@qwen-code/qwen-code-core/services/loop-protection.js';
+import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -18,7 +39,11 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -33,6 +58,7 @@ import {
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
+  type LoopStopDetail,
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
   type ToolResult,
@@ -193,7 +219,6 @@ import {
   GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   logRepeatedToolFailureGuard,
   LoopDetectedEvent,
@@ -274,9 +299,11 @@ import {
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  buildSessionHistoryFromConversation,
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
+  cloneApiHistory,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
@@ -373,7 +400,11 @@ import type {
   SetSessionModelResponse,
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  readSettingsSnapshot,
+  SettingScope,
+  type LoadedSettings,
+} from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
@@ -852,6 +883,18 @@ export type DaemonToolLoopState = {
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
   loopType?: LoopType;
+  /** Reason and tool-call numbers of the stop, for shared loop types. */
+  loopDetail?: LoopStopDetail;
+  /** Tool of the (tool, args) pair behind maxToolCallKeyRepeat. */
+  maxToolCallKeyName?: string;
+  /** Loop-protection patterns already reminded or observed this turn. */
+  loopProtectionHandled?: Set<string>;
+  /** Reminders for the next model request that carries tool results. */
+  pendingLoopReminders?: Array<{
+    text: string;
+    loopType: LoopType;
+    detail: LoopStopDetail;
+  }>;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
   explorationBudget?: ToolExplorationBudget;
@@ -1023,17 +1066,19 @@ function recordDaemonLoopDetected(
   loopType: LoopType,
   message: string,
   loopState: DaemonToolLoopState,
-  options: { recordToQwenLogger?: boolean } = {},
+  options: { recordToQwenLogger?: boolean; loopDetail?: LoopStopDetail } = {},
 ): true {
   if (!loopState.loopDetected) {
+    const { loopDetail, ...logOptions } = options;
     loopState.loopDetected = true;
     loopState.loopType = loopType;
+    loopState.loopDetail = loopDetail;
     debugLogger.warn(message);
     try {
       logLoopDetected(
         config,
-        new LoopDetectedEvent(loopType, promptId),
-        options,
+        new LoopDetectedEvent(loopType, promptId, loopDetail),
+        logOptions,
       );
     } catch (error) {
       debugLogger.debug(
@@ -1062,10 +1107,18 @@ function managedOutcomeUnknownError(error: Error): RequestError {
 function createLoopDetectedTurnError(
   loopState: DaemonToolLoopState,
 ): RequestError {
+  const detail = loopState.loopDetail;
   return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
     code: 'LOOP_DETECTED',
     errorKind: 'loop_detected',
     ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+    ...(detail?.loopReason ? { loopReason: detail.loopReason } : {}),
+    ...(detail?.toolCallCount !== undefined
+      ? { toolCallCount: detail.toolCallCount }
+      : {}),
+    ...(detail?.toolCallLimit !== undefined
+      ? { toolCallLimit: detail.toolCallLimit }
+      : {}),
   });
 }
 
@@ -1088,6 +1141,133 @@ function isLoopDetectedTurnError(error: unknown): boolean {
   );
 }
 
+function logDaemonLoopProtection(
+  config: Config,
+  promptId: string,
+  loopType: LoopType,
+  decision: 'reminded' | 'stopped' | 'observed',
+  detail: LoopStopDetail,
+): void {
+  try {
+    logLoopProtection(
+      config,
+      new LoopProtectionEvent({
+        prompt_id: promptId,
+        loop_type: loopType,
+        decision,
+        mode: config.getLoopProtection(),
+        loop_reason: detail.loopReason,
+      }),
+    );
+  } catch (error) {
+    debugLogger.debug(
+      '[Session] Failed to record loop protection telemetry',
+      error,
+    );
+  }
+}
+
+// One reminder per pattern.
+function remindDaemonLoop(
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: LoopReminderInput,
+  detail: LoopStopDetail,
+): void {
+  const handled = (loopState.loopProtectionHandled ??= new Set());
+  if (handled.has(key)) return;
+  handled.add(key);
+  (loopState.pendingLoopReminders ??= []).push({
+    text: buildLoopReminder(input),
+    loopType: input.loopType,
+    detail,
+  });
+}
+
+// Takes the queued reminders for the next request, logging them as
+// delivered.
+function takeDaemonLoopReminders(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState,
+): string | undefined {
+  const pending = loopState.pendingLoopReminders;
+  if (!pending?.length) return undefined;
+  loopState.pendingLoopReminders = undefined;
+  for (const { loopType, detail } of pending) {
+    logDaemonLoopProtection(config, promptId, loopType, 'reminded', detail);
+  }
+  return pending.map(({ text }) => text).join('\n\n');
+}
+
+// A governed detector reached its reminder point (#14828).
+function remindDaemonLoopBeforeStop(
+  config: Config,
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: Omit<LoopReminderInput, 'stops'>,
+  detail: LoopStopDetail = {},
+): void {
+  const mode = config.getLoopProtection();
+  if (mode === 'off') return;
+  remindDaemonLoop(
+    loopState,
+    key,
+    { ...input, stops: mode === 'stop' },
+    detail,
+  );
+}
+
+// A governed detector reached its stop point: `stop` halts, `warn` reminds,
+// `off` only records. Returns whether to halt.
+function onDaemonLoopStopPoint(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: Omit<LoopReminderInput, 'stops'>,
+  detail: LoopStopDetail,
+  stopMessage: string,
+): boolean {
+  switch (config.getLoopProtection()) {
+    case 'stop':
+      if (loopState.loopDetected) return true;
+      recordDaemonLoopDetected(
+        config,
+        promptId,
+        input.loopType,
+        stopMessage,
+        loopState,
+        { loopDetail: detail },
+      );
+      logDaemonLoopProtection(
+        config,
+        promptId,
+        input.loopType,
+        'stopped',
+        detail,
+      );
+      return true;
+    case 'warn':
+      remindDaemonLoop(loopState, key, { ...input, stops: false }, detail);
+      return false;
+    default: {
+      const handled = (loopState.loopProtectionHandled ??= new Set());
+      if (!handled.has(key)) {
+        handled.add(key);
+        logDaemonLoopProtection(
+          config,
+          promptId,
+          input.loopType,
+          'observed',
+          detail,
+        );
+      }
+      return false;
+    }
+  }
+}
+
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -1103,10 +1283,11 @@ function recordDaemonToolCalls(
     loopState.toolCallKeyCounts.set(key, count);
     if (count > loopState.maxToolCallKeyRepeat) {
       loopState.maxToolCallKeyRepeat = count;
+      loopState.maxToolCallKeyName = call.name ?? '';
     }
   }
   // Same per-turn cap semantics as the core LoopDetectionService — the
-  // shouldHaltOnTurnToolCallCap predicate is shared with core's
+  // getTurnToolCallCapHalt classifier is shared with core's
   // checkTurnToolCallCap so the two runtimes cannot drift (an explicit
   // model.maxToolCallsPerTurn is a hard cap; the default is adaptive —
   // past the soft cap a productive turn continues until the
@@ -1121,21 +1302,64 @@ function recordDaemonToolCalls(
   // daemon stream loops discard the failed attempt's accumulated calls
   // (functionCalls.length = 0) before re-streaming, so a failed attempt's
   // calls never reach this function to be double-counted.
-  if (
-    shouldHaltOnTurnToolCallCap(
+  const cap = config.getMaxToolCallsPerTurn();
+  const isExplicitCap = config.isMaxToolCallsPerTurnExplicit();
+  const capHalt = getTurnToolCallCapHalt(
+    loopState.totalToolCalls,
+    loopState.maxToolCallKeyRepeat,
+    cap,
+    isExplicitCap,
+  );
+  const capMessage = `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`;
+  const stuck = {
+    loopType: LoopType.TURN_TOOL_CALL_CAP,
+    toolName: loopState.maxToolCallKeyName,
+    count: loopState.maxToolCallKeyRepeat,
+    softCap: cap,
+  };
+  if (capHalt) {
+    const loopDetail = {
+      loopReason: capHalt.reason,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: capHalt.limit,
+    };
+    // Budgets (an explicit cap, the backstop) stop in every mode.
+    if (capHalt.reason !== LoopReason.STUCK_REPETITION) {
+      return recordDaemonLoopDetected(
+        config,
+        promptId,
+        LoopType.TURN_TOOL_CALL_CAP,
+        capMessage,
+        loopState,
+        { loopDetail },
+      );
+    }
+    if (
+      onDaemonLoopStopPoint(
+        config,
+        promptId,
+        loopState,
+        'cap',
+        stuck,
+        loopDetail,
+        capMessage,
+      )
+    ) {
+      return true;
+    }
+  } else if (
+    shouldRemindTurnToolCallCap(
       loopState.totalToolCalls,
       loopState.maxToolCallKeyRepeat,
-      config.getMaxToolCallsPerTurn(),
-      config.isMaxToolCallsPerTurnExplicit(),
+      cap,
+      isExplicitCap,
     )
   ) {
-    return recordDaemonLoopDetected(
-      config,
-      promptId,
-      LoopType.TURN_TOOL_CALL_CAP,
-      `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
-      loopState,
-    );
+    remindDaemonLoopBeforeStop(config, loopState, 'cap', stuck, {
+      loopReason: LoopReason.STUCK_REPETITION,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: cap,
+    });
   }
   // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
   // repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn halts
@@ -1150,15 +1374,18 @@ function recordDaemonToolCalls(
   // would ship this halt on.
   if (
     !config.getSkipLoopDetection() &&
-    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
-  ) {
-    return recordDaemonLoopDetected(
+    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD &&
+    onDaemonLoopStopPoint(
       config,
       promptId,
-      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
-    );
+      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      { loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE },
+      { loopReason: LoopReason.REPEATED_CALL },
+      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
+    )
+  ) {
+    return true;
   }
   // Deliberately after both halt checks: a halted batch is skipped whole and
   // never executes, so its calls must not feed the exploration budget (nor
@@ -1189,13 +1416,31 @@ function recordDaemonInvalidToolParams(
   const key = toolName;
   const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
   loopState.invalidToolParamErrors.set(key, count);
+  const invalid = {
+    loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+    toolName,
+    count,
+  };
+  if (
+    count >= INVALID_PARAMS_REMINDER_AT &&
+    count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+  ) {
+    remindDaemonLoopBeforeStop(
+      config,
+      loopState,
+      `invalid:${toolName}`,
+      invalid,
+    );
+  }
   if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
-  return recordDaemonLoopDetected(
+  return onDaemonLoopStopPoint(
     config,
     promptId,
-    LoopType.INVALID_TOOL_PARAMS_STAGNATION,
-    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
     loopState,
+    `invalid:${toolName}`,
+    invalid,
+    {},
+    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
   );
 }
 
@@ -1404,7 +1649,11 @@ function truncateTurnText(text: string): {
   if (text.length <= TURN_RESULT_TEXT_MAX_CHARS) {
     return { text, truncated: false };
   }
-  return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
+  const end =
+    (text.codePointAt(TURN_RESULT_TEXT_MAX_CHARS - 1) ?? 0) > 0xffff
+      ? TURN_RESULT_TEXT_MAX_CHARS - 1
+      : TURN_RESULT_TEXT_MAX_CHARS;
+  return { text: text.slice(0, end), truncated: true };
 }
 
 function stripReferencedAttachmentDataParts(
@@ -2375,6 +2624,7 @@ export class Session implements SessionContext {
   private closing = false;
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
+  private pendingDeletedApiPromptIds: Set<string> | undefined;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
@@ -2495,6 +2745,7 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
    * Tail of this session's permission queue. The serialization unit is the
    * session, not the `AgentSideConnection`: one daemon child owns a single
@@ -4428,6 +4679,7 @@ export class Session implements SessionContext {
   }
 
   async assertCanStartTurn(): Promise<void> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -4491,6 +4743,18 @@ export class Session implements SessionContext {
       this.channelTaskCaptures.size === 0 &&
       !this.#hasActiveTurn()
     );
+  }
+
+  assertHistoryContextAvailable(): void {
+    if (this.pendingDeletedApiPromptIds) {
+      throw new RequestError(
+        -32000,
+        'Reload the session before using its history',
+        {
+          errorKind: 'session_history_context_unavailable',
+        },
+      );
+    }
   }
 
   isIdle(): boolean {
@@ -4924,6 +5188,7 @@ export class Session implements SessionContext {
     targetTurnIndex: number;
     apiTruncateIndex: number;
   } {
+    this.assertHistoryContextAvailable();
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
@@ -5015,13 +5280,85 @@ export class Session implements SessionContext {
     return { targetTurnIndex, apiTruncateIndex };
   }
 
+  async deleteMessageGroups(request: { snapshot: string; groupIds: string[] }) {
+    this.assertHistoryContextAvailable();
+    const release = this.beginHistoryMutation();
+    let persisted = false;
+    let deletedGroupIds: string[] = [];
+    let deletedPromptIds: string[] = [];
+    try {
+      const recording = this.config.getChatRecordingService();
+      if (!recording?.supportsMessageGroupDeletion())
+        throw new RequestError(-32602, 'History recording is unavailable', {
+          errorKind: 'session_message_deletion_unsupported',
+        });
+      const result = await recording.deleteMessageGroups(request);
+      persisted = true;
+      deletedGroupIds = result.deletedGroupIds;
+      deletedPromptIds = result.deletedPromptIds;
+      this.pendingDeletedApiPromptIds = new Set(result.removedApiPromptIds);
+      await this.installDeletedMessageHistory();
+      return { deletedGroupIds, deletedPromptIds };
+    } catch (error) {
+      if (persisted) {
+        throw new RequestError(
+          -32000,
+          'Messages were deleted, but the session must be reopened before sending another message',
+          {
+            errorKind: 'message_deletion_context_unavailable',
+            deletedGroupIds,
+            deletedPromptIds,
+          },
+        );
+      }
+      throw error;
+    } finally {
+      release();
+    }
+  }
+
+  async recoverMessageDeletionContext(): Promise<void> {
+    if (!this.pendingDeletedApiPromptIds) return;
+    const release = this.beginHistoryMutation();
+    try {
+      await this.installDeletedMessageHistory();
+    } finally {
+      release();
+    }
+  }
+
+  private async installDeletedMessageHistory(): Promise<void> {
+    const removed = this.pendingDeletedApiPromptIds!;
+    const records = await this.config
+      .getChatRecordingService()!
+      .readActiveTranscriptChain();
+    const restored = buildSessionHistoryFromConversation({ messages: records });
+    const current = this.captureHistorySnapshot();
+    const prelude = current.slice(0, getStartupContextLength(current));
+    const llmClient = this.config.getLlmClient()!;
+    llmClient.setHistory([...prelude, ...restored.apiHistory]);
+    llmClient.getChat().setCompletedToolCallIds(restored.completedToolCallIds);
+    const fileHistory = this.config.getFileHistoryService();
+    fileHistory.restoreFromSnapshots(
+      removeFileHistorySnapshots(fileHistory.getSnapshots(), removed),
+    );
+    this.pendingDeletedApiPromptIds = undefined;
+  }
+
   captureHistorySnapshot(): Content[] {
-    return this.config.getLlmClient()!.getChat().getHistoryShallow();
+    const history = this.config.getLlmClient()!.getChat().getHistoryShallow();
+    this.historySnapshotBoundary = {
+      hash: createHash('sha256').update(JSON.stringify(history)).digest('hex'),
+      prefixLength: getStartupContextLength(history, {
+        includeCompressed: true,
+      }),
+    };
+    return history;
   }
 
   getRewindableUserTurnCount(): number {
     return countApiUserPrompts(
-      this.captureHistorySnapshot(),
+      this.config.getLlmClient()!.getChat().getHistoryShallow(),
       ACP_API_USER_PROMPT_OPTIONS,
     );
   }
@@ -5034,7 +5371,17 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
+    const restored = cloneApiHistory(history);
+    if (
+      this.historySnapshotBoundary?.hash ===
+      createHash('sha256').update(JSON.stringify(history)).digest('hex')
+    ) {
+      markCompressedHistory(
+        restored,
+        this.historySnapshotBoundary.prefixLength,
+      );
+    }
+    this.config.getLlmClient()!.setHistory(restored);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -5427,6 +5774,7 @@ export class Session implements SessionContext {
     turnRecording: InFlightTurnRecording | null,
     channelTask?: ChannelTaskResponseCapture,
   ): Promise<PromptResponse> {
+    this.assertHistoryContextAvailable();
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -5937,9 +6285,8 @@ export class Session implements SessionContext {
       return undefined;
     }
 
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
+    // Limit meaningful history while retaining trailing notifications for replay.
+    // The authoritative re-detection inside prompt() uses full history to strip.
     const chat = this.#getCurrentChat();
     // A trailing restorable ask_user_question is awaiting its restore
     // prompt, not an interruption to close: `interrupted_turn` would answer
@@ -5961,7 +6308,8 @@ export class Session implements SessionContext {
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
-        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        : (chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+          chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
           chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
       historyGaps: runtimeGaps?.length
         ? runtimeGaps
@@ -6903,6 +7251,46 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
+            const workflowHumanInput =
+              isUserSubmissionTurn &&
+              !isSlashInput &&
+              !isSlashCommand(submittedPrompt) &&
+              !goalTurn &&
+              !pendingSend.signal.aborted &&
+              submittedPrompt.trim().length > 0
+                ? { text: submittedPrompt }
+                : undefined;
+            if (workflowHumanInput && this.config.isWorkflowsEnabled?.()) {
+              try {
+                const liveSettings = readSettingsSnapshot(
+                  this.config.storage.getProjectRoot(),
+                  {
+                    environment: process.env,
+                    workspaceTrusted: this.config.isTrustedFolder(),
+                  },
+                );
+                this.config.setWorkflowKeywordTriggerEnabled(
+                  liveSettings.merged.ui?.disableWorkflowKeywordTrigger !==
+                    true,
+                );
+              } catch (error) {
+                this.config.setWorkflowKeywordTriggerEnabled(false);
+                debugLogger.warn(
+                  'Unable to read the live workflow keyword setting:',
+                  error,
+                );
+              }
+            }
+            // ACP sends through LlmChat, bypassing LlmClient's injection.
+            // Resolve here before the interrupted-prompt reminder deduplication.
+            const workflowIntent = resolveWorkflowIntent(
+              this.config,
+              workflowHumanInput,
+            );
+            if (workflowIntent) {
+              systemReminders.push({ text: workflowIntent.reminder });
+              logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
+            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
@@ -9685,6 +10073,11 @@ export class Session implements SessionContext {
         `[repeated-tool-failure-guard] mode=${toolLoopState.repeatedToolFailureMode} decision=${repeatedToolFailureDecision.kind} phase=${state.phase} candidate=${state.candidateOrdinal} failures=${state.failureCount} batches=${state.batchCount}`,
       );
     }
+    // A stop sends nothing, so its batch leaves the reminders unlogged.
+    const loopReminder =
+      repeatedToolFailureDecision.kind === 'stop'
+        ? undefined
+        : takeDaemonLoopReminders(this.config, promptId, toolLoopState);
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
@@ -9693,6 +10086,7 @@ export class Session implements SessionContext {
       )
         ? [{ text: TOOL_EXPLORATION_REMINDER }]
         : []),
+      ...(loopReminder ? [{ text: loopReminder }] : []),
       ...(repeatedToolFailureDecision.kind === 'warn'
         ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
         : []),
@@ -10743,6 +11137,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
@@ -10759,6 +11154,7 @@ export class Session implements SessionContext {
 
   async #drainCronQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
@@ -12012,6 +12408,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.notificationProcessing) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
@@ -12034,6 +12431,7 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.pendingDeletedApiPromptIds) return;
     if (this.notificationsPaused || this.notificationAdmissionDeferred) return;
     if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
@@ -13258,9 +13656,12 @@ export class Session implements SessionContext {
       ? this.sessionReasoningSelection
       : parseReasoningSelection(rawSelection);
     const generation = this.config.getContentGeneratorConfig?.();
-    const thinkingMandatory = generation?.thinkingMandatory === true;
     const modelReasoning = getConfiguredModelReasoning(this.config, modelId);
-    const gptCapabilities = getGptReasoningCapabilities(modelId);
+    const requestModel = getRequestModel(generation ?? {}, modelId);
+    const thinkingMandatory =
+      requestModel === (generation?.model ?? modelId) &&
+      generation?.thinkingMandatory === true;
+    const gptCapabilities = getGptReasoningCapabilities(requestModel);
     const configuredReasoning = parseModelReasoningCapabilities(modelReasoning);
     const gptModel = gptCapabilities !== undefined && !configuredReasoning;
     const supportsPreference = (value: ReasoningSelection | undefined) =>
@@ -13268,7 +13669,7 @@ export class Session implements SessionContext {
       value !== REASONING_EFFORT_DEFAULT &&
       ((gptModel && value !== REASONING_EFFORT_NONE) ||
         isReasoningSelectionSupported(
-          modelId,
+          requestModel,
           value,
           thinkingMandatory,
           modelReasoning,
@@ -13702,6 +14103,7 @@ export class Session implements SessionContext {
           LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
           message,
           toolLoopState,
+          { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
         );
       } else {
         debugLogger.warn(message);
@@ -16912,11 +17314,14 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
+                  this.config,
                 )
               : convertToFunctionResponse(
                   modelFacingToolName,
                   callId,
                   toolResult.llmContent,
+                  toolResult,
+                  this.config,
                 );
 
           // A tool can fail "softly" by returning toolResult.error without

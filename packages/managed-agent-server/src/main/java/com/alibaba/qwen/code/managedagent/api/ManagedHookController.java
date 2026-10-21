@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.service.ManagedHookCatalogService;
+import com.alibaba.qwen.code.managedagent.catalog.ManagedHookCatalogService;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;

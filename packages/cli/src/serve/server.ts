@@ -1502,8 +1502,10 @@ export function createServeApp(
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       preheatAcpChild: () => bridge.preheat(),
-      refreshExtensionsForAllSessions: () =>
-        bridge.refreshExtensionsForAllSessions(),
+      refreshExtensionsForAllSessions: (sessionIds) =>
+        sessionIds === undefined
+          ? bridge.refreshExtensionsForAllSessions()
+          : bridge.refreshExtensionsForAllSessions(undefined, { sessionIds }),
       ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
       ...(deps.persistSettings
         ? { persistSettings: deps.persistSettings }
@@ -2234,6 +2236,19 @@ export function createServeApp(
         `configured. '*' admits any cross-origin browser to the API; ` +
         `without a token, any local page can drive the daemon. Set a ` +
         `token or list specific origins instead of '*'.`,
+    );
+  }
+  if (
+    parsedAllowOrigins.loopbackPortWildcards &&
+    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
+    !opts.token
+  ) {
+    throw new Error(
+      `Refusing to start with a loopback port wildcard in --allow-origin ` +
+        `but no bearer token configured. A port wildcard admits any page ` +
+        `served from that loopback host, on any port; without a token, any ` +
+        `local page can drive the daemon. Set a token or list specific ` +
+        `origins instead.`,
     );
   }
   const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
@@ -3459,6 +3474,8 @@ export function createServeApp(
 
   registerSessionCatalogRoutes(app, workspaceRegistry);
   const { resolveSubagentSessionRuntime } = registerSessionRoutes(app, {
+    sessionArtifactsPersistenceAvailable:
+      deps.sessionArtifactsPersistenceAvailable !== false,
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspaceRegistry,
@@ -3653,6 +3670,8 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
+    getSkillsSnapshot: (workspaceCwd) =>
+      trustedSkillsConfigStatus.snapshot(workspaceCwd),
     workspaceRegistry,
     mutate,
     safeBody,
