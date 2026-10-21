@@ -1554,6 +1554,10 @@ each arm runs even when an earlier one failed.
 
 ### Hosted recovery scope
 
+Ordinary LOCAL and SSH_LOCAL Managed Workspace Sessions may execute concurrently in the same directory, with one active Turn per Session. An UNKNOWN tool result on a READY binding retains its original Runtime Session and cannot be replayed, but does not exclude another ordinary Session. Existing LOST, DRAINING, OPERATOR_RECOVERY and attested RECOVERY_BLOCKED placement barriers remain in force. Physical registration, fencing, migration and maintenance still require every execution membership and unproven writer to drain. Shared files have no transactional isolation. Past execution overlap does not disable file undo. Undo requires other current memberships to release, then briefly excludes new acquisitions; existing file-level history checks still apply. Resident/private CSI and existing Agent/Workflow child-admission restrictions are unchanged. See the [concurrency design](../../docs/design/2026-10-21-managed-workspace-concurrency.md) ([简体中文](../../docs/design/2026-10-21-managed-workspace-concurrency.zh-CN.md)).
+
+V15 adds per-Runtime-Session execution memberships over the published V14 catalog. Stop all old Broker, control-plane and maintenance writers before migration and reopen execution only with the compatible build. Mixed old/new writers are unsupported. Existing singleton holders remain evidence-gated; do not clear unknown holders or memberships to upgrade or roll back. Rollback requires a compatible build or complete draining.
+
 The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
 macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
 provider acceptance. The scope below does not extend those claims.

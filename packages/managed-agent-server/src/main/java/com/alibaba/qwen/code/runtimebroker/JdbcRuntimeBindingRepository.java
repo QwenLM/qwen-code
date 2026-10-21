@@ -129,6 +129,18 @@ public final class JdbcRuntimeBindingRepository
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, claim.getRequest().getScope().getTenantId());
+            String physical = localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
+                    claim.getRequest().getStorageId(), true);
+            if (physical != null) {
+                try (var lock = connection.prepareStatement("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
+                    lock.setString(1, physical);
+                    try (var rows = lock.executeQuery()) {
+                        if (!rows.next()) {
+                            throw unverifiedWorkspaceHolder();
+                        }
+                    }
+                }
+            }
             var authority = claim.getRequest().getScope().getLifecycleAuthority();
             if (authority != null) {
                 requireHarnessAdmission(connection, claim.getRequest().getScope(), claim.getRequest().getIsolationKey(),
@@ -153,15 +165,17 @@ public final class JdbcRuntimeBindingRepository
     private static void clearStoppedHolder(Connection connection, RuntimeBindingRecord binding,
             RuntimeSessionRecord session) throws SQLException {
         String key = localStorageOwnerKey(connection, binding.getRequest().getScope().getTenantId(),
-                binding.getRequest().getStorageId());
+                binding.getRequest().getStorageId(), true);
         if (key == null) {
             return;
         }
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT holder_key, binding_id, runtime_generation, runtime_session_id,"
                                 + " physical_key FROM ma_storage_owner WHERE storage_key = ? AND"
-                                + " storage_kind = 'LOCAL' FOR UPDATE")) {
+                                + " storage_kind IN ('LOCAL', 'SSH_LOCAL') AND storage_kind ="
+                                + " (SELECT storage_kind FROM ma_storage WHERE alias_key = ?) FOR UPDATE")) {
             statement.setString(1, key);
+            statement.setString(2, storageAliasKey(binding.getRequest().getScope().getTenantId(), binding.getRequest().getStorageId()));
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     throw unverifiedWorkspaceHolder();
@@ -169,6 +183,7 @@ public final class JdbcRuntimeBindingRepository
                 if (!key.equals(row.getString("physical_key"))) {
                     throw unverifiedWorkspaceHolder();
                 }
+                clearStoppedMember(connection, key, session);
                 String holder = row.getString("holder_key");
                 String holderBinding = row.getString("binding_id");
                 String holderSession = row.getString("runtime_session_id");
@@ -190,7 +205,7 @@ public final class JdbcRuntimeBindingRepository
                 try (PreparedStatement clear = connection.prepareStatement(
                                 "UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
                                     + " runtime_generation = NULL, runtime_session_id = NULL WHERE"
-                                    + " storage_key = ? AND storage_kind = 'LOCAL' AND holder_key ="
+                                    + " storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND holder_key ="
                                     + " ? AND binding_id = ? AND runtime_generation = ? AND"
                                     + " runtime_session_id = ?")) {
                     clear.setString(1, key);
@@ -206,7 +221,34 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
+    private static void clearStoppedMember(Connection connection, String key, RuntimeSessionRecord session) throws SQLException {
+        try (var read = connection.prepareStatement("SELECT execution_storage_key FROM ma_runtime_session"
+                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(read, 1, session.getBindingId());
+            read.setLong(2, session.getRuntimeGeneration());
+            JdbcRepositorySupport.setIdentity(read, 3, session.getRuntimeSessionId());
+            try (var rows = read.executeQuery()) {
+                if (!rows.next() || rows.getString(1) != null && !key.equals(rows.getString(1))) {
+                    throw unverifiedWorkspaceHolder();
+                }
+            }
+        }
+        try (var clear = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
+                + " execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
+                + " AND runtime_generation = ? AND runtime_session_id = ?")) {
+            clear.setString(1, key);
+            JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
+            clear.setLong(3, session.getRuntimeGeneration());
+            JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());
+            clear.executeUpdate();
+        }
+    }
+
     private static String localStorageOwnerKey(Connection connection, String tenant, String storage) throws SQLException {
+        return localStorageOwnerKey(connection, tenant, storage, false);
+    }
+
+    private static String localStorageOwnerKey(Connection connection, String tenant, String storage, boolean includeSsh) throws SQLException {
         if (storage == null) {
             return null;
         }
@@ -223,7 +265,8 @@ public final class JdbcRuntimeBindingRepository
                         || !storage.equals(row.getString("storage_id"))) {
                     throw unverifiedWorkspaceHolder();
                 }
-                if (!"LOCAL".equals(row.getString("storage_kind"))) {
+                if (!"LOCAL".equals(row.getString("storage_kind"))
+                        && !(includeSsh && "SSH_LOCAL".equals(row.getString("storage_kind")))) {
                     return null;
                 }
                 String physical = row.getString("physical_key");
@@ -1470,10 +1513,16 @@ public final class JdbcRuntimeBindingRepository
     private static boolean hasStorageHolder(Connection connection, RuntimeSessionRecord session) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT binding_id, runtime_session_id FROM ma_storage_owner"
-                                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?")) {
+                                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?"
+                                + " UNION ALL SELECT binding_id, runtime_session_id FROM ma_runtime_session"
+                                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?"
+                                + " AND execution_storage_key IS NOT NULL")) {
             JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
             statement.setLong(2, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(statement, 3, session.getRuntimeSessionId());
+            JdbcRepositorySupport.setIdentity(statement, 4, session.getBindingId());
+            statement.setLong(5, session.getRuntimeGeneration());
+            JdbcRepositorySupport.setIdentity(statement, 6, session.getRuntimeSessionId());
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     if (session.getBindingId().equals(rows.getString("binding_id"))

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -75,6 +76,7 @@ public class WorkspaceExecutionStore {
                 + " JOIN ma_runtime_slot slot ON slot.active_binding_id = b.binding_id AND slot.request_key = b.request_key"
                 + " JOIN ma_storage_owner o ON o.binding_id = b.binding_id AND o.runtime_generation = b.runtime_generation"
                 + " WHERE rs.binding_id = ? AND rs.runtime_generation = ? AND rs.runtime_session_id = ?"
+                + " AND rs.execution_storage_key IS NULL AND rs.execution_exclusive = FALSE"
                 + " AND rs.harness_session_id = ? AND rs.session_state IN (" + (releasing
                         ? "'ACQUIRING', 'READY', 'RELEASING', 'RELEASED'" : "'ACQUIRING', 'READY'") + ")"
                 + " AND b.request_key = ? AND b.binding_state = 'READY' AND b.drain_requested = FALSE"
@@ -344,7 +346,6 @@ public class WorkspaceExecutionStore {
             });
             return;
         }
-        String holder = holderKey(session);
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -379,20 +380,140 @@ public class WorkspaceExecutionStore {
             jdbc.update("INSERT INTO ma_storage_owner"
                     + " (storage_key, storage_kind) VALUES (?, ?) ON DUPLICATE KEY UPDATE"
                     + " storage_key = storage_key", key, SshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId()) == null ? "LOCAL" : "SSH_LOCAL");
-            String current = jdbc.queryForObject("SELECT holder_key FROM"
-                    + " ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE",
-                    String.class, key);
+            var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_kind, holder_key, binding_id, runtime_generation,"
+                    + " runtime_session_id, maintenance_id FROM ma_storage_owner WHERE storage_key = ?"
+                    + " AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", key);
+            if (owners.size() != 1) {
+                throw unavailable();
+            }
             if (storageGuard != null) {
                 storageGuard.verifyLocked(binding);
             }
-            if (current != null && !holder.equals(current)) {
+            var owner = owners.getFirst();
+            if (owner.get("maintenance_id") != null) {
                 throw busy();
             }
-            jdbc.update("UPDATE ma_storage_owner SET holder_key = ?,"
-                    + " binding_id = ?, runtime_generation = ?, runtime_session_id = ?"
-                    + " WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')", holder, session.getBindingId(),
-                    session.getRuntimeGeneration(), session.getRuntimeSessionId(), key);
+            var members = WorkspaceOperations.rows(jdbc, "SELECT runtime_session_id,"
+                    + " binding_id, runtime_generation, execution_exclusive FROM ma_runtime_session"
+                    + " WHERE execution_storage_key = ? FOR UPDATE", key);
+            for (var member : members) {
+                if (Boolean.TRUE.equals(member.get("execution_exclusive")) && !sameMember(member, session)) {
+                    throw busy();
+                }
+            }
+            if (owner.get("holder_key") != null) {
+                var legacy = legacyMember(key, owner);
+                if (jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?"
+                        + " AND runtime_generation = ? AND runtime_session_id = ?"
+                        + " AND (execution_storage_key IS NULL OR execution_storage_key = ?)", key,
+                        legacy.get("binding_id"), legacy.get("runtime_generation"), legacy.get("runtime_session_id"), key) != 1) {
+                    throw unavailable();
+                }
+                jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
+                        + " runtime_generation = NULL, runtime_session_id = NULL WHERE storage_key = ?", key);
+            } else if (owner.get("binding_id") != null || owner.get("runtime_generation") != null
+                    || owner.get("runtime_session_id") != null) {
+                throw unavailable();
+            }
+            if (jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?"
+                    + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?"
+                    + " AND (execution_storage_key IS NULL OR execution_storage_key = ?)", key, session.getBindingId(),
+                    session.getRuntimeGeneration(), session.getRuntimeSessionId(), session.getSession().getHarnessSessionId(), key) != 1) {
+                throw unavailable();
+            }
         });
+    }
+
+    private static boolean sameMember(java.util.Map<String, Object> member, RuntimeSessionRecord session) {
+        return session.getBindingId().equals(member.get("binding_id"))
+                && member.get("runtime_generation") instanceof Number generation
+                && session.getRuntimeGeneration() == generation.longValue()
+                && session.getRuntimeSessionId().equals(member.get("runtime_session_id"));
+    }
+
+    private java.util.Map<String, Object> legacyMember(String key, java.util.Map<String, Object> owner) {
+        if (!(owner.get("binding_id") instanceof String bindingId)
+                || !(owner.get("runtime_generation") instanceof Number generation)
+                || !(owner.get("runtime_session_id") instanceof String runtimeSessionId)
+                || !digest(bindingId + "\u0000" + generation.longValue() + "\u0000" + runtimeSessionId).equals(owner.get("holder_key"))) {
+            throw unavailable();
+        }
+        var members = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, harness_session_id, runtime_session_id,"
+                + " binding_id, runtime_generation FROM ma_runtime_session WHERE binding_id = ?"
+                + " AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE", bindingId, generation.longValue(), runtimeSessionId);
+        if (members.size() != 1) {
+            throw unavailable();
+        }
+        var runtimes = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id FROM ma_runtime_binding"
+                + " WHERE binding_id = ? AND runtime_generation = ?", bindingId, generation.longValue());
+        if (runtimes.size() != 1 || !runtimes.getFirst().get("tenant_id").equals(members.getFirst().get("tenant_id"))) {
+            throw unavailable();
+        }
+        String tenant = (String) runtimes.getFirst().get("tenant_id");
+        String storage = (String) runtimes.getFirst().get("storage_id");
+        // The held physical owner fences remapping; do not reverse the alias/owner lock order.
+        var aliases = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, storage_kind, physical_key,"
+                + " registration_state, fence_operation_id FROM ma_storage WHERE alias_key = ?",
+                JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+        if (aliases.size() != 1 || !tenant.equals(aliases.getFirst().get("tenant_id"))
+                || !storage.equals(aliases.getFirst().get("storage_id")) || !key.equals(aliases.getFirst().get("physical_key"))
+                || !owner.get("storage_kind").equals(aliases.getFirst().get("storage_kind"))
+                || !("LOCAL".equals(owner.get("storage_kind"))
+                        ? java.util.Set.of("REGISTERED", "RETIRING").contains(aliases.getFirst().get("registration_state"))
+                        : "REGISTERED".equals(aliases.getFirst().get("registration_state"))
+                                && aliases.getFirst().get("fence_operation_id") == null)) {
+            throw unavailable();
+        }
+        return members.getFirst();
+    }
+
+    static boolean hasExecutionMembers(JdbcTemplate jdbc, String physical) {
+        return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE execution_storage_key = ? LIMIT 1"
+                + (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()
+                        ? " FOR UPDATE" : ""), String.class, physical).isEmpty();
+    }
+
+    public boolean beginRewind(ContextBinding binding, RuntimeSessionRecord session) {
+        return Boolean.TRUE.equals(transaction.execute(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+            String key = storageKey(binding);
+            if (!isHeld(binding, session)) {
+                throw unavailable();
+            }
+            var members = WorkspaceOperations.rows(jdbc, "SELECT binding_id, runtime_generation, runtime_session_id,"
+                    + " execution_exclusive FROM ma_runtime_session WHERE execution_storage_key = ? FOR UPDATE", key);
+            for (var member : members) {
+                if (sameMember(member, session) && Boolean.TRUE.equals(member.get("execution_exclusive"))) {
+                    throw new RuntimeBrokerException(409, "workspace_rewind_recovery_required",
+                            "An earlier Workspace rewind has an unconfirmed outcome.", false);
+                }
+            }
+            if (members.stream().anyMatch(member -> !sameMember(member, session))
+                    || !jdbc.queryForList("SELECT holder_key FROM ma_storage_owner WHERE storage_key = ?"
+                            + " AND holder_key IS NOT NULL", String.class, key).isEmpty()) {
+                return false;
+            }
+            return jdbc.update("UPDATE ma_runtime_session SET execution_exclusive = TRUE WHERE binding_id = ?"
+                    + " AND runtime_generation = ? AND runtime_session_id = ? AND execution_storage_key = ?",
+                    session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(), key) == 1;
+        }));
+    }
+
+    public void endRewind(ContextBinding binding, RuntimeSessionRecord session) {
+        transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+            String key = storageKey(binding);
+            jdbc.update("UPDATE ma_runtime_session SET execution_exclusive = FALSE WHERE binding_id = ?"
+                    + " AND runtime_generation = ? AND runtime_session_id = ? AND execution_storage_key = ?",
+                    session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(), key);
+        });
+    }
+
+    public boolean hasExclusiveClaim(RuntimeSessionRecord session) {
+        return !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE binding_id = ?"
+                + " AND runtime_generation = ? AND runtime_session_id = ? AND execution_storage_key IS NOT NULL"
+                + " AND execution_exclusive = TRUE", String.class, session.getBindingId(), session.getRuntimeGeneration(),
+                session.getRuntimeSessionId()).isEmpty();
     }
 
     public void assertHeld(ContextBinding binding, RuntimeSessionRecord session) {
@@ -406,6 +527,10 @@ public class WorkspaceExecutionStore {
         if (!isHeld(binding, session)) {
             throw busy();
         }
+        if (hasExclusiveClaim(session)) {
+            throw new RuntimeBrokerException(409, "workspace_rewind_recovery_required",
+                    "Workspace rewind is active or has an unconfirmed outcome.", false);
+        }
     }
 
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session) {
@@ -414,6 +539,30 @@ public class WorkspaceExecutionStore {
             return session.getState() != RuntimeSessionRecord.State.RELEASED;
         }
         WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        String key = storageKey(binding);
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_kind, holder_key, binding_id, runtime_generation,"
+                + " runtime_session_id, maintenance_id FROM ma_storage_owner WHERE storage_key = ?"
+                + " AND storage_kind IN ('LOCAL', 'SSH_LOCAL')", key);
+        if (owners.size() != 1 || owners.getFirst().get("maintenance_id") != null) {
+            return false;
+        }
+        var owner = owners.getFirst();
+        if (owner.get("holder_key") != null) {
+            try {
+                legacyMember(key, owner);
+            } catch (RuntimeBrokerException error) {
+                return false;
+            }
+        } else if (owner.get("binding_id") != null || owner.get("runtime_generation") != null
+                || owner.get("runtime_session_id") != null) {
+            return false;
+        }
+        if (!jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session WHERE execution_storage_key = ?"
+                + " AND binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
+                String.class, key, session.getBindingId(), session.getRuntimeGeneration(), session.getRuntimeSessionId(),
+                session.getSession().getHarnessSessionId()).isEmpty()) {
+            return true;
+        }
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
                 + " ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')",
                 String.class, storageKey(binding));
@@ -435,6 +584,7 @@ public class WorkspaceExecutionStore {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            String key = storageKey(binding);
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state"
                     + " FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE",
                     (row, index) -> session.getBindingId().equals(row.getString("binding_id"))
@@ -449,6 +599,10 @@ public class WorkspaceExecutionStore {
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
                     + " WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND holder_key = ?",
                     storageKey(binding), holderKey(session));
+            jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, execution_exclusive = FALSE"
+                    + " WHERE execution_storage_key = ? AND binding_id = ? AND runtime_generation = ?"
+                    + " AND runtime_session_id = ? AND harness_session_id = ?", key, session.getBindingId(),
+                    session.getRuntimeGeneration(), session.getRuntimeSessionId(), session.getSession().getHarnessSessionId());
         });
     }
 
@@ -492,7 +646,7 @@ public class WorkspaceExecutionStore {
                 storageGuard.verifyLocked(binding);
             }
             String current = rows.getFirst()[0];
-            if (current != null && !holder.equals(current)) {
+            if (current != null && !holder.equals(current) || hasExecutionMembers(jdbc, key)) {
                 throw busy();
             }
             jdbc.update("UPDATE ma_storage_owner SET holder_key = ?,"
@@ -530,7 +684,9 @@ public class WorkspaceExecutionStore {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner"
                 + " WHERE binding_id = ? AND runtime_generation = ? AND holder_key IS NOT NULL",
                 Integer.class, saved.getBindingId(), saved.getGeneration());
-        return count != null && count > 0;
+        return count != null && count > 0 || !jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
+                + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key IS NOT NULL LIMIT 1",
+                String.class, saved.getBindingId(), saved.getGeneration()).isEmpty();
     }
 
     public boolean canStopDrained(RuntimeBindingRecord saved) {
@@ -560,6 +716,17 @@ public class WorkspaceExecutionStore {
                         Long.class, saved.getBindingId(), saved.getGeneration()) != 0) {
             return false;
         }
+        String physical = storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId());
+        var members = jdbc.query("SELECT execution_storage_key, harness_session_id, tenant_id FROM ma_runtime_session"
+                + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key IS NOT NULL", (row, index) ->
+                        physical.equals(row.getString("execution_storage_key"))
+                                && saved.getRequest().getScope().getTenantId().equals(row.getString("tenant_id"))
+                                && (HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
+                                        || saved.getRequest().getIsolationKey().equals(row.getString("harness_session_id"))),
+                saved.getBindingId(), saved.getGeneration());
+        if (members.contains(false)) {
+            return false;
+        }
         var holders = jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
                 + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL')", (row, index) -> {
                     String holder = row.getString("holder_key");
@@ -578,7 +745,7 @@ public class WorkspaceExecutionStore {
                                     : jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                                             + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
                                             Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1);
-                }, storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId()));
+                }, physical);
         return holders.isEmpty() || holders.size() == 1 && holders.getFirst();
     }
 
@@ -589,6 +756,8 @@ public class WorkspaceExecutionStore {
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, saved.getRequest().getScope().getTenantId());
+            String key = hasHolder(saved)
+                    ? storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId()) : null;
             List<Boolean> exact = jdbc.query("SELECT binding_id, runtime_generation, binding_state, tenant_id,"
                     + " workspace_id, storage_id, record_version, operation_owner, operation_generation,"
                     + " operation_lease_until, loss_evidence_json, stop_evidence_json, UNIX_TIMESTAMP() AS db_seconds,"
@@ -614,10 +783,16 @@ public class WorkspaceExecutionStore {
                             Long.class, saved.getBindingId(), saved.getGeneration()) != 0) {
                 throw unavailable();
             }
-            if (jdbc.queryForList(ORIGINAL_HOLDER_SQL, String.class, saved.getBindingId(), saved.getGeneration()).isEmpty()) {
+            var memberKeys = jdbc.queryForList("SELECT execution_storage_key FROM ma_runtime_session"
+                    + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key IS NOT NULL FOR UPDATE",
+                    String.class, saved.getBindingId(), saved.getGeneration());
+            if (jdbc.queryForList(ORIGINAL_HOLDER_SQL, String.class, saved.getBindingId(), saved.getGeneration()).isEmpty()
+                    && memberKeys.isEmpty()) {
                 return;
             }
-            String key = storageKey(saved.getRequest().getScope().getTenantId(), saved.getRequest().getStorageId());
+            if (key == null || memberKeys.stream().anyMatch(member -> !key.equals(member))) {
+                throw unavailable();
+            }
             jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id, maintenance_id"
                     + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') FOR UPDATE", row -> {
                         String holder = row.getString("holder_key");
@@ -658,6 +833,15 @@ public class WorkspaceExecutionStore {
                             }
                         }
                     }, key);
+            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding WHERE binding_id = ?"
+                    + " AND runtime_generation = ? AND operation_owner = ? AND operation_generation = ?"
+                    + " AND operation_lease_until > " + ManagedSchemaTime.SQL_NOW, Long.class, saved.getBindingId(),
+                    saved.getGeneration(), saved.getOperationOwner(), saved.getOperationGeneration()) != 1) {
+                throw unavailable();
+            }
+            jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, execution_exclusive = FALSE"
+                    + " WHERE binding_id = ? AND runtime_generation = ? AND execution_storage_key = ?",
+                    saved.getBindingId(), saved.getGeneration(), key);
         });
     }
 

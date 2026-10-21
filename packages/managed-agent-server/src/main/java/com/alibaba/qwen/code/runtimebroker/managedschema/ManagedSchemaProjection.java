@@ -97,7 +97,8 @@ public enum ManagedSchemaProjection {
     RUNTIME_SESSION(
             "scope_key, runtime_session_id, tenant_id, workspace_id, workspace_generation, "
                     + "canonical_cwd, capability_digest, isolation_class, harness_session_id, turn_kind, "
-                    + "binding_id, runtime_generation, session_state, record_version, last_active_at"),
+                    + "binding_id, runtime_generation, session_state, record_version, last_active_at, "
+                    + "execution_storage_key, execution_exclusive"),
     RUNTIME_SLOT(
             "request_key, tenant_id, workspace_id, workspace_generation, canonical_cwd, "
                     + "capability_digest, isolation_class, isolation_key, provisioner_kind, storage_id, "
