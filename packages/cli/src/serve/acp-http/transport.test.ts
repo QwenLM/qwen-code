@@ -90,6 +90,7 @@ import {
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 import { CredentialStore } from '../local-control/credentials.js';
 import { tagListener } from '../local-control/listener-identity.js';
+import { parseAllowOriginPatterns } from '../auth.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -12721,20 +12722,22 @@ describe('ACP WebSocket transport security', () => {
   it('allows a WS upgrade from a loopback port wildcard origin', async () => {
     await startServer({
       token: 'secret-token-123',
-      allowedOrigins: {
-        allowAny: false,
-        origins: new Set(),
-        loopbackPortWildcards: [{ protocol: 'http:', hostname: '127.0.0.1' }],
-      },
+      allowedOrigins: parseAllowOriginPatterns(['http://127.0.0.1:*']),
     });
     const wildcard = await wsConnectRaw('127.0.0.1', 'http://127.0.0.1:54321', {
       Authorization: 'Bearer secret-token-123',
     });
     expect(wildcard.code).toBe(101);
-    const foreign = await wsConnectRaw('127.0.0.1', 'https://evil.com', {
-      Authorization: 'Bearer secret-token-123',
-    });
-    expect(foreign.code).toBe(403);
+    for (const origin of [
+      'https://evil.com',
+      'http://localhost:54321',
+      'https://127.0.0.1:54321',
+    ]) {
+      const foreign = await wsConnectRaw('127.0.0.1', origin, {
+        Authorization: 'Bearer secret-token-123',
+      });
+      expect(foreign.code).toBe(403);
+    }
   });
 
   it('does not register chrome-devtools MCP without an explicit CDP MCP command', async () => {

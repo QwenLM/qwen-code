@@ -218,9 +218,14 @@ function matchesLoopbackPortWildcard(
   } catch {
     return false;
   }
-  // An Origin header carries no path, so anything that does not round-trip
-  // through `.origin` (including the literal `null`) cannot match.
-  if (parsed.origin !== origin) return false;
+  // An Origin header carries no path. Accept the canonical serialization,
+  // which drops a scheme-default port (`http://127.0.0.1:80` becomes
+  // `http://127.0.0.1`), so a non-browser client that spells that port still
+  // matches the "any port" contract.
+  if (parsed.origin !== origin) {
+    const defaultPort = parsed.protocol === 'http:' ? '80' : '443';
+    if (origin !== `${parsed.origin}:${defaultPort}`) return false;
+  }
   return wildcards.some(
     (wildcard) =>
       wildcard.protocol === parsed.protocol &&

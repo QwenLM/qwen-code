@@ -536,18 +536,18 @@ describe('loopback port wildcard', () => {
   it('rejects a port wildcard on a non-loopback host', () => {
     expect(() =>
       parseAllowOriginPatterns(['https://app.example.com:*']),
-    ).toThrow(InvalidAllowOriginPatternError);
+    ).toThrow(/only supported for loopback hosts/);
   });
 
   it('rejects a port wildcard that also names a port', () => {
     expect(() => parseAllowOriginPatterns(['http://127.0.0.1:3000:*'])).toThrow(
-      InvalidAllowOriginPatternError,
+      /do not name one/,
     );
   });
 
   it('rejects a non-http(s) port wildcard', () => {
     expect(() => parseAllowOriginPatterns(['ftp://127.0.0.1:*'])).toThrow(
-      InvalidAllowOriginPatternError,
+      /only supported for http and https/,
     );
   });
 
@@ -563,7 +563,11 @@ describe('loopback port wildcard', () => {
     const middleware = allowOriginCors(
       parseAllowOriginPatterns(['http://127.0.0.1:*']),
     );
-    for (const origin of ['http://127.0.0.1:54321', 'http://127.0.0.1:1']) {
+    for (const origin of [
+      'http://127.0.0.1:54321',
+      'http://127.0.0.1:1',
+      'http://127.0.0.1:80',
+    ]) {
       const res = invokeAllowOrigin(middleware, {
         method: 'OPTIONS',
         headers: {
@@ -597,6 +601,44 @@ describe('loopback port wildcard', () => {
     );
     expect(allowlist.allows('http://127.0.0.1:54321')).toBe(true);
     expect(allowlist.allows('http://localhost:54321')).toBe(false);
+  });
+
+  it('matches the configured loopback host exactly, including IPv6', () => {
+    const ipv6 = allowOriginCors(parseAllowOriginPatterns(['https://[::1]:*']));
+    expect(
+      invokeAllowOrigin(ipv6, {
+        method: 'GET',
+        headers: { origin: 'https://[::1]:54321' },
+      }).nextCalled,
+    ).toBe(true);
+    expect(
+      invokeAllowOrigin(ipv6, {
+        method: 'GET',
+        headers: { origin: 'http://[::1]:54321' },
+      }).status,
+    ).toBe(403);
+    expect(
+      invokeAllowOrigin(ipv6, {
+        method: 'GET',
+        headers: { origin: 'https://127.0.0.1:54321' },
+      }).status,
+    ).toBe(403);
+
+    const localhost = allowOriginCors(
+      parseAllowOriginPatterns(['http://localhost:*']),
+    );
+    expect(
+      invokeAllowOrigin(localhost, {
+        method: 'GET',
+        headers: { origin: 'http://localhost:1234' },
+      }).nextCalled,
+    ).toBe(true);
+    expect(
+      invokeAllowOrigin(localhost, {
+        method: 'GET',
+        headers: { origin: 'http://127.0.0.1:1234' },
+      }).status,
+    ).toBe(403);
   });
 });
 
