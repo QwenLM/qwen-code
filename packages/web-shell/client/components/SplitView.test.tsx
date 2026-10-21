@@ -1072,6 +1072,34 @@ describe('SplitView', () => {
     expect(hiddenSlots()).toHaveLength(0);
   });
 
+  it('reveals and activates a pane appended by the parent', () => {
+    const onPanesChange = vi.fn();
+    render({ sessionIds: ['s1', 's2'], onPanesChange });
+    act(() =>
+      maximizeButtons()[0].dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(hiddenSlots()).toHaveLength(1);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <SplitView
+            onExit={() => {}}
+            sessionIds={['s1', 's2', 's3']}
+            onPanesChange={onPanesChange}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(titles()).toEqual(['One', 'Two', 'Three']);
+    expect(hiddenSlots()).toHaveLength(0);
+    expect(
+      container!.querySelector('[data-pane-active]')?.textContent,
+    ).toContain('Three');
+    expect(onPanesChange).not.toHaveBeenCalled();
+  });
+
   it('reloads the session list when the picker opens (never a stale list)', () => {
     render({ sessionIds: ['s1'] });
     // `useSessions` only fetches on mount; nothing reloads until the user acts.
