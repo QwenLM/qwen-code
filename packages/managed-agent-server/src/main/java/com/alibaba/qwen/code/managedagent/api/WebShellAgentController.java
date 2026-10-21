@@ -15,6 +15,8 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellOperationRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRenameRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellRenameResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionModelsRequest;
@@ -121,6 +123,18 @@ public class WebShellAgentController {
         return service.getWebShellSession(tenant.tenantId(),
                 tenant.actorId(),
                 request.sessionId());
+    }
+
+    @PostMapping("/sessions/rename")
+    public ResponseEntity<WebShellRenameResult> rename(TenantContext tenant,
+            @Valid @RequestBody WebShellRenameRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
+        var result = service.renameSession(tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId(), request.title());
+        return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
+                .body(new WebShellRenameResult(result.body().id(),
+                        (String) result.body().metadata().get("title"), result.replayed()));
     }
 
     @PostMapping("/transcript/query")

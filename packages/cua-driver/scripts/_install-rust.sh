@@ -145,8 +145,8 @@ CHANNEL_EXPLICIT=0
 # See packages/cua-driver/rust/scripts/CuaDriverBundle/Contents/Info.plist and
 # the matching docs on `qwen-cua-driver mcp`'s auto-relaunch behavior.
 # Identical to the prior Qwen driver's QwenCuaDriver.app + com.qwencode.cua-driver
-# pair — the Rust port replaces the Swift install at this path,
-# preserving TCC grants (they're keyed on bundle id, which we share).
+# pair. Permission continuity also depends on the designated signing
+# requirement, which is checked before reporting an upgrade's status.
 APP_NAME="QwenCuaDriver.app"
 APP_DEST="/Applications/$APP_NAME"
 
@@ -177,6 +177,27 @@ TMP_DIR=$(mktemp -d)
 
 log() { printf '==> %s\n' "$*"; }
 err() { printf 'error: %s\n' "$*" >&2; }
+
+macos_designated_requirement() {
+    codesign -d -r- "$1" 2>/dev/null \
+        | sed -n -e 's/^designated => //p' -e 's/^# designated => //p'
+}
+
+verify_macos_release_app() {
+    local app="$1"
+    local bundle_id
+    if ! codesign --verify --deep --strict "$app"; then
+        err "macOS release app failed signature verification: $app"
+        return 1
+    fi
+    bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+        "$app/Contents/Info.plist" 2>/dev/null || true)
+    if [[ "$bundle_id" != "com.qwencode.cua-driver" \
+       || ! -x "$app/Contents/MacOS/$BINARY_NAME" ]]; then
+        err "macOS release app has an unexpected bundle identity or missing executable: $app"
+        return 1
+    fi
+}
 
 # --- Concurrent-install lockfile ---------------------------------------
 #
@@ -209,6 +230,38 @@ LOCK_POLL_INTERVAL_SECONDS=1
 LOCK_STALE_AFTER_SECONDS=600
 
 LOCK_HELD=0
+MACOS_APP_SWAP_STARTED=0
+MACOS_APP_HAD_PREVIOUS=0
+MACOS_APP_INSTALL_COMMITTED=0
+MACOS_APP_BACKUP=""
+MACOS_DAEMONS_STOPPED=0
+
+restore_macos_app_backup_on_exit() {
+    [[ "$MACOS_APP_SWAP_STARTED" == "1" ]] || return 0
+    if [[ "$MACOS_APP_INSTALL_COMMITTED" == "1" ]]; then
+        rm -rf "$MACOS_APP_BACKUP" \
+            || err "could not remove the old macOS install backup: $MACOS_APP_BACKUP"
+        MACOS_APP_SWAP_STARTED=0
+        return 0
+    fi
+    if [[ "$MACOS_APP_HAD_PREVIOUS" == "1" ]]; then
+        # A failed rename leaves the original path in place. Never remove it
+        # unless its backup exists; a failed restore must keep the backup.
+        if [[ -e "$MACOS_APP_BACKUP" || -L "$MACOS_APP_BACKUP" ]]; then
+            if rm -rf "$APP_DEST" && mv "$MACOS_APP_BACKUP" "$APP_DEST"; then
+                printf 'warning: restored the previous app after an incomplete installation\n' >&2
+                MACOS_APP_SWAP_STARTED=0
+            else
+                err "could not restore the previous app; recoverable backup remains at $MACOS_APP_BACKUP"
+            fi
+        fi
+    else
+        rm -rf "$APP_DEST" || err "could not remove the incomplete app: $APP_DEST"
+        MACOS_APP_SWAP_STARTED=0
+    fi
+    return 0
+}
+
 release_install_lock() {
     if (( LOCK_HELD == 1 )); then
         rm -rf "$LOCK_DIR" 2>/dev/null || true
@@ -220,6 +273,7 @@ release_install_lock() {
 # clobbers the other. INT/TERM also re-raise via $? so the user-visible
 # exit code reflects the signal.
 cleanup_on_exit() {
+    restore_macos_app_backup_on_exit
     rm -rf "$TMP_DIR" 2>/dev/null || true
     release_install_lock
 }
@@ -402,12 +456,8 @@ prune_old_releases() {
 # under the home. Every step is best-effort + idempotent; a machine with no
 # prior local install is a clean no-op.
 #
-# TCC is preserved deliberately: we do NOT `tccutil reset` here. The bundle at
-# /Applications/QwenCuaDriver.app is shared (bundle id com.qwencode.cua-driver) and the
-# subsequent release `ditto` re-points the binary in place; grants keyed on the
-# bundle id survive (macOS may re-prompt once on the cdhash change, same as any
-# upgrade). Churning the signing identity would gratuitously invalidate
-# cert-pinned grants, so we leave it alone.
+# Permission records are left unchanged. Bundle identity alone does not prove
+# signing-requirement compatibility or that previous grants will remain usable.
 cleanup_prior_local_install() {
     local releases_dir="$HOME_DIR/packages/releases"
     local tcc_marker="$HOME_DIR/.tcc-signing-identity"
@@ -431,7 +481,9 @@ cleanup_prior_local_install() {
 
     # Stop the local daemon BEFORE we yank its binary out from under it,
     # mirroring the post-swap stop both installers already do. Best-effort.
-    stop_cua_driver_daemons
+    if [[ "$MACOS_DAEMONS_STOPPED" != "1" ]]; then
+        stop_cua_driver_daemons
+    fi
 
     # Remove the `*-local-*` release dirs. The release install stages into its
     # own `<version>-<target>` dir and swaps `current` to it, so deleting the
@@ -523,7 +575,7 @@ done
 # asset — see the recovery at the download step below.
 #
 # ~~~ BAKED_VERSION: must match the release version in this change ~~~
-CUA_DRIVER_RS_BAKED_VERSION="0.20.11"
+CUA_DRIVER_RS_BAKED_VERSION="0.26.0"
 # ~~~ END_BAKED_VERSION ~~~
 
 # Run API requests with an optional token. Keep the header construction here
@@ -840,7 +892,6 @@ case "$LABEL" in
     *)
         SRC="$TMP_DIR/$BINARY_NAME"
         SRC_THEME="$TMP_DIR/cua-cursor-theme"
-        SRC_WAYLAND_HELPER="$TMP_DIR/wayland-helper"
         SRC_APP=""
         ;;
 esac
@@ -877,10 +928,10 @@ fi
 
 # --- Install ------------------------------------------------------------
 
-# Before staging the new release, sweep any prior install-local build that
-# shares this home so the release install ends up authoritative (see the
-# function definition above for the conservative marker-gated logic).
-cleanup_prior_local_install
+# Keep macOS local-build state until its replacement has been validated.
+if [[ "$OS" != "Darwin" ]]; then
+    cleanup_prior_local_install
+fi
 
 mkdir -p "$BIN_DIR"
 
@@ -945,8 +996,7 @@ fi
 # anchor for both TCC attribution (cdhash + bundle id) and
 # LaunchServices' `open -a QwenCuaDriver` discovery — symlinking the
 # .app from /Applications to a versioned dir under $HOME_DIR breaks
-# both. The asymmetry is deliberate; rollback on macOS = reinstall
-# an older release tag.
+# both. A sibling backup protects the previous bundle during replacement.
 #
 # Linux: drop the binary into the per-version dir under
 # $HOME_DIR/packages/releases/<version>-<target>/ and swap the
@@ -971,17 +1021,19 @@ if [[ "$OS" == "Darwin" && -n "$SRC_APP" && -d "$SRC_APP" ]]; then
         err "  Without the .app bundle, \`qwen-cua-driver mcp\` from an IDE terminal will not auto-relaunch into a TCC-correct daemon."
         exit 1
     fi
-    # The Rust port and the legacy Swift driver both live at
-    # /Applications/QwenCuaDriver.app with bundle id `com.qwencode.cua-driver` —
-    # bundle-id-identical so TCC grants survive the upgrade. When we
-    # detect a prior Swift bundle at the install path we log it for
-    # transparency, but no `tccutil reset` is needed; grants transfer
-    # automatically because they're keyed on bundle id. macOS may
-    # surface a one-time re-prompt on first action because the cdhash
-    # of the new binary doesn't match the old one — that's a TCC
-    # cdhash-pairing detail, not a grant loss.
+    if ! command -v codesign >/dev/null 2>&1; then
+        err "codesign is required to verify the macOS release app; the installed app was not changed"
+        exit 1
+    fi
+    verify_macos_release_app "$SRC_APP"
+    STAGED_REQUIREMENT="$(macos_designated_requirement "$SRC_APP")"
+    if [[ -z "$STAGED_REQUIREMENT" ]]; then
+        err "could not read the staged signing requirement; the installed app was not changed"
+        exit 1
+    fi
     REPLACED_SWIFT=0
-    if [[ -e "$APP_DEST" ]]; then
+    REQUIREMENT_COMPATIBILITY="unknown"
+    if [[ -e "$APP_DEST" || -L "$APP_DEST" ]]; then
         PREV_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_DEST/Contents/Info.plist" 2>/dev/null || true)
         PREV_BUNDLE_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DEST/Contents/Info.plist" 2>/dev/null || true)
         if [[ "$PREV_BUNDLE_ID" == "com.qwencode.cua-driver" ]] && [[ -n "$PREV_BUNDLE_VERSION" ]]; then
@@ -990,21 +1042,54 @@ if [[ "$OS" == "Darwin" && -n "$SRC_APP" && -d "$SRC_APP" ]]; then
         elif [[ -n "$PREV_BUNDLE_ID" ]]; then
             log "replacing existing $APP_DEST (bundle id $PREV_BUNDLE_ID)"
         else
-            log "removing existing $APP_DEST"
+            log "replacing existing $APP_DEST"
         fi
-        rm -rf "$APP_DEST"
+        if [[ "$PREV_BUNDLE_ID" == "com.qwencode.cua-driver" ]] \
+           && codesign --verify --deep --strict "$APP_DEST" >/dev/null 2>&1; then
+            PREVIOUS_REQUIREMENT="$(macos_designated_requirement "$APP_DEST" || true)"
+            if [[ -n "$PREVIOUS_REQUIREMENT" ]]; then
+                if codesign --verify --deep --strict -R "=$PREVIOUS_REQUIREMENT" "$SRC_APP" >/dev/null 2>&1; then
+                    REQUIREMENT_COMPATIBILITY="compatible"
+                elif [[ "$?" == "3" ]]; then
+                    REQUIREMENT_COMPATIBILITY="incompatible"
+                fi
+            fi
+        fi
+    fi
+    MACOS_APP_BACKUP="${APP_DEST}.install-backup.$$"
+    if [[ -e "$MACOS_APP_BACKUP" || -L "$MACOS_APP_BACKUP" ]]; then
+        err "macOS backup path already exists: $MACOS_APP_BACKUP"
+        exit 1
+    fi
+    stop_cua_driver_daemons
+    show_cua_driver_daemon_survivors
+    MACOS_DAEMONS_STOPPED=1
+    if [[ -e "$APP_DEST" || -L "$APP_DEST" ]]; then
+        MACOS_APP_HAD_PREVIOUS=1
+    fi
+    MACOS_APP_SWAP_STARTED=1
+    if [[ "$MACOS_APP_HAD_PREVIOUS" == "1" ]]; then
+        mv "$APP_DEST" "$MACOS_APP_BACKUP"
     fi
     log "installing $APP_DEST"
     # `ditto` preserves the bundle's metadata + nested symlinks the way
     # Apple's installer would. `cp -R` works but doesn't preserve as
     # much, and ditto is always present on macOS.
     ditto "$SRC_APP" "$APP_DEST"
+    verify_macos_release_app "$APP_DEST"
+    INSTALLED_REQUIREMENT="$(macos_designated_requirement "$APP_DEST")"
+    if [[ "$INSTALLED_REQUIREMENT" != "$STAGED_REQUIREMENT" ]]; then
+        err "the copied app did not preserve its verified signing requirement"
+        exit 1
+    fi
     APP_BINARY="$APP_DEST/Contents/MacOS/$BINARY_NAME"
     if [[ ! -x "$APP_BINARY" ]]; then
         err "binary missing at $APP_BINARY (refusing to create broken symlink)"
         exit 1
     fi
     ln -sf "$APP_BINARY" "$BIN_LINK"
+    MACOS_APP_INSTALL_COMMITTED=1
+    restore_macos_app_backup_on_exit
     log "symlinked $BIN_LINK -> $APP_BINARY"
 else
     # Linux: versioned-dirs + atomic `current` symlink swap.
@@ -1028,18 +1113,6 @@ else
     install -m 0755 "$SRC" "$VERSIONED_DIR/$BINARY_NAME"
     if [[ "$THEME_AVAILABLE" == "1" ]]; then
         install -m 0755 "$SRC_THEME" "$VERSIONED_DIR/cua-cursor-theme"
-    fi
-    if [[ -d "${SRC_WAYLAND_HELPER:-}" ]]; then
-        mkdir -p "$VERSIONED_DIR/wayland-helper"
-        cp -R "$SRC_WAYLAND_HELPER/." "$VERSIONED_DIR/wayland-helper/"
-
-        INSTALLED_WAYLAND_HELPER="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/winrects@cua"
-        if [[ -d "$INSTALLED_WAYLAND_HELPER" ]]; then
-            cp "$SRC_WAYLAND_HELPER/winrects@cua/metadata.json" \
-                "$SRC_WAYLAND_HELPER/winrects@cua/extension.js" \
-                "$INSTALLED_WAYLAND_HELPER/"
-            log "updated installed GNOME helper; reload the GNOME session to activate it"
-        fi
     fi
     log "installed $VERSIONED_DIR/$BINARY_NAME (version $VERSION, target $TARGET)"
 
@@ -1073,6 +1146,10 @@ else
     # never a deletion candidate (it's both the newest by mtime and
     # exempted via the current-symlink check inside prune_old_releases).
     prune_old_releases "$RELEASES_DIR" "$CURRENT_LINK" "$TARGET" "$KEEP_VERSIONS"
+fi
+
+if [[ "$OS" == "Darwin" ]]; then
+    cleanup_prior_local_install
 fi
 
 # --- Sweep the legacy ~/.cua-driver-rs home -----------------------------
@@ -1110,8 +1187,10 @@ fi
 # LaunchAgent / systemd user unit / manual `serve` shell keeps serving
 # pre-upgrade behaviour until logout, which is what surfaces to users
 # as "the bug I just fixed is still there".
-stop_cua_driver_daemons
-show_cua_driver_daemon_survivors
+if [[ "$MACOS_DAEMONS_STOPPED" != "1" ]]; then
+    stop_cua_driver_daemons
+    show_cua_driver_daemon_survivors
+fi
 
 # Agent skill pack: NOT auto-linked. The install script never touches
 # ~/.claude/skills/, ~/.agents/skills/, etc. Run `qwen-cua-driver skills
@@ -1165,11 +1244,14 @@ echo ""
 
 if [[ "${REPLACED_SWIFT:-0}" == "1" ]]; then
     echo "Upgraded the qwen-cua-driver bundle that was previously at $APP_DEST."
-    echo "TCC grants (Accessibility, Screen Recording) are keyed on the bundle id"
-    echo "(com.qwencode.cua-driver) — which is preserved — so they transfer to the new"
-    echo "binary automatically. macOS may surface a one-time re-grant prompt on"
-    echo "first action because the new binary's cdhash doesn't match the old"
-    echo "one's; approve once and the grants persist."
+    if [[ "$REQUIREMENT_COMPATIBILITY" == "compatible" ]]; then
+        echo "The replacement satisfies the previous signing requirement."
+    elif [[ "$REQUIREMENT_COMPATIBILITY" == "incompatible" ]]; then
+        echo "The signing requirement changed; macOS may require authorization again."
+    else
+        echo "Compatibility with the previous signing requirement could not be established."
+    fi
+    echo "Existing Accessibility and Screen Recording permission records were left unchanged."
     echo ""
 fi
 
