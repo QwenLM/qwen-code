@@ -130,6 +130,76 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
+  const splitOutsideGroups = (line, separator) => {
+    const parts = [];
+    let current = '';
+    let depth = 0;
+    let quote = '';
+    for (let i = 0; i < line.length; i += 1) {
+      const char = line[i];
+      if (quote) {
+        current += char;
+        if (char === '\\' && quote === '"') current += line[++i] ?? '';
+        else if (char === quote) quote = '';
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+        current += char;
+        continue;
+      }
+      if (char === '{') depth += 1;
+      else if (char === '}') depth = Math.max(0, depth - 1);
+      if (depth === 0) {
+        const match = line.slice(i).match(separator);
+        if (match?.index === 0) {
+          parts.push(current);
+          current = '';
+          i += match[0].length - 1;
+          continue;
+        }
+      }
+      current += char;
+    }
+    parts.push(current);
+    return parts;
+  };
+
+  // Enumerate rather than recognise: a fragment this does not understand must
+  // fail the pin, not escape it.
+  const hostLockCommands = (run) =>
+    run
+      .replace(/\\\n/g, ' ')
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .flatMap((line) => splitOutsideGroups(line, /&&|\|\||\||;/))
+      .map((command) => command.trim())
+      .filter((command) => command)
+      .filter(
+        (command) =>
+          !/^(?:if|then|else|elif|fi|set|cd|exec|source|echo|exit|true|\[|sdk_java_lock_acquire)\b/.test(
+            command,
+          ),
+      )
+      // Pre-lock fallback: runs before `exec 9>` opens the descriptor.
+      .filter(
+        (command) =>
+          !command.startsWith('mkdir -p "${HOME}/.cache/qwen-code-ci"'),
+      );
+
+  const expectHostLockClosed = (run, name) => {
+    const commands = hostLockCommands(run);
+    expect(commands.length, name).toBeGreaterThan(0);
+    for (const command of commands) {
+      expect(command, name).toMatch(/ 9>&-$/);
+    }
+  };
+
+  const lockedSection = (name) =>
+    parse(workflow).jobs[name].steps.find((s) =>
+      s.run?.includes('sdk-java-tests.lock'),
+    ).run;
+
   it('keeps the host lock out of every child that can outlive the step', () => {
     const jobs = parse(workflow).jobs;
     const lockedSteps = ['test', 'mysql-integration'].flatMap((name) =>
@@ -138,27 +208,88 @@ describe('SDK Java self-hosted workflow guards', () => {
     // The MariaDB lane's two Maven steps are one step now (#14903), so the
     // lock-bearing steps are the test job's and this job's single one.
     expect(lockedSteps).toHaveLength(2);
-    for (const s of lockedSteps) {
-      // A child that keeps fd 9 after the step shell dies holds the host lock
-      // until the child exits (#15099), so every external command in the
-      // locked section closes it. Pipeline stages are judged separately: a
-      // leak through either tar keeps the whole lock.
-      const commands = s.run
-        .replace(/\\\n/g, ' ')
-        .split('\n')
-        .flatMap((line) => line.split('|'))
-        .map((command) => command.trim())
-        .filter((command) => /^(?:mvn|cp|mkdir|tar)\b/.test(command));
-      expect(commands.length, s.name).toBeGreaterThan(0);
-      for (const command of commands) {
-        // The bare-lock fallback creates its lock directory before the lock
-        // exists; no fd 9 is open there to inherit.
-        if (command.includes('mkdir -p "${HOME}/.cache/qwen-code-ci"')) {
-          continue;
-        }
-        expect(command, s.name).toContain('9>&-');
-      }
-    }
+    for (const s of lockedSteps) expectHostLockClosed(s.run, s.name);
+  });
+
+  it.each([
+    [
+      'an unrecognised child',
+      (run) =>
+        run.replace(
+          'cd packages/managed-agent-server',
+          'node scripts/x.mjs\ncd packages/managed-agent-server',
+        ),
+      'node scripts/x.mjs',
+    ],
+    [
+      'a command chained before a closed one',
+      (run) =>
+        run.replace(
+          'mvn --batch-mode --no-transfer-progress -Pmysql-integration',
+          'mvn --batch-mode verify && mvn --batch-mode --no-transfer-progress -Pmysql-integration',
+        ),
+      'mvn --batch-mode verify',
+    ],
+    [
+      'a command chained after a closed one',
+      (run) =>
+        run.replace(
+          'checkstyle:check 9>&-',
+          'checkstyle:check 9>&- && mvn --batch-mode verify',
+        ),
+      'mvn --batch-mode verify',
+    ],
+    [
+      'a command backgrounded after a closed one',
+      (run) =>
+        run.replace(
+          'checkstyle:check 9>&-',
+          'checkstyle:check 9>&- & mvn --batch-mode verify',
+        ),
+      'mvn --batch-mode verify',
+    ],
+    [
+      'brace-grouped pipeline stages',
+      (run) =>
+        run
+          .split('\n')
+          .map((line) =>
+            line.startsWith('tar -C "${RUNNER_TEMP}/m2-repo"')
+              ? line.replace(/^(.*) 9>&- \\$/, '{ $1 ; } \\')
+              : line.startsWith('  | tar -C "${HOME}/.m2/repository"')
+                ? line.replace(/^ {2}\| (.*) 9>&- \\$/, '  | { $1 ; } \\')
+                : line,
+          )
+          .join('\n'),
+      '{ tar -C "${RUNNER_TEMP}/m2-repo"',
+    ],
+  ])('fails the fd-9 pin on %s', (_, mutate, leak) => {
+    const mutated = mutate(lockedSection('mysql-integration'));
+    const leaks = hostLockCommands(mutated).filter(
+      (command) => !/ 9>&-$/.test(command),
+    );
+    expect(leaks.some((command) => command.includes(leak))).toBe(true);
+    expect(() => expectHostLockClosed(mutated, 'mutant')).toThrow();
+  });
+
+  it('accepts a group that closes the descriptor once', () => {
+    expect(() =>
+      expectHostLockClosed(
+        '{ tar -C a -cf - . | tar -C b -xf - ; } 9>&-',
+        'safe',
+      ),
+    ).not.toThrow();
+  });
+
+  it('fails the fd-9 pin on a locked section with no real work', () => {
+    const emptied = lockedSection('test')
+      .split('\n')
+      .filter(
+        (line) => !/^\s*(?:mvn|cp|mkdir -p "\$\{HOME\}\/\.m2|tar)\b/.test(line),
+      )
+      .join('\n');
+    expect(hostLockCommands(emptied)).toEqual([]);
+    expect(() => expectHostLockClosed(emptied, 'mutant')).toThrow();
   });
 
   it.skipIf(process.platform !== 'linux')(
