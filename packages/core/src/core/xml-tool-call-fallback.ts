@@ -276,6 +276,9 @@ function computeExampleRanges(
       if (
         closer.index > ambiguousFrom &&
         !rangeContains(quotedValueRanges, closer.index) &&
+        !rangeContains(parameterRanges, closer.index) &&
+        (tagPositions === null || tagPositions.has(closer.index)) &&
+        !positionInsideFence(text, closer.index, parameterRanges) &&
         !/\/\s*>$/.test(closer[0])
       ) {
         ambiguousEnd = closer.index + closer[0].length;

@@ -1913,6 +1913,22 @@ describe('ambiguous documentation fences', () => {
       'run_shell_command',
     ]);
   });
+
+  it('does not let a fenced example closer widen an ambiguous region', () => {
+    // The ambiguous closer scan must refuse the same structural candidates
+    // the main tag scan refuses: a `</example>` inside a fence is content,
+    // not structure, so it cannot push the mask past the live call.
+    const quoted = invoke('b', param('p', 'w'));
+    const write = invoke(
+      'write_file',
+      param('content', `${quoted}\n<example>data`),
+    );
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    const text = `<example>\n${write}\n</example>\n${read}\n\`\`\`\n</example>\n\`\`\``;
+    expect(extractXmlToolCalls(text).map(({ name }) => name)).toEqual([
+      'read_file',
+    ]);
+  });
 });
 
 describe('refreshed documentation fences', () => {
