@@ -50,7 +50,9 @@ Legacy daemon 按 Session 排队，允许不同 Session 使用同一目录。修
 
 ## 发布与边界
 
-初始化 schema V15，并使用匹配的 Server 和 Broker 构建。普通执行仅以 Runtime Session 成员作为占用依据，不转换或回退到之前的 singleton 表示。CSI 预留和物理维护身份继续承担各自现有职责。
+全新安装初始化 schema V15，并使用匹配的 Server 和 Broker 构建。普通执行仅以 Runtime Session 成员作为占用依据，不转换或回退到之前的 singleton 表示。CSI 预留和物理维护身份继续承担各自现有职责。
+
+现有 canonical V1–V14 catalog 必须先排空再切换，不支持新旧版本混跑的滚动升级。停止接收新 Turn，使用旧构建完成执行或恢复并释放全部普通 LOCAL/SSH_LOCAL holder。停止旧 Server、Broker、Harness、Runtime worker 和其他存储 writer 后，确认 `ma_storage_owner` 中所有满足 `storage_kind IN ('LOCAL', 'SSH_LOCAL')` 且 `maintenance_id IS NULL` 的行均没有非空 `holder_key`，才可应用 V15 并启动匹配构建。writer 清理尚未确认的 UNKNOWN holder 必须保留在旧部署，直到恢复和释放成功；不能手动清除其占用，也不能将新构建连接到该 catalog。此发布前提不向 V15 或运行时清理加入兼容处理。
 
 本次让 READY binding 上的 UNKNOWN 工具结果不再阻塞无关普通 Session；不修复未知结果、不绕过 placement 恢复、不证明逃逸 writer 已停止、不增加文件事务隔离、不实现 CSI 并发、不改变子任务准入，也不修复独立的 Skill 空展示。未证明停止的 writer 仍阻止维护。开发期间不修改原故障部署。
 

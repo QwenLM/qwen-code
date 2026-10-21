@@ -50,7 +50,9 @@ The existing Runtime placement recovery barrier is unchanged. An UNKNOWN tool re
 
 ## Rollout and boundaries
 
-Initialize schema V15 and use the matching Server and Broker build. Ordinary execution has one authority representation: per-Runtime-Session membership. There is no conversion or fallback for an earlier singleton representation. CSI reservation and physical-maintenance identities retain their existing roles.
+Fresh installations initialize schema V15 and use the matching Server and Broker build. Ordinary execution has one authority representation: per-Runtime-Session membership. There is no conversion or fallback for an earlier singleton representation. CSI reservation and physical-maintenance identities retain their existing roles.
+
+An existing canonical V1–V14 catalog requires a drained cutover, not a mixed-version rolling upgrade. Disable new Turn admission and use the old build to finish or recover and release every ordinary LOCAL/SSH_LOCAL holder. Stop the old Server, Broker, Harness, Runtime workers and other storage writers, then verify that no `ma_storage_owner` row with `storage_kind IN ('LOCAL', 'SSH_LOCAL')` and `maintenance_id IS NULL` has a non-null `holder_key`. Only then apply V15 and start the matching build. An UNKNOWN holder with unconfirmed writer cleanup must remain on the old deployment until recovery and release succeed; do not manually clear its ownership or start the new build against that catalog. This requirement does not add compatibility handling to V15 or runtime cleanup.
 
 This change prevents an UNKNOWN tool result on a READY binding from blocking unrelated ordinary Sessions; it does not repair the unknown result, bypass placement recovery, prove escaped writers stopped, add transactional file isolation, implement CSI concurrency, change child-agent admission, or fix the separate empty Skill display. Maintenance remains blocked by unproven writers. The original incident deployment is not modified during development.
 
