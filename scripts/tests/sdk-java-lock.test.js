@@ -116,6 +116,43 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
+    'reaps a stale head ticket whose recorded PID is still alive',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-livepid-'));
+      const queue = queueDir(home);
+      mkdirSync(queue, { recursive: true });
+      // A SIGKILLed owner leaves its ticket behind and its PID gets recycled,
+      // so `kill -0` still answers; only the mtime arm can clear it. Without
+      // that arm the orphan stays head and an idle lock is unreachable.
+      const orphan = join(queue, `0000000001-${process.pid}`);
+      writeFileSync(orphan, '');
+      const past = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      utimesSync(orphan, past, past);
+      const stub = flockStub(freeFlock);
+      const result = await acquire(home, 15, stub);
+      expect(result.code).toBe(0);
+      expect(result.out).toContain('acquired');
+      expect(existsSync(orphan)).toBe(false);
+    },
+  );
+
+  it(
+    'leaves no ticket behind after a successful acquisition',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-success-'));
+      const stub = flockStub(freeFlock);
+      const result = await acquire(home, 15, stub);
+      expect(result.code).toBe(0);
+      expect(result.out).toContain('acquired');
+      // The holder leaves the queue at acquisition, so a normal run cannot
+      // plant an orphan head ticket for the next job on the host.
+      expect(readdirSync(queueDir(home))).toEqual(['.seq']);
+    },
+  );
+
+  it(
     'times out with the pinned infrastructure signature and drops its ticket',
     { timeout: 30000 },
     async () => {
