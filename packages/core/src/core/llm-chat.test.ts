@@ -903,6 +903,18 @@ describe('LlmChat', async () => {
         toolNamed('shell'),
       ]);
     });
+
+    // A tool-restricted registry refresh hands `setTools` an empty list, so
+    // the clear has to land rather than keep advertising stale declarations.
+    it('clears previously-set declarations when given an empty list', () => {
+      const isolatedChat = newChat({
+        chatConfig: { tools: [toolNamed('stale_tool')] },
+      });
+
+      isolatedChat.setTools([]);
+
+      expect(isolatedChat['generationConfig'].tools).toEqual([]);
+    });
   });
 
   describe('prepared model request recovery', () => {
