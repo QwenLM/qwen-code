@@ -326,6 +326,18 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    pub fn computer_use_error(code: &str, reason: impl Into<String>, sent: bool) -> Self {
+        let reason = reason.into();
+        let next = if sent {
+            "Observe the app state before deciding whether to retry."
+        } else {
+            "Observe the app again and use its current target."
+        };
+        Self::error(format!("{code}: {reason} {next}")).with_structured(serde_json::json!({
+            "code":code,"reason":reason,"sent":sent,"next":next,
+        }))
+    }
+
     pub fn text(msg: impl Into<String>) -> Self {
         Self {
             content: vec![Content::text(msg)],
@@ -378,6 +390,35 @@ pub fn initialize_result() -> Value {
 /// Goose uses in its `ComputerController` extension and Open
 /// Interpreter uses for its system message.
 fn agent_instructions() -> String {
+    if std::env::var("CUA_DRIVER_EXTRA_TOOLS").as_deref() == Ok("1") {
+        legacy_agent_instructions()
+    } else {
+        computer_use_instructions()
+    }
+}
+
+fn computer_use_instructions() -> String {
+    let platform = if cfg!(target_os = "macos") {
+        "macOS: application names, bundle IDs or absolute application paths."
+    } else if cfg!(target_os = "windows") {
+        "Windows: exact application names or executable paths."
+    } else {
+        "Linux: X11 applications only; inherit DISPLAY, XAUTHORITY and the accessibility session bus."
+    };
+    format!(
+        r#"cua-driver Computer Use. {platform}
+
+Prefer client-provided APIs, CLI or filesystem operations for non-GUI outcomes. This server has no shell.
+
+Use `get_state` for inventory, then `get_app(app)` for full AX state. `get_ax_state(app)` returns subsequent diffs; `force_full:true` requests a full tree. Act with `app` and a current short `element` ID. Observe again after actions; an acknowledgement does not prove the UI changed. Never replay uncertain input automatically.
+
+Request `get_screenshot(app)` before point actions. Coordinates are window screenshot pixels, independent of legacy coordinate settings. For explicit desktop tasks, use `get_screenshot(scope:"desktop")`, then desktop input with `scope:"desktop"` and no `app`. Desktop coordinates are latest primary-display screenshot pixels. `key_down/key_up` are desktop-only; release held keys in finally and before app input or ordinary text/chords.
+
+`start_session` is optional. For multi-call work, prefer a short `session` label and repeat it on every call that accepts it. Unnamed calls use the transport's implicit session. Only `start_session` revives an ended name; `end_session` explicitly cleans up."#
+    )
+}
+
+fn legacy_agent_instructions() -> String {
     let (tree_kind, platform_skill_pointer) = if cfg!(target_os = "macos") {
         (
             "AX (Accessibility)",
@@ -391,7 +432,7 @@ fn agent_instructions() -> String {
     } else {
         (
             "AT-SPI",
-            "LINUX.md (X11/Wayland status, AT-SPI bus, BETA-level support)",
+            "LINUX.md (X11 support, AT-SPI bus, BETA-level support)",
         )
     };
 
@@ -399,9 +440,9 @@ fn agent_instructions() -> String {
         coordinate_terms(crate::coord_norm::default_normalized());
 
     format!(
-        r#"cua-driver: cross-platform background computer-use automation.
+        r#"cua-driver: extra native tools. App/scope calls always use screenshot pixels; this guidance applies to raw tools.
 
-Before starting UI work, classify the desired postcondition. For a non-GUI outcome, prefer a client-provided app API/SDK, headless/background interface, CLI, or filesystem operation and read the result back in that semantic domain. This server has no shell.
+For a non-GUI outcome, prefer a client-provided app API/SDK, headless/background interface, CLI, or filesystem operation and read the result back in that semantic domain. This server has no shell.
 
 For an app or window outcome, use the narrowest semantic Cua route first: `set_window_frame` plus `list_windows` readback for geometry, typed browser tools for supported page content, and clipboard tools for clipboard state. Then climb through background `element_index` ({tree_kind}), background {coordinate_term}, foreground delivery, and desktop fallback.{coordinate_note} Never advance on transport success alone.
 
@@ -559,11 +600,11 @@ mod action_record_wire_tests {
 
 #[cfg(test)]
 mod agent_instruction_tests {
-    use super::{agent_instructions, initialize_result};
+    use super::{computer_use_instructions, initialize_result, legacy_agent_instructions};
 
     #[test]
     fn instructions_route_structured_and_visual_verification_to_the_right_owner() {
-        let instructions = agent_instructions();
+        let instructions = legacy_agent_instructions();
         assert!(instructions.contains("verify_state"));
         assert!(instructions.contains("`unknown` is not success"));
         assert!(instructions.contains("multimodal agent"));
@@ -583,6 +624,33 @@ mod agent_instruction_tests {
             instructions.split_whitespace().count() <= 200,
             "initialize instructions should stay within the documented context budget"
         );
+    }
+
+    #[test]
+    fn compact_instructions_match_app_desktop_and_pixel_consumers() {
+        let instructions = computer_use_instructions();
+        for required in [
+            "get_app(app)",
+            "get_ax_state(app)",
+            "short `element` ID",
+            "window screenshot pixels",
+            "primary-display screenshot pixels",
+            "scope:\"desktop\"",
+            "key_down/key_up",
+            "Never replay uncertain input",
+        ] {
+            assert!(instructions.contains(required), "missing {required}");
+        }
+        for obsolete in [
+            "element_index",
+            "get_window_state",
+            "verify_state",
+            "0-1000",
+            "SKILL.md",
+        ] {
+            assert!(!instructions.contains(obsolete), "obsolete {obsolete}");
+        }
+        assert!(instructions.split_whitespace().count() <= 200);
     }
 
     #[test]
