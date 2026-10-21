@@ -19,7 +19,15 @@ import type {
   WebShellUnavailableModelTooltipHandle,
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
-import { Popover, PopoverAnchor, PopoverContent } from './ui/popover';
+import {
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+  PopoverDescription,
+  PopoverHeader,
+  PopoverTitle,
+} from './ui/popover';
+import styles from './UnavailableModelTooltip.module.css';
 
 const OPEN_DELAY_MS = 300;
 const CLOSE_DELAY_MS = 150;
@@ -191,9 +199,9 @@ export function UnavailableModelTooltip({
         ref={contentRef}
         side="right"
         align="start"
-        sideOffset={8}
+        sideOffset={10}
         collisionPadding={8}
-        className="w-auto max-w-72"
+        className={styles.card}
         data-web-shell-unavailable-model-tooltip=""
         data-web-shell-toolbar-popover=""
         onOpenAutoFocus={(event) => event.preventDefault()}
@@ -207,16 +215,20 @@ export function UnavailableModelTooltip({
         onClick={(event) => event.stopPropagation()}
         onPointerDown={(event) => event.stopPropagation()}
       >
-        {showFallback ? (
-          <p className="m-0 text-xs leading-5 text-popover-foreground">
-            {fallbackText}
-          </p>
-        ) : null}
+        <PopoverHeader className={styles.header}>
+          <PopoverTitle data-web-shell-unavailable-model-title="">
+            {model.label ?? model.id}
+          </PopoverTitle>
+          {showFallback ? (
+            <PopoverDescription>{fallbackText}</PopoverDescription>
+          ) : null}
+        </PopoverHeader>
         <div
           ref={(node) => {
             hostRef.current = node;
             setHostEl(node);
           }}
+          className={styles.host}
           hidden={showFallback}
           data-web-shell-unavailable-model-host=""
         />

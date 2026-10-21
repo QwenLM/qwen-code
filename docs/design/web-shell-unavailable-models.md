@@ -91,9 +91,11 @@ hint are the host’s responsibility.
 
 Reuse a hover-intent Popover, not Tooltip or a new HoverCard. Open after
 about 300ms, close after a short leave delay, stay open when the pointer
-enters the content, and open on keyboard focus. Web Shell owns placement,
-open/close, the portal, and the scroll bounds. The host only fills the
-container.
+enters the content, and open on keyboard focus. The hint is a fixed-width
+card: Web Shell renders the model name as the title and the string tooltip
+as the description. Disabled rows keep a hover/focus highlight. Web Shell
+owns placement, open/close, the portal, and the scroll bounds. The host
+only fills the area under the title.
 
 The hint is marked so the parent picker ignores outside pointer events and
 does not close when the user clicks “Authorize”. Clicks inside the hint do

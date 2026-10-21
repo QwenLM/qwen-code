@@ -108,7 +108,10 @@ test('shows a host string tooltip on a disabled model', async ({
   const disabled = await openPicker(page);
   await disabled.focus();
   const hint = page.locator('[data-web-shell-unavailable-model-tooltip]');
-  await expect(hint).toContainText('Need Pro');
+  await expect(
+    hint.locator('[data-web-shell-unavailable-model-title]'),
+  ).toHaveText('Qwen Max');
+  await expect(hint).toContainText('Available on the Pro plan.');
   await evidence(page, 'tooltip', [
     page.locator('[data-web-shell-model-button]'),
     page.locator('[data-web-shell-toolbar-popover]').first(),
@@ -123,8 +126,11 @@ test('mounts an authorize action in the disabled-model hint', async ({
   const disabled = await openPicker(page);
   await disabled.focus();
   const hint = page.locator('[data-web-shell-unavailable-model-tooltip]');
+  await expect(
+    hint.locator('[data-web-shell-unavailable-model-title]'),
+  ).toHaveText('Qwen Max');
   await expect(hint.getByRole('button', { name: 'Authorize' })).toBeVisible();
-  await expect(hint).toContainText('Qwen Max is not authorized');
+  await expect(hint).toContainText('Not authorized for the current account.');
   await evidence(page, 'authorize', [
     page.locator('[data-web-shell-model-button]'),
     page.locator('[data-web-shell-toolbar-popover]').first(),

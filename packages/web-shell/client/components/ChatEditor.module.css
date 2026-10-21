@@ -1499,16 +1499,17 @@
 
 .dropdownItem[data-disabled] {
   color: var(--muted-foreground);
-  cursor: not-allowed;
-  opacity: 0.6;
+  cursor: default;
 }
 
 .dropdownItem:hover {
   background: var(--accent);
 }
 
-.dropdownItem[data-disabled]:hover {
-  background: transparent;
+.dropdownItem[data-disabled]:hover,
+.dropdownItem[data-disabled]:focus-visible,
+.dropdownItem[data-disabled][aria-expanded='true'] {
+  background: var(--accent);
 }
 
 .dropdownItemActive {

@@ -35,8 +35,16 @@ const includeItems = params.has('include')
 const unavailableModels: readonly WebShellUnavailableModel[] | undefined =
   params.get('unavailableModels') === '1'
     ? [
-        { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
-        { id: 'gpt-5', label: 'GPT-5', tooltip: 'Enterprise account required' },
+        {
+          id: 'qwen-max',
+          label: 'Qwen Max',
+          tooltip: 'Available on the Pro plan.',
+        },
+        {
+          id: 'gpt-5',
+          label: 'GPT-5',
+          tooltip: 'Requires an enterprise account.',
+        },
       ]
     : undefined;
 const mountUnavailableModelTooltip:
@@ -45,17 +53,14 @@ const mountUnavailableModelTooltip:
   params.get('unavailableMount') === '1'
     ? (container, info) => {
         const summary = container.ownerDocument.createElement('p');
-        summary.style.margin = '0 0 8px';
-        summary.style.fontSize = '12px';
+        summary.style.margin = '0';
         const button = container.ownerDocument.createElement('button');
         button.type = 'button';
         button.textContent = 'Authorize';
         button.style.cssText =
-          'appearance:none;border:0;border-radius:6px;padding:4px 8px;background:#3b82f6;color:#fff;font-size:12px;cursor:pointer';
-        const update = (next: { model: WebShellUnavailableModel }) => {
-          summary.textContent = `${
-            next.model.label ?? next.model.id
-          } is not authorized`;
+          'appearance:none;border:1px solid var(--border);border-radius:8px;padding:6px 10px;background:transparent;color:var(--foreground);font:inherit;font-size:13px;font-weight:500;cursor:pointer';
+        const update = () => {
+          summary.textContent = 'Not authorized for the current account.';
         };
         update(info);
         container.replaceChildren(summary, button);

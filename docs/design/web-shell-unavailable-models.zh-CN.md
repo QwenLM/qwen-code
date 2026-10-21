@@ -64,7 +64,7 @@ export type WebShellUnavailableModelTooltipMount = (
 
 ## 提示层
 
-复用 hover-intent Popover，不使用 Tooltip，也不新增 HoverCard。约 300ms 后打开，离开后短延迟关闭，指针进入内容层保持打开，键盘焦点同样打开。Web Shell 拥有定位、开闭、portal 和滚动边界。宿主只填容器。
+复用 hover-intent Popover，不使用 Tooltip，也不新增 HoverCard。约 300ms 后打开，离开后短延迟关闭，指针进入内容层保持打开，键盘焦点同样打开。提示层是固定宽度的卡片：Web Shell 渲染模型名为标题、纯文本 tooltip 为说明。禁用行在 hover/焦点时保持高亮。Web Shell 拥有定位、开闭、portal 和滚动边界。宿主只填标题下方的区域。
 
 提示层带标记，父选择器忽略其外部指针事件，用户点击「去授权」时不会关掉模型列表。提示层内的点击不选中该模型。
 

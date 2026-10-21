@@ -876,7 +876,7 @@ Live 和频道右侧标题都为「设置」，左栏标题与首页品牌名共
 />
 ```
 
-需要按钮（例如引导授权）时，使用 `mountUnavailableModelTooltip`。公开载荷只有纯数据和一个 `HTMLElement`，Solid 或原生 DOM 宿主不必构造 React 元素：
+提示层由 Web Shell 渲染为卡片：模型名作为标题，`tooltip` 作为说明。需要按钮（例如引导授权）时，使用 `mountUnavailableModelTooltip`；宿主只填标题下方的内容。公开载荷只有纯数据和一个 `HTMLElement`，Solid 或原生 DOM 宿主不必构造 React 元素：
 
 ```js
 import { render } from 'solid-js/web';
@@ -887,7 +887,7 @@ function mountUnavailableModelTooltip(container, info) {
   const dispose = render(
     () => (
       <div>
-        <p>{model().label ?? model().id} 未授权</p>
+        <p>当前账号未授权该模型。</p>
         <button type="button" onClick={() => authorize(model().id)}>
           去授权
         </button>

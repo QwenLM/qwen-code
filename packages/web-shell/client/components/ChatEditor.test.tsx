@@ -4191,6 +4191,10 @@ describe('ChatEditor toolbar popovers', () => {
     const hint = document.querySelector(
       '[data-web-shell-unavailable-model-tooltip]',
     );
+    expect(
+      hint?.querySelector('[data-web-shell-unavailable-model-title]')
+        ?.textContent,
+    ).toBe('Qwen Max');
     expect(hint?.textContent).toContain('Need Pro');
   });
 

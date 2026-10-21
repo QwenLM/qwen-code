@@ -70,6 +70,10 @@ describe('UnavailableModelTooltip', () => {
     });
     expect(mount).toHaveBeenCalledTimes(1);
     expect(
+      document.querySelector('[data-web-shell-unavailable-model-title]')
+        ?.textContent,
+    ).toBe('Qwen Max');
+    expect(
       document.querySelector('[data-web-shell-unavailable-model-host]')
         ?.textContent,
     ).toBe('qwen-max');
@@ -106,9 +110,13 @@ describe('UnavailableModelTooltip', () => {
         .querySelector<HTMLButtonElement>('[data-testid="trigger"]')
         ?.focus();
     });
+    const hint = document.querySelector(
+      '[data-web-shell-unavailable-model-tooltip]',
+    );
     expect(
-      document.querySelector('[data-web-shell-unavailable-model-tooltip]')
+      hint?.querySelector('[data-web-shell-unavailable-model-title]')
         ?.textContent,
-    ).toContain('Need Pro');
+    ).toBe('Qwen Max');
+    expect(hint?.textContent).toContain('Need Pro');
   });
 });
