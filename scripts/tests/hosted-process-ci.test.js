@@ -767,16 +767,18 @@ describe('Hosted real-process gates', () => {
       // retry-reuse cell adds 11 s (2x its measured 5.3 s), moving the fork to
       // 10650 and the step stays 188 minutes; the FG12d Spring-restart
       // owner-release cell adds 24 s (2x its measured 11.9 s), moving the fork
-      // to 10674; the FG13a result store ack-loss cell adds 150 s, moving the
-      // fork to 10824 and the step to 191 minutes; the FG13a dispatch
-      // ack-loss cell adds 150 s, moving the fork to 10974 and the step to
-      // 193 minutes; the FG13a registration-settle ack-loss cell adds 150 s,
-      // moving the fork to 11124 and the step to 196 minutes):
+      // to 10674; the FG11d settled-outcome cell adds 9 s (2x its measured
+      // 4.5 s), moving the fork to 10683; the FG13a result store ack-loss
+      // cell adds 150 s, moving the fork to 10833 and the step to 191
+      // minutes; the FG13a dispatch ack-loss cell adds 150 s, moving the fork
+      // to 10983 and the step to 194 minutes; the FG13a registration-settle
+      // ack-loss cell adds 150 s, moving the fork to 11133 and the step to
+      // 196 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11124);
+        expect(forkSeconds).toBe(11133);
       }
     },
   );
@@ -862,15 +864,16 @@ describe('Hosted real-process gates', () => {
   // FG12d cancel-before-dispatch cell adds 18s (2x its measured 9.1s), so it
   // becomes 10039s; the retry-reuse cell adds 11s (2x its measured 5.3s), so it
   // becomes 10050s; the FG12d Spring-restart owner-release cell adds 24s (2x
-  // its measured 11.9s), so it becomes 10074s; the FG13a result store ack-loss
-  // cell adds 150s, so it becomes 10224s; the FG13a dispatch ack-loss cell
-  // adds 150s, so it becomes 10374s; the FG13a registration-settle ack-loss
-  // cell adds 150s, so it becomes 10524s. The largest
+  // its measured 11.9s), so it becomes 10074s; the settled-outcome cell adds
+  // 9s (2x its measured 4.5s), so it becomes 10083s; the FG13a result store
+  // ack-loss cell adds 150s, so it becomes 10233s; the FG13a dispatch
+  // ack-loss cell adds 150s, so it becomes 10383s; the FG13a registration-settle
+  // ack-loss cell adds 150s, so it becomes 10533s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10524;
+  const hostedForkHealthySeconds = 10533;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
