@@ -162,13 +162,15 @@ PR 提交之后，作者还得一直盯着：CI 在没测过的平台上失败�
 - 只有 CI 还在跑时，动作是 `wait`。CI 在跑的同时仍然可以修可信评论，因为下一次推送反正会重新触发 CI。
 - 评论 id 既不在 `handledCommentIds` 也不在 `postedCommentIds` 里、且正文不带回复标记（第 9 节）时，才算新评论。已 resolve 的 thread、空的或 pending 的 review 会被跳过；outdated 的 thread 会保留，并带上 `outdated: true`。
 - head SHA 和 `lastKnownHeadSha` 不同、且不在 `pushedShas` 里，记为 `head_moved_externally`。
-- `truncated` 列出条目数超过查询读取范围的连接（`checks`、`reviewThreads`）。
+- `truncated` 列出条目数超过查询读取范围的连接（`checks`、`reviewThreadComments`、`reviewThreads`、`reviews`、`comments`）。
 
 动作优先级：`stop`（已合并或已关闭）→ `resync`（head 被别人移动）→ `fix`（冲突、失败的检查或可信评论）→ `wait`。循环会再加两个输入：预算用完时为 `stop`，修复进行中（状态文件里有 `inFlight`）时为 `wait`。
 
 ### 6.3 `ci-log <pr> <run-id> [--lines 200]`
 
-把失败 job 的日志（`gh run view --log-failed`）按每个 job 截取最后 `--lines` 行，并注明省略了多少行，写到 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`，然后输出路径和 job 名称。修复 agent 读这个文件，而不是把日志通过 shell 预览输出。`--lines` 必须是正整数。
+把该 run 中已结束且失败或超时的每个 job 的日志在该 job 最后一行 `##[error]` 之后截断（之后是 post-job 清理步骤），再按 job 截取最后 `--lines` 行，并注明省略了多少行，写到 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`，然后输出路径和 job 名称。修复 agent 读这个文件，而不是把日志通过 shell 预览输出。`--lines` 必须是正整数。
+
+每个 job 的日志通过 REST jobs 接口读取，而不是 `gh run view --log-failed`：`gh run view`（加不加 `--job` 都一样）会拒绝仍在运行的 run，而 `snapshot` 在一个 job 失败时就会报告它，这时同一 run 的其他 job 可能还在跑。
 
 ### 6.4 `push <pr>`
 
@@ -200,7 +202,9 @@ snapshot
        1. conflict  → merge origin/<base> in the worktree (merge, never rebase)
        2. ci_failed → ci-log; the agent decides between a code fix and
                       "infrastructure" → gh run rerun <runId> --failed
-                      (at most once per check per head SHA)
+                      (at most once per check per head SHA, and only once
+                      the run has finished: GitHub refuses to rerun a run
+                      in progress)
        3. trusted comments → address or decline with a reason
        4. verify (targeted tests, lint, typecheck chosen from the repo's docs)
        5. commit → push → reply

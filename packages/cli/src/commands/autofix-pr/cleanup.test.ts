@@ -203,6 +203,14 @@ describe('runCleanup (real git)', () => {
     expect(existsSync(paths.worktreePath)).toBe(true);
   });
 
+  it('counts a subdirectory whose name starts with two dots as inside', () => {
+    const sub = join(paths.worktreePath, '..cache');
+    mkdirSync(sub);
+    process.chdir(sub);
+    expect(() => runCleanup(7, false)).toThrow(/from inside it/);
+    expect(existsSync(paths.worktreePath)).toBe(true);
+  });
+
   it('finds the watch from another worktree of the clone', () => {
     const other = join(repo, '..', `${repo.split('/').at(-1)}-other`);
     run(repo, 'worktree', 'add', '-q', '--detach', other);

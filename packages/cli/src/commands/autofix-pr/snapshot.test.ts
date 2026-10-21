@@ -58,8 +58,8 @@ function pr(overrides: Partial<PrData> = {}, contexts: Contexts = []): PrData {
       ],
     },
     reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
-    reviews: { nodes: [] },
-    comments: { nodes: [] },
+    reviews: { pageInfo: { hasPreviousPage: false }, nodes: [] },
+    comments: { pageInfo: { hasPreviousPage: false }, nodes: [] },
     ...overrides,
   };
 }
@@ -97,7 +97,7 @@ function thread(
     isOutdated: extra.isOutdated ?? false,
     path: 'src/a.ts',
     line: 3,
-    comments: { nodes: comments },
+    comments: { pageInfo: { hasNextPage: false }, nodes: comments },
   };
 }
 
@@ -313,7 +313,12 @@ describe('buildSnapshot', () => {
 
   it('waits on untrusted comments alone', () => {
     const snap = buildSnapshot(
-      pr({ comments: { nodes: [comment('I1', 'stranger', 'CONTRIBUTOR')] } }),
+      pr({
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [comment('I1', 'stranger', 'CONTRIBUTOR')],
+        },
+      }),
       state(),
     );
     expect(snap.action).toBe('wait');
@@ -329,7 +334,12 @@ describe('buildSnapshot', () => {
 
   it('treats a deleted author as untrusted', () => {
     const ghost = { ...comment('I1', 'x', 'OWNER'), author: null };
-    const snap = buildSnapshot(pr({ comments: { nodes: [ghost] } }), state());
+    const snap = buildSnapshot(
+      pr({
+        comments: { pageInfo: { hasPreviousPage: false }, nodes: [ghost] },
+      }),
+      state(),
+    );
     expect(snap.events).toEqual([
       {
         type: 'untrusted_comment',
@@ -344,6 +354,7 @@ describe('buildSnapshot', () => {
     const snap = buildSnapshot(
       pr({
         comments: {
+          pageInfo: { hasPreviousPage: false },
           nodes: [comment('I1', 'coverage', 'NONE', { bot: true })],
         },
       }),
@@ -356,6 +367,7 @@ describe('buildSnapshot', () => {
     const snap = buildSnapshot(
       pr({
         comments: {
+          pageInfo: { hasPreviousPage: false },
           nodes: [
             comment('I1', 'me', 'OWNER', {
               body: `Fixed in abc\n${REPLY_MARKER}`,
@@ -389,6 +401,7 @@ describe('buildSnapshot', () => {
     const snap = buildSnapshot(
       pr({
         reviews: {
+          pageInfo: { hasPreviousPage: false },
           nodes: [
             comment('R1', 'a', 'MEMBER', { body: '', state: 'APPROVED' }),
             comment('R2', 'a', 'MEMBER', { state: 'PENDING' }),
@@ -419,9 +432,21 @@ describe('buildSnapshot', () => {
     const data = pr();
     data.commits.nodes[0].commit.statusCheckRollup!.contexts.pageInfo.hasNextPage = true;
     data.reviewThreads.pageInfo.hasNextPage = true;
+    data.reviewThreads.nodes = [
+      thread('T1', [comment('C1', 'alice', 'MEMBER')]),
+      thread('T2', [comment('C2', 'alice', 'MEMBER')]),
+    ];
+    for (const node of data.reviewThreads.nodes) {
+      node.comments.pageInfo.hasNextPage = true;
+    }
+    data.reviews.pageInfo.hasPreviousPage = true;
+    data.comments.pageInfo.hasPreviousPage = true;
     expect(buildSnapshot(data, state()).truncated).toEqual([
       'checks',
+      'reviewThreadComments',
       'reviewThreads',
+      'reviews',
+      'comments',
     ]);
   });
 });

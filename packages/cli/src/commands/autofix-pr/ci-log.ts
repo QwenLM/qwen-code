@@ -11,60 +11,101 @@
 import type { CommandModule } from 'yargs';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
 import {
   assertOwnedBySession,
+  assertPositiveInteger,
   autofixPrPaths,
   repoRoot,
   requireState,
 } from './state.js';
 
+const FAILED_JOB_CONCLUSIONS = new Set(['failure', 'timed_out']);
+
+interface JobLog {
+  name: string;
+  log: string;
+}
+
 /**
- * Keep the last `limit` lines of every job. `gh run view --log-failed`
- * prints `<job>\t<step>\t<line>`; the failure is almost always at the end.
+ * Keep the last `limit` lines of every job up to its last `##[error]` line,
+ * each prefixed with its job name. A job's log runs on through the post-job
+ * cleanup steps; the failure is at the end of the step that failed.
  */
 export function tailPerJob(
-  log: string,
+  jobs: JobLog[],
   limit: number,
 ): { text: string; jobs: string[] } {
-  const byJob = new Map<string, string[]>();
-  for (const line of log.split('\n')) {
-    if (line === '') continue;
-    const job = line.slice(0, Math.max(line.indexOf('\t'), 0));
-    const lines = byJob.get(job) ?? [];
-    lines.push(line);
-    byJob.set(job, lines);
-  }
   const parts: string[] = [];
-  for (const [job, lines] of byJob) {
+  for (const { name, log } of jobs) {
+    let lines = log.split('\n').filter((line) => line !== '');
+    const lastError = lines.findLastIndex((line) => line.includes('##[error]'));
+    const later = lastError === -1 ? 0 : lines.length - lastError - 1;
+    if (later > 0) lines = lines.slice(0, lastError + 1);
     const dropped = lines.length - limit;
-    if (dropped > 0) parts.push(`${job}\t… ${dropped} earlier lines omitted`);
-    parts.push(...lines.slice(-limit));
+    if (dropped > 0) parts.push(`${name}\t… ${dropped} earlier lines omitted`);
+    parts.push(...lines.slice(-limit).map((line) => `${name}\t${line}`));
+    if (later > 0) parts.push(`${name}\t… ${later} later lines omitted`);
   }
-  return { text: `${parts.join('\n')}\n`, jobs: [...byJob.keys()] };
+  return { text: `${parts.join('\n')}\n`, jobs: jobs.map((job) => job.name) };
+}
+
+/**
+ * One job's log. `gh run view --log-failed` (and `--job`) refuses any run
+ * still in progress, while `snapshot` reports a failed job as soon as it
+ * fails; the REST endpoint serves a finished job's log either way.
+ */
+function jobLog(repo: string, jobId: number): string {
+  const path = `repos/${repo}/actions/jobs/${jobId}/logs`;
+  let log: string;
+  try {
+    // Newer gh refuses to print a response with terminal escape sequences
+    // without this flag; older gh has neither the check nor the flag.
+    log = gh('api', '--allow-escape-sequences', path);
+  } catch (err) {
+    if (
+      !String((err as { stderr?: unknown }).stderr).includes('unknown flag')
+    ) {
+      throw err;
+    }
+    log = gh('api', path);
+  }
+  return stripVTControlCharacters(log);
 }
 
 export function runCiLog(prNumber: number, runId: number, limit: number): void {
   // `slice(-0)` and `slice(NaN)` both keep the whole log.
-  if (!Number.isInteger(limit) || limit < 1) {
-    throw new TypeError(`--lines must be a positive integer, got ${limit}`);
-  }
+  assertPositiveInteger(limit, '--lines');
+  assertPositiveInteger(runId, 'run id');
   const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
   const state = requireState(paths.statePath, prNumber);
   assertOwnedBySession(state);
   setGhHost(state.host);
   ensureAuthenticated();
-  const log = gh(
-    'run',
-    'view',
-    String(runId),
-    '-R',
-    `${state.owner}/${state.repo}`,
-    '--log-failed',
+  const repo = `${state.owner}/${state.repo}`;
+  // Only finished failures: a job still running may yet pass, and its log is
+  // not complete.
+  const failed = gh(
+    'api',
+    '--paginate',
+    `repos/${repo}/actions/runs/${runId}/jobs?per_page=100`,
+    '--jq',
+    '.jobs[] | select(.status == "completed") | {id, name, conclusion}',
+  )
+    .split('\n')
+    .filter((line) => line !== '')
+    .map(
+      (line) =>
+        JSON.parse(line) as { id: number; name: string; conclusion: string },
+    )
+    .filter((job) => FAILED_JOB_CONCLUSIONS.has(job.conclusion));
+  const { text, jobs } = tailPerJob(
+    failed.map((job) => ({ name: job.name, log: jobLog(repo, job.id) })),
+    limit,
   );
-  const { text, jobs } = tailPerJob(log, limit);
   const path = join(
     root,
     '.qwen',

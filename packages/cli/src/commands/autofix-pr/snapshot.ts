@@ -55,14 +55,17 @@ const PR_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
           path
           line
           comments(first: 100) {
+            pageInfo { hasNextPage }
             nodes { id databaseId author { __typename login } authorAssociation body url }
           }
         }
       }
       reviews(last: 100) {
+        pageInfo { hasPreviousPage }
         nodes { id author { __typename login } authorAssociation state body url }
       }
       comments(last: 100) {
+        pageInfo { hasPreviousPage }
         nodes { id author { __typename login } authorAssociation body url }
       }
     }
@@ -126,11 +129,21 @@ export interface PrData {
       isOutdated: boolean;
       path: string;
       line: number | null;
-      comments: { nodes: CommentNode[] };
+      comments: {
+        pageInfo: { hasNextPage: boolean };
+        nodes: CommentNode[];
+      };
     }>;
   };
-  reviews: { nodes: CommentNode[] };
-  comments: { nodes: CommentNode[] };
+  // `last: 100`: what is cut is the oldest entries.
+  reviews: {
+    pageInfo: { hasPreviousPage: boolean };
+    nodes: CommentNode[];
+  };
+  comments: {
+    pageInfo: { hasPreviousPage: boolean };
+    nodes: CommentNode[];
+  };
 }
 
 export type Trust = 'owner' | 'member' | 'collaborator' | 'pr_author' | 'bot';
@@ -305,6 +318,12 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
 
   for (const thread of pr.reviewThreads.nodes) {
     if (thread.isResolved) continue;
+    if (
+      thread.comments.pageInfo.hasNextPage &&
+      !truncated.includes('reviewThreadComments')
+    ) {
+      truncated.push('reviewThreadComments');
+    }
     const comments: CommentRef[] = [];
     for (const node of thread.comments.nodes.filter(isNew)) {
       const trust = classify(node, 'thread', state.prAuthor);
@@ -326,6 +345,7 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
 
   // A review's inline comments arrive through its threads; only a review
   // with a body of its own says something the threads do not.
+  if (pr.reviews.pageInfo.hasPreviousPage) truncated.push('reviews');
   for (const node of pr.reviews.nodes) {
     if (node.state === 'PENDING' || !node.body.trim() || !isNew(node)) continue;
     const trust = classify(node, 'review', state.prAuthor);
@@ -335,6 +355,7 @@ export function buildSnapshot(pr: PrData, state: AutofixPrState): Snapshot {
     }
   }
 
+  if (pr.comments.pageInfo.hasPreviousPage) truncated.push('comments');
   for (const node of pr.comments.nodes) {
     if (!isNew(node)) continue;
     const trust = classify(node, 'issue_comment', state.prAuthor);

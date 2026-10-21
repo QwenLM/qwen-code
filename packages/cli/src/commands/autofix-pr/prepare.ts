@@ -150,8 +150,12 @@ export function runPrepare(args: PrepareArgs): void {
           `Run \`qwen autofix-pr cleanup ${args.pr}\` first.`,
       );
     }
-    if (existsSync(existing.worktreePath)) {
-      report(existing, { resumed: true });
+    // The recorded path goes stale when the clone moves; this one does not.
+    if (existsSync(paths.worktreePath)) {
+      report(
+        { ...existing, worktreePath: paths.worktreePath },
+        { resumed: true },
+      );
       return;
     }
   }

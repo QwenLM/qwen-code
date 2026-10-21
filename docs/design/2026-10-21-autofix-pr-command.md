@@ -227,8 +227,9 @@ Event rules:
   outdated threads are kept with `outdated: true`.
 - A head SHA that differs from `lastKnownHeadSha` and is not in `pushedShas`
   is `head_moved_externally`.
-- `truncated` names the connections (`checks`, `reviewThreads`) that had more
-  entries than the query reads.
+- `truncated` names the connections (`checks`, `reviewThreadComments`,
+  `reviewThreads`, `reviews`, `comments`) that had more entries than the
+  query reads.
 
 Action precedence: `stop` (merged or closed) → `resync` (head moved
 externally) → `fix` (a conflict, a failed check or a trusted comment) →
@@ -237,11 +238,18 @@ fix in flight (`inFlight` in the state file) means `wait`.
 
 ### 6.3 `ci-log <pr> <run-id> [--lines 200]`
 
-Writes the failed jobs' log (`gh run view --log-failed`), trimmed to the last
-`--lines` lines per job with a note of how many were omitted, to
+Writes the log of each finished job of the run that failed or timed out,
+cut after the job's last `##[error]` line (what follows is post-job cleanup)
+and trimmed to the last `--lines` lines per job, with a note of how many were
+omitted, to
 `.qwen/tmp/autofix-pr-<n>-ci-<run-id>.log`, and prints the path and the job
 names. The fix agent reads that file instead of piping logs into a shell
 preview. `--lines` must be a positive integer.
+
+Each job's log comes from the REST jobs endpoint, not `gh run view
+--log-failed`: `gh run view` (with or without `--job`) refuses a run that is
+still in progress, and `snapshot` reports a failed job as soon as it fails,
+while other jobs of the same run may still be running.
 
 ### 6.4 `push <pr>`
 
@@ -291,7 +299,9 @@ snapshot
        1. conflict  → merge origin/<base> in the worktree (merge, never rebase)
        2. ci_failed → ci-log; the agent decides between a code fix and
                       "infrastructure" → gh run rerun <runId> --failed
-                      (at most once per check per head SHA)
+                      (at most once per check per head SHA, and only once
+                      the run has finished: GitHub refuses to rerun a run
+                      in progress)
        3. trusted comments → address or decline with a reason
        4. verify (targeted tests, lint, typecheck chosen from the repo's docs)
        5. commit → push → reply

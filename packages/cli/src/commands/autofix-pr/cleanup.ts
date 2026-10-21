@@ -10,7 +10,8 @@
 
 import type { CommandModule } from 'yargs';
 import { existsSync, readdirSync, realpathSync, rmSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, join } from 'node:path';
+import { isWithinRoot } from '../../config/path-comparison.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt, refExists, releaseWorktree } from '../review/lib/git.js';
 import {
@@ -66,17 +67,12 @@ export function unsavedWork(
     : `${where} has ${ahead} commit(s) the PR does not have`;
 }
 
-function isWithin(parent: string, child: string): boolean {
-  const rel = relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-}
-
 export function runCleanup(prNumber: number, force: boolean): void {
   const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
   if (
     existsSync(paths.worktreePath) &&
-    isWithin(realpathSync(paths.worktreePath), realpathSync(process.cwd()))
+    isWithinRoot(realpathSync(process.cwd()), realpathSync(paths.worktreePath))
   ) {
     throw new Error(
       `cannot remove ${paths.worktreePath} from inside it; run cleanup from ${root}.`,

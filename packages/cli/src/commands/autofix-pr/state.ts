@@ -56,7 +56,16 @@ export function repoRoot(): string {
   return first.slice('worktree '.length);
 }
 
+/** Throws unless `value` is a positive integer; `what` names it. */
+export function assertPositiveInteger(value: number, what: string): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new TypeError(`${what} must be a positive integer, got ${value}`);
+  }
+}
+
 export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
+  // The number goes into file names, the branch name and `refs/pull/<n>/head`.
+  assertPositiveInteger(prNumber, 'PR number');
   const tmp = join(root, '.qwen', 'tmp');
   return {
     worktreePath: join(tmp, `autofix-pr-${prNumber}`),
