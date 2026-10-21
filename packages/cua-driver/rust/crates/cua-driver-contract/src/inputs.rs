@@ -586,6 +586,12 @@ pub struct GetWindowStateInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "boolean_schema")]
     pub include_screenshot: Option<bool>,
+    /// macOS 14.2+: include child content in this screenshot only. Default false.
+    /// Keeps the requested window coordinate frame and accessibility scope.
+    #[uniffi(default = None)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "boolean_schema")]
+    pub include_child_windows: Option<bool>,
     /// Write the PNG here instead of returning base64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "string_schema")]

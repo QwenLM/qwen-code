@@ -471,6 +471,16 @@ capture, no mode flip.
 > element ax action** and don't need to re-ground on pixels. The
 > `ax`/`px` decision still lives at action time, not here.
 
+On macOS 14.2+, `include_child_windows:true` requests child content inside the
+requested window's screenshot for this observation only. It requires Metal and
+an on-screen window fully contained in one display; attached-window crops and
+unconfirmed attachment state are unsupported. It preserves the window frame and
+AX scope, clips content outside that frame, and hides the cursor. The option
+only affects requested captures (`include_screenshot` or `screenshot_out_file`).
+If capture fails, retain AX actions and inspect `screenshot_error`. Omit the
+option or set it to false to request default capture. Use coordinates only from
+a successful current screenshot. Other platforms reject true.
+
 > **`capture_mode` is DEPRECATED and ignored.** It is still _accepted_
 > on `get_window_state` so old callers don't error, but it has **no
 > effect** — both the tree and the screenshot come back regardless of

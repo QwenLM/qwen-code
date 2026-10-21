@@ -2242,6 +2242,11 @@ export type GetWindowStateInput = {
      */
     includeScreenshot?: boolean,
     /**
+     * macOS 14.2+: include child content in this screenshot only. Default false.
+     * Keeps the requested window coordinate frame and accessibility scope.
+     */
+    includeChildWindows?: boolean,
+    /**
      * Write the PNG here instead of returning base64.
      */
     screenshotOutFile?: string,
@@ -2269,6 +2274,7 @@ export type GetWindowStateInput = {
  */
 export const GetWindowStateInput = (() => {
     const defaults = () => ({
+        includeChildWindows: undefined,
         appContext: undefined,
     });
     const create = (() => {
@@ -2291,6 +2297,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
                 session: FfiConverterOptionalString.read(from),
                 query: FfiConverterOptionalString.read(from),
                 includeScreenshot: FfiConverterOptionalBoolean.read(from),
+                includeChildWindows: FfiConverterOptionalBoolean.read(from),
                 screenshotOutFile: FfiConverterOptionalString.read(from),
                 maxElements: FfiConverterOptionalUInt32.read(from),
                 maxDepth: FfiConverterOptionalUInt32.read(from),
@@ -2304,6 +2311,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
             FfiConverterOptionalString.write(value.session, into);
             FfiConverterOptionalString.write(value.query, into);
             FfiConverterOptionalBoolean.write(value.includeScreenshot, into);
+            FfiConverterOptionalBoolean.write(value.includeChildWindows, into);
             FfiConverterOptionalString.write(value.screenshotOutFile, into);
             FfiConverterOptionalUInt32.write(value.maxElements, into);
             FfiConverterOptionalUInt32.write(value.maxDepth, into);
@@ -2316,6 +2324,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
              FfiConverterOptionalString.allocationSize(value.session) +
              FfiConverterOptionalString.allocationSize(value.query) +
              FfiConverterOptionalBoolean.allocationSize(value.includeScreenshot) +
+             FfiConverterOptionalBoolean.allocationSize(value.includeChildWindows) +
              FfiConverterOptionalString.allocationSize(value.screenshotOutFile) +
              FfiConverterOptionalUInt32.allocationSize(value.maxElements) +
              FfiConverterOptionalUInt32.allocationSize(value.maxDepth) +

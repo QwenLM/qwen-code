@@ -219,6 +219,190 @@ test("app observations retain a current screenshot without exposing it by defaul
   );
 });
 
+test("child-window capture is per observation and keeps native targets and input", async () => {
+  const { computer, calls } = fixture();
+  const app = await computer.getApp("Fixture");
+  await app.getState({ includeScreenshot: true });
+  const expanded = await app.getState({
+    includeScreenshot: true,
+    includeChildWindows: true,
+  });
+  assert.equal(expanded.window, "Document");
+  assert.equal(expanded.text, compactState);
+  await app.click(37);
+  assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+  await app.click({ x: 12, y: 23 });
+  assert.equal(calls.at(-1).input.windowId, 7n);
+  assert.equal(calls.at(-1).input.x, 12);
+  assert.equal(calls.at(-1).input.y, 23);
+  assert.equal(calls.at(-1).input.deliveryMode, "foreground");
+  await app.getState();
+  await app.getState({ includeChildWindows: false });
+  assert.deepEqual(
+    calls.filter((call) => call.method === "getWindowState")
+      .map((call) => call.input.includeChildWindows),
+    [undefined, true, undefined, false],
+  );
+});
+
+test("invalid child-window options fail before launching an app", async () => {
+  const apps = [{ ...appRecord, running: false, pid: 0 }];
+  const { computer, calls } = fixture({ apps, launch: () => Object.assign(apps[0], appRecord) });
+  const app = await computer.getApp("Fixture");
+  const before = calls.length;
+  await assert.rejects(
+    app.getState({ includeChildWindows: "true" }),
+    /must be a boolean/,
+  );
+  assert.equal(calls.length, before);
+});
+
+test("invalid child-window options retain the current App observation", async () => {
+  const { computer, calls } = fixture();
+  const app = await computer.getApp("Fixture");
+  await app.getState();
+  const before = calls.length;
+  await assert.rejects(app.getState({ includeChildWindows: "true" }), /must be a boolean/);
+  assert.equal(calls.length, before);
+  await app.click(37);
+  assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
+});
+
+test("failed child-window capture explains the missing image and retains AX actions", async () => {
+  const { computer, calls } = fixture({ observe: (_input, state, count) => count === 1 ? state : {
+    ...state,
+    screenshot_width: undefined,
+    screenshot_height: undefined,
+    screenshot_frame_valid: false,
+    screenshot_error: { reason: "ScreenCaptureKit capture timed out after 3000 ms" },
+  } });
+  const app = await computer.getApp("Fixture");
+  await app.getState({ includeScreenshot: true, includeChildWindows: true });
+  const failed = await app.getState({ includeScreenshot: true, includeChildWindows: true });
+  assert.equal(failed.screenshot, undefined);
+  assert.match(failed.text, /Child-window screenshot unavailable/);
+  assert.match(failed.text, /timed out after 3000 ms/);
+  assert.match(failed.text, /includeChildWindows: false/);
+  assert.ok(failed.text.includes(compactState));
+  await assert.rejects(app.click({ x: 12, y: 23 }), { code: "app_screenshot_required" });
+  assert.equal(calls.filter((call) => call.method === "windowClick").length, 0);
+  await app.click(37);
+  assert.equal(calls.at(-1).input.elementToken, "rv1:window_7:25");
+  const ordinary = await app.getState({ includeScreenshot: true });
+  assert.equal(ordinary.text, compactState);
+});
+
+for (const appContext of [true, false]) for (const maxTextChars of [512, 12_000]) {
+  test(`child-window and AX failures use the ${maxTextChars} text budget (${appContext ? "App" : "window"})`, async () => {
+    const { computer } = fixture({ observe: (_input, state) => ({
+      ...state,
+      tree_markdown: '[37] Button "Save"\n' + "More AX text\n".repeat(100),
+      screenshot_width: undefined,
+      screenshot_height: undefined,
+      screenshot_frame_valid: false,
+      screenshot_error: { reason: "child-window capture is unavailable: " + "long diagnostic ".repeat(30) },
+      observation_revision: {
+        ...state.observation_revision,
+        capture_complete: false,
+        capture_read_complete: false,
+        capture_incomplete_details: [
+          "AXChildren: ax_error -25204",
+          "AXRole: required role value unavailable",
+          "AXTitle: ax_error -25204",
+          "AXValue: ax_error -25204",
+          "AXFrame: null or undecodable value",
+          "AXSheet discovery: attachment reads incomplete or bounded",
+        ],
+      },
+    }) });
+    const app = await computer.getApp("Fixture");
+    const observe = (options) => appContext
+      ? app.getState(options)
+      : computer.observeWindow({ pid: 42, windowId: 7, ...options });
+    const failed = await observe({ includeScreenshot: true, includeChildWindows: true, maxTextChars });
+    assert.ok(failed.text.length <= maxTextChars);
+    assert.match(failed.text, /Child-window screenshot unavailable: child-window capture is unavailable/);
+    assert.match(failed.text, /includeChildWindows: false/);
+    assert.match(failed.text, /Accessibility capture is incomplete/);
+    assert.match(failed.text, /AXChildren: ax_error -25204/);
+    assert.match(failed.text, /\[37\] Button "Save"/);
+    assert.match(failed.text.split("\n").find((line) => line.startsWith("Capture details:")), /…$/);
+    if (maxTextChars === 512) assert.match(failed.text, /Text truncated/);
+    else assert.match(failed.text, /AXRole: required role value unavailable/);
+    const ordinary = await observe({ maxTextChars });
+    const explicitFalse = await observe({ includeChildWindows: false, maxTextChars });
+    assert.equal(ordinary.text, explicitFalse.text);
+    assert.doesNotMatch(ordinary.text, /Child-window screenshot/);
+  });
+}
+
+for (const screenshotError of [
+  { code: "px_frame_mismatch" },
+  { code: "px_window_not_found" },
+  { code: "px_capture_unavailable", reason: `ScreenCaptureKit ${"capture diagnostic ".repeat(20)}Code=-3801` },
+]) {
+  test(`App screenshot diagnostics retain ${screenshotError.code}`, async () => {
+    const { computer } = fixture({ observe: (_input, state) => ({
+      ...state,
+      screenshot_frame_valid: false,
+      screenshot_error: screenshotError,
+    }) });
+    const app = await computer.getApp("Fixture");
+    const state = await app.getState({ includeChildWindows: true, maxTextChars: 512 });
+    assert.ok(state.text.length <= 512);
+    assert.ok(state.text.includes(screenshotError.code));
+    if (screenshotError.reason) {
+      assert.match(state.text, /….*Code=-3801/);
+    } else {
+      assert.match(state.text, /Re-observe the current window/);
+      assert.doesNotMatch(state.text, /retry with includeChildWindows: false/);
+    }
+    await assert.rejects(app.click({ x: 1, y: 2 }), { code: "app_screenshot_required" });
+    await app.click(37);
+  });
+}
+
+for (const platform of ["macos", "windows", "linux"]) {
+  test(`cached ${platform} still validates cancellation and closed state`, async () => {
+    const { computer, calls } = fixture({ platform });
+    const app = await computer.getApp("Fixture");
+    await computer.getPlatform();
+    const before = calls.length;
+    for (const observe of [
+      (signal) => app.getState({ includeChildWindows: true, signal }),
+      (signal) => computer.observeWindow({ pid: 42, windowId: 7, includeChildWindows: true, signal }),
+    ]) {
+      await assert.rejects(observe(AbortSignal.abort()), { code: "call_cancelled" });
+      await assert.rejects(observe({}), /AbortSignal/);
+    }
+    await computer.close();
+    await assert.rejects(app.getState({ includeChildWindows: true }), /closed/);
+    await assert.rejects(computer.observeWindow({ pid: 42, windowId: 7, includeChildWindows: true }), /closed/);
+    assert.equal(calls.length, before);
+  });
+}
+
+for (const platform of ["windows", "linux"]) {
+  test(`${platform} rejects expanded capture but preserves default and false`, async () => {
+    const apps = [{ ...appRecord, running: false, pid: 0 }];
+    const { computer, calls } = fixture({ platform, apps, launch: () => Object.assign(apps[0], appRecord) });
+    const app = await computer.getApp("Fixture");
+    const before = calls.length;
+    await assert.rejects(app.getState({ includeChildWindows: true }), {
+      code: "unsupported_platform",
+    });
+    assert.equal(calls.length, before);
+    await app.getState();
+    await app.getState({ includeChildWindows: false });
+    assert.deepEqual(
+      calls.filter((call) => call.method === "getWindowState")
+        .map((call) => call.input.includeChildWindows),
+      [undefined, false],
+    );
+  });
+}
+
 test("coordinates reject a screenshot frame that native marked invalid", async () => {
   const { computer, calls } = fixture({ observe: (_input, state) => ({
     ...state,

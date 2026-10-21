@@ -141,6 +141,7 @@ export class ComputerUseApp {
     if (options.includeScreenshot !== undefined && typeof options.includeScreenshot !== "boolean") {
       throw new ComputerUseError("includeScreenshot must be a boolean");
     }
+    await this.#computer.validateChildWindowCapture(options);
     const exposeScreenshot = options.includeScreenshot === true;
     const target = resolved ?? await this.#target(options.signal, { launch: true, allowNoWindow: true });
     if (!target.window) {

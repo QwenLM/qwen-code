@@ -490,6 +490,13 @@ starting point for new browser workflows.
 | `Accessibility permission not granted`                        | TCC not granted                                                                                                   | Stop; tell user to grant in System Settings                                                                                                                                                                                         |
 | `Screen Recording permission not granted`                     | TCC not granted for capture                                                                                       | Screenshots and pixel actions are unavailable. If the task is AX-completable, use `get_window_state({include_screenshot:false})` and element-indexed actions; otherwise stop and ask the user to run `qwen-cua-driver permissions grant` |
 
+For `include_child_windows:true`, unsupported OS/Metal or attached-window
+capture conditions require a different request: omit the option or use false
+for default capture. A timeout may be transient; a missing window requires
+re-listing, and permission errors require the recovery above. Read
+`screenshot_error` and obtain a fresh successful screenshot before pixel input;
+AX actions remain available when the AX observation is valid.
+
 ## Example end-to-end task (macOS)
 
 **User:** "Open the Downloads folder in Finder."
