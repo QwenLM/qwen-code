@@ -3955,6 +3955,7 @@ export const MessageList = memo(
     const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
     if (trackedSessionKey !== sessionKey) {
       setTrackedSessionKey(sessionKey);
+      followPausedByUserRef.current = false;
       pendingPaginationTurnCompares.current.clear();
       olderHistoryLoadGeneration.current += 1;
       olderHistoryLoadInFlight.current = false;

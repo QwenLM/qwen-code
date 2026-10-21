@@ -6418,6 +6418,46 @@ describe('MessageList — turn collapse (DOM)', () => {
     },
   );
 
+  it('resumes follow after switching sessions while paused', async () => {
+    let scrollTop = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, 600));
+      },
+    });
+    const c = mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      sessionKey: 'session-a',
+    });
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300 }));
+      list.scrollTop = 300;
+      list.dispatchEvent(new Event('scroll'));
+    });
+
+    const sessionB = [userMsg('u2'), asstMsg('a2')];
+    rerenderMessages(c, sessionB, {
+      sessionKey: 'session-b',
+      catchingUp: true,
+    });
+    rerenderMessages(c, sessionB, {
+      sessionKey: 'session-b',
+      catchingUp: false,
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(600);
+  });
+
   it('finishes cooldown following unless the user scrolls up', () => {
     resizeObserversFireOnObserve = false;
     let scrollHeight = 1200;
