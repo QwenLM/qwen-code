@@ -130,7 +130,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('keeps the host lock out of every Maven child', () => {
+  it('keeps the host lock out of every locked child', () => {
     const jobs = parse(workflow).jobs;
     const lockedSteps = ['test', 'mysql-integration'].flatMap((name) =>
       jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
@@ -138,25 +138,40 @@ describe('SDK Java self-hosted workflow guards', () => {
     // The MariaDB lane's two Maven steps are one step now (#14903), so the
     // lock-bearing steps are the test job's and this job's single one.
     expect(lockedSteps).toHaveLength(2);
-    for (const s of lockedSteps) {
-      const commands = s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm);
-      expect(commands?.length, s.name).toBeGreaterThan(0);
-      for (const command of commands) {
-        expect(command.trim(), s.name).toMatch(/ 9>&-$/);
-      }
+    // The test job runs Maven under the lock, so every Maven child must drop
+    // fd 9 or a survivor keeps the host lock after the step shell exits.
+    const maven = lockedSteps[0].run.match(/^\s*mvn .+$/gm);
+    expect(maven?.length, lockedSteps[0].name).toBeGreaterThan(0);
+    for (const command of maven) {
+      expect(command.trim(), lockedSteps[0].name).toMatch(/ 9>&-$/);
     }
+    // The MariaDB lane locks only its write-back: both Maven runs are above
+    // the acquisition, and the write-back children drop fd 9 so a cancelled
+    // job's survivor cannot retain the lock.
+    const integration = lockedSteps[1].run;
+    const lockAt = integration.indexOf(
+      'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
+    );
+    expect(
+      integration.indexOf('-f packages/sdk-java/qwencode/pom.xml'),
+    ).toBeLessThan(lockAt);
+    expect(integration.indexOf('-Pmysql-integration')).toBeLessThan(lockAt);
+    expect(integration).toContain('mkdir -p "${HOME}/.m2/repository" 9>&-');
+    expect(integration).toMatch(
+      /tar -C "\$\{RUNNER_TEMP\}\/m2-repo".* 9>&- \\\n\s*\| tar -C "\$\{HOME\}\/\.m2\/repository" --skip-old-files -xf - 9>&-/,
+    );
   });
 
   it.skipIf(process.platform !== 'linux')(
     'retains serialization while Maven runs and releases it with a surviving child',
     () => {
       const jobs = parse(workflow).jobs;
-      const commands = ['test', 'mysql-integration'].flatMap((name) =>
-        jobs[name].steps.flatMap((s) =>
-          s.run?.includes('sdk-java-tests.lock')
-            ? (s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm) ?? [])
-            : [],
-        ),
+      // Only the test job's Maven runs are inside the lock now; the MariaDB
+      // lane's Maven runs resolve from a job-local repository above it.
+      const commands = jobs.test.steps.flatMap((s) =>
+        s.run?.includes('sdk-java-tests.lock')
+          ? (s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm) ?? [])
+          : [],
       );
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-'));
       try {
@@ -954,13 +969,12 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     },
   );
 
-  it('holds the per-host sdk-java lock once around both Maven runs', () => {
-    // Derived from the parsed steps, not a string count: the install and
-    // verify commands share one acquisition — the shared path pinned for the
-    // test job above is what makes the two jobs mutually exclusive on one ECS
-    // host — and wait on it with the pinned literal. Run 39353663670's second
-    // acquisition lost the queue between the two steps and exhausted the wait
-    // without starting Maven.
+  it('holds the per-host sdk-java lock once around the cache write-back', () => {
+    // The Maven runs resolve from the job-local repository, so the lock now
+    // guards only the host-shared cache write-back. Run 39627609266's
+    // fast-tier job burned its full 90-minute wait while the previous
+    // whole-suite hold ran from 15:54 to 18:57 (run 39628985638); a
+    // multi-hour verify must not sit between the fast tier and its hold.
     const parsed = parse(workflow);
     const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
       (s) => typeof s.run === 'string' && s.run.includes('mvn '),
@@ -993,15 +1007,19 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // verify it runs `clean verify` in the wrong module.
     const cdAt = step.run.indexOf('cd packages/managed-agent-server');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
+    const writeBackAt = step.run.indexOf('tar -C "${RUNNER_TEMP}/m2-repo"');
     expect(lockAt).toBeGreaterThan(-1);
-    expect(installAt).toBeGreaterThan(lockAt);
+    expect(installAt).toBeGreaterThan(-1);
+    expect(installAt).toBeLessThan(lockAt);
     expect(cdAt).toBeGreaterThan(installAt);
     expect(verifyAt).toBeGreaterThan(cdAt);
-    // The ceiling must absorb one full lock wait plus the ~60 minutes of
-    // measured Maven work and ~30 minutes of uncapped setup.
+    expect(verifyAt).toBeLessThan(lockAt);
+    expect(writeBackAt).toBeGreaterThan(lockAt);
+    // The ceiling must absorb one full lock wait plus the ~3-hour Maven run
+    // and ~30 minutes of uncapped setup.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
-    ).toBeGreaterThanOrEqual(seconds + 60 * 60 + 30 * 60);
+    ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + 30 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus its own measured hold (the sdk-java suite plus
     // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.

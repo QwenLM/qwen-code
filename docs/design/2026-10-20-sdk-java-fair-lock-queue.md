@@ -32,7 +32,7 @@ hold at a time — no constant budget bounds the queue.
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
   fairness makes their remaining work measurable instead of urgent.
-- Non-goal: changing the 5400 s budget or the 150/280-minute job ceilings.
+- Non-goal: changing the 5400 s budget or the 150/300-minute job ceilings.
 
 ## Design
 
@@ -77,6 +77,24 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   `flock --wait 5400 9` lock they replaced when the helper file is absent,
   rather than dying before Maven and wedging the release permanently.
 
+### Hold scope: the write-back, not the suite
+
+A fair queue still cannot bound a wait that outlasts its budget. The MariaDB
+lane held the lock across its install and its full MySQL `clean verify`; under
+pool contention that verify ran for about three hours (run 39628985638 held it
+15:54-18:57) while the fast tier owns the same lock with a 90-minute wait. Run
+39627609266's fast-tier job arrived at 17:38, stayed head of the queue, and
+failed at 19:15 without starting Maven — the hold, not the queue order, was
+the bound.
+
+Both Maven runs already resolve from a job-local repository, so they touch no
+host-shared state. Only the cache write-back mutates `~/.m2`, so only the
+write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
+and runs before the acquisition; the Maven runs run unlocked; the write-back
+holds one acquisition, and its `mkdir`/`tar` children drop fd 9 so a survivor
+cannot retain the lock. A hold now measures the copy instead of the suite, and
+the fast tier's 90-minute budget is again far above one hold.
+
 ### Why fairness over the alternatives
 
 - Shard the lock by suite: reduces queue frequency but each shard is still a
@@ -111,9 +129,10 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   two waiters, stale-owner reaping, timeout signature and ticket cleanup,
   with `flock` stubbed on `PATH`.
 - The workflow pins move with the mechanism:
-  `scripts/tests/sdk-java-workflow.test.js` now pins the sourced helper and
-  the `sdk_java_lock_acquire 5400` budget at each acquisition site, and the
-  `.size-baseline` records the workflow's new size.
+  `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper and the
+  `sdk_java_lock_acquire 5400` budget at each acquisition site, the MariaDB
+  lane's Maven runs above its acquisition and its write-back children's fd 9
+  close, and the `.size-baseline` records the workflow's new size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
