@@ -12,6 +12,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -62,6 +63,37 @@ case "$*" in
   *) exit 0 ;;
 esac
 `;
+
+// A held lock parks the blocking wait the way the kernel does: it returns
+// only when the test releases the lock or the wait runs out, so a head that
+// entered `flock --wait` never loops again before it is served. Release is
+// not exclusive, so only the order of tickets still waiting is meaningful.
+const parkedFlock = (held, order) => `#!/bin/sh
+case "$*" in
+  *"--wait "*" 9")
+    n=$(($2 * 10))
+    while [ -f "${held}" ]; do
+      [ "$n" -le 0 ] && exit 1
+      n=$((n - 1))
+      sleep 0.1
+    done
+    ;;
+  *" 9") [ -f "${held}" ] && exit 1 ;;
+  *) exit 0 ;;
+esac
+echo "$LOCK_LABEL" >> "${order}"
+`;
+
+const waitFor = async (what, check) => {
+  const deadline = Date.now() + 10000;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(what);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+const hasTicket = (home, pattern) =>
+  existsSync(queueDir(home)) &&
+  readdirSync(queueDir(home)).some((f) => pattern.test(f));
 
 const startAcquire = (
   home,
@@ -172,109 +204,125 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
-    'serves a fast ticket ahead of an older normal ticket',
+    'serves a fast ticket ahead of a normal ticket still waiting its turn',
     { timeout: 30000 },
     async () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-fast-'));
       const held = join(home, 'held');
       const order = join(home, 'order');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held, order));
+      const stub = flockStub(parkedFlock(held, order));
+      // The production shape: the oldest normal ticket is already parked in
+      // `flock --wait` as head, a second normal ticket sleeps behind it, and
+      // only then does the fast ticket arrive.
+      const head = startAcquire(home, 30, stub, '', 'head', {}, 'full');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
       const normal = acquire(home, 30, stub, '', 'normal', {}, 'full');
-      // Wait for the normal ticket instead of a fixed sleep: it must be the
-      // one this fast ticket overtakes.
-      let deadline = Date.now() + 10000;
-      while (
-        !(
-          existsSync(queueDir(home)) &&
-          readdirSync(queueDir(home)).some((f) => /^1-0000000001-/.test(f))
-        )
-      ) {
-        if (Date.now() > deadline) throw new Error('normal took no ticket');
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      await waitFor('normal took no ticket', () =>
+        hasTicket(home, /^\d-0000000002-/),
+      );
       const fast = acquire(home, 30, stub, '', 'fast', {}, 'fast');
-      // Let both waiters complete a loop with the fast ticket as head, so
-      // releasing the lock cannot hand it to the normal ticket by timing.
-      deadline = Date.now() + 10000;
-      while (
-        !(
-          existsSync(queueDir(home)) &&
-          readdirSync(queueDir(home)).some((f) => /^0-0000000002-/.test(f))
-        )
-      ) {
-        if (Date.now() > deadline) throw new Error('fast took no ticket');
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      await waitFor('fast took no ticket', () =>
+        hasTicket(home, /^\d-0000000003-/),
+      );
+      // Let both waiters complete a loop with the fast ticket queued, so the
+      // release cannot hand the turn to the normal ticket by timing.
       await new Promise((r) => setTimeout(r, 2500));
       rmSync(held);
-      const [normalResult, fastResult] = await Promise.all([normal, fast]);
-      expect(normalResult.code).toBe(0);
-      expect(fastResult.code).toBe(0);
-      // The observable ordering, not just the ticket names: the stub records
-      // who actually reached the lock first.
-      expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
-        'fast',
-        'normal',
-      ]);
+      const results = await Promise.all([head.done, normal, fast]);
+      expect(results.map((r) => r.code)).toEqual([0, 0, 0]);
+      // The stub records who actually reached the lock. The parked head is
+      // not overtaken, so only the fast-before-normal order is the claim.
+      const served = readFileSync(order, 'utf8').trim().split('\n');
+      expect(served.indexOf('fast')).toBeLessThan(served.indexOf('normal'));
     },
   );
 
   it(
-    'promotes a normal ticket into the fast class so full-tier work cannot starve',
+    'promotes a waiting normal ticket ahead of a later fast ticket',
     { timeout: 30000 },
     async () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-promote-'));
       const held = join(home, 'held');
       const order = join(home, 'order');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held, order));
+      const stub = flockStub(parkedFlock(held, order));
+      // Promotion is for a ticket that is not head yet: the head is parked
+      // in `flock --wait` and is next whatever its class.
+      const head = startAcquire(home, 30, stub, '', 'head', {}, 'full');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
       const normal = acquire(
         home,
         30,
         stub,
         '',
         'normal',
-        {
-          SDK_JAVA_LOCK_PROMOTE_AFTER: '1',
-        },
+        { SDK_JAVA_LOCK_PROMOTE_AFTER: '1' },
         'full',
       );
-      let deadline = Date.now() + 10000;
-      while (
-        !(
-          existsSync(queueDir(home)) &&
-          readdirSync(queueDir(home)).some((f) => /^0-0000000001-/.test(f))
-        )
-      ) {
-        if (Date.now() > deadline) throw new Error('normal was not promoted');
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      await waitFor('normal was not promoted', () =>
+        hasTicket(home, /^0-0000000002-/),
+      );
       const fast = acquire(home, 30, stub, '', 'fast', {}, 'fast');
-      deadline = Date.now() + 10000;
-      while (
-        !(
-          existsSync(queueDir(home)) &&
-          readdirSync(queueDir(home)).some((f) => /^0-0000000002-/.test(f))
-        )
-      ) {
-        if (Date.now() > deadline) throw new Error('fast took no ticket');
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      await waitFor('fast took no ticket', () =>
+        hasTicket(home, /^\d-0000000003-/),
+      );
       await new Promise((r) => setTimeout(r, 2500));
       rmSync(held);
-      const [normalResult, fastResult] = await Promise.all([normal, fast]);
-      expect(normalResult.code).toBe(0);
-      expect(fastResult.code).toBe(0);
-      expect(normalResult.out).toContain(
-        'Promoted sdk-java host lock queue ticket 1 to the fast class',
+      const results = await Promise.all([head.done, normal, fast]);
+      expect(results.map((r) => r.code)).toEqual([0, 0, 0]);
+      expect(results[1].out).toContain(
+        'Promoted sdk-java host lock queue ticket 2 to the fast class',
       );
       // The promoted ticket keeps its older sequence, so it still precedes
       // the fast ticket that arrived after it.
-      expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
-        'normal',
-        'fast',
-      ]);
+      const served = readFileSync(order, 'utf8').trim().split('\n');
+      expect(served.indexOf('normal')).toBeLessThan(served.indexOf('fast'));
+    },
+  );
+
+  it(
+    'keeps a parked head ticket fresh so a later waiter cannot reap it',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-keepalive-'));
+      const held = join(home, 'held');
+      const order = join(home, 'order');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, order));
+      const head = startAcquire(home, 30, stub, '', 'head', {}, 'fast');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const [name] = readdirSync(queueDir(home)).filter((f) => f !== '.seq');
+      const ticket = join(queueDir(home), name);
+      // Age the parked head past the 1800s arm, as a hold longer than that
+      // would: the mtime arm reaps any ticket nobody refreshes.
+      const past = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      utimesSync(ticket, past, past);
+      await waitFor(
+        'parked head ticket was not refreshed',
+        () => statSync(ticket).mtimeMs > Date.now() - 60000,
+      );
+      const waiter = acquire(home, 30, stub, '', 'waiter', {}, 'fast');
+      await waitFor('waiter took no ticket', () =>
+        hasTicket(home, /^\d-0000000002-/),
+      );
+      // Two of the waiter's loops, each running the reaper over the head.
+      await new Promise((r) => setTimeout(r, 4500));
+      expect(existsSync(ticket)).toBe(true);
+      rmSync(held);
+      const results = await Promise.all([head.done, waiter]);
+      expect(results.map((r) => r.code)).toEqual([0, 0]);
+      expect(readFileSync(order, 'utf8').trim().split('\n')[0]).toBe('head');
+      // The keepalive stops with the wait and `touch -c` cannot recreate a
+      // removed ticket, so nothing is left for the next job on the host.
+      await new Promise((r) => setTimeout(r, 2500));
+      expect(readdirSync(queueDir(home))).toEqual(['.seq']);
     },
   );
 

@@ -48,10 +48,11 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
   释放时输给一直阻塞着的 waiter。只进入一次才能保住到达顺序。
 - 票据携带 owner 的 PID。被取消或被 kill 的 step 会留下孤儿票；
   下一次队首检查会回收 owner PID 已死且 mtime 超过 10 秒的票。
-  仍在排队的 waiter 每两秒 touch 一次自己的票，但队首阻塞在 `flock`
-  里时无法 touch，因此第二条规则回收所有 mtime 超过 1800 秒的票 ——
-  远高于一次完整持锁时长 —— 正是它保证 PID 被复用的票不会把空闲的锁
-  永久堵死。
+  仍在排队的 waiter 每两秒 touch 一次自己的票，阻塞在 `flock` 里的
+  队首则由一个后台 keepalive 以同样节奏 touch，因此第二条规则可以回收
+  所有 mtime 超过 1800 秒的票 —— 正是它保证 PID 被复用的票不会把空闲
+  的锁永久堵死。keepalive 关闭了锁的 fd，因此永远不会持有锁；它用
+  `touch -c`，因此无法重新创建一张已被删除的票。
 - 成功后立刻删除票据：内核已经持有锁之后，持有者不再需要排队位置，
   而 trap 在 `return` 之后也看不到辅助脚本的局部变量。锁仍以 fd 9
   留在 step 的 shell 里，因此它仍会在 step 边界自动释放 —— 这个
@@ -72,25 +73,41 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 
 ### fast 档优先
 
-FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍然排在所有已
-入队的 full 档持锁之后。2026-10-20 的 run 39431579628 中，`SDK Java
-(fast)` job 在 full 档持锁后面等满 5400 秒，Maven 尚未启动就失败；
-2026-10-21 又出现同样的超时（qwen-code#14962、#15032）。现在同一把物理锁
-上区分两个档位：
+FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍然排在所有
+正在等待的 full 档票据之后。2026-10-21 的 run 39562109470 中，`SDK Java
+(fast)` job 在成为队首之前，作为非队首 waiter 排在其他票据后面等了最初的
+38 分钟（qwen-code#14566）。本节消除的就是这部分等待。现在同一把物理锁上
+区分两个档位：
 
 - 票据命名为 `rank-sequence-pid`。`fast` 是 rank 0，`normal` 是 rank 1；
-  队首是最小的活动名字，因此每张 fast 票都排在它之前或之后取得的
-  normal 票前面。
+  队首是最小的活动名字，因此每张 fast 票都排在所有仍在等待的 normal
+  票前面。
 - test job 把自己的 tier 传给辅助脚本：fast 档进入 fast 类，
-  approval、release 和 MariaDB 工作保持 normal。fast job 因此最多等
-  当前正在运行的那次持锁，而不是它后面的 full 档队列。
+  approval、release 和 MariaDB 工作保持 normal。
+- 已经阻塞在 `flock(2)` 里的队首保留它在内核等待队列中的位置；在它
+  之后到达的 fast 票会成为队首并同样阻塞。为本队列实测的 Linux 唤醒
+  顺序是插入顺序，因此先阻塞的队首仍赢得下一次释放。fast job 因此
+  等的是当前正在运行的那次持锁加上至多一个已阻塞的队首，而不是它们
+  后面的 full 档队列。
 - 等待超过 `SDK_JAVA_LOCK_PROMOTE_AFTER`（默认 1200 秒）的 normal 票
   会被重命名进 fast 类。它保留自己的顺序号，因此仍排在它之后到达的
-  fast 票之前，连续的 fast 流量无法饿死 full 档。
+  fast 票之前，连续的 fast 流量无法饿死 full 档。只有尚未成为队首的
+  票需要这一步：已阻塞的队首本来就是下一个。
 
 释放语义、5400 秒预算和固定的 `lock not acquired within` 错误文案都
-不变。已经阻塞在 `flock(2)` 里的 normal 队首仍会先于新到的 fast 票
-赢得下一次释放；实测上界约为两次持锁，远在预算之内。
+不变。
+
+优先级不能限制单次持锁的时长。同一个 2026-10-21 的 job 随后作为队首在
+一次持锁之后等了最后 52 分钟并超时，而这把锁上已实测到 7426 秒和 8685
+秒的 full 档 MariaDB 持锁；这样一次持锁无论票序如何都会耗尽 fast 队首
+的 5400 秒预算。点名持锁者（一次很长的持票持锁，还是一个从未取票的进程）
+是 qwen-code#15031 的诊断，限制持锁时长仍归 #14566。
+
+有了两个档位之后，队首 keepalive 更加重要。没有它时，阻塞超过 1800
+秒的队首会被其他 waiter 的回收逻辑删掉票据，队列里的下一张票 —— 不论
+档位 —— 成为队首并同样阻塞进内核。在长达两小时的持锁里，这会让多张
+normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而这恰恰是本节
+要避免的顺序。
 
 ### 为什么是公平性，而不是其他方案
 
@@ -108,9 +125,9 @@ FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍�
   排其后的 waiter 仍有剩余预算。如果宿主机仍然卡住，运维恢复命令是
   `rm -rf ~/.cache/qwen-code-ci/sdk-java-tests.lock.queue/`，仓库里没有
   任何代码会执行它。
-- 1800 秒规则也可能回收一个仍然存活的队首的票，因为队首阻塞在
-  `flock` 里、无法 touch 自己的票。这没有危害：队首早已排在内核等待
-  队列里更晚的票之前，并保住了那个位置。
+- 被 SIGKILL 的队首会留下仍在运行的 keepalive，直到 keepalive 下一次
+  两秒检查发现 owner 已不在；随后票据照旧由 owner 已死的规则回收，
+  `touch -c` 也无法让它复活。
 - 计数器由只追加 `.seq` 文件上的 `flock` 串行化，持有者死亡时内核会
   释放该锁，因此没有需要清理的老化路径；在读取-递增-写入之间被 kill
   最多只多一次重试。
@@ -118,9 +135,11 @@ FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍�
 ## 验证计划
 
 - 辅助脚本的单元行为由 `scripts/tests/sdk-java-lock.test.js` 钉住
-  （仅 POSIX）：两个 waiter 的 FIFO 顺序、fast 先于 normal 的顺序、
-  老化提升、过期 owner 的回收、超时签名与票据清理，`flock` 以 PATH
-  stub 注入。
+  （仅 POSIX）：两个 waiter 的 FIFO 顺序、已阻塞队首之后 fast 票超过
+  仍在等待的 normal 票、等待中的 normal 票提升后排在更晚的 fast 票之前、
+  已阻塞队首的票在其他 waiter 的回收逻辑下存活、过期 owner 的回收、
+  超时签名与票据清理，`flock` 以 PATH stub 注入。排序用的 stub 会像内核
+  一样让 `flock --wait` 一直阻塞到释放，因此队首不会循环、也不会被超过。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   现在 pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400`
   预算，`.size-baseline` 记录工作流的新尺寸。

@@ -10,11 +10,13 @@
 #
 # Two classes share the one physical lock. `fast` is the pull-request and
 # push feedback lane; its tickets sort before `normal` (approval and main
-# full-tier work), so a fast job waits at most the hold already running
-# instead of the full-tier queue behind it (qwen-code#14962, #15032). A
-# normal ticket that waits more than SDK_JAVA_LOCK_PROMOTE_AFTER seconds
-# (default 1200) is promoted into the fast class, so continuous fast traffic
-# cannot starve the full tier.
+# full-tier work), so a fast job overtakes every full-tier ticket still
+# waiting its turn. It does not overtake the hold already running, nor a
+# head already parked in `flock`, which keeps its kernel wait position: a
+# fast job waits for those two holds, not for the full-tier queue behind
+# them. A normal ticket that waits more than SDK_JAVA_LOCK_PROMOTE_AFTER
+# seconds (default 1200) is promoted into the fast class, so continuous fast
+# traffic cannot starve the full tier.
 #
 # Source this file and call
 # `sdk_java_lock_acquire <wait-seconds> [fast|normal]`; it returns non-zero
@@ -51,11 +53,12 @@ sdk_java_lock_acquire() {
   exec 8>&-
 
   local start=${SECONDS} head name pid mtime age remaining last_log=-60 blocking
-  local promoted=$((rank == 0)) promoted_ticket
+  local promoted=$((rank == 0)) promoted_ticket keepalive acquired
   while true; do
     # Drop tickets whose owner is gone. A waiter waiting its turn re-touches
-    # every loop; the head cannot while it is blocked in `flock`, so the mtime
-    # arm below also bounds a ticket whose PID was recycled to a live process.
+    # every loop and a head parked in `flock` re-touches from its keepalive
+    # below, so the mtime arm only bounds a ticket whose PID was recycled to
+    # a live process.
     for head in "${queue}/"*; do
       [[ -e ${head} && ${head##*/} != .seq ]] || continue
       name=${head##*/}
@@ -65,8 +68,8 @@ sdk_java_lock_acquire() {
           || { stat -f %m "${head}" 2>/dev/null; } || echo 0
       )
       age=$((${EPOCHSECONDS:-$(date +%s)} - mtime))
-      # 1800s is far above one full hold (~925s): this is the arm that clears
-      # a ticket whose PID was recycled, since `kill -0` still answers for it.
+      # 1800s is far above the 2s refresh cadence: this is the arm that
+      # clears a ticket whose PID was recycled, since `kill -0` still answers.
       if ((age > 1800)) ||
         { ((age > 10)) && ! kill -0 "${pid}" 2>/dev/null; }; then
         rm -f "${head}"
@@ -75,7 +78,8 @@ sdk_java_lock_acquire() {
 
     # Age a normal ticket into the fast class so a continuous stream of fast
     # tickets cannot starve full-tier work. The renamed ticket keeps its
-    # sequence, so it still precedes fast tickets that arrived after it.
+    # sequence, so it still precedes fast tickets that arrived after it. Only
+    # a waiter reaches this: a head parked in `flock` is already next.
     if ((!promoted && SECONDS - start >= promote_after)); then
       promoted_ticket=$(printf '%s/0-%010d-%s' "${queue}" "${seq}" "$$")
       if mv "${ticket}" "${promoted_ticket}" 2>/dev/null; then
@@ -107,7 +111,25 @@ sdk_java_lock_acquire() {
       echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${priority}, ${remaining}s left in a ${wait_seconds}s budget)"
     fi
     if ((blocking)); then
+      # A parked head cannot touch its own ticket, and one hold can outlast
+      # the 1800s arm above (a head on 2026-10-21 blocked 3106s), so another
+      # waiter would reap a live head. Refresh it at the waiters' cadence from
+      # a keepalive that closes the lock fd, so it can never hold the lock,
+      # and uses `touch -c`, so it cannot recreate a ticket already removed.
+      (
+        exec 9>&-
+        while sleep 2 && kill -0 $$ 2>/dev/null; do
+          touch -c "${ticket}"
+        done
+      ) </dev/null >/dev/null 2>&1 &
+      keepalive=$!
+      acquired=0
       if flock --wait "${remaining}" 9; then
+        acquired=1
+      fi
+      kill "${keepalive}" 2>/dev/null || true
+      wait "${keepalive}" 2>/dev/null || true
+      if ((acquired)); then
         # Leave the queue at acquisition: a holder needs no place in line once
         # the kernel holds the lock, and a trap cannot see this `local` anyway.
         rm -f "${ticket}"
