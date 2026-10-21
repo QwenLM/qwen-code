@@ -1293,6 +1293,21 @@ describe('createJavaManagedAgentProvider', () => {
       workspaceId: 'ws-default',
       cwdRelative: 'services/api',
     });
+
+    // The cap must slice by code point: a code-unit cut at 77 splits an astral
+    // character, sending a title that ends in a lone high surrogate, which no
+    // store column keeps, so the server would persist the tail as '?'.
+    await provider.workspaceBinding!.createSession!(
+      {
+        agentId: 'qwen-code',
+        workspaceId: 'ws-default',
+        cwdRelative: 'services/api',
+        text: `${'a'.repeat(76)}\u{1f600}${'b'.repeat(10)}`,
+      },
+      { clientId: 'client-1', idempotencyKey: 'key-2' },
+    );
+    const capped = JSON.parse(String(fetchImpl.mock.calls[1]![1]?.body)).title;
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(capped)).toBe(false);
   });
 
   it('scopes the storageKey by environmentId when no productScope is given', () => {
