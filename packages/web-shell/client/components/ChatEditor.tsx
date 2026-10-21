@@ -296,6 +296,7 @@ interface ChatEditorProps {
   selectedWorkspaceCwd?: string;
   workspaceSelectionDisabled?: boolean;
   workspaceSelectorAlwaysVisible?: boolean;
+  workspaceMenuItems?: ReactNode;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
   /** Host-aware variant; see WorkspaceSelector. */
   onSelectHostedWorkspace?: (
@@ -1473,6 +1474,7 @@ export const ChatEditor = memo(
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
       workspaceSelectorAlwaysVisible = false,
+      workspaceMenuItems,
       onSelectWorkspace,
       onSelectHostedWorkspace,
       scratchWorkspaceSupported = false,
@@ -2485,6 +2487,7 @@ export const ChatEditor = memo(
         onSelectWorkspace &&
         showToolbarAction('workspace') &&
         (workspaceSelectorAlwaysVisible ||
+          workspaceMenuItems ||
           workspaces.length > 1 ||
           scratchWorkspaceSupported ||
           existingFolderWorkspaceSupported ||
@@ -2530,6 +2533,7 @@ export const ChatEditor = memo(
           disabled={workspaceSelectionDisabled}
           busy={workspaceMutationBusy}
           alwaysVisible={workspaceSelectorAlwaysVisible}
+          menuItems={workspaceMenuItems}
           scratchSupported={scratchWorkspaceSupported}
           existingFolderSupported={existingFolderWorkspaceSupported}
           standaloneSupported={standaloneTargetSupported}
