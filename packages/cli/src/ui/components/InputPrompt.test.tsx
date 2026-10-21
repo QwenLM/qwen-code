@@ -8037,12 +8037,14 @@ describe('classifyPastedImagePaths', () => {
   });
 
   // fileURLToPath follows host semantics: on Windows a URI without a drive
-  // letter throws and the production catch keeps the raw token instead.
-  const fileUriToPath = (uri: string): string => {
+  // letter names no local path, so the token is dropped from classification.
+  const classifiedFileUri = (
+    uri: string,
+  ): { imagePaths: string[]; allImages: boolean } => {
     try {
-      return fileURLToPath(uri);
+      return { imagePaths: [fileURLToPath(uri)], allImages: true };
     } catch {
-      return uri;
+      return { imagePaths: [], allImages: false };
     }
   };
 
@@ -8050,14 +8052,42 @@ describe('classifyPastedImagePaths', () => {
     // A copied file arrives as a uri-list entry from file managers and some
     // clipboard helpers; without conversion the path never resolves and the
     // paste degrades to raw URI text.
-    expect(classifyPastedImagePaths('file:///a/shot.png')).toEqual({
-      imagePaths: [fileUriToPath('file:///a/shot.png')],
-      allImages: true,
-    });
-    expect(classifyPastedImagePaths('file:///a/My%20Shot.png')).toEqual({
-      imagePaths: [fileUriToPath('file:///a/My%20Shot.png')],
-      allImages: true,
-    });
+    expect(classifyPastedImagePaths('file:///a/shot.png')).toEqual(
+      classifiedFileUri('file:///a/shot.png'),
+    );
+    expect(classifyPastedImagePaths('file:///a/My%20Shot.png')).toEqual(
+      classifiedFileUri('file:///a/My%20Shot.png'),
+    );
+  });
+
+  it('converts every legal file: URI spelling, not only the lowercase triple-slash one', () => {
+    // RFC 3986 makes the scheme case-insensitive and RFC 8089 allows the
+    // single-slash and localhost forms; all name the same local file.
+    for (const uri of [
+      'FILE:///a/shot.png',
+      'File:///a/shot.png',
+      'file:/a/shot.png',
+      'file://localhost/a/shot.png',
+    ]) {
+      expect(classifyPastedImagePaths(uri)).toEqual(
+        classifiedFileUri('file:///a/shot.png'),
+      );
+    }
+  });
+
+  it('rejects a remote host in any scheme spelling and any UNC-shaped path', () => {
+    for (const token of [
+      'File://attacker.example.com/share/shot.png',
+      'FILE://attacker.example.com/share/shot.png',
+      'file:////attacker.example.com/share/shot.png',
+      '\\\\attacker.example.com\\share\\shot.png',
+      '//attacker.example.com/share/shot.png',
+    ]) {
+      expect(classifyPastedImagePaths(token)).toEqual({
+        imagePaths: [],
+        allImages: false,
+      });
+    }
   });
 
   it('rejects a file:// URI with a remote host instead of promoting it', () => {

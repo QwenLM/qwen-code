@@ -533,6 +533,23 @@ describe('clipboardUtils', () => {
         reads: ['text/uri-list'],
       },
       {
+        name: 'converts every file: URI spelling and leaves remote hosts raw',
+        tool: 'wl-paste',
+        types: ['text/uri-list'],
+        payloads: {
+          'text/uri-list':
+            'File:///a/shot.png\r\nfile:/a/two.png\r\nfile://attacker.example.com/share/shot.png\r\n',
+        },
+        // The remote line is hardcoded: on Windows fileURLToPath would turn
+        // it into a UNC path, which the conversion must never produce.
+        expected: [
+          fileUriToPath('File:///a/shot.png'),
+          fileUriToPath('file:/a/two.png'),
+          'file://attacker.example.com/share/shot.png',
+        ].join('\n'),
+        reads: ['text/uri-list'],
+      },
+      {
         name: 'drops uri-list comment lines',
         tool: 'wl-paste',
         types: ['text/uri-list'],

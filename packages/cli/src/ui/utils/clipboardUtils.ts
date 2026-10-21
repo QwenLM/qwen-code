@@ -9,9 +9,9 @@ import { constants as fsConstants } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { wrapForMultiplexer } from '../../utils/osc.js';
+import { fileUriToLocalPath, isFileUri } from './file-uri.js';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
@@ -890,24 +890,18 @@ export async function readClipboardText(): Promise<string | null> {
 
 /**
  * `text/uri-list` carries one URI per line (RFC 2483, with `#` comment
- * lines); file managers use it for copied files. Convert the `file://` URIs
- * to local paths so a copied image file classifies as an image path on the
- * way into the editor; anything else passes through unchanged.
+ * lines); file managers use it for copied files. Convert the `file:` URIs
+ * that name local files to their paths so a copied image file classifies as
+ * an image path on the way into the editor; anything else passes through
+ * unchanged.
  */
 function uriListToPaths(text: string): string {
   return text
     .split('\n')
     .filter((line) => !line.startsWith('#'))
-    .map((line) => {
-      if (!line.startsWith('file://')) {
-        return line;
-      }
-      try {
-        return fileURLToPath(line);
-      } catch {
-        return line;
-      }
-    })
+    .map((line) =>
+      isFileUri(line) ? (fileUriToLocalPath(line) ?? line) : line,
+    )
     .join('\n');
 }
 

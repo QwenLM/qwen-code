@@ -57,9 +57,9 @@ import {
   saveClipboardImage,
   cleanupOldClipboardImages,
 } from '../utils/clipboardUtils.js';
+import { fileUriToLocalPath, isFileUri, isUncPath } from '../utils/file-uri.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
 import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
@@ -153,27 +153,19 @@ export function classifyPastedImagePaths(pasted: string): {
       .replace(/^@/, '') // strip the `@` reference prefix
       .replace(/^["']|["']$/g, '') // strip surrounding quotes
       .replace(/\\ /g, ' '); // unescape shell-escaped spaces
-    if (normalized.startsWith('file://')) {
-      // A terminal or helper may inject the uri-list form of a copied file;
-      // fileURLToPath also percent-decodes the name.
-      let url: URL | undefined;
-      try {
-        url = new URL(normalized);
-      } catch {
-        url = undefined;
-      }
-      if (url && (url.host === '' || url.host === 'localhost')) {
-        try {
-          normalized = fileURLToPath(url);
-        } catch {
-          // Not convertible on this host — keep the token as-is.
-        }
-      } else {
-        // A remote host would become a UNC path that fs.stat authenticates
-        // to (Windows SMB): drop the token from image classification.
+    if (isFileUri(normalized)) {
+      // A terminal or helper may inject the uri-list form of a copied file.
+      const localPath = fileUriToLocalPath(normalized);
+      if (localPath === null) {
+        // A remote host or no local path on this platform: nothing to stat.
         allImages = false;
         continue;
       }
+      normalized = localPath;
+    } else if (isUncPath(normalized)) {
+      // fs.stat on a UNC share authenticates to its host (Windows SMB).
+      allImages = false;
+      continue;
     }
     if (PASTED_IMAGE_EXTENSIONS.test(normalized)) {
       imagePaths.push(normalized);
