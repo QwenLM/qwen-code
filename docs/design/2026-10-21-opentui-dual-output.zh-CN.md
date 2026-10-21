@@ -26,6 +26,8 @@ Ink 在 prompt 准备后发初始 user 记录，ToolResult/Goal continuation 除
 
 正常工具完成使用真实 request/response ID 和既有有界内容/artifact 投影生成 `tool_result` block。MOD native 重试不等于逻辑完成，不能每次都发结果。Ink 的 secondary-owner 与 duplicate-provider 分支另有 producer，目前 OpenTUI live loop 没有相同分支。
 
+逻辑完成与 JSON 内容投影是两个边界。最终 MOD response parts 只传给模型 continuation、录制和 bridge 一次。对普通成功结果，共享 JSON adapter 优先使用非空 display 字符串；display 为空时才回退到最终 response parts。错误、vision 和 MCP display 的优先级保持不变，因此最终模型 parts 不必与 JSON 显示文本相同。
+
 Ink 主路径的 continuation-cancelled 和 all-tools-cancelled 分支在常规 `emitToolResult` 前返回。保留并测量这个基线，不能以 parity 为名增加 OpenTUI 独有取消结果。同样，握手广告有 top-level `result`，但 interactive bridge 没有 `emitResult` producer。这些共享广告/实际缺口单列记录；真实 `tool_result` 内容 block 仍是本批必验范围。
 
 ## 接线方案
@@ -69,6 +71,8 @@ writer 的路径/fd/FIFO、信任、权限和失败语义不变。JSON 文件沿
 E2E 计划和正式交互测试定义六个 PTY 场景，分别运行 Node/Ink、Bun/Ink 和 strict OpenTUI：text/thought、工具 continuation、许可允许、全部拒绝、partial 取消后再次提交、active stream 退出。同一真实产物、精确 runtime，对照真实模型 HTTP、JSONL、终端、退出与捕获进程清理。模型服务是合成的；CLI、工具实现、文件系统和 runtime 是真实的。历史全局 CLI 检查为独立证据，不代表已验证此输出合同。精确 A 产物基线是本批权威参考；如另做 global dry-run，必须先解析实际安装 launcher/runtime。
 
 focused 使用真实 bridge/adapter 和独占 JSONL，仅控制 core/scheduler 时间。覆盖图片/@ 准备及既有 adapter 投影（非文本 part 转为 JSON 文本）、明确 decline、零事件/core limit 事件、错误、混合工具终态、最终 MOD 逻辑结果、再次 ask、calls 清空、SteerInput accepted/restored、旧 generation 晚到和 shutdown 顺序。完整 middleware 重试执行与独立进程清理仍需另行动态证据。这些路径不能由六个 PTY 场景推定通过。
+
+MOD 投影用例先在真实 bridge、模型 continuation 和录制消费者处核对最终 parts，再检查 JSON。非空 display 与空 display 两个变体都要求逻辑结果仅出现一次，且位于 tool use 与下一条 assistant 之间；两者均不改变共享序列化合同。保留原先只检查 JSON 而预期错误的失败记录，将其归为测试断言证据，不称为生产修复。
 
 验收要求支持路径匹配真实 Ink 的事件类别/顺序/ID，queue/replay/retry 不重复，旧流不污染后继，正常关闭 session_start/session_end 各一次，正常退出后没有捕获的产品活体。只解析完整 flush 的行，拒绝坏 JSON/ANSI。普通场景 `/quit` 期望 0；active raw CtrlC 基线明确记录 Ink 0 和当前 OpenTUI 130，不接受任意非零码，也不改变产品语义。
 

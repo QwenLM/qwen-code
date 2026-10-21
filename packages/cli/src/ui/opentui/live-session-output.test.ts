@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Part } from '@google/genai';
+import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import { MockTool } from '@qwen-code/qwen-code-core/test-utils/mock-tool.js';
 import { ToolErrorType } from '@qwen-code/qwen-code-core/utils/tool-error-type.js';
@@ -686,34 +687,86 @@ describe('logical tools and actual permission transitions', () => {
     ]);
   });
 
-  it('uses the finalized MOD logical response, not native-attempt payloads', async () => {
-    const finalParts = [
-      {
-        functionResponse: {
-          id: request.callId,
-          name: request.name,
-          response: { output: 'final-logical-output' },
+  it.each([
+    {
+      label: 'nonempty',
+      resultDisplay: 'tool-result',
+      expectedContent: 'tool-result',
+    },
+    {
+      label: 'empty',
+      resultDisplay: '',
+      expectedContent: 'final-logical-output',
+    },
+  ])(
+    'keeps finalized MOD parts and projects the $label display once',
+    async ({ resultDisplay, expectedContent }) => {
+      const finalParts: Part[] = [
+        {
+          functionResponse: {
+            id: request.callId,
+            name: request.name,
+            response: { output: 'final-logical-output' },
+          },
         },
-      },
-    ];
-    control.finalize.mockResolvedValue([{ responseParts: finalParts }]);
-    control.schedule.mockImplementation(async (options: SchedulerOptions) => {
-      await options.onAllToolCallsComplete([
-        { ...completed(), nativeAttemptsObserved: true },
+      ];
+      const call = { ...completed(), nativeAttemptsObserved: true };
+      call.response.resultDisplay = resultDisplay;
+      control.finalize.mockResolvedValue([{ responseParts: finalParts }]);
+      control.schedule.mockImplementation(async (options: SchedulerOptions) => {
+        await options.onAllToolCallsComplete([call]);
+      });
+      const h = setup(toolHop());
+      const emitToolResult = vi.spyOn(h.bridge, 'emitToolResult');
+      await h.run();
+
+      expect(control.finalize).toHaveBeenCalledOnce();
+      expect(control.finalize).toHaveBeenCalledWith(h.config, [
+        {
+          callId: request.callId,
+          toolName: request.name,
+          responseParts: call.response.responseParts,
+          persistedOutputFiles: undefined,
+          artifacts: undefined,
+        },
       ]);
-    });
-    const h = setup(toolHop());
-    const recorder = h.config.getChatRecordingService();
-    Object.assign(recorder!, { recordToolResult: vi.fn() });
-    await h.run();
-    const results = userBlocks(await h.frames()).filter(
-      (block) => block.type === 'tool_result',
-    );
-    expect(results).toHaveLength(1);
-    expect(JSON.stringify(results)).toContain('final-logical-output');
-    expect(JSON.stringify(results)).not.toContain('"tool-result"');
-    expect(control.finalize).toHaveBeenCalledOnce();
-  });
+      expect(emitToolResult).toHaveBeenCalledOnce();
+      expect(emitToolResult).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({ responseParts: finalParts, resultDisplay }),
+      );
+      expect(h.client.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(h.client.sendMessageStream.mock.calls[1][0]).toEqual(finalParts);
+      expect(h.client.sendMessageStream.mock.calls[1][3]).toEqual({
+        type: SendMessageType.ToolResult,
+      });
+      expect(h.recorder.recordToolResult).toHaveBeenCalledOnce();
+      expect(h.recorder.recordToolResult).toHaveBeenCalledWith(
+        finalParts,
+        expect.objectContaining({ callId: request.callId, resultDisplay }),
+      );
+
+      const frames = await h.frames();
+      const results = userBlocks(frames).filter(
+        (block) => block.type === 'tool_result',
+      );
+      expect(results).toEqual([
+        {
+          type: 'tool_result',
+          tool_use_id: request.callId,
+          is_error: false,
+          content: expectedContent,
+        },
+      ]);
+      const toolResultIndex = frames.indexOf(users(frames)[1]);
+      expect(toolResultIndex).toBeGreaterThan(
+        frames.indexOf(assistants(frames)[0]),
+      );
+      expect(toolResultIndex).toBeLessThan(
+        frames.indexOf(assistants(frames).at(-1)!),
+      );
+    },
+  );
 
   it('does not let stale tool completion or permission updates touch a successor', async () => {
     let current = true;
