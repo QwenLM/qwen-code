@@ -97,7 +97,18 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       writeFileSync(held, '');
       const stub = flockStub(heldFlock(held, order));
       const a = acquire(home, 30, stub, 'sleep 1', 'A');
-      await new Promise((r) => setTimeout(r, 800));
+      // Wait for A's published ticket instead of a fixed sleep: on a loaded
+      // runner 800 ms can run out and B then takes sequence 1.
+      const deadline = Date.now() + 10000;
+      while (
+        !(
+          existsSync(queueDir(home)) &&
+          readdirSync(queueDir(home)).some((f) => /^\d{10}-\d+$/.test(f))
+        )
+      ) {
+        if (Date.now() > deadline) throw new Error('A took no ticket');
+        await new Promise((r) => setTimeout(r, 20));
+      }
       const b = acquire(home, 30, stub, '', 'B');
       await new Promise((r) => setTimeout(r, 2500));
       rmSync(held);
