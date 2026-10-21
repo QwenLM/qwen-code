@@ -586,8 +586,15 @@
                                  ack-loss cell adds 150 s: healthy 10233 s, fork
                                  10833 s, Verify 191 minutes. The FG13a dispatch
                                  ack-loss cell adds 150 s: healthy 10383 s, fork
-                                 10983 s, Verify 194 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10983</forkedProcessTimeoutInSeconds>
+                                 10983 s, Verify 194 minutes. The FG13a
+                                 registration-settle ack-loss cell adds 150 s:
+                                 healthy 10533 s, fork 11133 s, Verify 196
+                                 minutes. The FG11e stream cells add 42 s (2x
+                                 their measured 14.1 s and 6.1 s): healthy
+                                 10575 s, fork 11175 s, Verify 197 minutes
+                                 (11775 s of fork plus wrap no longer fit
+                                 196). -->
+                            <forkedProcessTimeoutInSeconds>11175</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
