@@ -2,10 +2,15 @@
 
 [English](2026-10-21-autofix-pr-command.md) | [简体中文](2026-10-21-autofix-pr-command.zh-CN.md)
 
-Status: in progress. 2026-10-21. Delivery step 1 (the `prepare`,
-`snapshot`, `ci-log` and `cleanup` helpers) is implemented; everything else is
-a proposal. The four product decisions
-in [Resolved decisions](#11-resolved-decisions) were made on 2026-10-21.
+Status: in progress. 2026-10-21, revised the same day after the scheduled-task
+gate ([2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md),
+PR #15069) replaced the model-driven tick: the trigger layer is a `gate` on a
+scheduled task, and this command's probes — `snapshot --gate` for the author
+and `review watch-repo` for a reviewer — are implemented, together with the
+`prepare`, `ci-log` and `cleanup` helpers that wait for the reaction layer.
+Everything else is a proposal. The four product decisions in
+[Resolved decisions](#11-resolved-decisions) were made on 2026-10-21; the
+fourth is revised there.
 
 ## 1. Problem
 
@@ -25,21 +30,23 @@ and stops when the PR is merged or closed.
 Everything this command needs to schedule, isolate and delegate work already
 exists on `main`:
 
-| Capability                  | Existing building block                                                                                                                                                                                                                                                    |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Recurring trigger           | `cron_create` (`packages/core/src/tools/cron-create.ts`): session-only or durable, recurring jobs jittered by up to 10% of the period, auto-expiry. Fires enter the notification queue and never interrupt a running turn (`packages/cli/src/ui/hooks/use-llm-stream.ts`). |
-| Loop conventions            | Bundled `loop` skill (`packages/core/src/skills/bundled/loop/SKILL.md`), `cron_list` / `cron_delete`, the CronPill.                                                                                                                                                        |
-| Isolated PR worktree        | `qwen review fetch-pr` (`packages/cli/src/commands/review/fetch-pr.ts`) and its git helpers (`releaseWorktree` in `packages/cli/src/commands/review/lib/git.ts`, `redirectedAncestor` in `lib/worktree.ts`).                                                               |
-| Delegation                  | The `agent` tool with `working_dir` and `run_in_background` (`packages/core/src/tools/agent/agent.ts`).                                                                                                                                                                    |
-| Deterministic skill helpers | The `qwen review <helper>` pattern: logic lives in tested CLI subcommands and the skill calls them through `"${QWEN_CODE_CLI:-qwen}"`.                                                                                                                                     |
-| Conflict policy             | The `/resolve` design ([2026-06-23-fix-conflicts-command.md](2026-06-23-fix-conflicts-command.md)): merge the base branch and push with `--force-with-lease` against the expected head SHA.                                                                                |
-| Untrusted-input rules       | The repository's `.qwen/skills/autofix` skill treats PR text, comments and logs as data, not instructions.                                                                                                                                                                 |
+| Capability                  | Existing building block                                                                                                                                                                                                                                                                |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Recurring trigger           | `cron_create` (`packages/core/src/tools/cron-create.ts`): session-only or durable, recurring jobs jittered by up to 10% of the period, auto-expiry. Fires enter the notification queue and never interrupt a running turn (`packages/cli/src/ui/hooks/use-llm-stream.ts`).             |
+| Model-free trigger          | A scheduled task's `gate` ([2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md)): a command runs at each fire outside the model; silence skips the fire with no turn, output wakes the session with the output attached as data. The probes below are such commands. |
+| Loop conventions            | Bundled `loop` skill (`packages/core/src/skills/bundled/loop/SKILL.md`), `cron_list` / `cron_delete`, the CronPill.                                                                                                                                                                    |
+| Isolated PR worktree        | `qwen review fetch-pr` (`packages/cli/src/commands/review/fetch-pr.ts`) and its git helpers (`releaseWorktree` in `packages/cli/src/commands/review/lib/git.ts`, `redirectedAncestor` in `lib/worktree.ts`).                                                                           |
+| Delegation                  | The `agent` tool with `working_dir` and `run_in_background` (`packages/core/src/tools/agent/agent.ts`).                                                                                                                                                                                |
+| Deterministic skill helpers | The `qwen review <helper>` pattern: logic lives in tested CLI subcommands and the skill calls them through `"${QWEN_CODE_CLI:-qwen}"`.                                                                                                                                                 |
+| Conflict policy             | The `/resolve` design ([2026-06-23-fix-conflicts-command.md](2026-06-23-fix-conflicts-command.md)): merge the base branch and push with `--force-with-lease` against the expected head SHA.                                                                                            |
+| Untrusted-input rules       | The repository's `.qwen/skills/autofix` skill treats PR text, comments and logs as data, not instructions.                                                                                                                                                                             |
 
 What is missing is the deterministic part: reading a PR's state and computing
 what changed since the last check, enforcing push safety, and posting replies
 without creating feedback loops. Running a monitor until a condition is met
 does not fit, because `monitor` stops after at most 10 minutes of silence,
-while a PR can stay quiet for hours.
+while a PR can stay quiet for hours; a gated scheduled task has no such cap
+and costs nothing while the PR is quiet.
 
 ## 3. Goals and non-goals
 
@@ -52,7 +59,8 @@ Goals:
 - Reply to the feedback it handled, so reviewers can see what changed.
 - Stop on its own when the PR is merged or closed, or when the attempt budgets
   run out, and report why.
-- Keep idle checks cheap.
+- Wake the session only when something changed; a quiet check costs no model
+  turn.
 
 Non-goals (first version):
 
@@ -72,8 +80,8 @@ Non-goals (first version):
 - No PR argument: use the PR whose head is the current branch.
 - `--once`: run one check-and-fix pass and do not schedule anything. This is
   the only mode in headless `-p` runs.
-- `--every`: check interval in minutes, one of `5, 10, 15, 20, 30, 60`.
-  Default `15`.
+- `--every`: check interval in minutes, one of `1, 2, 5, 10, 15, 30, 60`.
+  Default `2`: a quiet check runs only the probe, never the model.
 - `--no-reply`: push fixes but post nothing on the PR.
 - Free text after the options is appended to every fix brief, for example
   "do not touch the public API".
@@ -106,18 +114,25 @@ with unit tests; judgment stays in the skill.
   ├─ qwen autofix-pr push      guarded push, advances the cursor
   ├─ qwen autofix-pr reply     post replies with a marker, record their ids
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
-  └─ cron_create               session-only, recurring: "Run /autofix-pr tick <owner>/<repo>#<n>"
+  └─ cron_create               session-only, recurring, gate: "qwen autofix-pr snapshot --gate <n>";
+                               the prompt says how to handle the events the gate printed
+
+qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marked
+                               ready since the last run, behind a gate of its own
 ```
 
 Helpers live under `packages/cli/src/commands/autofix-pr.ts` and
-`packages/cli/src/commands/autofix-pr/`. Per-PR state lives next to the
-worktree, outside it, under the clone's main worktree. Branches are shared by
-every worktree of a clone, so each helper finds the same watch from any of
-them, the autofix worktree included:
+`packages/cli/src/commands/autofix-pr/`; the reviewer probe lives with the
+other `qwen review` helpers. Per-PR state lives next to the worktree, outside
+it, under the clone's main worktree. Branches are shared by every worktree of
+a clone, so each helper finds the same watch from any of them, the autofix
+worktree included:
 
 - worktree: `.qwen/tmp/autofix-pr-<n>/`
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
+- gate cursor: `.qwen/tmp/autofix-pr-<n>-gate.json`
 - logs and briefs: `.qwen/tmp/autofix-pr-<n>-*.{log,md}`
+- reviewer cursor: `.qwen/tmp/review-watch-<host>-<owner>-<repo>.json`
 
 ## 6. Helper contracts
 
@@ -154,17 +169,21 @@ them, the autofix worktree included:
    local branch whose upstream is the head branch on the push remote counts as
    that copy, so a fork's `main` is never compared with the user's `main`.
 
-### 6.2 `snapshot <pr>`
+### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate]`
 
 One GraphQL call reads:
 
-- PR fields: `state`, `isDraft`, `url`, `headRefOid`, `mergeable`
-- the status check rollup of the head commit (first 100 contexts)
+- PR fields: `state`, `isDraft`, `url`, `headRefOid`, `mergeable`, the author
+  and the viewer
+- the status check rollup of the head commit, paged past the first 100
+  contexts (up to ten pages; a head on a busy repository carries well over
+  100, and a failure on a later page must not read as all green)
 - the first 100 `reviewThreads` with their comments (`id`, `databaseId`,
   `author { __typename login }`, `authorAssociation`, `body`, `url`)
 - the last 100 `reviews` and the last 100 issue comments
 
-`snapshot` compares them with the state file and prints events plus one action:
+Without `--gate`, `snapshot` compares them with the state file `prepare`
+wrote and prints events plus one action:
 
 ```json
 {
@@ -236,6 +255,35 @@ externally) → `fix` (a conflict, a failed check or a trusted comment) →
 `wait`. The loop adds two more inputs: an exhausted budget means `stop`, and a
 fix in flight (`inFlight` in the state file) means `wait`.
 
+#### Gate mode (`--gate`)
+
+`snapshot --gate` is the command behind the scheduled task's gate. It needs
+no worktree and no state file: `--repo` names the PR on the first run (or the
+prepared state supplies it), and its own cursor,
+`.qwen/tmp/autofix-pr-<n>-gate.json`, records what it has already reported.
+It prints the same JSON, but only the transitions since the previous run, and
+prints nothing when there are none, so the session is woken only for them:
+
+- A failed check is reported once per (check, head). The cursor keeps only
+  the failures still present, so a check that is re-run and fails again is
+  reported again, and a new head starts over.
+- Pending checks are never reported; `ci_pending` does not appear.
+- A conflict is reported once per head; `mergeable` clears the mark,
+  `UNKNOWN` keeps it.
+- Comments, reviews and thread comments are reported once each, by node id,
+  with the trust rules of Section 8. The viewer's own comments are never
+  events. An untrusted comment alone is reported as a notice (`wait`).
+- A head that differs from the previous run's is `head_moved_externally`
+  (`resync`); the first run records the head without reporting it.
+- A merge or close is reported once (`stop`); afterwards the probe is quiet,
+  and a reopened PR is watched again.
+- The first run reports what is outstanding: failed checks, a conflict, and
+  comments no one has handled.
+
+The cursor is written before the output, so a probe that prints and then
+dies cannot report the same transitions twice. `ci_pending` and the `wait`
+action for a quiet PR exist only in prepared mode.
+
 ### 6.3 `ci-log <pr> <run-id> [--lines 200]`
 
 Writes the log of each finished job of the run that failed or timed out,
@@ -287,10 +335,38 @@ unreadable state file. A branch that cannot be deleted is an error, and the
 state file stays. Running `cleanup` from inside the worktree it would remove
 is a refusal.
 
+### 6.7 `review watch-repo --repo <owner>/<repo> [--host <host>] [--limit 50] [filters]`
+
+The reviewer's probe, behind a gate of its own. One GraphQL call reads the
+most recently updated open PRs (`--limit`, default 50, at most 100) with
+their head, draft flag, author, labels and review requests. The cursor,
+`.qwen/tmp/review-watch-<host>-<owner>-<repo>.json`, records every open PR's
+head and draft flag:
+
+- The first run records the open PRs and prints nothing.
+- Afterwards a PR that is new to the cursor is `pr_opened`, one whose head
+  changed is `pr_pushed`, and one that was a draft and no longer is is
+  `pr_ready`. Each event carries the number, title, author, URL, head SHA,
+  base branch, labels and whether the viewer's review was requested.
+- Filters decide which PRs become events: `--author <login>`,
+  `--label <name>`, `--review-requested` (the viewer is a requested reviewer;
+  team requests do not count), `--exclude-drafts`, `--exclude-bots`,
+  `--exclude-mine`. The cursor follows every PR regardless, so changing a
+  filter later does not replay history.
+- A PR missing from the list was closed or merged and leaves the cursor —
+  unless the list was cut at `--limit`, in which case it is kept.
+
+Output: `{ "repo": "<owner>/<repo>", "events": [...] }`, and nothing when
+there are no events. The skill that uses it decides what each event means:
+run `/qreview <number>`, or a verification pass, per PR.
+
 ## 7. One check (`tick`)
 
+The gate already ran `snapshot --gate`; a fire that reaches the model carries
+its events in the gate output, so a quiet check never becomes a turn.
+
 ```text
-snapshot
+snapshot --gate (in the gate)
   ├─ stop     → cron_delete, cleanup, report outcome
   ├─ wait     → end the turn with no message
   ├─ resync   → fetch, fast-forward the worktree to the new head, set cursor;
@@ -364,11 +440,15 @@ Replies are on by default; `--no-reply` turns them off.
 
 ## 10. Scheduling, budgets and lifecycle
 
-- Start runs the first tick immediately, then calls `cron_create` with a
-  session-only recurring job, cron `*/<every> * * * *` (default `*/15`), prompt
-  `Run /autofix-pr tick <owner>/<repo>#<n>`. The cron prompt reaches the model
-  as text, and the model invokes the skill.
-- Fires that arrive while the session is busy wait in the notification queue.
+- Start runs the first check immediately, then calls `cron_create` with a
+  session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
+  gate `qwen autofix-pr snapshot --gate <n> --repo <owner>/<repo>`, and a
+  prompt that tells the model how to handle the events in the gate output
+  (`Run /autofix-pr tick <owner>/<repo>#<n> on the events below`). The gate
+  is confirmed once, like a Monitor command, when the task is created.
+- Fires that arrive while the session is busy wait in the notification queue;
+  the probe runs once when the session is idle and prints everything new
+  since its previous run.
 - The job ends with the process. Re-running `/autofix-pr` later resumes from the
   state file, so handled comments are not answered twice.
 - The cron maximum age setting (`QWEN_CODE_CRON_MAX_AGE_DAYS`) still applies.
@@ -387,10 +467,9 @@ Stop conditions: the PR is merged or closed; `/autofix-pr stop`; a budget in
 the table says stop; the cron job expires. Every stop runs `cleanup` and
 prints the reason, the pushes made and any `needsHuman` items.
 
-Cost: a quiet tick is one short model turn (the `snapshot` call and an empty
-end of turn). At 15 minutes that is at most 4 turns an hour. Skipping the model
-turn when nothing changed needs a cron precondition and is follow-up work
-(Section 12).
+Cost: a quiet check is one probe run — one GraphQL call, plus one per extra
+page of checks — and no model turn. Only a check with events reaches the
+model, so a two-minute cadence costs nothing while the PR is quiet.
 
 ## 11. Resolved decisions
 
@@ -400,7 +479,9 @@ Decided on 2026-10-21:
 2. Trusted authors include the PR author and review bots, in addition to
    `OWNER`, `MEMBER` and `COLLABORATOR`.
 3. Replying on the PR is part of the first version and on by default.
-4. The default check interval is 15 minutes.
+4. The default check interval was 15 minutes while every check was a model
+   turn. With the gate a quiet check costs no turn, so the default is
+   2 minutes (revised 2026-10-21).
 
 ## 12. Risks, validation and delivery
 
@@ -412,14 +493,19 @@ Risks:
   marker, the recorded ids and per-thread attempts.
 - Racing another agent or a person on the same branch. Mitigated by
   `--force-with-lease` and stopping after two external head moves.
-- Conversation growth in long sessions. Each quiet tick adds a small exchange;
-  context compaction handles it, and the cron precondition follow-up removes it.
+- Conversation growth in long sessions. A quiet check never reaches the model;
+  only events do, and the probes report each transition once.
+- A probe that prints on every run would turn the gate back into a
+  model-driven loop. Both probes keep a cursor and report transitions only;
+  their tests pin that a second run on unchanged data prints nothing.
 
 Validation:
 
 - Unit tests with recorded `gh` JSON fixtures: event diffing, stale checks on
   an old SHA, the trust classes, marker and id self-exclusion, action
-  precedence, budgets.
+  precedence, budgets; the gate cursor rules (once per head, re-run failures,
+  conflict marks, the viewer's own comments, merge and reopen) and check
+  rollup paging; the reviewer probe's events, filters and cursor pruning.
 - Push guard tests against a local bare repository: non-fast-forward refusal,
   default-branch refusal, lease rejection after an external push.
 - An integration test with a fake `gh` on `PATH` that drives `prepare` →
@@ -437,14 +523,19 @@ Acceptance criteria:
 
 Delivery plan:
 
-1. Helpers `prepare`, `snapshot`, `ci-log` and `cleanup` with tests.
-2. Helpers `push` and `reply` with tests, and the skill with `--once`. The
-   state records which failed checks were handled on which head, so a failure
-   the agent declined or reran is not dispatched again on the same head.
-3. The loop: `tick`, `status`, `stop`, budgets and resume from the state file.
-4. Follow-ups: a cron precondition so quiet ticks skip the model, durable
-   watching in daemon sessions (`durable` with `sessionMode: "current"`), and a
-   configurable bot allowlist.
+1. The trigger layer: the scheduled-task gate (PR #15069).
+2. The probes (this PR): `snapshot --gate` with its cursor and check paging,
+   and `review watch-repo`; `prepare`, `ci-log` and `cleanup` ship alongside
+   and wait for the reaction layer.
+3. Helpers `push` and `reply` with tests, and the skills: `/autofix-pr` with
+   `--once`, then watch mode as a gated task, and the reviewer watch that runs
+   `/qreview` or a verification pass per event. The state records which
+   failed checks were handled on which head, so a failure the agent declined
+   or reran is not dispatched again on the same head.
+4. The loop state: `status`, `stop`, budgets and resume from the state file.
+5. Follow-ups: durable watching in daemon sessions (`durable` with
+   `sessionMode: "current"`, once the gate supports it), and a configurable
+   bot allowlist.
 
 Open questions:
 

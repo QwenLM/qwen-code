@@ -16,7 +16,7 @@ import { cleanupCommand } from './autofix-pr/cleanup.js';
 export const autofixPrCommand: CommandModule = {
   command: 'autofix-pr',
   describe:
-    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot, CI logs, cleanup)',
+    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, cleanup)',
   builder: (yargs: Argv) =>
     yargs
       .command(prepareCommand)

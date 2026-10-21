@@ -37,9 +37,37 @@ export interface AutofixPrState {
   postedCommentIds: string[];
 }
 
+/**
+ * Cursor of `snapshot --gate`: what the probe has already reported, so a
+ * fire wakes the session only for a transition. Independent of the prepared
+ * state file — a gate needs no worktree — and never moved by push or reply.
+ */
+export interface AutofixPrGateCursor {
+  version: 1;
+  host: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  /** The `gh` identity; its own comments are never events. */
+  viewer: string;
+  prAuthor: string;
+  /** Head SHA seen by the previous run; a different one is `head_moved`. */
+  headSha: string | null;
+  /** GraphQL node ids of comments and reviews already reported, newest last. */
+  reportedCommentIds: string[];
+  /** `<check>@<headSha>` of failures already reported on the current head. */
+  reportedChecks: string[];
+  /** Head SHA whose merge conflict was reported; null while mergeable. */
+  conflictSha: string | null;
+  /** Set once a merge or close was reported; the probe is quiet afterwards. */
+  stopped: 'merged' | 'closed' | null;
+}
+
 export interface AutofixPrPaths {
   worktreePath: string;
   statePath: string;
+  /** `snapshot --gate` cursor; separate from the state file on purpose. */
+  gatePath: string;
   branch: string;
 }
 
@@ -70,8 +98,29 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
   return {
     worktreePath: join(tmp, `autofix-pr-${prNumber}`),
     statePath: join(tmp, `autofix-pr-${prNumber}-state.json`),
+    gatePath: join(tmp, `autofix-pr-${prNumber}-gate.json`),
     branch: `qwen-autofix/pr-${prNumber}`,
   };
+}
+
+export function readGateCursor(gatePath: string): AutofixPrGateCursor | null {
+  if (!existsSync(gatePath)) return null;
+  const parsed = JSON.parse(
+    readFileSync(gatePath, 'utf8'),
+  ) as AutofixPrGateCursor;
+  if (parsed.version !== 1) {
+    throw new Error(
+      `unsupported autofix-pr gate cursor version in ${gatePath}: ${String(parsed.version)}`,
+    );
+  }
+  return parsed;
+}
+
+export function writeGateCursor(
+  gatePath: string,
+  cursor: AutofixPrGateCursor,
+): void {
+  atomicWriteFileSync(gatePath, `${JSON.stringify(cursor, null, 2)}\n`);
 }
 
 export function readState(statePath: string): AutofixPrState | null {
