@@ -130,6 +130,7 @@ export interface OpenTuiDialogMountProps {
   fillInput?: (text: string) => void;
   /** Applies a setting chosen in the settings dialog (shell-owned). */
   onSelectSetting?: (name: string, scope: SettingScope) => void;
+  onRestartRequest?: () => void;
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
   /** Row budget of the popup region, handed to every dialog leg — the legs
@@ -382,6 +383,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         <OpenTuiSettingsDialog
           settings={settings}
           config={config}
+          onRestartRequest={props.onRestartRequest}
           availableTerminalHeight={props.availableTerminalHeight}
           onSelect={(name, scope) => {
             if (name === undefined) {

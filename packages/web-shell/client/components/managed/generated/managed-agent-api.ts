@@ -508,7 +508,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the next-user-Turn policy of an idle eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
+        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1,/2. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -601,6 +601,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-mcp/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read the selected Session's sanitized, committed MCP catalog. Requires a trusted actor and Workspace read access. Discovery states describe the published snapshot, not live Runtime health. Does not configure servers, discover capabilities or execute tools, resources or prompts. */
+        post: operations["queryWebShellSessionMcp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/session-skills/query": {
         parameters: {
             query?: never;
@@ -678,6 +695,54 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        PublicMcpCatalog: {
+            /** @constant */
+            object: "agent.mcp_catalog";
+            /** Format: uuid */
+            session_id: string;
+            servers: components["schemas"]["PublicMcpServerCatalog"][];
+        };
+        PublicMcpServerCatalog: {
+            server_id: string;
+            server_revision: number;
+            /** @description The pinned catalog revision; null while no catalog has been published. */
+            catalog_revision: number | null;
+            tools: components["schemas"]["PublicMcpTool"][];
+            resources: components["schemas"]["PublicMcpResource"][];
+            prompts: components["schemas"]["PublicMcpPrompt"][];
+            discovery: components["schemas"]["PublicMcpDiscovery"];
+        };
+        PublicMcpTool: {
+            name: string;
+            description?: string;
+            input_schema: {
+                [key: string]: unknown;
+            };
+        };
+        PublicMcpResource: {
+            name: string;
+            uri: string;
+            description?: string;
+            mime_type?: string;
+        };
+        PublicMcpPrompt: {
+            name: string;
+            description?: string;
+            arguments?: components["schemas"]["PublicMcpPromptArgument"][];
+        };
+        PublicMcpPromptArgument: {
+            name: string;
+            description?: string;
+            required?: boolean;
+        };
+        PublicMcpDiscovery: {
+            /** @enum {string} */
+            tools: "complete" | "partial" | "failed" | "stale";
+            /** @enum {string} */
+            resources: "complete" | "partial" | "failed" | "stale";
+            /** @enum {string} */
+            prompts: "complete" | "partial" | "failed" | "stale";
+        };
         InputBlock: components["schemas"]["InputTextBlock"] | components["schemas"]["InputFileBlock"] | components["schemas"]["InputImageBlock"];
         PublicArtifact: {
             /** @constant */
@@ -1034,8 +1099,10 @@ export interface components {
                 workspaceCreation?: boolean;
                 /** @description Supports effective Session policy options and explicit Workspace-bound creation policy. Missing or false means unsupported. */
                 approvalModeSelection?: boolean;
-                /** @description Supports browsing and selecting existing directories on authorized Linux storage; absent means unsupported. */
+                /** @description Supports browsing and selecting existing directories on authorized Linux or macOS storage; absent means unsupported. */
                 workspaceDirectorySelection?: boolean;
+                /** @description Trusted single-user local deployment can browse and import existing host directories without a pre-registered Workspace. Missing or false means unsupported. */
+                localDirectoryImport?: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
             defaultWorkspace: (components["schemas"]["WebShellWorkspace"] & {
@@ -1429,6 +1496,8 @@ export interface components {
             idempotencyKey: string;
             sourceWorkspaceId?: string;
             cwdRelative?: string;
+            /** @description Absolute execution-host directory. Requires localDirectoryImport; exclusive with Workspace-relative fields. An empty path is allowed only for directory browsing and starts at the host home directory. */
+            localPath?: string;
         };
         WebShellSessionOptionsRequest: {
             agentId: string;
@@ -1488,6 +1557,8 @@ export interface components {
             sessionId: string;
         };
         WebShellSessionApproval: {
+            /** @description Execution approval can change during a Turn when true. Missing means idle-only; Plan changes remain idle-only. */
+            liveSupported?: boolean;
             /** @enum {string} */
             approvalMode: "default" | "auto-edit" | "yolo";
             /** Format: int64 */
@@ -1577,6 +1648,9 @@ export interface components {
         WebShellWorkspaceDirectoryQueryRequest: {
             workspaceId: string;
             cwdRelative: string;
+        } | {
+            /** @description Absolute execution-host directory. Requires localDirectoryImport; exclusive with Workspace-relative fields. An empty path is allowed only for directory browsing and starts at the host home directory. */
+            localPath: string;
         };
         InputTextBlock: {
             /** @enum {string} */
@@ -2945,6 +3019,35 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    queryWebShellSessionMcp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Session MCP catalog snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicMcpCatalog"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     queryWebShellSessionSkills: {

@@ -17,11 +17,26 @@ class WorkspaceCsiApplicationInventoryMySqlIT extends WorkspaceCsiApplicationInv
     void alterColumn(String table, String column, String type) {
         var current = jdbc.queryForMap("SELECT IS_NULLABLE, COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS"
                 + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?", table, column);
-        String nullable = "NO".equals(current.get("is_nullable")) ? " NOT NULL" : " NULL";
-        Object existingDefault = current.get("column_default");
-        String defaultValue = existingDefault == null ? ""
-                : " DEFAULT '" + existingDefault.toString().replace("'", "''") + "'";
-        jdbc.execute("ALTER TABLE " + table + " MODIFY COLUMN " + column + " " + type + nullable + defaultValue);
+        boolean notNull = "NO".equals(current.get("is_nullable"));
+        jdbc.execute("ALTER TABLE " + table + " MODIFY COLUMN " + column + " " + type
+                + (notNull ? " NOT NULL" : " NULL")
+                + defaultClause(current.get("column_default"), type, notNull));
+    }
+
+    // A MODIFY resets the default unless it is repeated, and MariaDB reports an
+    // absent default as the string "NULL" where MySQL reports SQL NULL. Rebuild
+    // the clause with the quoting the new type needs; expressions stay bare.
+    private static String defaultClause(Object existing, String type, boolean notNull) {
+        if (existing == null || "NULL".equalsIgnoreCase(existing.toString())) {
+            return notNull ? "" : " DEFAULT NULL";
+        }
+        String value = existing.toString();
+        if (value.matches("(?i)current_timestamp(\\(\\d*\\))?")
+                || type.matches("(?i)(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT|DECIMAL|"
+                        + "NUMERIC|FLOAT|DOUBLE|REAL|BOOLEAN|BOOL|BIT).*")) {
+            return " DEFAULT " + value;
+        }
+        return " DEFAULT '" + value.replace("'", "''") + "'";
     }
 
     @AfterEach

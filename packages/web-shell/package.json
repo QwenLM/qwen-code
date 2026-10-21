@@ -73,6 +73,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.0",
+    "docx-preview": "0.4.1",
     "echarts": "^6.0.0",
     "exceljs": "4.4.0",
     "fzf": "^0.5.2",
@@ -100,6 +101,7 @@
   "bundledDevDependencies": [
     "@pierre/diffs",
     "@pierre/trees",
+    "docx-preview",
     "shiki-files"
   ],
   "devDependencies": {

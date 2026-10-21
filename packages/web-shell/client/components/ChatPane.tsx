@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useModelRefresh } from '../hooks/useModelRefresh';
 import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
 import {
@@ -310,9 +311,11 @@ export function ChatPane({
   const {
     renderComposerFooter: CustomComposerFooter,
     askUserFreeTextLabel,
+    onRefreshModels,
     allowedApprovalModes,
   } = useWebShellCustomization();
   const connection = useConnection();
+  const modelRefresh = useModelRefresh(onRefreshModels);
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
@@ -2000,6 +2003,7 @@ export function ChatPane({
             onTogglePlan={handleTogglePlan}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             currentModel={connection.currentModel ?? ''}
+            modelRefresh={modelRefresh}
             availableModels={availableModels}
             onSelectMode={handleSelectMode}
             onSelectModel={handleSelectModel}
