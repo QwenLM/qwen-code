@@ -9811,39 +9811,57 @@ describe('useLlmStream', () => {
       expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_race_A']);
     });
 
-    // Keep local completion bookkeeping for skill-modification protection,
-    // but do not accept the real result that was dropped from history.
+    // Dropped results have no model consumer and must not retain experience
+    // records, ordinary reservations or recall hints.
     expect(realClient['toolCallCount']).toBe(0);
-    expect(realClient['pendingExperienceOutcomes'].has('call_race_A')).toBe(
-      true,
-    );
+    expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+    expect(realClient['recordedExperienceCallIds'].size).toBe(0);
+    expect(realClient['recentCompletedToolNames']).toEqual([]);
     expect(client.addHistory).not.toHaveBeenCalled();
     expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
       'read_file',
       { path: '/tmp/x.txt' },
-      { ...lateRealResult.response, status: lateRealResult.status },
+      {
+        ...lateRealResult.response,
+        status: lateRealResult.status,
+        modelFacing: false,
+      },
     );
 
     // No follow-up submission: the synthetic in history already closes
     // the tool_use ↔ tool_result pair.
     expect(mockSendMessageStream).not.toHaveBeenCalled();
+    realClient.acceptCompletedToolResults(
+      lateRealResult.response.responseParts,
+    );
+    expect(realClient['toolCallCount']).toBe(0);
   });
 
-  it.each(['success', 'error', 'cancelled', 'not_started'] as const)(
-    'protects deduped cancelled skill writes with %s execution without counting experience',
-    async (executionStatus) => {
-      const cancelledDedupedTool = {
+  it.each([
+    ['success', 'success', false],
+    ['success', 'success', true],
+    ['success', 'not_started', true],
+    ['cancelled', 'success', true],
+    ['cancelled', 'error', true],
+    ['cancelled', 'cancelled', true],
+    ['cancelled', 'not_started', true],
+  ] as const)(
+    'handles deduped %s writes with %s execution (skill: %s) without counting experience',
+    async (status, executionStatus, skillWrite) => {
+      const dedupedWrite = {
         request: {
           callId: 'call_dedup_cancelled',
           name: 'write_file',
           args: {
-            path: '/test/dir/.qwen/skills/example/SKILL.md',
+            path: skillWrite
+              ? '/test/dir/.qwen/skills/example/SKILL.md'
+              : '/test/dir/example.txt',
             content: 'x',
           },
           isClientInitiated: false,
           prompt_id: 'prompt-dedup-cancel',
         },
-        status: 'cancelled',
+        status,
         responseSubmittedToLlm: false,
         response: {
           callId: 'call_dedup_cancelled',
@@ -9870,7 +9888,7 @@ describe('useLlmStream', () => {
         invocation: {
           getDescription: () => 'cancelled write',
         } as unknown as AnyToolInvocation,
-      } as unknown as TrackedCancelledToolCall;
+      } as unknown as TrackedToolCall;
 
       const client = new MockedLlmClientClass(mockConfig);
       const { LlmClient: RealLlmClient } = await vi.importActual<
@@ -9896,7 +9914,7 @@ describe('useLlmStream', () => {
               functionCall: {
                 id: 'call_dedup_cancelled',
                 name: 'write_file',
-                args: cancelledDedupedTool.request.args,
+                args: dedupedWrite.request.args,
               },
             },
           ],
@@ -9949,7 +9967,7 @@ describe('useLlmStream', () => {
 
       await act(async () => {
         if (capturedOnComplete) {
-          await capturedOnComplete([cancelledDedupedTool]);
+          await capturedOnComplete([dedupedWrite]);
         }
       });
 
@@ -9962,15 +9980,15 @@ describe('useLlmStream', () => {
 
       expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
         'write_file',
-        cancelledDedupedTool.request.args,
-        { ...cancelledDedupedTool.response, status: 'cancelled' },
+        dedupedWrite.request.args,
+        { ...dedupedWrite.response, status, modelFacing: false },
       );
       expect(realClient['skillsModifiedInSession']).toBe(
-        executionStatus !== 'not_started',
+        skillWrite && executionStatus !== 'not_started',
       );
       expect(
         realClient['recordedExperienceCallIds'].has('call_dedup_cancelled'),
-      ).toBe(executionStatus !== 'not_started');
+      ).toBe(skillWrite && executionStatus !== 'not_started');
       expect(realClient['toolCallCount']).toBe(0);
       expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
       expect(realClient['recentCompletedToolNames']).toEqual([]);
@@ -9979,7 +9997,7 @@ describe('useLlmStream', () => {
 
       realClient['skillsModifiedInSession'] = false;
       await act(async () => {
-        await capturedOnComplete?.([cancelledDedupedTool]);
+        await capturedOnComplete?.([dedupedWrite]);
       });
       expect(realClient['skillsModifiedInSession']).toBe(false);
       expect(realClient['toolCallCount']).toBe(0);
@@ -10619,7 +10637,10 @@ describe('useLlmStream', () => {
       expect(realClient['toolCallCount']).toBe(status === 'success' ? 1 : 0);
       expect(
         realClient['pendingExperienceOutcomes'].has('call_mixed_deduped'),
-      ).toBe(true);
+      ).toBe(false);
+      expect(
+        realClient['recordedExperienceCallIds'].has('call_mixed_deduped'),
+      ).toBe(false);
       expect(realClient['failedExperienceToolNames'].has('read_file')).toBe(
         status === 'cancelled',
       );

@@ -5060,15 +5060,15 @@ export const useLlmStream = (
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
-        // Preserve local skill-write protection and recall hints, but never
-        // accept the dropped result as experience. Client-owned calls do not
-        // belong to this completion bookkeeping.
+        // Dropped results have no model consumer. Keep local skill-write
+        // protection and its replay reservation without retaining experience
+        // records or recall hints. Client-owned calls remain excluded.
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
-            { ...tc.response, status: tc.status },
+            { ...tc.response, status: tc.status, modelFacing: false },
           );
         }
         markToolsAsSubmitted(dedupedCallIds);

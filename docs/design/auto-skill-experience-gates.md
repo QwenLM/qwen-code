@@ -40,11 +40,12 @@ even if a PostToolUse hook subsequently denies the result or the call settles
 cancelled after execution started. Denied and cancelled results remain excluded
 from experience accounting and unstarted writes do not set protection. Cancelled
 executions reserve their completion IDs so replay cannot renew skill protection.
-ACP marks code-mode nested and MCP App completions as non-model-facing. They do
-not create pending experience records, recent-tool hints or ordinary call-ID
-reservations, since no top-level model response can accept them. Local skill
-writes still set protection and reserve their IDs to prevent replay from renewing
-it; these intentional reservations last until the session resets.
+ACP marks code-mode nested and MCP App completions as non-model-facing. TUI also
+marks late results dropped by history deduplication as non-model-facing. These
+completions do not create pending experience records, recent-tool hints or
+ordinary call-ID reservations, since no model submission can accept them. Local
+skill writes still set protection and reserve their IDs to prevent replay from
+renewing it; these intentional reservations last until the session resets.
 
 Stream ID normalization also reserves the client's session-level recorded
 completion IDs, not just IDs in current history. Compression and rewind/restore
@@ -56,8 +57,10 @@ state. This adds no separate ID store or persistent state.
 Tracked terminal status excludes cancelled calls even if execution already
 settled successfully. Execution status excludes unstarted and cancelled calls;
 terminal error type excludes hook-denied results. Auto Memory recall hints remain
-independent of this experience gate: non-cancelled terminal tools are remembered. A successful
-shell retry requires an existing structured `ShellResultDisplay` with completed
+independent of this experience gate: only model-facing, non-cancelled terminal
+completions add recent-tool hints, without waiting for result acceptance.
+Non-model-facing completions add no hints. A successful shell retry requires an
+existing structured `ShellResultDisplay` with completed
 outcome and exit code 0; output text is never parsed. Failed shell results use
 execution status/error type; structured cancelled results are excluded even if
 a front end labels them successful. No shell teardown changes are needed.
@@ -133,6 +136,11 @@ without contributing experience or recent-tool hints. Nested read and ordinary
 write calls, and MCP App calls, leave no pending records or ordinary reservations;
 only their model-facing parent results count. Nested skill writes retain protection
 and their ID without a pending record, including cancelled or hook-denied writes.
+TUI dedup tests verify that dropped ordinary results leave no pending records,
+ordinary reservations or recent-tool hints. Started skill writes still protect
+and reserve their IDs without counting experience, including cancellation after
+execution starts; unstarted writes do not protect, and replay cannot renew
+protection. Mixed batches still accept and count only the fresh results.
 No new shell process-cancellation semantics are introduced.
 
 ## Risks and open questions
@@ -140,7 +148,22 @@ No new shell process-cancellation semantics are introduced.
 Signals are deterministic heuristics, not semantic proof of reusable experience.
 MCP tools without read-only hints and agent delegation deliberately favor not
 missing substantive work. Pending results occupy memory until acceptance or a
-session reset. No persistence, classifier, configurable thresholds, new UI or
+session reset.
+
+The 5-call experience floor is an intentional cost tradeoff against the 20-call
+substantive-work backstop: retry- or steer-heavy sessions can dispatch a review
+after roughly every 5 accepted calls when each new window qualifies. Dispatch
+resets its count and signals; an in-flight review retains the next window, which
+may dispatch at the next eligible turn boundary after that review finishes. Each
+review processes the full, growing session transcript with default limits of
+8 turns / 120 s. Existing `memory.agentMaxTurns` and
+`memory.agentTimeoutMinutes` settings can override these limits; 0 disables the
+corresponding limit. When confirmation is enabled, newly created skills are
+staged and prompt for confirmation. Repeated reviews therefore increase token,
+execution-time and potential confirmation costs. A session cap, cooldown and
+incremental history processing remain deferred scheduling-policy work.
+
+No persistence, classifier, configurable thresholds, new UI or
 changes to Auto Memory extraction cadence are included. There are no open
 product decisions for this implementation; platform validation limits must be
 reported separately from passing unit tests.
