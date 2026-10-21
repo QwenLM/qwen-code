@@ -2958,6 +2958,36 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it.each([undefined, false, true])(
+    'passes only the resolved Generated UI opt-in as a runtime candidate: %s',
+    async (enabled) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ experimental: { generatedUi: enabled } }, argv);
+      expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bundledGeneratedUi: expect.objectContaining({
+            enabled: enabled === true,
+          }),
+        }),
+      );
+    },
+  );
+
+  it('does not prepare a Generated UI server for Safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    await loadCliConfig({ experimental: { generatedUi: true } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bundledGeneratedUi: {
+          enabled: true,
+          unavailableReason: 'unsupported-runtime',
+        },
+      }),
+    );
+  });
+
   it('should keep the session writer lease disabled by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
