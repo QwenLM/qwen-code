@@ -225,13 +225,9 @@ class ManagedRuntimeRetentionGuardTest {
     }
 
     @Test
-    void localHolderAndCsiRetirementRetainBindings() throws Exception {
-        jdbc.update("INSERT INTO ma_storage_owner"
-                + " (storage_key, holder_key, binding_id, runtime_generation, runtime_session_id)"
-                + " VALUES (?, ?, 'local', 1, 'session')", "a".repeat(64), "b".repeat(64));
+    void csiRetirementRetainsItsBinding() throws Exception {
         operation("CSI_RETIREMENT", "csi-retirement", "csi", 2);
         try (var connection = source.getConnection()) {
-            assertThat(guard.bindingReferenced(connection, binding("local", 1))).isTrue();
             assertThat(guard.bindingReferenced(connection, binding("csi", 2))).isTrue();
             assertThat(guard.bindingReferenced(connection, binding("absent", 1))).isFalse();
         }

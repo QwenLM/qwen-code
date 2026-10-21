@@ -132,10 +132,13 @@ public final class JdbcRuntimeBindingRepository
             String physical = localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
                     claim.getRequest().getStorageId(), true);
             if (physical != null) {
-                try (var lock = connection.prepareStatement("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
+                try (var lock = connection.prepareStatement("SELECT physical_key FROM ma_storage_owner WHERE storage_key = ?"
+                        + " AND storage_kind = (SELECT storage_kind FROM ma_storage WHERE alias_key = ?)"
+                        + " AND holder_key IS NULL AND maintenance_id IS NULL FOR UPDATE")) {
                     lock.setString(1, physical);
+                    lock.setString(2, storageAliasKey(claim.getRequest().getScope().getTenantId(), claim.getRequest().getStorageId()));
                     try (var rows = lock.executeQuery()) {
-                        if (!rows.next()) {
+                        if (!rows.next() || !physical.equals(rows.getString(1))) {
                             throw unverifiedWorkspaceHolder();
                         }
                     }
@@ -155,70 +158,13 @@ public final class JdbcRuntimeBindingRepository
             RuntimeSessionRecord updated = JdbcRuntimeSessionRepository.compareAndSet(connection, expected,
                     expected.withState(RuntimeSessionRecord.State.RELEASED, JdbcRepositorySupport.databaseNow(connection)));
             if (updated != null) {
-                clearStoppedHolder(connection, binding, expected);
+                if (physical != null) {
+                    clearStoppedMember(connection, physical, expected);
+                }
                 RuntimeAdmission.requireStoppedRelease(binding, claim, expected, JdbcRepositorySupport.databaseNowPrecise(connection));
             }
             return updated;
         });
-    }
-
-    private static void clearStoppedHolder(Connection connection, RuntimeBindingRecord binding,
-            RuntimeSessionRecord session) throws SQLException {
-        String key = localStorageOwnerKey(connection, binding.getRequest().getScope().getTenantId(),
-                binding.getRequest().getStorageId(), true);
-        if (key == null) {
-            return;
-        }
-        try (PreparedStatement statement = connection.prepareStatement(
-                        "SELECT holder_key, binding_id, runtime_generation, runtime_session_id,"
-                                + " physical_key FROM ma_storage_owner WHERE storage_key = ? AND"
-                                + " storage_kind IN ('LOCAL', 'SSH_LOCAL') AND storage_kind ="
-                                + " (SELECT storage_kind FROM ma_storage WHERE alias_key = ?) FOR UPDATE")) {
-            statement.setString(1, key);
-            statement.setString(2, storageAliasKey(binding.getRequest().getScope().getTenantId(), binding.getRequest().getStorageId()));
-            try (ResultSet row = statement.executeQuery()) {
-                if (!row.next()) {
-                    throw unverifiedWorkspaceHolder();
-                }
-                if (!key.equals(row.getString("physical_key"))) {
-                    throw unverifiedWorkspaceHolder();
-                }
-                clearStoppedMember(connection, key, session);
-                String holder = row.getString("holder_key");
-                String holderBinding = row.getString("binding_id");
-                String holderSession = row.getString("runtime_session_id");
-                long generation = row.getLong("runtime_generation");
-                if (holder == null && holderBinding == null && holderSession == null
-                        && row.getObject("runtime_generation") == null) {
-                    return;
-                }
-                if (holder == null || !binding.getBindingId().equals(holderBinding)
-                        || binding.getGeneration() != generation || holderSession == null
-                        || !holder.equals(workspaceHolderKey(holderBinding + "\u0000"
-                                + generation + "\u0000" + holderSession))) {
-                    throw new RuntimeBrokerException(409, "workspace_close_identity_unverified",
-                            "Original Workspace holder differs", false);
-                }
-                if (!session.getRuntimeSessionId().equals(holderSession)) {
-                    return;
-                }
-                try (PreparedStatement clear = connection.prepareStatement(
-                                "UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
-                                    + " runtime_generation = NULL, runtime_session_id = NULL WHERE"
-                                    + " storage_key = ? AND storage_kind IN ('LOCAL', 'SSH_LOCAL') AND holder_key ="
-                                    + " ? AND binding_id = ? AND runtime_generation = ? AND"
-                                    + " runtime_session_id = ?")) {
-                    clear.setString(1, key);
-                    clear.setString(2, holder);
-                    JdbcRepositorySupport.setIdentity(clear, 3, holderBinding);
-                    clear.setLong(4, generation);
-                    JdbcRepositorySupport.setIdentity(clear, 5, holderSession);
-                    if (clear.executeUpdate() != 1) {
-                        throw new SQLException("Original Workspace holder changed");
-                    }
-                }
-            }
-        }
     }
 
     private static void clearStoppedMember(Connection connection, String key, RuntimeSessionRecord session) throws SQLException {
@@ -317,17 +263,6 @@ public final class JdbcRuntimeBindingRepository
                 "workspace_close_identity_unverified",
                 "Original Workspace holder differs",
                 false);
-    }
-
-    private static String workspaceHolderKey(String identity) {
-        try {
-            return java.util.HexFormat.of()
-                    .formatHex(
-                            java.security.MessageDigest.getInstance("SHA-256")
-                                    .digest(identity.getBytes(StandardCharsets.UTF_8)));
-        } catch (java.security.NoSuchAlgorithmException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
-        }
     }
 
     @Override
@@ -1500,7 +1435,7 @@ public final class JdbcRuntimeBindingRepository
             if (sharing && (session.isActive()
                     || JdbcToolExecutionRepository.hasActiveByRuntimeSession(connection, session.getBindingId(),
                             session.getRuntimeGeneration(), session.getRuntimeSessionId())
-                    || hasStorageHolder(connection, session))) {
+                    || hasExecutionMembership(connection, session))) {
                 throw new RuntimeBrokerException(
                         409,
                         "workspace_close_execution_unsettled",
@@ -1510,29 +1445,17 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
-    private static boolean hasStorageHolder(Connection connection, RuntimeSessionRecord session) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                        "SELECT binding_id, runtime_session_id FROM ma_storage_owner"
-                                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?"
-                                + " UNION ALL SELECT binding_id, runtime_session_id FROM ma_runtime_session"
-                                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?"
-                                + " AND execution_storage_key IS NOT NULL")) {
+    private static boolean hasExecutionMembership(Connection connection, RuntimeSessionRecord session) throws SQLException {
+        try (var statement = connection.prepareStatement("SELECT runtime_session_id FROM ma_runtime_session"
+                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?"
+                + " AND execution_storage_key IS NOT NULL")) {
             JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
             statement.setLong(2, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(statement, 3, session.getRuntimeSessionId());
-            JdbcRepositorySupport.setIdentity(statement, 4, session.getBindingId());
-            statement.setLong(5, session.getRuntimeGeneration());
-            JdbcRepositorySupport.setIdentity(statement, 6, session.getRuntimeSessionId());
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    if (session.getBindingId().equals(rows.getString("binding_id"))
-                            && session.getRuntimeSessionId().equals(rows.getString("runtime_session_id"))) {
-                        return true;
-                    }
-                }
+            try (var rows = statement.executeQuery()) {
+                return rows.next();
             }
         }
-        return false;
     }
 
     @Override

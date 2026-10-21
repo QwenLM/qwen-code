@@ -16,13 +16,11 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -38,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcPhysicalStorageReleaseTest {
     @Test
-    void aliasesReleaseOnlyTheirMatchingPhysicalHolder() throws Exception {
+    void aliasesReleaseOnlyTheirMatchingExecutionMember() throws Exception {
         var source = new JdbcDataSource();
         source.setURL(
                 "jdbc:h2:mem:physical-release-"
@@ -66,9 +64,8 @@ class JdbcPhysicalStorageReleaseTest {
                     shared.binding.getBindingId().getBytes(StandardCharsets.UTF_8)));
         }
         Fixture matched = new Fixture(source);
-        matched.holder(matched.binding.getBindingId(), matched.binding.getGeneration());
         assertEquals(RuntimeSessionRecord.State.RELEASED, matched.release().getState());
-        assertNull(matched.holder());
+        assertNull(matched.member());
         assertEquals(
                 2L,
                 matched.scalar(
@@ -111,14 +108,14 @@ class JdbcPhysicalStorageReleaseTest {
                         "SELECT storage_alias_key FROM ma_runtime_binding WHERE binding_id=?",
                         frozen.binding.getBindingId().getBytes(StandardCharsets.UTF_8)));
 
-        Fixture successor = new Fixture(source);
-        successor.holder(successor.binding.getBindingId(), successor.binding.getGeneration() + 1);
-        String original = successor.holder();
+        Fixture mismatched = new Fixture(source);
+        mismatched.execute("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?",
+                "f".repeat(64), mismatched.binding.getBindingId().getBytes(StandardCharsets.UTF_8));
         assertEquals(
                 "workspace_close_identity_unverified",
-                assertThrows(RuntimeBrokerException.class, successor::release).getCode());
-        assertEquals(original, successor.holder());
-        successor.unreleased();
+                assertThrows(RuntimeBrokerException.class, mismatched::release).getCode());
+        assertEquals("f".repeat(64), mismatched.member());
+        mismatched.unreleased();
 
         Fixture missing = new Fixture(source);
         missing.execute("DELETE FROM ma_storage_owner WHERE storage_key=?", missing.physical);
@@ -126,21 +123,18 @@ class JdbcPhysicalStorageReleaseTest {
         missing.unreleased();
 
         Fixture wrongScope = new Fixture(source);
-        wrongScope.holder(wrongScope.binding.getBindingId(), wrongScope.binding.getGeneration());
         wrongScope.execute(
                 "UPDATE ma_storage SET tenant_id=? WHERE alias_key=?",
                 "other-tenant".getBytes(StandardCharsets.UTF_8),
                 JdbcRuntimeBindingRepository.storageAliasKey(wrongScope.tenant, "second"));
         assertThrows(RuntimeBrokerException.class, wrongScope::release);
-        assertNotNull(wrongScope.holder());
+        assertEquals(wrongScope.physical, wrongScope.member());
         wrongScope.unreleased();
     }
 
     private static void verifyCleanupOrdering(DataSource source, boolean ssh, boolean lost) throws Exception {
         var observing = new CleanupDataSource(source);
         var fixture = new Fixture(observing, ssh);
-        fixture.execute("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?",
-                fixture.physical, fixture.binding.getBindingId().getBytes(StandardCharsets.UTF_8));
         RuntimeBindingRecord cleanup = fixture.binding;
         if (lost) {
             var seed = cleanup.getProvisionSeed();
@@ -335,6 +329,8 @@ class JdbcPhysicalStorageReleaseTest {
                                             draining.getProvisionSeed().getProvisionRequestId(),
                                             draining.getResourceHandle(),
                                             Instant.now())));
+            execute("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE binding_id = ?",
+                    physical, binding.getBindingId().getBytes(StandardCharsets.UTF_8));
         }
 
         private String text(String sql, Object parameter) throws Exception {
@@ -363,41 +359,13 @@ class JdbcPhysicalStorageReleaseTest {
                     physical, storageKind);
         }
 
-        private void holder(String bindingId, long generation) throws Exception {
-            String holder =
-                    HexFormat.of()
-                            .formatHex(
-                                    MessageDigest.getInstance("SHA-256")
-                                            .digest(
-                                                    (bindingId + "\0" + generation + "\0original")
-                                                            .getBytes(StandardCharsets.UTF_8)));
-            execute(
-                    "UPDATE ma_storage_owner SET"
-                            + " holder_key=?,binding_id=?,runtime_generation=?,runtime_session_id=?"
-                            + " WHERE storage_key=?",
-                    holder,
-                    bindingId.getBytes(StandardCharsets.UTF_8),
-                    generation,
-                    "original".getBytes(StandardCharsets.UTF_8),
-                    physical);
-        }
-
         private RuntimeSessionRecord release() {
             return bindings.completeStoppedSessionRelease(sessions, executions, session, binding);
         }
 
-        private String holder() throws Exception {
-            try (var connection = source.getConnection();
-                    var statement =
-                            connection.prepareStatement(
-                                    "SELECT holder_key FROM ma_storage_owner WHERE"
-                                            + " storage_key=?")) {
-                statement.setString(1, physical);
-                try (var row = statement.executeQuery()) {
-                    assertEquals(true, row.next());
-                    return row.getString(1);
-                }
-            }
+        private String member() throws Exception {
+            return text("SELECT execution_storage_key FROM ma_runtime_session WHERE binding_id = ?"
+                    + " AND runtime_session_id = X'6f726967696e616c'", binding.getBindingId().getBytes(StandardCharsets.UTF_8));
         }
 
         private void unreleased() {

@@ -18,15 +18,13 @@ Add a nullable `execution_storage_key` and a false-by-default `execution_exclusi
 
 The physical `ma_storage_owner` row continues to identify the registered mount and any exclusive maintenance holder. Acquisition locks that row briefly, verifies the original tenant/Workspace/storage/binding/generation and mount, rejects migration, maintenance, or an exclusive rewind, and records only the requesting member. Other ordinary members are allowed. Release removes only the original member. It never clears the directory's other memberships. All membership scans used for admission or physical maintenance are current locking reads under the same physical row lock, including across storage aliases.
 
-Published singleton Runtime holders remain recognized. They are validated against their exact Runtime Session and holder digest before another member can join. The first compatible acquisition atomically transfers the original holder to its exact membership before clearing the singleton columns; no execution authority is dropped. A holder released before that transfer still uses its original evidence-gated cleanup. A malformed holder fails closed. No timeout steals ownership and no SQL operation assumes a cancelled command stopped.
-
 ## File history
 
 Concurrent edits have Legacy's shared-file semantics: separate Sessions can overwrite each other's files, and Shell/Hook/MCP effects are not transactions. The existing fingerprint checks alone cannot safely attribute a write when another Session changes the file before the final fingerprint is captured.
 
 Past execution overlap does not disable file undo, including overlap involving only reads. No persistent overlap marker is stored and ordinary execution acquisition does not create or update a history head for this purpose. Once other memberships have released, the Session can request rewind through the existing runtime/history implementation. Existing file-level history checks remain in force; this change adds no cross-Session file transaction or attribution guarantee.
 
-Rewind upgrades its membership to exclusive under the physical row lock after verifying there are no other members or legacy holders. If another member is still held, it returns the existing conflict result. New acquisitions refuse until the rewind result returns. Successful completion downgrades the membership; an uncertain result retains exclusive membership for original-operation recovery. Existing Hosted conflict receipts and pending-undo handling are reused without changing the history wire format or UI API.
+Rewind upgrades its membership to exclusive under the physical row lock after verifying there are no other members. If another member is still held, it returns the existing conflict result. New acquisitions refuse until the rewind result returns. Successful completion downgrades the membership; an uncertain result retains exclusive membership for original-operation recovery. Existing Hosted conflict receipts and pending-undo handling are reused without changing the history wire format or UI API.
 
 ## Lifecycle and recovery
 
@@ -43,7 +41,7 @@ The existing Runtime placement recovery barrier is unchanged. An UNKNOWN tool re
 | Component                              | Change                                                                                                                                                    |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Shared schema and projections          | Add V15 without rewriting published migrations; include the new fields in strict CSI inventory and require ordinary memberships to be absent on CSI rows. |
-| Workspace execution store              | Shared claim, exact release, exclusive rewind, legacy-holder validation, complete maintenance occupancy, and scoped lost cleanup.                         |
+| Workspace execution store              | Shared claim, exact release, exclusive rewind, complete maintenance occupancy, and scoped lost cleanup.                                                   |
 | Runtime transport                      | Acquire/execute still prove the original membership; reuse the existing conflict result for current occupancy and retain exclusivity on uncertain rewind. |
 | Storage guard                          | Include all memberships in inspect, registration, fence, restore, and captured-registration verification.                                                 |
 | Binding repository and retention guard | Preserve memberships across CAS; exact stopped release, close checks, and retention references.                                                           |
@@ -52,7 +50,7 @@ The existing Runtime placement recovery barrier is unchanged. An UNKNOWN tool re
 
 ## Rollout and boundaries
 
-Drain and stop all old Broker/control-plane/maintenance writers before applying V15 and reopening execution. Old binaries do not understand memberships; mixed writers are unsupported. Preserve old data and original execution evidence. Rollback requires a compatible build or a fully drained catalog; do not erase memberships or unknown executions to force rollback. Existing CSI limits are unchanged.
+Initialize schema V15 and use the matching Server and Broker build. Ordinary execution has one authority representation: per-Runtime-Session membership. There is no conversion or fallback for an earlier singleton representation. CSI reservation and physical-maintenance identities retain their existing roles.
 
 This change prevents an UNKNOWN tool result on a READY binding from blocking unrelated ordinary Sessions; it does not repair the unknown result, bypass placement recovery, prove escaped writers stopped, add transactional file isolation, implement CSI concurrency, change child-agent admission, or fix the separate empty Skill display. Maintenance remains blocked by unproven writers. The original incident deployment is not modified during development.
 
@@ -60,24 +58,22 @@ This change prevents an UNKNOWN tool result on a READY binding from blocking unr
 
 - Baseline the globally installed CLI and confirm the existing Java/Broker contention behavior before implementation, documenting a Java/API fallback when the CLI cannot reach the embedded ownership store.
 - Two independent SQL clients and two Broker processes can hold ordinary memberships on one physical directory. A blocked or UNKNOWN A does not prevent B's real tool call from completing; A retains its original status/cancel identity and cannot replay.
-- Releasing, cancelling, handing back, closing, or recovering A leaves B held. Cross-tenant aliases, stale generations, malformed legacy holders, revoked authority, and CSI profile confusion fail closed.
+- Releasing, cancelling, handing back, closing, or recovering A leaves B held. Cross-tenant aliases, stale generations, revoked authority, and CSI profile confusion fail closed.
 - Maintenance and acquisition races have one winner; physical operations wait for every member, including RELEASED rows with retained claims. Lost cleanup and retention cannot discard another binding's claim.
 - Sequential undo remains functional. After the neighbor releases, a Session that previously overlapped can rewind through the existing history implementation. Current neighbor occupancy still produces a conflict with no file effect. Exclusive rewind excludes a late acquisition; uncertainty preserves exclusivity.
 - Run focused H2 tests, Maven verify, disposable MySQL 8.4 concurrency/schema tests, and the real-process Hosted concurrency test using the built CLI. Inspect the full diff in two clean self-audit passes, then obtain independent review.
 
 ### Verification results
 
-Locally verified on main base `461be87304c7b3b5d64b701207c49f236515d5fd`, using macOS, JDK 21, Node 22.22.3 and disposable MySQL 8.4.11:
+Verified the single-representation cleanup based on `48e2adc0b5bb3b65c608abf8188702ca938bdfeb`, using macOS, JDK 21, Node 22.22.3 and disposable MySQL 8.4.11:
 
-- Frozen-lockfile installation and its normal prepare completed root build and bundle; root typecheck also passed. All 145 focused H2/schema cases passed without skips.
-- Complete module verification covered 5,145 unit/H2 cases: 5,127 passed, 18 skipped, no failures or errors. The skips have explicit macOS, SSH interop, Kubernetes, worker-bundle, MySQL-locking/consistent-read or mutually exclusive admission-profile conditions. Both Checkstyle executions and high-confidence SpotBugs passed in the same `verify` command.
-- Nine complete affected MySQL classes passed all 202 cases without skips: Managed Agent, creation schema, strict CSI inventory, recovery, retention guard, retention races, SSH storage, CSI checkpoints and migration. This is selected-class coverage; the complete MySQL roster was not rerun.
-- All 44 fault-profile cases and both standalone Hosted concurrency cases passed without failures, errors or skips, using the synchronized CLI bundle.
-- Independent actual-process probes used two Broker JVMs and real Node workers per case. B completed tool work while A remained prepared or held an injected UNKNOWN record; exact release preserved its neighbor and UNKNOWN could not be replayed. After B completed a read-only `read_file` and released, A's real history implementation completed a no-op rewind with `conflict:false`, no failed files and cleared temporary exclusivity.
-- The existing MCP Spring-restart/release gate passed on MySQL, preserving the original binding and Runtime Session identities and the `1 → 1 → 0` retained/retained/released membership expectations.
-- The disposable MySQL server was verified by port, data directory and PID, then shut down gracefully with no other clients. Its private data was removed and logs retained. The independent probes' recorded processes and all five recorded standalone Hosted process PIDs exited; both independent private H2 servers stopped.
+- All 94 focused H2 cases passed without skips. Complete module verification covered 5,144 unit/H2 cases: 5,126 passed, 18 skipped, no failures or errors, across 349 classes. Both Checkstyle executions and high-confidence SpotBugs passed. The skips require unavailable platform, SSH/Kubernetes/worker fixtures, MySQL locking/consistent-read semantics or mutually exclusive admission profiles.
+- Eight selected MySQL cases across four classes passed without skips: original-member recovery and operator preparation, LOCAL/SSH_LOCAL stopped-member cleanup and recovery batches, exact CSI/member retention, and query-scale contracts. This is selected-method/class coverage, not the complete MySQL matrix.
+- All 15 selected reboot, lost-reply and storage-concurrency fault cases, both standalone Hosted concurrency cases, and all 10 selected Hosted MCP reply-loss/store-fault/Spring-restart cases passed without failures, errors or skips. MCP recovery retained the original member before confirmed release and then cleared it.
+- Five independent private probes exited successfully. They confirmed that an old ordinary singleton is neither execution authority nor converted or cleared. Actual Broker JVMs and Node workers retained normal shared execution, exact release and UNKNOWN non-replay. After a read-only neighbor released, the real history implementation completed a no-op rewind with `conflict:false` and cleared temporary exclusivity. Saved-member recovery also passed after actual worker loss with synthetic reboot evidence.
+- All nine independent-probe and five standalone Hosted recorded Broker/worker PIDs, plus 14 recorded MCP stdio PIDs, exited. Both independent private H2 servers stopped. The disposable MySQL port, data directory, UUID and PID were verified; it was shut down gracefully with no other clients, its data removed and logs retained.
 
-The process probes use synthetic physical identity and injected UNKNOWN state on macOS. They do not establish native Linux/Windows physical qualification, real SSH workers, host reboot, the complete Hosted/MySQL matrix or a model-driven WebShell conversation. The real undo probe is a no-op over an actual snapshot and does not prove restoration of modified file bytes. Production deployment is outside this verification.
+Tracked Java/POM inputs and the existing CLI bundle stayed unchanged throughout verification. This cleanup changes no TypeScript or shared API, so earlier root build/typecheck evidence was not rerun or counted as new validation. Modified Linux-only extension/public-close cases and optional cancellation/provider-control/Shell-output/operator process modes were compiled but not all executed. Process fixtures use synthetic physical identity and injected UNKNOWN/reboot evidence on macOS; they do not establish native Linux/Windows qualification, real SSH workers, actual host reboot, hardware CSI/Kubernetes acceptance, production deployment or a model-driven WebShell conversation. The actual rewind probe is a successful no-op, not restoration of modified bytes.
 
 ## Open questions
 

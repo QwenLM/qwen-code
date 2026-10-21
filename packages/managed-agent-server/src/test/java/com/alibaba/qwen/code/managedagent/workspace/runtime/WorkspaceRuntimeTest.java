@@ -702,27 +702,6 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
-    void verifiedLegacyHolderCoexistsAndConvertsWithoutDroppingItsNeighbor() throws Exception {
-        var session = createSession("storage", ".");
-        var original = holder(session, "legacy");
-        authority.claim(session.workspace(), original);
-        String key = jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?",
-                String.class, original.getRuntimeSessionId());
-        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", original.getRuntimeSessionId());
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = ?, binding_id = ?, runtime_generation = ?, runtime_session_id = ? WHERE storage_key = ?",
-                org.apache.commons.codec.digest.DigestUtils.sha256Hex(original.getBindingId() + "\u0000" + original.getRuntimeGeneration()
-                        + "\u0000" + original.getRuntimeSessionId()), original.getBindingId(), original.getRuntimeGeneration(), original.getRuntimeSessionId(), key);
-        var neighbor = holder(session, "neighbor");
-        authority.claim(session.workspace(), neighbor);
-        authority.assertHeld(session.workspace(), original);
-        authority.claim(session.workspace(), original);
-        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner WHERE storage_key = ?", String.class, key)).isNull();
-        authority.assertHeld(session.workspace(), neighbor);
-        authority.release(session.workspace(), original);
-        authority.assertHeld(session.workspace(), neighbor);
-    }
-
-    @Test
     void releasesAnUnclaimedSessionWithoutActivatingItOrReleasingTheWorkspaceHolder() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);

@@ -285,39 +285,19 @@ public final class WorkspaceOperatorRecoveryStore {
         String bindingId = binding.getBindingId();
         long generation = binding.getGeneration();
         String storageKey = LocalStorageOwners.key(jdbc, binding.getRequest().getScope().getTenantId(), binding.getRequest().getStorageId());
-        String sql = "SELECT storage_key, holder_key, binding_id, runtime_generation,"
-                + " runtime_session_id FROM ma_storage_owner"
+        var owners = jdbc.queryForList("SELECT storage_key FROM ma_storage_owner"
                 + " WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                + " AND (holder_key IS NOT NULL OR (runtime_generation IS NULL AND maintenance_id IS NULL))"
-                + (locked ? " FOR UPDATE" : "");
-        List<Holder> holders = jdbc.query(sql, (row, index) -> new Holder(
-                row.getString("storage_key"), row.getString("holder_key"),
-                row.getString("binding_id"), row.getLong("runtime_generation"),
-                row.getString("runtime_session_id")), storageKey);
+                + " AND holder_key IS NULL AND maintenance_id IS NULL" + (locked ? " FOR UPDATE" : ""),
+                String.class, storageKey);
         var members = jdbc.queryForList("SELECT runtime_session_id FROM ma_runtime_session"
                 + " WHERE execution_storage_key = ? AND binding_id = ? AND runtime_generation = ?"
                 + (locked ? " FOR UPDATE" : ""), String.class, storageKey, bindingId, generation);
-        if (holders.size() == 1 && holders.getFirst().holderKey() == null
-                && holders.getFirst().bindingId() == null && holders.getFirst().runtimeSessionId() == null) {
-            if (members.size() != 1) {
-                throw blocked();
-            }
-            String sessionId = members.getFirst();
-            return new Holder(storageKey, digest(bindingId + "\u0000" + generation + "\u0000" + sessionId),
-                    bindingId, generation, sessionId);
-        }
-        if (holders.size() != 1 || holders.getFirst().holderKey() == null
-                || holders.getFirst().runtimeSessionId() == null
-                || !bindingId.equals(holders.getFirst().bindingId())
-                || generation != holders.getFirst().generation()
-                || !holders.getFirst().storageKey().equals(storageKey)
-                || !holders.getFirst().holderKey().equals(digest(
-                        bindingId + "\u0000" + generation + "\u0000"
-                                + holders.getFirst().runtimeSessionId()))
-                || members.stream().anyMatch(member -> !holders.getFirst().runtimeSessionId().equals(member))) {
+        if (owners.size() != 1 || members.size() != 1) {
             throw blocked();
         }
-        return holders.getFirst();
+        String sessionId = members.getFirst();
+        return new Holder(storageKey, digest(bindingId + "\u0000" + generation + "\u0000" + sessionId),
+                bindingId, generation, sessionId);
     }
 
     private Capture capture(String bindingId, long generation, String sessionId) {

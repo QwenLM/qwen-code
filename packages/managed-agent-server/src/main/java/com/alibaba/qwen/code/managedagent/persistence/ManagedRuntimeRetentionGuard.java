@@ -30,7 +30,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                 || exists(
                         connection,
                         "SELECT 1 FROM ma_storage_owner"
-                                + " WHERE binding_id = ? AND runtime_generation = ? LIMIT 1",
+                                + " WHERE storage_kind = 'CSI' AND binding_id = ? AND runtime_generation = ? LIMIT 1",
                         identity(binding.getBindingId()),
                         binding.getGeneration())
                 || exists(
