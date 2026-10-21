@@ -577,8 +577,10 @@
                                  10039 s, fork 10639 s, Verify 188 minutes. The
                                  FG13a result store ack-loss cell adds 150 s:
                                  healthy 10189 s, fork 10789 s, Verify 190
-                                 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10789</forkedProcessTimeoutInSeconds>
+                                 minutes. The FG13a dispatch ack-loss cell adds
+                                 150 s: healthy 10339 s, fork 10939 s, Verify
+                                 193 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10939</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
