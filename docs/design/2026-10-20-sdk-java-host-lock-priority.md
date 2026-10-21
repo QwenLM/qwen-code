@@ -35,9 +35,9 @@ and reaping mechanics stay those of the FIFO design.
 
 - Tickets are named `rank-sequence-pid`. `fast` is rank 0 and `normal` is
   rank 1; the head is the smallest live name, so every fast ticket precedes
-  every normal ticket taken before or after it. The test job passes its
-  `TIER`, so a `pull_request` run enters the fast class while approval and
-  main full-tier work stays normal.
+  every non-promoted normal ticket taken before or after it. The test job
+  passes its `TIER`, so a `pull_request` run enters the fast class while
+  approval and main full-tier work stays normal.
 - A normal ticket that waits past `SDK_JAVA_LOCK_PROMOTE_AFTER` (default
   1200 s) is renamed into the fast class. It keeps its sequence, so it
   precedes fast tickets that arrived after it, and continuous PR traffic
@@ -61,7 +61,8 @@ and reaping mechanics stay those of the FIFO design.
 
 - `scripts/tests/sdk-java-lock.test.js` pins FIFO ordering, fast before an
   older normal ticket, aging promotion, dead-owner reaping (including a
-  recycled PID), the timeout signature with ticket cleanup, and the
+  recycled PID), the start time a ticket publishes, the no-start-time scope
+  of the age backstop, the timeout signature with ticket cleanup, and the
   blocking-head diagnostic. `flock` is stubbed on `PATH`; the shell runs
   with `-eo pipefail` like a workflow step.
 - `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper at both
@@ -88,5 +89,6 @@ and reaping mechanics stay those of the FIFO design.
 - A continuous stream of fast tickets delays normal work by at most one
   promotion interval; the aging boundary is the knob if that proves too long.
 - A SIGKILLed waiter leaves its ticket until the next head-of-line check
-  reaps it: within the ten-second grace when the start time identifies a
-  recycled PID, or the 1800-second backstop otherwise.
+  reaps it: within the ten-second grace when the owner is dead or its PID
+  was recycled, or the 1800-second backstop when the ticket has no recorded
+  start time.

@@ -101,7 +101,7 @@ sdk_java_lock_acquire() {
       fi
       # 1800s is far above one full hold (~925s): it is the backstop for a
       # ticket with no recorded start time, where only the PID can be checked.
-      if ((age > 1800)) ||
+      if { ((age > 1800)) && ((owner_start == 0)); } ||
         { ((age > 10)) && ((alive == 0)); }; then
         rm -f "${head}"
       fi

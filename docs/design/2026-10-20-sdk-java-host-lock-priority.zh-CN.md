@@ -31,7 +31,7 @@ fast 类别叠加在 `.github/scripts/sdk-java-lock.sh` 的 FIFO 辅助脚本上
 队列、计数器、队首探测、释放与回收机制沿用 FIFO 设计。
 
 - 票据命名为 `rank-sequence-pid`。`fast` 为 rank 0，`normal` 为 rank 1；
-  队首是最小的活动票据名，因此所有 fast 票据都排在所有 normal 票据之前，
+  队首是最小的活动票据名，因此所有 fast 票据都排在所有尚未提升的 normal 票据之前，
   无论先后。test job 传入自己的 `TIER`，因此 `pull_request` 运行进入 fast
   类别，approval 和 main 的 full-tier 工作保持 normal。
 - 等待超过 `SDK_JAVA_LOCK_PROMOTE_AFTER`（默认 1200 秒）的 normal 票据会
@@ -53,9 +53,10 @@ fast 类别叠加在 `.github/scripts/sdk-java-lock.sh` 的 FIFO 辅助脚本上
 ## 验证计划
 
 - `scripts/tests/sdk-java-lock.test.js` 钉住 FIFO 顺序、fast 先于更老的
-  normal 票据、aging 提升、死 owner 回收（含 PID 复用）、超时签名与票据
-  清理，以及队首阻塞诊断。`flock` 通过 `PATH` stub 注入；shell 以和
-  workflow step 相同的 `-eo pipefail` 运行。
+  normal 票据、aging 提升、死 owner 回收（含 PID 复用）、票据发布的启动
+  时间、1800 秒兜底仅适用于没有启动时间的票据、超时签名与票据清理，以及
+  队首阻塞诊断。`flock` 通过 `PATH` stub 注入；shell 以和 workflow step
+  相同的 `-eo pipefail` 运行。
 - `scripts/tests/sdk-java-workflow.test.js` 钉住两个 self-hosted 取锁点
   source 该辅助脚本、5400 秒预算、resumed release tag 的裸锁回退，以及
   fast tier 的 `TIER` 参数。
@@ -78,5 +79,5 @@ fast 类别叠加在 `.github/scripts/sdk-java-lock.sh` 的 FIFO 辅助脚本上
   已有的条件。
 - 持续的 fast 票据流最多让 normal 工作多等一个提升间隔；如果这个间隔
   太长，aging 边界就是调节旋钮。
-- 被 SIGKILL 的等待者会留下票据，直到下一次队首检查回收：启动时间能
-  识别 PID 复用时在十秒宽限内回收，否则走 1800 秒兜底。
+- 被 SIGKILL 的等待者会留下票据，直到下一次队首检查回收：owner 已死或
+  PID 被复用时在十秒宽限内回收；没有记录启动时间的票据才走 1800 秒兜底。

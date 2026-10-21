@@ -113,6 +113,14 @@ const order = (home) => {
   return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n') : [];
 };
 
+// Field 22 of /proc/<pid>/stat is the process start time; the tail fields
+// begin at field 3, so it is index 19. This mirrors the helper's sed/awk.
+const procStart = (pid) =>
+  readFileSync(`/proc/${pid}/stat`, 'utf8')
+    .replace(/.*\) /, '')
+    .trim()
+    .split(/\s+/)[19];
+
 const ticketName = /^\d-\d{10}-\d+$/;
 const waitForTicket = async (home, pattern) => {
   const deadline = Date.now() + 10000;
@@ -292,6 +300,54 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       expect(result.code).toBe(0);
       expect(result.out).toContain('acquired');
       expect(existsSync(orphan)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'records its owner start time in the published ticket',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-starttime-'));
+      const { child, done } = startAcquire(home, 60, flockStub(blockingFlock));
+      const ticket = join(queueDir(home), `1-0000000001-${child.pid}`);
+      await waitForTicket(home, ticketName);
+      // The file appears before its body is written, so poll briefly instead
+      // of failing on an empty first read.
+      let body = '';
+      const deadline = Date.now() + 2000;
+      while (!body && Date.now() < deadline) {
+        body = readFileSync(ticket, 'utf8').trim();
+        if (!body) await new Promise((r) => setTimeout(r, 20));
+      }
+      const starttime = procStart(child.pid);
+      child.kill('SIGKILL');
+      await done;
+      expect(body).toBe(starttime);
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'keeps a live ticket with a matching start time past the age backstop',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-age-'));
+      const queue = queueDir(home);
+      mkdirSync(queue, { recursive: true });
+      // A live owner whose recorded start time still matches keeps the head
+      // place even after the 1800-second backstop: that arm only applies to
+      // tickets without a start time (pre-upgrade files or hosts without
+      // /proc), where `kill -0` cannot tell a recycled PID apart.
+      writeFileSync(join(queue, '.seq'), '1\n');
+      const live = join(queue, `1-0000000001-${process.pid}`);
+      writeFileSync(live, `${procStart(process.pid)}\n`);
+      const past = new Date(Date.now() - 1801 * 1000);
+      utimesSync(live, past, past);
+      const result = await acquire(home, 3, flockStub(freeFlock));
+      expect(result.code).toBe(1);
+      expect(result.out).toContain(
+        `head of queue is 1-0000000001-${process.pid}`,
+      );
+      expect(existsSync(live)).toBe(true);
     },
   );
 
