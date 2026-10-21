@@ -1073,6 +1073,24 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     });
   });
 
+  it('does not close an unterminated comment at a value-borne terminator', () => {
+    // The opener scan already walked every `-->` in the remainder and found
+    // none outside a value, so the terminator a continuation line holds is
+    // value data. Closing the region there exposes the documented call.
+    const text =
+      'Docs:\n\n<!--\n' +
+      invoke('a', param('p', 'x --> y')) +
+      '\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n\nend.';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
   it('rejects a block whose parameter names repeat', () => {
     // The advance can pull a stray element behind a quoted value into the
     // block; a duplicate name would silently overwrite the argument.

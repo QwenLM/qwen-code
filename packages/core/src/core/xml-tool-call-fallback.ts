@@ -419,13 +419,11 @@ function hiddenDocumentationRanges(
   for (const line of text.split('\n')) {
     const blank = line.trim() === '';
     const indent = line.length - line.trimStart().length;
-    if (inComment) {
-      const close = line.indexOf('-->');
-      if (close !== -1) {
-        ranges.push([commentStart, lineStart + close + 3]);
-        inComment = false;
-      }
-    } else {
+    // No terminator search on the continuation lines: the opener scan below
+    // already walked every `-->` in the remainder and found none outside a
+    // value, so a terminator here is necessarily value data. An unterminated
+    // region runs to end of turn, pushed once after the loop.
+    if (!inComment) {
       const listItem = /^( {0,3})(?:[-*+]|\d{1,9}[.)])(\s+)/.exec(line);
       if (listItem) {
         const markerEnd = listItem[0].length - listItem[2].length;
