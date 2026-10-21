@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import jakarta.annotation.PostConstruct;
@@ -164,8 +165,48 @@ public class ManagedAgentProperties implements EnvironmentAware {
         validateWorkspaceFiles();
     }
 
+    // On a single host the Harness reaches the store routes on this
+    // server's loopback listener, and the store scope is the Runtime
+    // Broker's workspace identity, so neither needs its own setting.
+    private void applySessionStoreDefaults() {
+        if (!sessionStore.isEnabled()) {
+            return;
+        }
+        if (StringUtils.isBlank(sessionStore.getBaseUrl()) && environment != null) {
+            sessionStore.setBaseUrl(localStoreBaseUrl());
+        }
+        if (StringUtils.isNotBlank(sessionStore.getWorkspaceId())) {
+            return;
+        }
+        String provisioner = runtimeBroker.getProvisioner();
+        if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceId())) {
+            sessionStore.setWorkspaceId(runtimeBroker.getWorkspaceId());
+        } else if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceCwd())
+                && (LocalProcessRuntimeProvisioner.KIND.equals(provisioner)
+                        || "kubernetes".equals(provisioner))) {
+            sessionStore.setWorkspaceId(EmbeddedRuntimeBroker.workspaceId(runtimeBroker));
+        }
+    }
+
+    private String localStoreBaseUrl() {
+        boolean internal = internalServer.getPort() > 0;
+        int port = internal ? internalServer.getPort()
+                : environment.getProperty("server.port", Integer.class, 8080);
+        String address = internal ? internalServer.getAddress()
+                : environment.getProperty("server.address", "");
+        if (port <= 0) {
+            return "";
+        }
+        return switch (address) {
+            case "", "0.0.0.0", "::", "127.0.0.1" -> "http://127.0.0.1:" + port;
+            case "::1" -> "http://[::1]:" + port;
+            default -> "";
+        };
+    }
+
     @PostConstruct
     void validateWorkspaceFiles() {
+        applySessionStoreDefaults();
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
