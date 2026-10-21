@@ -40,6 +40,65 @@ const step = (block, name) => {
   return block.slice(start, next < 0 ? undefined : start + 1 + next);
 };
 
+const shellBuiltins = new Set([
+  '!',
+  '[',
+  '[[',
+  '{',
+  '}',
+  ':',
+  'case',
+  'cd',
+  'do',
+  'done',
+  'echo',
+  'elif',
+  'else',
+  'esac',
+  'exec',
+  'exit',
+  'export',
+  'false',
+  'fi',
+  'for',
+  'if',
+  'local',
+  'printf',
+  'readonly',
+  'return',
+  'set',
+  'shift',
+  'source',
+  'test',
+  'then',
+  'trap',
+  'true',
+  'wait',
+  'while',
+]);
+
+const firstWord = (command) => command.split(/\s+/)[0];
+
+// Every non-builtin command after lock acquisition must close fd 9, or a
+// child that survives the step keeps the host lock with it. The lock setup
+// is exempt: the fallback mkdir creates the lock directory before fd 9
+// exists, and flock/sdk_java_lock_acquire are the acquisition itself.
+const lockedChildCommands = (run) =>
+  run
+    .replace(/\\\n/g, ' ')
+    .split('\n')
+    .flatMap((line) => line.split(/\|\|?/))
+    .map((command) => command.trim())
+    .filter(
+      (command) =>
+        command &&
+        !command.startsWith('#') &&
+        !shellBuiltins.has(firstWord(command)) &&
+        command !== 'mkdir -p "${HOME}/.cache/qwen-code-ci"' &&
+        !command.startsWith('flock ') &&
+        !command.startsWith('sdk_java_lock_acquire '),
+    );
+
 describe('SDK Java self-hosted workflow guards', () => {
   it('builds native producer prerequisites before either Server test lane', () => {
     const jobs = parse(workflow).jobs;
@@ -139,40 +198,28 @@ describe('SDK Java self-hosted workflow guards', () => {
     // lock-bearing steps are the test job's and this job's single one.
     expect(lockedSteps).toHaveLength(2);
     for (const s of lockedSteps) {
-      // A child that keeps fd 9 after the step shell dies holds the host lock
-      // until the child exits (#15106), so every external command in the
-      // locked section closes it. Pipeline stages are judged separately: a
-      // leak through either tar keeps the whole lock.
-      const commands = s.run
-        .replace(/\\\n/g, ' ')
-        .split('\n')
-        .flatMap((line) => line.split('|'))
-        .map((command) => command.trim())
-        .filter((command) => /^(?:mvn|cp|mkdir|tar)\b/.test(command));
+      const commands = lockedChildCommands(s.run);
       expect(commands.length, s.name).toBeGreaterThan(0);
       for (const command of commands) {
-        // The bare-lock fallback creates its lock directory before the lock
-        // exists; no fd 9 is open there to inherit.
-        if (command.includes('mkdir -p "${HOME}/.cache/qwen-code-ci"')) {
-          continue;
-        }
-        expect(command, s.name).toContain('9>&-');
+        expect(command, s.name).toMatch(/ 9>&-$/);
       }
     }
   });
 
   it.skipIf(process.platform !== 'linux')(
-    'retains serialization while Maven runs and releases it with a surviving child',
+    'retains serialization while every locked child runs and releases it with a surviving child',
     () => {
       const jobs = parse(workflow).jobs;
       const commands = ['test', 'mysql-integration'].flatMap((name) =>
         jobs[name].steps.flatMap((s) =>
           s.run?.includes('sdk-java-tests.lock')
-            ? (s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm) ?? [])
+            ? lockedChildCommands(s.run)
             : [],
         ),
       );
+      expect(commands.length).toBeGreaterThan(0);
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-'));
+      const pidFile = join(dir, 'children.pids');
       try {
         for (const command of commands) {
           const result = spawnSync(
@@ -181,24 +228,34 @@ describe('SDK Java self-hosted workflow guards', () => {
               '-e',
               '-c',
               `
-              trap 'kill "\${child_pid:-}" 2>/dev/null || true' EXIT
+              trap 'kill $(cat "$PID_FILE") 2>/dev/null || true' EXIT
+              : > "$PID_FILE"
+              spawn_survivor() {
+                sleep 30 </dev/null >/dev/null 2>&1 &
+                echo $! >> "$PID_FILE"
+              }
+              mvn() { spawn_survivor; }
+              cp() { spawn_survivor; }
+              mkdir() { spawn_survivor; }
+              tar() { spawn_survivor; }
               exec 9>"$LOCK_FILE"
               flock --nonblock 9
-              mvn() {
-                sleep 30 </dev/null >/dev/null 2>&1 &
-                child_pid=$!
-              }
               ${command}
               if flock --nonblock "$LOCK_FILE" true; then exit 91; fi
               exec 9>&-
               flock --nonblock "$LOCK_FILE" true
-              kill -0 "$child_pid"
+              [ -s "$PID_FILE" ]
+              for pid in $(cat "$PID_FILE"); do kill -0 "$pid"; done
             `,
             ],
             {
               encoding: 'utf8',
               timeout: 5000,
-              env: { ...process.env, LOCK_FILE: join(dir, 'tests.lock') },
+              env: {
+                ...process.env,
+                LOCK_FILE: join(dir, 'tests.lock'),
+                PID_FILE: pidFile,
+              },
             },
           );
           expect(result.error, command).toBeUndefined();

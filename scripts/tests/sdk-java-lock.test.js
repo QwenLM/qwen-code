@@ -265,6 +265,7 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const stub = flockStub(freeFlock);
       const result = await acquire(home, 3, stub);
       expect(result.code).toBe(1);
+      expect(result.out).toContain('as queue ticket 2');
       expect(result.out).toContain(`head of queue is ${name}`);
       expect(readdirSync(queue).filter((f) => f !== '.seq')).toEqual([name]);
     },
