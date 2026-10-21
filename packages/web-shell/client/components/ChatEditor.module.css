@@ -1425,6 +1425,23 @@
   flex: 0 0 28px;
 }
 
+.dropdownSearch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dropdownSearchRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dropdownSearchRow > :first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .dropdownList {
   display: flex;
   min-height: 0;
