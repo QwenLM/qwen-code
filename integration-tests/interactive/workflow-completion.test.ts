@@ -54,12 +54,15 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
     let restoreNoProxy: (() => void) | undefined;
 
     afterEach(async () => {
-      await session?.close();
-      session = undefined;
-      await server?.close();
-      server = undefined;
-      restoreNoProxy?.();
-      await rig?.cleanup();
+      try {
+        await session?.close();
+      } finally {
+        session = undefined;
+        await server?.close();
+        server = undefined;
+        restoreNoProxy?.();
+        await rig?.cleanup();
+      }
     });
 
     it.each([
