@@ -49,8 +49,8 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 
 - 被取消的 run 依据其已提交的证明进入 `cancelled`，occurrence 恰好结算一次；
 - schedule、未来 slot、兄弟 run 与前台工作不受影响；
-- 在任何尝试之前被取消的排队 input 结算且不调用模型。自然完成的 run 保留其结果
-  已交付：结算之后到达的取消被 `409 task_action_unavailable`（`The task does
+- 在任何尝试之前被取消的排队 input 结算且不调用模型；自然完成的 run 保留其结果
+  ——已交付：结算之后到达的取消被 `409 task_action_unavailable`（`The task does
 not accept a cancellation now.`）拒绝，run 保持 `completed`、occurrence 保持
   `fired`；
 - `cancel-stops-only-the-target` 已交付：把 wake turn 扣在模型上时，公开 task
