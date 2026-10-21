@@ -8,6 +8,44 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
+describe('TUI product evidence', () => {
+  const workflow = parse(
+    readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
+  );
+  const steps = workflow.jobs.parity.steps;
+
+  it('treats unhandled errors as acceptance failures on every runner', () => {
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    const commands = product.run
+      .split('\n')
+      .filter((line) => line.includes('npx vitest run'));
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      expect(command).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    }
+  });
+
+  it('keeps fresh evidence retrievable when the same head is rerun', () => {
+    const upload = steps.find(
+      (step) => step.name === 'Upload product acceptance evidence',
+    );
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    expect(upload.if).toContain('always()');
+    expect(upload.with.name).toContain('github.event.pull_request.head.sha');
+    expect(upload.with.name).toContain('${{ github.run_attempt }}');
+    const artifactName = (attempt) =>
+      upload.with.name.replace('${{ github.run_attempt }}', String(attempt));
+    expect(artifactName(1)).not.toBe(artifactName(2));
+    expect(upload.with.path.replace(/\/$/, '')).toBe(
+      product.env.QWEN_TUI_ACCEPTANCE_OUT,
+    );
+  });
+});
+
 describe('e2e workflow', () => {
   const workflow = readFileSync('.github/workflows/e2e.yml', 'utf8');
   const e2eRunScript = readFileSync('.github/scripts/run-e2e-tests.sh', 'utf8');
