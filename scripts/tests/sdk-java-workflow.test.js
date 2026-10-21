@@ -114,12 +114,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'if: "${{ runner.environment == \'self-hosted\' }}"',
     );
-    // The ticketed queue makes the wake order deterministic, so the pin
-    // is the sourced helper and its wait budget, not a bare flock --wait.
+    // The ticketed queue makes the wake order deterministic and the fast
+    // class puts this tier's ticket ahead of waiting full-tier tickets, so
+    // the pin is the sourced helper, its budget, and the tier argument.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(block).toContain('sdk_java_lock_acquire 5400');
+    expect(block).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
     // release-sdk-java.yml resumes an existing tag by checking out that
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.

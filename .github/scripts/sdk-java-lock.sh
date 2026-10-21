@@ -8,10 +8,25 @@
 # whose owner is gone is dropped by the next waiter. The lock itself still
 # releases at the step boundary, so release semantics are unchanged.
 #
-# Source this file and call `sdk_java_lock_acquire <wait-seconds>`; it returns
-# non-zero on timeout with the pinned `lock not acquired within` error.
+# Two classes share the one physical lock. `fast` is the pull-request and
+# push feedback lane; its tickets sort before `normal` (approval and main
+# full-tier work), so a fast job waits at most the hold already running
+# instead of the full-tier queue behind it (qwen-code#14962, #15032). A
+# normal ticket that waits more than SDK_JAVA_LOCK_PROMOTE_AFTER seconds
+# (default 1200) is promoted into the fast class, so continuous fast traffic
+# cannot starve the full tier.
+#
+# Source this file and call
+# `sdk_java_lock_acquire <wait-seconds> [fast|normal]`; it returns non-zero
+# on timeout with the pinned `lock not acquired within` error.
 sdk_java_lock_acquire() {
   local wait_seconds="${1:?wait seconds required}"
+  local priority="${2:-normal}"
+  local rank=1
+  if [[ ${priority} == 'fast' ]]; then
+    rank=0
+  fi
+  local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"
   mkdir -p "${queue}"
@@ -29,13 +44,14 @@ sdk_java_lock_acquire() {
   seq=$((${seq:-0} + 1))
   printf '%s\n' "${seq}" >>"${queue}/.seq"
   local ticket
-  ticket=$(printf '%s/%010d-%s' "${queue}" "${seq}" "$$")
+  ticket=$(printf '%s/%d-%010d-%s' "${queue}" "${rank}" "${seq}" "$$")
   # Publish inside the critical section: a later arrival that sees an empty
   # queue names itself head and wins out of arrival order.
   : >"${ticket}"
   exec 8>&-
 
   local start=${SECONDS} head name pid mtime age remaining last_log=-60 blocking
+  local promoted=$((rank == 0)) promoted_ticket
   while true; do
     # Drop tickets whose owner is gone. A waiter waiting its turn re-touches
     # every loop; the head cannot while it is blocked in `flock`, so the mtime
@@ -57,6 +73,18 @@ sdk_java_lock_acquire() {
       fi
     done
 
+    # Age a normal ticket into the fast class so a continuous stream of fast
+    # tickets cannot starve full-tier work. The renamed ticket keeps its
+    # sequence, so it still precedes fast tickets that arrived after it.
+    if ((!promoted && SECONDS - start >= promote_after)); then
+      promoted_ticket=$(printf '%s/0-%010d-%s' "${queue}" "${seq}" "$$")
+      if mv "${ticket}" "${promoted_ticket}" 2>/dev/null; then
+        ticket="${promoted_ticket}"
+        promoted=1
+        echo "Promoted sdk-java host lock queue ticket ${seq} to the fast class after $((promote_after / 60)) minutes"
+      fi
+    fi
+
     head=$(printf '%s\n' "${queue}/"* | grep -v '/\.seq$' | sort | sed -n '1p')
     remaining=$((wait_seconds - (SECONDS - start)))
     ((remaining < 0)) && remaining=0
@@ -76,7 +104,7 @@ sdk_java_lock_acquire() {
     fi
     if ((SECONDS - start - last_log >= 60)); then
       last_log=$((SECONDS - start))
-      echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${remaining}s left in a ${wait_seconds}s budget)"
+      echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${priority}, ${remaining}s left in a ${wait_seconds}s budget)"
     fi
     if ((blocking)); then
       if flock --wait "${remaining}" 9; then
@@ -97,6 +125,6 @@ sdk_java_lock_acquire() {
 }
 
 if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
-  echo "source ${0} and call sdk_java_lock_acquire <wait-seconds>" >&2
+  echo "source ${0} and call sdk_java_lock_acquire <wait-seconds> [fast|normal]" >&2
   exit 2
 fi

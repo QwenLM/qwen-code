@@ -77,6 +77,32 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   `flock --wait 5400 9` lock they replaced when the helper file is absent,
   rather than dying before Maven and wedging the release permanently.
 
+### Fast-tier priority
+
+The FIFO queue bounds a waiter by its position, but it still puts a fast-tier
+job at the back of every full-tier hold already queued. On 2026-10-20 run
+39431579628's `SDK Java (fast)` job waited the full 5400 s behind full-tier
+holds and failed before Maven started, and the same timeout recurred on
+2026-10-21 (qwen-code#14962, #15032). Two classes now share the one physical
+lock:
+
+- Tickets are named `rank-sequence-pid`. `fast` is rank 0 and `normal` is
+  rank 1; the head is the smallest live name, so every fast ticket precedes
+  every normal ticket taken before or after it.
+- The test job passes its tier to the helper, so a fast-tier run enters the
+  fast class while approval, release, and MariaDB work stays normal. A fast
+  job therefore waits at most the hold already running, not the full-tier
+  queue behind it.
+- A normal ticket that waits past `SDK_JAVA_LOCK_PROMOTE_AFTER` (default
+  1200 s) is renamed into the fast class. It keeps its sequence, so it
+  precedes fast tickets that arrived after it, and continuous fast traffic
+  cannot starve the full tier.
+
+The release semantics, the 5400 s budget, and the pinned
+`lock not acquired within` error are unchanged. A normal head already blocked
+in `flock(2)` still wins the next release ahead of a newly arrived fast
+ticket; the measured bound is about two holds, well inside the budget.
+
 ### Why fairness over the alternatives
 
 - Shard the lock by suite: reduces queue frequency but each shard is still a
@@ -108,8 +134,9 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 
 - Unit behavior of the helper is pinned by
   `scripts/tests/sdk-java-lock.test.js` (POSIX-only): FIFO ordering across
-  two waiters, stale-owner reaping, timeout signature and ticket cleanup,
-  with `flock` stubbed on `PATH`.
+  two waiters, fast-before-normal ordering, aging promotion, stale-owner
+  reaping, timeout signature and ticket cleanup, with `flock` stubbed on
+  `PATH`.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` now pins the sourced helper and
   the `sdk_java_lock_acquire 5400` budget at each acquisition site, and the
@@ -119,7 +146,8 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 
 ## Acceptance criteria
 
-- Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s.
+- Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
+  the test job passes its tier and the MariaDB site defaults to normal.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.

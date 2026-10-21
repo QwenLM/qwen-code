@@ -70,6 +70,28 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
   `flock --wait 5400 9`，而不是在 Maven 之前直接失败并让发布永久
   卡死。
 
+### fast 档优先
+
+FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍然排在所有已
+入队的 full 档持锁之后。2026-10-20 的 run 39431579628 中，`SDK Java
+(fast)` job 在 full 档持锁后面等满 5400 秒，Maven 尚未启动就失败；
+2026-10-21 又出现同样的超时（qwen-code#14962、#15032）。现在同一把物理锁
+上区分两个档位：
+
+- 票据命名为 `rank-sequence-pid`。`fast` 是 rank 0，`normal` 是 rank 1；
+  队首是最小的活动名字，因此每张 fast 票都排在它之前或之后取得的
+  normal 票前面。
+- test job 把自己的 tier 传给辅助脚本：fast 档进入 fast 类，
+  approval、release 和 MariaDB 工作保持 normal。fast job 因此最多等
+  当前正在运行的那次持锁，而不是它后面的 full 档队列。
+- 等待超过 `SDK_JAVA_LOCK_PROMOTE_AFTER`（默认 1200 秒）的 normal 票
+  会被重命名进 fast 类。它保留自己的顺序号，因此仍排在它之后到达的
+  fast 票之前，连续的 fast 流量无法饿死 full 档。
+
+释放语义、5400 秒预算和固定的 `lock not acquired within` 错误文案都
+不变。已经阻塞在 `flock(2)` 里的 normal 队首仍会先于新到的 fast 票
+赢得下一次释放；实测上界约为两次持锁，远在预算之内。
+
 ### 为什么是公平性，而不是其他方案
 
 - 按套件分片：只降低排队频率，每个分片仍然是一把无序唤醒的裸
@@ -96,8 +118,9 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 ## 验证计划
 
 - 辅助脚本的单元行为由 `scripts/tests/sdk-java-lock.test.js` 钉住
-  （仅 POSIX）：两个 waiter 的 FIFO 顺序、过期 owner 的回收、超时
-  签名与票据清理，`flock` 以 PATH stub 注入。
+  （仅 POSIX）：两个 waiter 的 FIFO 顺序、fast 先于 normal 的顺序、
+  老化提升、过期 owner 的回收、超时签名与票据清理，`flock` 以 PATH
+  stub 注入。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   现在 pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400`
   预算，`.size-baseline` 记录工作流的新尺寸。
@@ -106,7 +129,8 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 
 ## 验收标准
 
-- `sdk-java.yml` 的两处取锁点都以 5400 秒通过该辅助脚本获取。
+- `sdk-java.yml` 的两处取锁点都以 5400 秒通过该辅助脚本获取；
+  test job 传入自己的 tier，MariaDB 站点默认 normal。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。

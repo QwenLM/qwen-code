@@ -70,6 +70,7 @@ const startAcquire = (
   extra = '',
   label = '',
   env = {},
+  priority = '',
 ) => {
   const child = spawn(
     'bash',
@@ -81,7 +82,7 @@ const startAcquire = (
       '-c',
       [
         `source "${script}"`,
-        `sdk_java_lock_acquire ${wait}`,
+        `sdk_java_lock_acquire ${wait}${priority ? ` ${priority}` : ''}`,
         'echo "acquired"',
         ...(extra ? [extra] : []),
       ].join('\n'),
@@ -124,7 +125,7 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       while (
         !(
           existsSync(queueDir(home)) &&
-          readdirSync(queueDir(home)).some((f) => /^\d{10}-\d+$/.test(f))
+          readdirSync(queueDir(home)).some((f) => /^\d-\d{10}-\d+$/.test(f))
         )
       ) {
         if (Date.now() > deadline) throw new Error('A took no ticket');
@@ -171,13 +172,121 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   );
 
   it(
+    'serves a fast ticket ahead of an older normal ticket',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-fast-'));
+      const held = join(home, 'held');
+      const order = join(home, 'order');
+      writeFileSync(held, '');
+      const stub = flockStub(heldFlock(held, order));
+      const normal = acquire(home, 30, stub, '', 'normal', {}, 'full');
+      // Wait for the normal ticket instead of a fixed sleep: it must be the
+      // one this fast ticket overtakes.
+      let deadline = Date.now() + 10000;
+      while (
+        !(
+          existsSync(queueDir(home)) &&
+          readdirSync(queueDir(home)).some((f) => /^1-0000000001-/.test(f))
+        )
+      ) {
+        if (Date.now() > deadline) throw new Error('normal took no ticket');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const fast = acquire(home, 30, stub, '', 'fast', {}, 'fast');
+      // Let both waiters complete a loop with the fast ticket as head, so
+      // releasing the lock cannot hand it to the normal ticket by timing.
+      deadline = Date.now() + 10000;
+      while (
+        !(
+          existsSync(queueDir(home)) &&
+          readdirSync(queueDir(home)).some((f) => /^0-0000000002-/.test(f))
+        )
+      ) {
+        if (Date.now() > deadline) throw new Error('fast took no ticket');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await new Promise((r) => setTimeout(r, 2500));
+      rmSync(held);
+      const [normalResult, fastResult] = await Promise.all([normal, fast]);
+      expect(normalResult.code).toBe(0);
+      expect(fastResult.code).toBe(0);
+      // The observable ordering, not just the ticket names: the stub records
+      // who actually reached the lock first.
+      expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
+        'fast',
+        'normal',
+      ]);
+    },
+  );
+
+  it(
+    'promotes a normal ticket into the fast class so full-tier work cannot starve',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-promote-'));
+      const held = join(home, 'held');
+      const order = join(home, 'order');
+      writeFileSync(held, '');
+      const stub = flockStub(heldFlock(held, order));
+      const normal = acquire(
+        home,
+        30,
+        stub,
+        '',
+        'normal',
+        {
+          SDK_JAVA_LOCK_PROMOTE_AFTER: '1',
+        },
+        'full',
+      );
+      let deadline = Date.now() + 10000;
+      while (
+        !(
+          existsSync(queueDir(home)) &&
+          readdirSync(queueDir(home)).some((f) => /^0-0000000001-/.test(f))
+        )
+      ) {
+        if (Date.now() > deadline) throw new Error('normal was not promoted');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const fast = acquire(home, 30, stub, '', 'fast', {}, 'fast');
+      deadline = Date.now() + 10000;
+      while (
+        !(
+          existsSync(queueDir(home)) &&
+          readdirSync(queueDir(home)).some((f) => /^0-0000000002-/.test(f))
+        )
+      ) {
+        if (Date.now() > deadline) throw new Error('fast took no ticket');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await new Promise((r) => setTimeout(r, 2500));
+      rmSync(held);
+      const [normalResult, fastResult] = await Promise.all([normal, fast]);
+      expect(normalResult.code).toBe(0);
+      expect(fastResult.code).toBe(0);
+      expect(normalResult.out).toContain(
+        'Promoted sdk-java host lock queue ticket 1 to the fast class',
+      );
+      // The promoted ticket keeps its older sequence, so it still precedes
+      // the fast ticket that arrived after it.
+      expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
+        'normal',
+        'fast',
+      ]);
+    },
+  );
+
+  it(
     'reaps a ticket whose owner process is gone',
     { timeout: 30000 },
     async () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-reap-'));
       const queue = queueDir(home);
       mkdirSync(queue, { recursive: true });
-      const stale = join(queue, '0000000001-99999999');
+      writeFileSync(join(queue, '.seq'), '1\n');
+      const stale = join(queue, '1-0000000001-99999999');
       writeFileSync(stale, '');
       // Predate the reaping age-out; 99999999 outlives no PID namespace.
       const past = new Date(Date.now() - 30000);
@@ -197,10 +306,11 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-livepid-'));
       const queue = queueDir(home);
       mkdirSync(queue, { recursive: true });
+      writeFileSync(join(queue, '.seq'), '1\n');
       // A SIGKILLed owner leaves its ticket behind and its PID gets recycled,
       // so `kill -0` still answers; only the mtime arm can clear it. Without
       // that arm the orphan stays head and an idle lock is unreachable.
-      const orphan = join(queue, `0000000001-${process.pid}`);
+      const orphan = join(queue, `1-0000000001-${process.pid}`);
       writeFileSync(orphan, '');
       const past = new Date(Date.now() - 2 * 60 * 60 * 1000);
       utimesSync(orphan, past, past);
@@ -255,9 +365,10 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-blocked-'));
       const queue = queueDir(home);
       mkdirSync(queue, { recursive: true });
+      writeFileSync(join(queue, '.seq'), '1\n');
       // A live owner with a fresh mtime is not reapable, so the lock stays out
       // of reach and the timeout has to name what blocked it.
-      const name = `0000000001-${process.pid}`;
+      const name = `1-0000000001-${process.pid}`;
       writeFileSync(join(queue, name), '');
       const stub = flockStub(freeFlock);
       const result = await acquire(home, 3, stub);
