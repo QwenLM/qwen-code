@@ -15,6 +15,7 @@ import {
   findNonLoopbackHttpOrigin,
   InvalidAllowOriginPatternError,
   isTrustedLoopbackMode,
+  MutableOriginAllowlist,
   parseAllowOriginPatterns,
   requestHasOperatorAuthority,
 } from './auth.js';
@@ -508,6 +509,94 @@ describe('parseAllowOriginPatterns (T2.4 #4514)', () => {
       expect(e.pattern).toBe('http://broken/');
       expect(e.message).toContain('http://broken/');
     }
+  });
+});
+
+describe('loopback port wildcard', () => {
+  it('parses a loopback port wildcard separately from exact origins', () => {
+    const out = parseAllowOriginPatterns(['http://127.0.0.1:*']);
+    expect(out.allowAny).toBe(false);
+    expect(out.origins.size).toBe(0);
+    expect(out.loopbackPortWildcards).toEqual([
+      { protocol: 'http:', hostname: '127.0.0.1' },
+    ]);
+  });
+
+  it('accepts https and IPv6 loopback spellings', () => {
+    const out = parseAllowOriginPatterns([
+      'https://[::1]:*',
+      'http://localhost:*',
+    ]);
+    expect(out.loopbackPortWildcards).toEqual([
+      { protocol: 'https:', hostname: '[::1]' },
+      { protocol: 'http:', hostname: 'localhost' },
+    ]);
+  });
+
+  it('rejects a port wildcard on a non-loopback host', () => {
+    expect(() =>
+      parseAllowOriginPatterns(['https://app.example.com:*']),
+    ).toThrow(InvalidAllowOriginPatternError);
+  });
+
+  it('rejects a port wildcard that also names a port', () => {
+    expect(() => parseAllowOriginPatterns(['http://127.0.0.1:3000:*'])).toThrow(
+      InvalidAllowOriginPatternError,
+    );
+  });
+
+  it('rejects a non-http(s) port wildcard', () => {
+    expect(() => parseAllowOriginPatterns(['ftp://127.0.0.1:*'])).toThrow(
+      InvalidAllowOriginPatternError,
+    );
+  });
+
+  it('does not classify a loopback port wildcard as a remote origin', () => {
+    expect(
+      findNonLoopbackHttpOrigin(
+        parseAllowOriginPatterns(['http://127.0.0.1:*']),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('matches any port on the configured scheme and host only', () => {
+    const middleware = allowOriginCors(
+      parseAllowOriginPatterns(['http://127.0.0.1:*']),
+    );
+    for (const origin of ['http://127.0.0.1:54321', 'http://127.0.0.1:1']) {
+      const res = invokeAllowOrigin(middleware, {
+        method: 'OPTIONS',
+        headers: {
+          origin,
+          'access-control-request-method': 'GET',
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe(origin);
+    }
+    for (const origin of [
+      'http://localhost:54321',
+      'https://127.0.0.1:54321',
+      'http://192.0.2.1:54321',
+      'null',
+    ]) {
+      const res = invokeAllowOrigin(middleware, {
+        method: 'OPTIONS',
+        headers: {
+          origin,
+          'access-control-request-method': 'GET',
+        },
+      });
+      expect(res.status).toBe(403);
+    }
+  });
+
+  it('honors the wildcard through MutableOriginAllowlist', () => {
+    const allowlist = new MutableOriginAllowlist(
+      parseAllowOriginPatterns(['http://127.0.0.1:*']),
+    );
+    expect(allowlist.allows('http://127.0.0.1:54321')).toBe(true);
+    expect(allowlist.allows('http://localhost:54321')).toBe(false);
   });
 });
 

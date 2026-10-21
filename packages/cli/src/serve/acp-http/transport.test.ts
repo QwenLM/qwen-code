@@ -12226,7 +12226,14 @@ describe('ACP WebSocket transport security', () => {
   function startServer(
     opts: {
       token?: string;
-      allowedOrigins?: { allowAny: boolean; origins: Set<string> };
+      allowedOrigins?: {
+        allowAny: boolean;
+        origins: Set<string>;
+        loopbackPortWildcards?: Array<{
+          protocol: string;
+          hostname: string;
+        }>;
+      };
       checkRate?: (key: string, tier: string) => boolean;
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
@@ -12709,6 +12716,25 @@ describe('ACP WebSocket transport security', () => {
       { Authorization: 'Bearer secret-token-123' },
     );
     expect(result.code).toBe(101);
+  });
+
+  it('allows a WS upgrade from a loopback port wildcard origin', async () => {
+    await startServer({
+      token: 'secret-token-123',
+      allowedOrigins: {
+        allowAny: false,
+        origins: new Set(),
+        loopbackPortWildcards: [{ protocol: 'http:', hostname: '127.0.0.1' }],
+      },
+    });
+    const wildcard = await wsConnectRaw('127.0.0.1', 'http://127.0.0.1:54321', {
+      Authorization: 'Bearer secret-token-123',
+    });
+    expect(wildcard.code).toBe(101);
+    const foreign = await wsConnectRaw('127.0.0.1', 'https://evil.com', {
+      Authorization: 'Bearer secret-token-123',
+    });
+    expect(foreign.code).toBe(403);
   });
 
   it('does not register chrome-devtools MCP without an explicit CDP MCP command', async () => {

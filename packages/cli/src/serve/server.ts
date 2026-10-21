@@ -2238,6 +2238,19 @@ export function createServeApp(
         `token or list specific origins instead of '*'.`,
     );
   }
+  if (
+    parsedAllowOrigins.loopbackPortWildcards &&
+    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
+    !opts.token
+  ) {
+    throw new Error(
+      `Refusing to start with a loopback port wildcard in --allow-origin ` +
+        `but no bearer token configured. A port wildcard admits any page ` +
+        `served from that loopback host, on any port; without a token, any ` +
+        `local page can drive the daemon. Set a token or list specific ` +
+        `origins instead.`,
+    );
+  }
   const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
   if (nonLoopbackHttpOrigin && !opts.token) {
     throw new Error(
