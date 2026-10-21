@@ -6515,6 +6515,23 @@ describe('loadCliConfig workflowsEnabled', () => {
     expect(config.isWorkflowsEnabled()).toBe(false);
   });
 
+  it.each([undefined, false, true])(
+    'DW03: maps the public keyword opt-out %s into the Core gate',
+    async (disableWorkflowKeywordTrigger) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { ui: { disableWorkflowKeywordTrigger } },
+        argv,
+        undefined,
+        [],
+      );
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(
+        disableWorkflowKeywordTrigger !== true,
+      );
+    },
+  );
+
   // The regression this whole setting exists to prevent: `workflowsEnabled`
   // was declared on ConfigParameters and read by isWorkflowsEnabled(), but
   // loadCliConfig never wrote it — so the setting was a dead switch and the

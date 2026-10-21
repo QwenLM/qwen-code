@@ -62,8 +62,10 @@ asserts:
 - the schedule, future slots, sibling runs and foreground work are untouched;
 - a queued input cancelled before any attempt settles with no model call, and
   a run that completes naturally keeps its outcome;
-- a retry under the same key reuses the original operation and run, and a
-  parked cancel is never redelivered.
+- a retry under the same key reuses the original operation and run — delivered:
+  the second `POST /runs` answers the run it already made, records no second
+  occurrence and starts no second Turn. That a parked cancel is never
+  redelivered stays open.
 
 - `cancel-stops-only-the-target` is delivered. With the wake turn parked on the
   model, the public task cancel settles the task and the run `cancelled` in
