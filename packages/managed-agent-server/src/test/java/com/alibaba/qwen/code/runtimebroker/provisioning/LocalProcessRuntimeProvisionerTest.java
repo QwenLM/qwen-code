@@ -31,7 +31,9 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -45,6 +47,23 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class LocalProcessRuntimeProvisionerTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+
+    @Test
+    void keepsTheControlPlaneConfigurationOutOfTheWorkerEnvironment() {
+        Map<String, String> environment = new HashMap<>();
+        for (String name : List.of("SPRING_DATASOURCE_PASSWORD", "spring_datasource_password",
+                "SPRING_APPLICATION_JSON", "QWEN_MANAGED_AGENT_HARNESS_TOKEN",
+                "QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY", "qwen_managed_agent_runtime_broker_token",
+                "QWEN_MANAGEDAGENT_AUTH_SIGNING_KEY", "OSS_ACCESS_KEY_SECRET",
+                // Worker inputs and the ordinary environment pass through.
+                "QWEN_MANAGED_MCP_CONFIG", "QWEN_MANAGED_HOOK_CONFIG", "PATH", "HOME",
+                "QWEN_HOME", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS")) {
+            environment.put(name, "value");
+        }
+        LocalProcessRuntimeProvisioner.removeControlPlaneEnvironment(environment);
+        assertEquals(Set.of("QWEN_MANAGED_MCP_CONFIG", "QWEN_MANAGED_HOOK_CONFIG", "PATH", "HOME",
+                "QWEN_HOME", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS"), environment.keySet());
+    }
 
     @Test
     void refusesPrivateProfileBeforeSpawningOrAdopting(
