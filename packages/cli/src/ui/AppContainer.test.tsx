@@ -1056,19 +1056,26 @@ describe('AppContainer State Management', () => {
     });
   });
 
-  afterEach(() => {
-    if (originalStdoutIsTTY === undefined) {
-      delete (process.stdout as { isTTY?: unknown }).isTTY;
-    } else {
-      Object.defineProperty(process.stdout, 'isTTY', {
-        value: originalStdoutIsTTY,
-        configurable: true,
-      });
+  afterEach(async () => {
+    try {
+      try {
+        cleanup();
+      } finally {
+        vi.useRealTimers();
+        await mockConfig.shutdown({ strictResourceCleanup: true });
+      }
+    } finally {
+      if (originalStdoutIsTTY === undefined) {
+        delete (process.stdout as { isTTY?: unknown }).isTTY;
+      } else {
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalStdoutIsTTY,
+          configurable: true,
+        });
+      }
+      vi.unstubAllEnvs();
+      restoreCiEnv();
     }
-    vi.unstubAllEnvs();
-    restoreCiEnv();
-    cleanup();
-    vi.useRealTimers();
   });
 
   const rewindUserItem = (
@@ -1634,20 +1641,28 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
-    it('handles debug mode state', () => {
+    it('handles debug mode state', async () => {
       const debugConfig = makeFakeConfig();
       vi.spyOn(debugConfig, 'getDebugMode').mockReturnValue(true);
 
-      expect(() => {
-        render(
-          <AppContainer
-            config={debugConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-      }).not.toThrow();
+      try {
+        expect(() => {
+          render(
+            <AppContainer
+              config={debugConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+        }).not.toThrow();
+      } finally {
+        try {
+          cleanup();
+        } finally {
+          await debugConfig.shutdown({ strictResourceCleanup: true });
+        }
+      }
     });
   });
 
@@ -6487,23 +6502,31 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Error Handling', () => {
-    it('handles config methods that might throw', () => {
+    it('handles config methods that might throw', async () => {
       const errorConfig = makeFakeConfig();
       vi.spyOn(errorConfig, 'getModel').mockImplementation(() => {
         throw new Error('Config error');
       });
 
       // Should still render without crashing - errors should be handled internally
-      expect(() => {
-        render(
-          <AppContainer
-            config={errorConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-      }).not.toThrow();
+      try {
+        expect(() => {
+          render(
+            <AppContainer
+              config={errorConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+        }).not.toThrow();
+      } finally {
+        try {
+          cleanup();
+        } finally {
+          await errorConfig.shutdown({ strictResourceCleanup: true });
+        }
+      }
     });
 
     it('handles undefined settings gracefully', () => {
