@@ -22,6 +22,7 @@ import { act, renderHook } from '@testing-library/react';
 import {
   ToolConfirmationOutcome,
   type Config,
+  type Logger,
 } from '@qwen-code/qwen-code-core';
 import type {
   LivePromptOptions,
@@ -29,6 +30,18 @@ import type {
   WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiInputSubmission } from './input-submission.js';
+import { OpenTuiAppHost } from './opentui-host.js';
+import { OpenTuiSlashDispatcher } from './commands-dispatch.js';
+import { CommandKind } from '../commands/types.js';
+import { historyCommand } from '../commands/historyCommand.js';
+import { createOpenTuiCommandContext } from './commands-context.js';
+import type { LoadedSettings } from '../../config/settings.js';
+import type { SessionStatsState } from '../contexts/SessionContext.js';
+import { rewindSession } from '../utils/session-rewind.js';
+import { rewindBoundaryHistory } from './live-session-model.js';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import type { Content } from '@google/genai';
+import { injectCapturedInput } from './early-input.js';
 import {
   foldBatch,
   imagePathsToParts,
@@ -48,6 +61,7 @@ const live = vi.hoisted(() => ({
   script: new Map<number, Array<Record<string, unknown>>>(),
   holds: new Set<number>(),
   errors: new Map<number, Error>(),
+  holdAfterEvents: new Set<number>(),
 }));
 
 vi.mock('./live-session.js', () => ({
@@ -61,12 +75,19 @@ vi.mock('./live-session.js', () => ({
     live.signals.push(signal);
     live.turns.push({ prompt, options });
     const turn = live.turns.length;
+    (options as LivePromptOptions).onPreparedRequest?.({
+      content: prompt as never,
+      modelOverride: (options as LivePromptOptions).modelOverride,
+      inlineModelOverride: false,
+    });
     if (turn === 1 || live.holds.has(turn)) {
       await new Promise<void>((resolve) => live.waiters.push(resolve));
     }
     if (live.errors.has(turn)) throw live.errors.get(turn);
     if (live.declines.has(turn)) return;
     for (const event of live.script.get(turn) ?? []) yield event;
+    if (live.holdAfterEvents.has(turn))
+      await new Promise<void>((resolve) => live.waiters.push(resolve));
     yield { type: 'done' };
   },
 }));
@@ -144,6 +165,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.holdAfterEvents.clear();
   });
 
   function approval(title: string): WaitingCallInfo {
@@ -161,6 +183,487 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   function park(turn: number, call: WaitingCallInfo) {
     (live.turns[turn - 1].options as LivePromptOptions).onWaitingCall?.(call);
   }
+
+  it('expands restored history without resetting the live turn or its structured queue', async () => {
+    const config = {} as Config;
+    const settings = { merged: {} } as LoadedSettings;
+    const hook = renderHook(() => useOpenTuiLiveTurn({ config }));
+    const host = new OpenTuiAppHost({
+      config,
+      settings,
+      logger: null,
+      transcript: {
+        append: hook.result.current.applyEvent,
+        reset: hook.result.current.resetTranscript,
+        clear: () => hook.result.current.resetTranscript([]),
+      },
+      confirmations: {
+        presentShell: async () => ({ outcome: ToolConfirmationOutcome.Cancel }),
+        presentAction: async () => false,
+      },
+      onChange: () => {},
+      toggleVimEnabled: async () => false,
+      reloadCommands: () => {},
+      startNewSession: () => {},
+      getSessionStats: () => ({}) as SessionStatsState,
+    });
+    const context = createOpenTuiCommandContext(
+      host,
+      { config, settings, logger: null },
+      { wasIdleBeforeDispatch: true },
+    );
+    act(() =>
+      context.ui.loadHistory([
+        {
+          id: 1,
+          type: 'user',
+          text: 'restored',
+          promptId: 'p1',
+          display: { suppressOnRestore: true },
+        },
+        {
+          id: 2,
+          type: 'info',
+          text: 'collapsed',
+          display: { kind: 'collapse-summary' },
+        },
+      ]),
+    );
+    await act(async () => {
+      hook.result.current.submit('active');
+      hook.result.current.submit('queued', undefined, {
+        deferUntilIdle: true,
+        submittedPrompt: '@queued',
+      });
+    });
+    const activeRow = hook.result.current.items.at(-1);
+    try {
+      await act(async () => {
+        await historyCommand.subCommands!.find(
+          (command) => command.name === 'expand-now',
+        )!.action!(context, '');
+      });
+      expect(hook.result.current.items.at(-1)).toBe(activeRow);
+      expect(hook.result.current.items[0]).toMatchObject({
+        kind: 'user',
+        text: 'restored',
+        promptId: 'p1',
+        display: undefined,
+      });
+      expect(hook.result.current.items).toHaveLength(2);
+      expect(hook.result.current.streaming).toBe(true);
+      expect(live.signals[0].aborted).toBe(false);
+      expect(live.turns).toHaveLength(1);
+      expect(hook.result.current.messageQueue).toEqual(['queued']);
+      act(() => {
+        expect(hook.result.current.popQueue()).toMatchObject({
+          text: 'queued',
+          submittedPrompt: '@queued',
+          deferUntilIdle: true,
+        });
+      });
+    } finally {
+      await act(async () => live.waiters.shift()?.());
+      hook.unmount();
+    }
+  });
+
+  it.each(['unchanged', 'reset', 'new-turn'] as const)(
+    'keeps rewind draft injection current across its own notice, but rejects %s successor changes',
+    async (change) => {
+      vi.useFakeTimers();
+      const hook = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      let dispose = () => {};
+      const setText = vi.fn();
+      try {
+        act(() =>
+          hook.result.current.resetTranscript([
+            { type: 'user', text: 'restored', promptId: 'old' },
+          ]),
+        );
+        act(() => {
+          hook.result.current.rewindTranscript(hook.result.current.items[0].id);
+          const expected = hook.result.current.applyEvent({
+            type: 'info',
+            text: 'Conversation rewound.',
+          })!;
+          dispose = injectCapturedInput(
+            () => ({
+              setText: (text) => {
+                if (hook.result.current.isCurrentHistory(expected))
+                  setText(text);
+              },
+            }),
+            'restored',
+          );
+          if (change === 'reset') hook.result.current.resetTranscript([]);
+          if (change === 'new-turn') hook.result.current.submit('successor');
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(25);
+        });
+        if (change === 'unchanged')
+          expect(setText).toHaveBeenCalledExactlyOnceWith('restored');
+        else expect(setText).not.toHaveBeenCalled();
+        await act(async () => live.waiters.shift()?.());
+      } finally {
+        dispose();
+        hook.unmount();
+        vi.useRealTimers();
+      }
+      expect(
+        hook.result.current.applyEvent({ type: 'info', text: 'late' }),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each(['reset', 'new-turn'] as const)(
+    'invalidates a deferred file rewind synchronously before %s commits a render',
+    async (change) => {
+      let release!: () => void;
+      const filesRestored = vi.fn();
+      const api: Content[] = [{ role: 'user', parts: [{ text: 'original' }] }];
+      markApiHistoryPrompt(api[0], 'original-id');
+      const truncateHistory = vi.fn();
+      const rewindRecording = vi.fn();
+      const config = {
+        getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
+        getChatRecordingService: () => ({ rewindRecording }),
+        getFileHistoryService: () => ({
+          rewind: async () => {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            filesRestored();
+            return { filesChanged: ['owned.txt'], filesFailed: [] };
+          },
+        }),
+      } as unknown as Config;
+      const { result } = renderHook(() => useOpenTuiLiveTurn({ config }));
+      act(() =>
+        result.current.resetTranscript([
+          {
+            type: 'user',
+            text: 'original',
+            promptId: 'original-id',
+            sentToModel: true,
+          },
+        ]),
+      );
+      const snapshot = result.current.items;
+      const boundary = rewindBoundaryHistory(snapshot);
+      const commit = vi.fn();
+      const pending = rewindSession(
+        config,
+        boundary,
+        boundary[0],
+        'both',
+        commit,
+        () => result.current.isCurrentHistory(snapshot),
+      );
+      await act(async () => {
+        if (change === 'reset')
+          result.current.resetTranscript([
+            { type: 'user', text: 'successor', promptId: 'new-id' },
+          ]);
+        else result.current.submit('successor');
+        expect(result.current.items).toBe(snapshot);
+        expect(result.current.isCurrentHistory(snapshot)).toBe(false);
+        release();
+        expect(await pending).toEqual({ stale: true, messages: [] });
+      });
+      expect(filesRestored).toHaveBeenCalledOnce();
+      expect(truncateHistory).not.toHaveBeenCalled();
+      expect(rewindRecording).not.toHaveBeenCalled();
+      expect(commit).not.toHaveBeenCalled();
+      expect(result.current.items.at(-1)).toMatchObject({
+        kind: 'user',
+        text: 'successor',
+      });
+      await act(async () => live.waiters.shift()?.());
+    },
+  );
+
+  it('logs accepted steering once and does not remove its later input on cancellation', async () => {
+    const logMessage = vi.fn(async (_sender: unknown, _message: string) => {});
+    const removeLastUserMessage = vi.fn(async () => true);
+    const logger = { logMessage, removeLastUserMessage } as unknown as Logger;
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, logger }),
+    );
+    await act(async () => {
+      result.current.submit('original');
+    });
+    const options = live.turns[0].options as LivePromptOptions;
+    act(() => {
+      park(1, approval('tool boundary'));
+      result.current.submit('accepted');
+      expect(logMessage.mock.calls.map((call) => call[1])).toEqual([
+        'original',
+      ]);
+      options.drainSteering!();
+      options.onAcceptedSteering!(['accepted']);
+      result.current.applyEvent({
+        type: 'user',
+        text: 'accepted',
+        sentToModel: false,
+      });
+      result.current.interrupt(() => true);
+    });
+    await act(async () => live.waiters.shift()?.());
+    expect(logMessage.mock.calls.map((call) => call[1])).toEqual([
+      'original',
+      'accepted',
+    ]);
+    expect(removeLastUserMessage).not.toHaveBeenCalled();
+    expect(
+      result.current.items
+        .filter((item) => item.kind === 'user')
+        .map((item) => item.text),
+    ).toEqual(['original', 'accepted']);
+  });
+
+  it.each([false, true])(
+    'only removes a no-output cancelled row when the composer actually restored it: %s',
+    async (restored) => {
+      const removeLastUserMessage = vi.fn(async () => true);
+      const stripOrphanedUserEntriesFromHistory = vi.fn();
+      const logger = {
+        logMessage: vi.fn(async () => {}),
+        removeLastUserMessage,
+      } as unknown as Logger;
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({
+          config: {
+            getLlmClient: () => ({ stripOrphanedUserEntriesFromHistory }),
+          } as unknown as Config,
+          logger,
+        }),
+      );
+      await act(async () => {
+        result.current.submit('owned prompt');
+      });
+      act(() => result.current.interrupt(() => restored));
+      await act(async () => live.waiters.shift()?.());
+      expect(
+        result.current.items.filter((item) => item.kind === 'user'),
+      ).toHaveLength(restored ? 0 : 1);
+      expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledTimes(
+        restored ? 1 : 0,
+      );
+      expect(removeLastUserMessage).toHaveBeenCalledTimes(restored ? 1 : 0);
+    },
+  );
+
+  it('a later processed input invalidates the old log rollback even while its log write is pending', async () => {
+    let finishLog!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finishLog = resolve;
+    });
+    const logMessage = vi
+      .fn()
+      .mockReturnValueOnce(pending)
+      .mockResolvedValue(undefined);
+    const removeLastUserMessage = vi.fn(async () => true);
+    const logger = { logMessage, removeLastUserMessage } as unknown as Logger;
+    const config = {
+      getLlmClient: () => ({ stripOrphanedUserEntriesFromHistory: vi.fn() }),
+    } as unknown as Config;
+    const { result } = renderHook(() => useOpenTuiLiveTurn({ config, logger }));
+    await act(async () => {
+      result.current.submit('ordinary');
+    });
+    const settings = { merged: {} } as LoadedSettings;
+    const host = new OpenTuiAppHost({
+      config,
+      settings,
+      logger,
+      transcript: {
+        append: result.current.applyEvent,
+        reset: result.current.resetTranscript,
+        clear: () => result.current.resetTranscript([]),
+      },
+      confirmations: {
+        presentShell: async () => ({ outcome: ToolConfirmationOutcome.Cancel }),
+        presentAction: async () => false,
+      },
+      onChange: () => {},
+      toggleVimEnabled: async () => false,
+      reloadCommands: () => {},
+      startNewSession: () => {},
+      getSessionStats: () => ({}) as SessionStatsState,
+    });
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      {
+        config: null,
+        settings,
+        logger,
+        onInputProcessed: result.current.notifyInputProcessed,
+      },
+      [
+        {
+          name: 'help',
+          description: 'local help',
+          kind: CommandKind.BUILT_IN,
+          action: () => ({
+            type: 'message',
+            messageType: 'info',
+            content: 'help stays visible',
+          }),
+        },
+      ],
+    );
+    await act(async () => {
+      expect(await dispatcher.handle('/help')).toEqual({ kind: 'handled' });
+    });
+    await act(async () => finishLog());
+    act(() => result.current.interrupt(() => true));
+    await act(async () => live.waiters.shift()?.());
+    expect(logMessage.mock.calls.map((call) => call[1])).toEqual([
+      'ordinary',
+      '/help',
+    ]);
+    expect(removeLastUserMessage).not.toHaveBeenCalled();
+    expect(result.current.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'user',
+          text: '/help',
+          sentToModel: false,
+        }),
+        expect.objectContaining({ kind: 'info', text: 'help stays visible' }),
+      ]),
+    );
+  });
+
+  it('keeps meaningful streamed content while the composer restores the prompt', async () => {
+    const strip = vi.fn();
+    const remove = vi.fn(async () => true);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({
+        config: {
+          getLlmClient: () => ({ stripOrphanedUserEntriesFromHistory: strip }),
+        } as unknown as Config,
+        logger: {
+          logMessage: vi.fn(async () => {}),
+          removeLastUserMessage: remove,
+        } as unknown as Logger,
+      }),
+    );
+    live.script.set(1, [{ type: 'text', delta: 'retained response' }]);
+    await act(async () => {
+      result.current.submit('owned');
+    });
+    act(() => result.current.interrupt(() => true));
+    await act(async () => live.waiters.shift()?.());
+    expect(
+      result.current.items.some(
+        (item) =>
+          item.kind === 'assistant' && item.text === 'retained response',
+      ),
+    ).toBe(true);
+    expect(strip).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('retries the same prepared payload once without another input log or user row', async () => {
+    const logMessage = vi.fn(async () => {});
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({
+        config: {} as Config,
+        logger: { logMessage } as unknown as Logger,
+      }),
+    );
+    live.errors.set(1, new Error('provider failed'));
+    await act(async () => {
+      result.current.submit('read @owned.txt');
+    });
+    const first = live.turns[0].options as LivePromptOptions;
+    const content = [
+      { text: 'prepared file content' },
+      { inlineData: { mimeType: 'image/png', data: 'exact' } },
+    ];
+    first.onPreparedRequest?.({ content, inlineModelOverride: false });
+    await act(async () => live.waiters.shift()?.());
+    live.holds.add(2);
+    await act(async () => {
+      result.current.retryLastPrompt();
+      result.current.retryLastPrompt();
+    });
+    expect(live.turns).toHaveLength(2);
+    expect(live.turns[1].prompt).toBe(content);
+    expect((live.turns[1].options as LivePromptOptions).retry?.content).toBe(
+      content,
+    );
+    expect((live.turns[1].options as LivePromptOptions).promptId).toBe(
+      first.promptId,
+    );
+    expect(logMessage).toHaveBeenCalledTimes(1);
+    expect(
+      result.current.items.filter((item) => item.kind === 'user'),
+    ).toHaveLength(1);
+    await act(async () => live.waiters.shift()?.());
+  });
+
+  it.each(['skip', 'clear', 'cancel', 'reset'] as const)(
+    'owns one retry-delay callback until %s',
+    async (action) => {
+      const skip = vi.fn();
+      live.script.set(1, [
+        {
+          type: 'retry-countdown',
+          attempt: 1,
+          maxRetries: 3,
+          delayMs: 1000,
+          skipDelay: skip,
+        },
+        ...(action === 'clear' ? [{ type: 'retry-countdown-clear' }] : []),
+      ]);
+      live.holdAfterEvents.add(1);
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      await act(async () => {
+        result.current.submit('retry delay');
+      });
+      await act(async () => live.waiters.shift()?.());
+      if (action === 'cancel') act(() => result.current.interrupt());
+      if (action === 'reset') act(() => result.current.resetTranscript([]));
+      act(() => {
+        result.current.retryLastPrompt();
+        result.current.retryLastPrompt();
+      });
+      expect(skip).toHaveBeenCalledTimes(action === 'skip' ? 1 : 0);
+      expect(live.turns).toHaveLength(1);
+      await act(async () => live.waiters.shift()?.());
+      expect(
+        result.current.items.filter((item) => item.kind === 'retry'),
+      ).toHaveLength(0);
+    },
+  );
+
+  it('reset invalidates a failed payload instead of retrying it in the successor session', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    live.errors.set(1, new Error('failed'));
+    await act(async () => {
+      result.current.submit('old');
+    });
+    await act(async () => live.waiters.shift()?.());
+    act(() => result.current.resetTranscript([]));
+    act(() => result.current.retryLastPrompt());
+    expect(live.turns).toHaveLength(1);
+    expect(result.current.items).toEqual([
+      expect.objectContaining({
+        kind: 'info',
+        text: 'No failed request to retry.',
+      }),
+    ]);
+  });
 
   it('returns late restored steering with image ownership at cancel settlement without resending', async () => {
     const path = join(dir, 'cancel.png');

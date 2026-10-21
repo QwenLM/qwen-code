@@ -43,6 +43,53 @@ const waitingTool = (id = 'tool1'): LiveToolItem => ({
   confirm: 'pending',
 });
 
+describe('identified user history', () => {
+  it('updates an invocation in place even after its command output', () => {
+    let items = foldLiveEvent([], {
+      type: 'user',
+      text: '/x',
+      historyId: 7,
+      sentToModel: false,
+    });
+    const id = items[0].id;
+    items = foldLiveEvent(items, { type: 'info', text: 'Preparing' });
+    items = foldLiveEvent(items, {
+      type: 'user',
+      text: '/x',
+      historyId: 7,
+      promptId: 'p1',
+      sentToModel: true,
+    });
+    expect(items).toHaveLength(2);
+    expect(items[0]).toEqual({
+      kind: 'user',
+      id,
+      historyId: 7,
+      text: '/x',
+      promptId: 'p1',
+      sentToModel: true,
+    });
+    expect(items[1]).toMatchObject({ kind: 'info', text: 'Preparing' });
+  });
+
+  it('retains equal text from distinct turns but deduplicates a repeated echo', () => {
+    let items = foldLiveEvent([], {
+      type: 'user',
+      text: 'again',
+      promptId: 'p1',
+    });
+    items = foldLiveEvent(items, {
+      type: 'user',
+      text: 'again',
+      promptId: 'p2',
+    });
+    expect(items).toHaveLength(2);
+    expect(
+      foldLiveEvent(items, { type: 'user', text: 'again', promptId: 'p2' }),
+    ).toBe(items);
+  });
+});
+
 describe('foldLiveEvent segment-end (finished parity)', () => {
   it('closes the streaming assistant block', () => {
     const items = foldLiveEvent([assistant('hello')], { type: 'segment-end' });

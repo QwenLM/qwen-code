@@ -34,7 +34,11 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { ArenaAgentCardData, CompressionProps } from '../types.js';
+import type {
+  ArenaAgentCardData,
+  CompressionProps,
+  HistoryItemBase,
+} from '../types.js';
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { AGENT_TOOL_NAMES } from '../utils/agent-tool-names.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
@@ -48,9 +52,12 @@ import type { LoopStop } from '../../utils/loop-detected-message.js';
  * tool cards (args preview, result content, approval state), plus turn
  * segmentation and inline images.
  */
-export type OpenTuiStreamEvent =
+type OpenTuiStreamEventData =
   | Exclude<StreamEvent, { type: 'text' | 'user' }>
-  | (Extract<StreamEvent, { type: 'user' }> & { recallText?: string })
+  | { type: 'history-expanded' }
+  | (Extract<StreamEvent, { type: 'user' }> & {
+      recallText?: string;
+    })
   /** Widened over the neutral `text` event: a replayed assistant record
    * carries its own recorded time, which ink stamps on the first display run
    * of that record. Live deltas leave it unset and fold as "now". */
@@ -66,6 +73,7 @@ export type OpenTuiStreamEvent =
       type: 'tool-result';
       id: string;
       display: string;
+      detailedDisplay?: string;
       /** Structured FileDiff payload: rendered as colored diff lines in the
        * tool card instead of the flattened `display` text (ink
        * DiffResultRenderer parity). */
@@ -183,6 +191,11 @@ export type OpenTuiStreamEvent =
   | { type: 'segment-end' }
   /** Inline image from model content (`inlineData` part). */
   | { type: 'image'; mimeType: string; data: string };
+
+export type OpenTuiStreamEvent = OpenTuiStreamEventData & {
+  historyId?: number;
+  historyDisplay?: HistoryItemBase['display'];
+};
 
 /**
  * Optional runtime context for notices that need config-derived values.

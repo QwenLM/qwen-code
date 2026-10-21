@@ -1076,8 +1076,9 @@ describe('OpenTuiInputPrompt submit guard', () => {
       });
       await pressKey('escape');
       if (successor) await typeText('successor');
-      await act(async () =>
-        settle({
+      let restored: boolean | void;
+      await act(async () => {
+        restored = settle({
           kind: 'cancelled',
           queued: null,
           prompt: {
@@ -1085,8 +1086,9 @@ describe('OpenTuiInputPrompt submit guard', () => {
             submittedPrompt: 'typed original',
             imagePaths: ['/tmp/original.png'],
           },
-        }),
-      );
+        });
+      });
+      expect(restored!).toBe(successor ? undefined : true);
       expect(currentEditor().plainText).toBe(
         successor ? 'successor' : 'expanded original',
       );
@@ -3196,6 +3198,38 @@ describe('composer admission and attachment ownership', () => {
         deferUntilIdle: false,
       }),
     );
+  });
+
+  it('routes Ctrl+Y without submitting or replacing the current draft', async () => {
+    const retry = vi.fn();
+    const submit = vi.fn(() => true);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={submit}
+        userMessages={[]}
+        onRetry={retry}
+      />,
+    );
+    await typeText('successor draft');
+    await press('y', true);
+    expect(retry).toHaveBeenCalledOnce();
+    expect(submit).not.toHaveBeenCalled();
+    expect(currentEditor().plainText).toBe('successor draft');
+  });
+
+  it('opens rewind only after two Escape keys on an empty idle draft', async () => {
+    const rewind = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => true}
+        userMessages={[]}
+        onRewind={rewind}
+      />,
+    );
+    await press('escape');
+    expect(rewind).not.toHaveBeenCalled();
+    await press('escape');
+    expect(rewind).toHaveBeenCalledOnce();
   });
 
   it.each([false, true])(

@@ -74,6 +74,7 @@ import { ICON } from '../constants.js';
 import { formatClockTime, formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import type { ArenaAgentCardData } from '../types.js';
+import { isHistoryItemVisibleAfterRestore } from '../types.js';
 
 /** ink HistoryItemDisplay picks between two hints by whether the card is
  *  clickable; `ui.mouseTracking: false` hands the pointer back to the
@@ -465,8 +466,12 @@ export function OpenTuiTranscriptView({
   awaitingCallId,
   initialAnchor = 'bottom',
 }: TranscriptViewProps) {
+  const visibleItems = useMemo(
+    () => items.filter(isHistoryItemVisibleAfterRestore),
+    [items],
+  );
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
-  const awaitingId = items.find(
+  const awaitingId = visibleItems.find(
     (item) =>
       item.kind === 'tool' &&
       item.confirm === 'pending' &&
@@ -474,7 +479,7 @@ export function OpenTuiTranscriptView({
       item.id === awaitingCallId,
   )?.id;
   const { rootRef, nodesRef, win } = useTranscriptWindow(
-    items,
+    visibleItems,
     availableTerminalHeight,
     initialAnchor,
   );
@@ -488,7 +493,7 @@ export function OpenTuiTranscriptView({
       }}
     >
       <box height={win.topPad} flexShrink={0} />
-      {items.slice(win.start, win.end).map((item) => {
+      {visibleItems.slice(win.start, win.end).map((item) => {
         const key = itemKey(item);
         return (
           <box
@@ -887,7 +892,22 @@ function ToolCard({
               </text>
             </box>
           ) : null}
-          <ToolCardBody item={item} maxRows={maxRows} width={width} />
+          <ToolCardBody
+            item={
+              fullDetail && item.detailedDisplay
+                ? {
+                    ...item,
+                    output: sanitizeTerminalText(item.detailedDisplay),
+                    diff: undefined,
+                    todos: undefined,
+                    ansi: undefined,
+                    subagentSummary: undefined,
+                  }
+                : item
+            }
+            maxRows={maxRows}
+            width={width}
+          />
         </>
       )}
     </box>

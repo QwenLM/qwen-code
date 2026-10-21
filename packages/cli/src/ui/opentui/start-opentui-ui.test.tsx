@@ -18,6 +18,7 @@ import { execFile, execFileSync } from 'child_process';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { InputPromptProps } from './input-prompt.js';
 import type { TextareaRenderable } from '@opentui/core';
+import type { HistoryItem } from '../types.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import { createInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
@@ -64,8 +65,11 @@ const mocks = vi.hoisted(() => {
       (key: { name: string; ctrl: boolean; eventType?: string }) => void
     >,
     items: [] as LiveHistoryItem[],
+    isCurrentHistory: vi.fn(),
     appProps: null as {
       userMessages?: readonly string[];
+      startupHistory?: HistoryItem[];
+      isCurrentHistory?: (snapshot: readonly LiveHistoryItem[]) => boolean;
       renderMain?: () => unknown;
       onToggleVim?: () => Promise<boolean>;
       vimMode?: string;
@@ -79,7 +83,6 @@ const mocks = vi.hoisted(() => {
         } | null;
       };
     } | null,
-    resumeEvents: null as OpenTuiStreamEvent[] | null,
     transcript: [] as OpenTuiStreamEvent[],
     replayOrder: [] as string[],
   };
@@ -174,6 +177,7 @@ vi.mock('./live-turn.js', () => ({
     mocks.state.liveOptions = options;
     return {
       items: mocks.state.items,
+      isCurrentHistory: mocks.state.isCurrentHistory,
       streaming: mocks.state.streaming,
       streamingCharsRef: { current: 0 },
       isReceivingContent: false,
@@ -228,9 +232,6 @@ vi.mock('./early-input.js', () => ({
   injectCapturedInput: () => () => {},
   armCapturedInputInjection: () => () => {},
 }));
-vi.mock('./resume-session.js', () => ({
-  resumeEventsFromConfig: () => mocks.state.resumeEvents,
-}));
 
 import type { ReactElement } from 'react';
 import { render } from '@testing-library/react';
@@ -245,6 +246,7 @@ import type { InitializationResult } from '../../core/initializer.js';
 function buildConfig(authType: 'qwen-oauth' | 'none' = 'qwen-oauth'): Config {
   return {
     getSessionId: () => 'test-session-id',
+    getResumedSessionData: () => undefined,
     getTargetDir: () => '/tmp/project',
     getApprovalMode: () => 'default',
     isInteractive: () => false,
@@ -284,7 +286,6 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.liveOptions = null;
     mocks.state.keyboard = [];
     vi.mocked(exitSession).mockClear();
-    mocks.state.resumeEvents = null;
     mocks.state.transcript = [];
     mocks.state.replayOrder = [];
     mocks.state.renderer.destroy.mockClear();
@@ -349,6 +350,39 @@ describe('startOpenTuiUI fallback contract', () => {
       write.mockRestore();
     }
   }
+
+  it('starts a fresh command history without a replay reset', async () => {
+    await withEntryApp(() => {
+      expect(mocks.state.appProps?.startupHistory).toEqual([]);
+      expect(mocks.state.appProps?.isCurrentHistory).toBe(
+        mocks.state.isCurrentHistory,
+      );
+      expect(mocks.state.replayOrder).not.toContain('reset');
+    });
+  });
+
+  it('uses the existing startup fallback when resumed history cannot be read', async () => {
+    const config = buildConfig();
+    config.getResumedSessionData = () => {
+      throw new Error('owned resume failure');
+    };
+    expect(
+      await startOpenTuiUI(
+        config,
+        settings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      ),
+    ).toBe(false);
+    expect(mocks.state.root.render).not.toHaveBeenCalled();
+    expect(mocks.state.root.unmount).toHaveBeenCalledOnce();
+    expect(mocks.state.renderer.destroy).toHaveBeenCalledOnce();
+    expect(mocks.state.runtime.shutdown).toHaveBeenCalledOnce();
+    expect(mocks.state.stderrLines.join('\n')).toContain(
+      'owned resume failure',
+    );
+  });
 
   it('wires /vim to the real provider, persistence and footer mode', async () => {
     await withEntryApp(async () => {
@@ -764,7 +798,28 @@ describe('startOpenTuiUI fallback contract', () => {
     const owner = createInteractiveModSession(config, {
       merged: { experimental: { mods: true } },
     } as LoadedSettings)!;
-    mocks.state.resumeEvents = [{ type: 'user', text: 'restored history' }];
+    config.getResumedSessionData = () =>
+      ({
+        conversation: {
+          sessionId: 'test-session-id',
+          projectHash: 'project',
+          startTime: '2026-10-21T00:00:00Z',
+          lastUpdated: '2026-10-21T00:00:00Z',
+          messages: [
+            {
+              uuid: 'restored',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-10-21T00:00:00Z',
+              cwd: '/tmp/project',
+              version: 'test',
+              type: 'user',
+              promptId: 'test-session-id########4',
+              message: { role: 'user', parts: [{ text: 'restored history' }] },
+            },
+          ],
+        },
+      }) as ReturnType<Config['getResumedSessionData']>;
     mocks.state.runtime.writeRuntimeSidecar.mockImplementationOnce(async () => {
       await owner.ready;
     });
@@ -785,8 +840,22 @@ describe('startOpenTuiUI fallback contract', () => {
       const calls = mocks.state.root.render.mock.calls;
       view = render(calls[calls.length - 1]?.[0] as ReactElement);
       expect(mocks.state.replayOrder).toEqual(['reset', 'info']);
+      expect(mocks.state.appProps?.startupHistory).toEqual([
+        expect.objectContaining({
+          type: 'user',
+          text: 'restored history',
+          promptId: 'test-session-id########4',
+        }),
+      ]);
       expect(mocks.state.transcript).toEqual([
-        { type: 'user', text: 'restored history' },
+        {
+          type: 'user',
+          text: 'restored history',
+          promptId: 'test-session-id########4',
+          sentToModel: undefined,
+          historyId: mocks.state.appProps?.startupHistory?.[0]?.id,
+        },
+        { type: 'done' },
         { type: 'info', text: `[Mod fixture] ${warning}` },
       ]);
       view.unmount();
@@ -795,7 +864,7 @@ describe('startOpenTuiUI fallback contract', () => {
         'fixture',
         config.getSessionId(),
       );
-      expect(mocks.state.transcript).toHaveLength(2);
+      expect(mocks.state.transcript).toHaveLength(3);
     } finally {
       view?.unmount();
       await owner.close();

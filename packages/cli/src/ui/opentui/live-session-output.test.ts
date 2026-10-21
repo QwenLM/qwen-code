@@ -12,6 +12,8 @@ import type { Part } from '@google/genai';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import { MockTool } from '@qwen-code/qwen-code-core/test-utils/mock-tool.js';
+import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
+import { ToolRegistry } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
 import { ToolErrorType } from '@qwen-code/qwen-code-core/utils/tool-error-type.js';
 import type {
   Config,
@@ -32,7 +34,11 @@ import type {
   CLIPartialAssistantMessage,
   ControlMessage,
 } from '../../nonInteractive/types.js';
-import { livePromptEvents, type LivePromptOptions } from './live-session.js';
+import {
+  livePromptEvents,
+  type LivePromptOptions,
+  type PreparedLiveRequest,
+} from './live-session.js';
 
 type SchedulerOptions = ConstructorParameters<
   typeof InteractiveModToolScheduler
@@ -462,6 +468,101 @@ function toolHop(onContinuation?: (options: SendMessageOptions) => void) {
 }
 
 describe('logical tools and actual permission transitions', () => {
+  it('retries a failed restored-tool continuation without executing the tool again', async () => {
+    const { InteractiveModToolScheduler: RealScheduler } =
+      await vi.importActual<
+        typeof import('../../services/interactive-mod-tool-scheduler.js')
+      >('../../services/interactive-mod-tool-scheduler.js');
+    control.schedule.mockImplementation(
+      (
+        options: SchedulerOptions,
+        requests: ToolCallRequestInfo[],
+        signal: AbortSignal,
+      ) => new RealScheduler(options).schedule(requests, signal),
+    );
+    let attempt = 0;
+    const h = setup(function* () {
+      if (++attempt === 1) throw new Error('continuation failed');
+      yield content('retried answer');
+    });
+    const config = makeFakeConfig({
+      targetDir: roots.at(-1)!,
+      cwd: roots.at(-1)!,
+      disableAllHooks: true,
+      usageStatisticsEnabled: false,
+    });
+    Object.assign(config, h.config);
+    const execute = vi.fn(async () => ({
+      llmContent: 'restored-result',
+      returnDisplay: 'restored-result',
+    }));
+    const registry = new ToolRegistry(config);
+    registry.registerTool(new MockTool({ name: 'owned_restore', execute }));
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const emitUser = vi.spyOn(h.bridge, 'emitUserMessage');
+    const emitResult = vi.spyOn(h.bridge, 'emitToolResult');
+    let prepared: PreparedLiveRequest | undefined;
+    const options: LivePromptOptions = {
+      promptId: 'restored-tool',
+      toolCall: { name: 'owned_restore', args: { owned: true } },
+      dualOutput: h.bridge,
+      onPreparedRequest: (request) => {
+        prepared = request;
+      },
+    };
+    try {
+      await expect(
+        drain(livePromptEvents(config, [], undefined, options)),
+      ).rejects.toThrow('continuation failed');
+      expect(execute).toHaveBeenCalledExactlyOnceWith({ owned: true });
+      expect(emitUser).not.toHaveBeenCalled();
+      expect(emitResult).toHaveBeenCalledOnce();
+      expect(prepared).toBeDefined();
+      const failed = prepared!;
+      expect(failed.content).toEqual([
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({
+            name: 'owned_restore',
+            response: { output: 'restored-result' },
+          }),
+        }),
+      ]);
+      await drain(
+        livePromptEvents(config, failed.content, undefined, {
+          ...options,
+          retry: failed,
+        }),
+      );
+      expect(control.schedule).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+      expect(emitResult).toHaveBeenCalledOnce();
+      expect(emitUser).toHaveBeenCalledExactlyOnceWith(failed.content);
+      expect(h.client.sendMessageStream).toHaveBeenCalledTimes(2);
+      for (const [index, type] of [
+        SendMessageType.ToolResult,
+        SendMessageType.Retry,
+      ].entries()) {
+        const call = h.client.sendMessageStream.mock.calls[index];
+        expect(call[0]).toBe(failed.content);
+        expect(call[2]).toBe('restored-tool');
+        expect(call[3]).toEqual({ type });
+      }
+      const frames = await h.frames();
+      expect(users(frames)).toHaveLength(2);
+      expect(users(frames)[0].message.content).toEqual([
+        expect.objectContaining({
+          type: 'tool_result',
+          content: 'restored-result',
+        }),
+      ]);
+      expect(users(frames)[1].message.content).toEqual([
+        { type: 'text', text: 'restored-result' },
+      ]);
+    } finally {
+      await config.shutdown({ strictResourceCleanup: true });
+    }
+  });
+
   it('emits one logical result between tool-use and the next model message', async () => {
     const h = setup(toolHop());
     await h.run();

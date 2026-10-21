@@ -137,6 +137,52 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('filters restored suppression only at display time, including full-detail mode', () => {
+    const hidden: LiveHistoryItem = {
+      kind: 'user',
+      id: 'hidden',
+      text: 'HIDDEN TURN',
+      display: { suppressOnRestore: true },
+    };
+    const summary: LiveHistoryItem = {
+      kind: 'info',
+      id: 'summary',
+      text: 'COLLAPSED SUMMARY',
+      display: { kind: 'collapse-summary' },
+    };
+    const view = render(<OpenTuiTranscriptView items={[hidden, summary]} />);
+    expect(view.container.textContent).not.toContain('HIDDEN TURN');
+    expect(view.container.textContent).toContain('COLLAPSED SUMMARY');
+    view.rerender(
+      <OpenTuiTranscriptView items={[hidden, summary]} thoughtsExpanded />,
+    );
+    expect(view.container.textContent).not.toContain('HIDDEN TURN');
+    view.rerender(
+      <OpenTuiTranscriptView items={[{ ...hidden, display: undefined }]} />,
+    );
+    expect(view.container.textContent).toContain('HIDDEN TURN');
+    expect(view.container.textContent).not.toContain('COLLAPSED SUMMARY');
+  });
+
+  it('uses resumed read detail only in full-detail mode and sanitizes raw controls', () => {
+    const item = toolItem({
+      tool: 'read_file',
+      done: true,
+      output: 'summary only',
+      detailedDisplay: 'FULL\u001b[31m CONTENT\u0007',
+    });
+    const view = render(
+      <OpenTuiTranscriptView items={[item]} thoughtsExpanded={false} />,
+    );
+    expect(view.container.textContent).toContain('summary only');
+    expect(view.container.textContent).not.toContain('FULL');
+    view.rerender(<OpenTuiTranscriptView items={[item]} thoughtsExpanded />);
+    expect(view.container.textContent).toContain('FULL CONTENT');
+    expect(view.container.textContent).not.toContain('summary only');
+    expect(view.container.textContent).not.toContain('\u001b');
+    expect(view.container.textContent).not.toContain('\u0007');
+  });
+
   it('keeps a pending MCP-shaped card description visible (R1-10)', () => {
     // An MCP confirmation dialog shows only the server and tool names — no
     // args — so the card is the only surface that carries the arguments.

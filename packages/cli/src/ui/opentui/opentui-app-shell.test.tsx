@@ -40,7 +40,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, renderHook, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import {
   getDialogMaxHeight,
@@ -64,7 +64,17 @@ import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
 import { StreamingState } from '../types.js';
-import type { OpenTuiSubmitOptions } from './live-turn.js';
+import type { HistoryItem } from '../types.js';
+import type { LiveHistoryItem } from './live-session-model.js';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import type { Content } from '@google/genai';
+import { historyCommand } from '../commands/historyCommand.js';
+import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
+import {
+  applyCollapsePolicyAndSummary,
+  expandCollapsedHistory,
+} from '../utils/resumeHistoryUtils.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -670,9 +680,305 @@ describe('OpenTuiApp shell wiring', () => {
       });
     }
 
+    const logger = {
+      getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+    } as unknown as NonNullable<AppProps['logger']>;
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} logger={logger} />);
+    });
+
     expect(mocks.state.dispatcherConstructions).toBe(1);
     expect(new Set(mocks.state.hosts).size).toBe(1);
+    expect((mocks.state.host as OpenTuiAppHost).logger).toBe(logger);
   });
+
+  it('rewinds a hidden turn from collapsed real host history and cannot expand discarded command rows', async () => {
+    const api: Content[] = [
+      { role: 'user', parts: [{ text: 'first' }] },
+      { role: 'model', parts: [{ text: 'answer' }] },
+      { role: 'user', parts: [{ text: 'second' }] },
+    ];
+    markApiHistoryPrompt(api[0], 'p1');
+    markApiHistoryPrompt(api[2], 'p2');
+    const truncateHistory = vi.fn();
+    const rewindRecording = vi.fn();
+    const config = {
+      ...CONFIG,
+      getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
+      getChatRecordingService: () => ({ rewindRecording }),
+      getFileHistoryService: () => ({ getSnapshots: () => [] }),
+      getContextFilePaths: () => ['/repo/AGENTS.md'],
+    } as unknown as Config;
+    const owner = renderHook(() => useOpenTuiLiveTurn({ config }));
+    const setText = vi.fn();
+    const invalidateImportedInput = vi.fn();
+    const props: AppProps = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      startupHistory: [
+        {
+          id: 0,
+          type: 'info',
+          text: 'hidden retained source',
+          display: { suppressOnRestore: true },
+        },
+      ],
+      getSessionStats,
+      initialDialog: { dialog: 'rewind' },
+      onTranscriptEvent: owner.result.current.applyEvent,
+      onTranscriptReset: owner.result.current.resetTranscript,
+      onRewindTranscript: owner.result.current.rewindTranscript,
+      onSubmitPrompt: vi.fn(() => true),
+      isCurrentHistory: owner.result.current.isCurrentHistory,
+      composerHandle: {
+        current: { getText: () => '', setText, invalidateImportedInput },
+      },
+    };
+    const view = render(
+      <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
+    );
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    let kept: readonly HistoryItem[];
+    await act(async () => {
+      host.addItem(
+        { type: 'user', text: 'first', promptId: 'p1', sentToModel: true },
+        1,
+      );
+      host.addItem({ type: 'user', text: '/help', sentToModel: false }, 2);
+      host.addItem({ type: 'info', text: 'kept line one\nkept line two' }, 3);
+      kept = [...host.getHistory()];
+      host.addItem(
+        { type: 'user', text: 'second', promptId: 'p2', sentToModel: true },
+        4,
+      );
+      host.addItem(
+        { type: 'info', text: 'discarded line one\ndiscarded line two' },
+        5,
+      );
+      host.addItem(
+        { type: 'info', text: 'Read context files: /repo/AGENTS.md' },
+        6,
+      );
+      const collapsed = applyCollapsePolicyAndSummary(
+        [...host.getHistory()],
+        true,
+      );
+      host.loadHistory(collapsed);
+      host.resetTranscript(projectHistoryToStreamEvents(collapsed, {}));
+    });
+    view.rerender(
+      <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
+    );
+    const turns = mocks.state.dialogProps!['rewindTurns'] as LiveHistoryItem[];
+    const target = turns.find(
+      (item) => item.kind === 'user' && item.promptId === 'p2',
+    )!;
+    expect(target.display?.suppressOnRestore).toBe(true);
+    expect(turns.filter((item) => item.kind === 'user')).toHaveLength(3);
+    const rewind = mocks.state.dialogProps!['onRewind'] as (
+      turn: { id: string },
+      option: 'conversation',
+    ) => Promise<void>;
+    await act(async () => {
+      await rewind(target, 'conversation');
+    });
+    expect(truncateHistory).toHaveBeenCalledExactlyOnceWith(2);
+    expect(rewindRecording).toHaveBeenCalledExactlyOnceWith(
+      1,
+      { truncatedCount: 3 },
+      [],
+    );
+    expect(host.getHistory()).toEqual(expandCollapsedHistory([...kept!]));
+    expect(owner.result.current.items.at(-1)).toMatchObject({
+      kind: 'info',
+      text: expect.stringContaining('Conversation rewound'),
+    });
+    await vi.waitFor(() =>
+      expect(setText).toHaveBeenCalledExactlyOnceWith('second'),
+    );
+    expect(invalidateImportedInput).toHaveBeenCalledOnce();
+    expect(
+      owner.result.current.items.every(
+        (item) =>
+          !item.display?.suppressOnRestore &&
+          item.display?.kind !== 'collapse-summary',
+      ),
+    ).toBe(true);
+    expect(
+      owner.result.current.items.some(
+        (item) => 'text' in item && item.text.includes('discarded'),
+      ),
+    ).toBe(false);
+    expect(
+      owner.result.current.items.some(
+        (item) => 'text' in item && item.text.includes('kept line two'),
+      ),
+    ).toBe(true);
+    mocks.state.handleResult = false;
+    await submit('continue after rewind');
+    expect(
+      owner.result.current.items.filter(
+        (item) =>
+          item.kind === 'info' &&
+          item.text.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX),
+      ),
+    ).toHaveLength(1);
+    await act(async () => {
+      owner.result.current.applyEvent({
+        type: 'user',
+        text: 'new prompt after rewind',
+        promptId: 'p3',
+        sentToModel: true,
+      });
+      owner.result.current.applyEvent({ type: 'text', delta: 'new answer' });
+      owner.result.current.applyEvent({ type: 'done' });
+    });
+    const newLiveRows = owner.result.current.items.slice(-2);
+    // The command-only host has no later model rows. Expanding its restored
+    // prefix must preserve the actual newer live rows and their identities.
+    const afterRewind = [...host.getHistory()];
+    const retained = host
+      .getHistory()
+      .map((item) => ({ ...item, display: { suppressOnRestore: true } }));
+    host.loadHistory(retained);
+    const context = createOpenTuiCommandContext(
+      host,
+      { config, settings: SETTINGS, logger: null },
+      { wasIdleBeforeDispatch: true },
+    );
+    await act(async () => {
+      await historyCommand.subCommands!.find(
+        (command) => command.name === 'expand-now',
+      )!.action!(context, '');
+    });
+    expect(context.ui.history.map((item) => item.id)).toEqual(
+      afterRewind.map((item) => item.id),
+    );
+    for (const item of newLiveRows)
+      expect(owner.result.current.items).toContain(item);
+    expect(owner.result.current.items.at(-2)).toMatchObject({
+      kind: 'user',
+      text: 'new prompt after rewind',
+      promptId: 'p3',
+    });
+    expect(owner.result.current.items.at(-1)).toMatchObject({
+      kind: 'assistant',
+      text: 'new answer',
+      streaming: false,
+    });
+    expect(
+      owner.result.current.items.some(
+        (item) => 'text' in item && item.text === 'hidden retained source',
+      ),
+    ).toBe(true);
+    expect(
+      owner.result.current.items.some(
+        (item) => 'text' in item && item.text.includes('discarded'),
+      ),
+    ).toBe(false);
+    expect(
+      owner.result.current.items.some(
+        (item) => 'text' in item && item.text.includes('kept line two'),
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['session', 'same-session-resume', 'new-turn'] as const)(
+    'discards delayed file rewind after %s without touching the successor',
+    async (change) => {
+      let sessionId = 'original';
+      let release!: () => void;
+      const filesRestored = vi.fn();
+      const fileRewind = vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        filesRestored();
+        return { filesChanged: ['owned.txt'], filesFailed: [] };
+      });
+      const api: Content[] = [{ role: 'user', parts: [{ text: 'first' }] }];
+      markApiHistoryPrompt(api[0], 'p1');
+      const truncateHistory = vi.fn();
+      const rewindRecording = vi.fn();
+      const onRewindTranscript = vi.fn();
+      const onTranscriptEvent = vi.fn();
+      const config = {
+        ...CONFIG,
+        getSessionId: () => sessionId,
+        getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
+        getChatRecordingService: () => ({ rewindRecording }),
+        getFileHistoryService: () => ({
+          rewind: fileRewind,
+          getSnapshots: () => [],
+        }),
+      } as unknown as Config;
+      const initial: readonly LiveHistoryItem[] = [
+        {
+          kind: 'user',
+          id: 'live-first',
+          text: 'first',
+          promptId: 'p1',
+          sentToModel: true,
+        },
+      ];
+      let currentItems = initial;
+      const props: AppProps = {
+        config,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        initialDialog: { dialog: 'rewind' },
+        onRewindTranscript,
+        isCurrentHistory: (snapshot) => snapshot === currentItems,
+        onTranscriptEvent,
+      };
+      const view = render(<OpenTuiApp {...props} historyItems={initial} />);
+      await settle();
+      const rewind = mocks.state.dialogProps!['onRewind'] as (
+        turn: { id: string },
+        option: 'both',
+      ) => Promise<void>;
+      let pending!: Promise<void>;
+      act(() => {
+        pending = rewind(initial[0], 'both');
+      });
+      expect(fileRewind).toHaveBeenCalledExactlyOnceWith('p1', true);
+      const successor: readonly LiveHistoryItem[] = [
+        {
+          kind: 'user',
+          id: 'successor',
+          text: 'keep me',
+          promptId: 'new',
+          sentToModel: true,
+        },
+      ];
+      currentItems = successor;
+      if (change === 'session') sessionId = 'next';
+      await act(async () => {
+        view.rerender(
+          <OpenTuiApp
+            {...props}
+            historyItems={successor}
+            streaming={change === 'new-turn'}
+          />,
+        );
+      });
+      await act(async () => {
+        release();
+        await pending;
+      });
+      expect(filesRestored).toHaveBeenCalledOnce();
+      expect(truncateHistory).not.toHaveBeenCalled();
+      expect(rewindRecording).not.toHaveBeenCalled();
+      expect(onRewindTranscript).not.toHaveBeenCalled();
+      expect(onTranscriptEvent).not.toHaveBeenCalled();
+      expect((mocks.state.host as OpenTuiAppHost).getHistory()).toEqual([]);
+    },
+  );
 
   it('reserves the update-notification slot, hidden while a dialog is open', async () => {
     renderApp({ updateNotice: 'Update available: v1.2.3' });
@@ -1162,6 +1468,49 @@ describe('OpenTuiApp shell wiring', () => {
       'Read context files: /repo/AGENTS.md',
     ]);
   });
+
+  it.each(['startup', 'reset'] as const)(
+    'retains the context announcement latch from %s history',
+    async (source) => {
+      const history: HistoryItem[] = [
+        {
+          id: 1,
+          type: 'info',
+          text: 'Read context files: /repo/AGENTS.md',
+          display: { suppressOnRestore: true },
+        },
+      ];
+      const onTranscriptEvent = vi.fn();
+      renderApp({
+        config: {
+          ...CONFIG,
+          getContextFilePaths: () => ['/repo/AGENTS.md'],
+        } as unknown as Config,
+        startupHistory: source === 'startup' ? history : [],
+        onTranscriptEvent,
+        onSubmitPrompt: vi.fn(() => true),
+      });
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      if (source === 'reset') {
+        act(() => {
+          host.loadHistory(history);
+          host.resetTranscript(projectHistoryToStreamEvents(history, {}));
+        });
+      }
+      mocks.state.handleResult = false;
+      await submit('after restore');
+      expect(onTranscriptEvent).not.toHaveBeenCalled();
+      act(() => host.clearItems());
+      await submit('after clear');
+      expect(onTranscriptEvent).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Read context files: /repo/AGENTS.md',
+        }),
+      );
+    },
+  );
 
   it('reports a not-wired notice for a plain prompt when no seam is provided', async () => {
     renderApp();
@@ -2468,7 +2817,9 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     renderApp({
       config,
       approvalMode: ApprovalMode.DEFAULT,
-      onTranscriptEvent: (event) => events.push(event),
+      onTranscriptEvent: (event) => {
+        events.push(event);
+      },
     });
     await settle();
     await cycleOnce();

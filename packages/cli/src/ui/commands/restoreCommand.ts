@@ -16,6 +16,7 @@ import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { t } from '../../i18n/index.js';
+import type { HistoryItem } from '../types.js';
 
 async function restoreAction(
   context: CommandContext,
@@ -24,6 +25,27 @@ async function restoreAction(
   const { services, ui } = context;
   const { config } = services;
   const { addItem, loadHistory } = ui;
+  const sessionId = config?.getSessionId();
+  const expectedHistory = ui.history;
+  let loadedHistory: HistoryItem[] | undefined;
+  let restoreNoticeId: number | undefined;
+  const isCurrent = () => {
+    const history = ui.history;
+    return (
+      !context.abortSignal?.aborted &&
+      config?.getSessionId() === sessionId &&
+      ui.isIdleRef.current &&
+      ((history.length === expectedHistory.length &&
+        history.every((item, index) => item === expectedHistory[index])) ||
+        (loadedHistory !== undefined &&
+          history.length === loadedHistory.length &&
+          history.every((item, index) => item === loadedHistory[index])) ||
+        (restoreNoticeId !== undefined &&
+          history.length === expectedHistory.length + 1 &&
+          history.at(-1)?.id === restoreNoticeId &&
+          expectedHistory.every((item, index) => item === history[index])))
+    );
+  };
 
   if (config?.getShellExecutionSandbox?.()) {
     return {
@@ -47,6 +69,7 @@ async function restoreAction(
     // Ensure the directory exists before trying to read it.
     await fs.mkdir(checkpointDir, { recursive: true });
     const files = await fs.readdir(checkpointDir);
+    if (!isCurrent()) return;
     const jsonFiles = files.filter((file) => file.endsWith('.json'));
 
     if (!args) {
@@ -85,6 +108,7 @@ async function restoreAction(
 
     const filePath = path.join(checkpointDir, selectedFile);
     const data = await fs.readFile(filePath, 'utf-8');
+    if (!isCurrent()) return;
     const toolCallData = JSON.parse(data);
 
     if (toolCallData.commitHash && !toolCallData.promptId) {
@@ -117,6 +141,7 @@ async function restoreAction(
         const result = await config
           .getFileHistoryService()
           .rewind(toolCallData.promptId, true);
+        if (!isCurrent()) return;
         if (result.filesFailed.length > 0) {
           addItem(
             {
@@ -127,7 +152,7 @@ async function restoreAction(
           );
           return;
         }
-        addItem(
+        restoreNoticeId = addItem(
           {
             type: 'info',
             text: 'Restored project to the state at the start of this turn.',
@@ -135,6 +160,7 @@ async function restoreAction(
           Date.now(),
         );
       } catch (error) {
+        if (!isCurrent()) return;
         addItem(
           {
             type: 'warning',
@@ -155,6 +181,9 @@ async function restoreAction(
         };
       }
       context.ui.clearPendingState?.();
+      // Ink publishes loadHistory through React before its command-context
+      // ref updates. Accept the exact requested snapshot on either side of it.
+      loadedHistory = toolCallData.history;
       loadHistory(toolCallData.history);
     }
 
@@ -171,6 +200,7 @@ async function restoreAction(
         markApiHistoryPrompt(content, promptIds[index]);
       });
       await config?.getLlmClient()?.setHistory(toolCallData.clientHistory);
+      if (!isCurrent()) return;
     }
 
     return {
@@ -179,6 +209,7 @@ async function restoreAction(
       toolArgs: toolCall.args,
     };
   } catch (error) {
+    if (!isCurrent()) return;
     return {
       type: 'message',
       messageType: 'error',

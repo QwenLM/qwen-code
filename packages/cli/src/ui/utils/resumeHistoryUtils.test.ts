@@ -1160,6 +1160,7 @@ describe('resumeHistoryUtils', () => {
         {
           type: 'system',
           subtype: 'slash_command',
+          promptId: 'session########3',
           systemPayload: {
             phase: 'invocation',
             rawCommand: '/filecmd',
@@ -1181,7 +1182,13 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 20);
 
     expect(items).toEqual([
-      { id: 21, type: 'user', text: '/filecmd', sentToModel: true },
+      {
+        id: 21,
+        type: 'user',
+        text: '/filecmd',
+        sentToModel: true,
+        promptId: 'session########3',
+      },
       {
         id: 22,
         type: 'gemini',

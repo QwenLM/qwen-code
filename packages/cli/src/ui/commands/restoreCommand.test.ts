@@ -4,12 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// @vitest-environment jsdom
+
+import { useLayoutEffect, useRef } from 'react';
+import { renderHook, act } from '@testing-library/react';
+import { useHistory } from '../hooks/useHistoryManager.js';
+import type { HistoryItem } from '../types.js';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { restoreCommand } from './restoreCommand.js';
-import { type CommandContext } from './types.js';
+import { type CommandContext, type SlashCommandActionReturn } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import {
   findApiHistoryPromptIndex,
@@ -42,6 +48,7 @@ describe('restoreCommand', () => {
       .mockResolvedValue({ filesChanged: [], filesFailed: [] });
 
     mockConfig = {
+      getSessionId: vi.fn().mockReturnValue('original'),
       getFileCheckpointingEnabled: vi.fn().mockReturnValue(true),
       getFileHistoryService: vi.fn().mockReturnValue({ rewind: mockRewind }),
       storage: {
@@ -65,6 +72,141 @@ describe('restoreCommand', () => {
     vi.restoreAllMocks();
     await fs.rm(testRootDir, { recursive: true, force: true });
   });
+
+  it.each(['', 'missing'])(
+    'does not return an old checkpoint listing or lookup after a session change: %s',
+    async (args) => {
+      const pending = restoreCommand(mockConfig)!.action!(mockContext, args);
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('successor');
+      expect(await pending).toBeUndefined();
+      expect(mockRewind).not.toHaveBeenCalled();
+      expect(mockSetHistory).not.toHaveBeenCalled();
+      expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['session', 'same-session-history', 'new-turn', 'cancel'] as const)(
+    'keeps late file restoration from replaying into %s',
+    async (change) => {
+      const checkpoint = {
+        promptId: 'old-prompt',
+        toolCall: { name: 'write_file', args: { file_path: 'old.txt' } },
+        history: [{ id: 1, type: 'user', text: 'old' }],
+        clientHistory: [{ role: 'user', parts: [{ text: 'old' }] }],
+      };
+      await fs.writeFile(
+        path.join(checkpointsDir, 'old.json'),
+        JSON.stringify(checkpoint),
+      );
+      let release!: () => void;
+      const didRestore = vi.fn();
+      mockRewind.mockImplementation(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        didRestore();
+        return { filesChanged: ['old.txt'], filesFailed: [] };
+      });
+      const controller = new AbortController();
+      mockContext.abortSignal = controller.signal;
+      const pending = restoreCommand(mockConfig)!.action!(mockContext, 'old');
+      await vi.waitFor(() => expect(mockRewind).toHaveBeenCalledOnce());
+      if (change === 'session')
+        vi.mocked(mockConfig.getSessionId).mockReturnValue('successor');
+      if (change === 'same-session-history')
+        mockContext.ui.history = [{ id: 2, type: 'user', text: 'successor' }];
+      if (change === 'new-turn') mockContext.ui.isIdleRef.current = false;
+      if (change === 'cancel') controller.abort();
+      release();
+      expect(await pending).toBeUndefined();
+      expect(didRestore).toHaveBeenCalledOnce();
+      expect(mockSetHistory).not.toHaveBeenCalled();
+      expect(mockContext.ui.loadHistory).not.toHaveBeenCalled();
+      expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['loaded', 'notice-only', 'successor'] as const)(
+    'guards deferred tool replay across the real Ink history publication: %s',
+    async (change) => {
+      const loaded: HistoryItem[] = [
+        { id: 9, type: 'user', text: 'checkpoint' },
+      ];
+      const checkpoint = {
+        promptId: 'checkpoint-prompt',
+        toolCall: { name: 'write_file', args: { file_path: 'owned.txt' } },
+        ...(change === 'notice-only' ? {} : { history: loaded }),
+        clientHistory: [{ role: 'user', parts: [{ text: 'checkpoint' }] }],
+      };
+      await fs.writeFile(
+        path.join(checkpointsDir, 'render.json'),
+        JSON.stringify(checkpoint),
+      );
+      const view = renderHook(() => {
+        const manager = useHistory();
+        const historyRef = useRef(manager.history);
+        useLayoutEffect(() => {
+          historyRef.current = manager.history;
+        }, [manager.history]);
+        return { ...manager, historyRef };
+      });
+      Object.defineProperty(mockContext.ui, 'history', {
+        get: () => view.result.current.historyRef.current,
+      });
+      mockContext.ui.addItem = view.result.current.addItem;
+      let beforeLoad!: readonly HistoryItem[];
+      mockContext.ui.loadHistory = (history) => {
+        beforeLoad = mockContext.ui.history;
+        view.result.current.loadHistory(history);
+        expect(mockContext.ui.history).toBe(beforeLoad);
+      };
+      let release!: () => void;
+      mockSetHistory.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+      let pending!:
+        | void
+        | SlashCommandActionReturn
+        | Promise<void | SlashCommandActionReturn>;
+      try {
+        await act(async () => {
+          pending = restoreCommand(mockConfig)!.action!(mockContext, 'render');
+          await vi.waitFor(() => expect(mockSetHistory).toHaveBeenCalledOnce());
+        });
+        if (change === 'notice-only') {
+          expect(view.result.current.history).toEqual([
+            expect.objectContaining({ type: 'info' }),
+          ]);
+        } else {
+          expect(view.result.current.history).toEqual(loaded);
+          expect(mockContext.ui.history).not.toBe(beforeLoad);
+        }
+        if (change === 'successor')
+          act(() =>
+            view.result.current.loadHistory([
+              { id: 10, type: 'user', text: 'successor' },
+            ]),
+          );
+        release();
+        const result = await pending;
+        expect(result).toEqual(
+          change === 'successor'
+            ? undefined
+            : {
+                type: 'tool',
+                toolName: 'write_file',
+                toolArgs: { file_path: 'owned.txt' },
+              },
+        );
+      } finally {
+        release?.();
+        view.unmount();
+      }
+    },
+  );
 
   it('should return null if checkpointing is not enabled', () => {
     vi.mocked(mockConfig.getFileCheckpointingEnabled).mockReturnValue(false);

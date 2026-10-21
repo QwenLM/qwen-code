@@ -974,6 +974,60 @@ describe('livePromptEvents', () => {
     expect(atMocks.calls).toEqual([]);
   });
 
+  it('explicit Retry reuses prepared parts without rereading mentions or rebridging media', async () => {
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const content = [{ text: '@owned.txt already expanded' }, imagePart];
+    await drain(
+      livePromptEvents(config, 'unused draft', undefined, {
+        promptId: 'same-id',
+        submittedPrompt: '@owned.txt',
+        humanInput: { text: 'original' },
+        retry: {
+          content,
+          modelOverride: 'skill-model',
+          inlineModelOverride: false,
+        },
+      }),
+    );
+    expect(sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+      content,
+      expect.any(AbortSignal),
+      'same-id',
+      { type: SendMessageType.Retry, modelOverride: 'skill-model' },
+    );
+    expect(atMocks.calls).toHaveLength(0);
+    expect(visionMocks.run).not.toHaveBeenCalled();
+  });
+
+  it('runs a restored client tool before sending its single ToolResult continuation', async () => {
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const events = await drain(
+      livePromptEvents(config, [], undefined, {
+        promptId: 'restored-tool',
+        toolCall: { name: 'test_tool', args: { owned: true } },
+      }),
+    );
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    const call = sendMessageStream.mock.calls[0] as unknown[];
+    expect(call[2]).toBe('restored-tool');
+    expect(call[3]).toEqual({ type: SendMessageType.ToolResult });
+    expect(call[0]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({ name: 'test_tool' }),
+        }),
+      ]),
+    );
+    expect(events.filter((event) => event.type === 'tool-end')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'user')).toBe(false);
+  });
+
   it('passes the per-turn modelOverride through send options', async () => {
     const sendMessageStream = vi.fn(function* () {});
     const config = createFakeConfig(sendMessageStream);
@@ -1386,10 +1440,12 @@ describe('livePromptEvents', () => {
         recordMidTurnUserMessage,
       });
       const restoreSteering = vi.fn();
+      const onAcceptedSteering = vi.fn();
       const events = await drain(
         livePromptEvents(config, 'start', undefined, {
           drainSteering: () => [entry],
           restoreSteering,
+          onAcceptedSteering,
         }),
       );
       expect(sendMessageStream).toHaveBeenCalledTimes(2);
@@ -1400,6 +1456,7 @@ describe('livePromptEvents', () => {
       expect(restoreSteering).toHaveBeenCalledOnce();
       expect(restoreSteering.mock.calls[0][0][0]).toBe(entry);
       expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+      expect(onAcceptedSteering).not.toHaveBeenCalled();
       expect(events.filter((item) => item.type === 'user')).toEqual([]);
     },
   );
@@ -1438,11 +1495,13 @@ describe('livePromptEvents', () => {
         recordMidTurnUserMessage,
       });
       const restoreSteering = vi.fn();
+      const onAcceptedSteering = vi.fn();
       const events: OpenTuiStreamEvent[] = [];
       const pending = (async () => {
         for await (const event of livePromptEvents(config, 'start', undefined, {
           drainSteering: () => [entry],
           restoreSteering,
+          onAcceptedSteering,
         })) {
           events.push(event);
         }
@@ -1467,6 +1526,7 @@ describe('livePromptEvents', () => {
         { type: 'user', text: entry.text, sentToModel: false },
       ]);
       expect(restoreSteering).not.toHaveBeenCalled();
+      expect(onAcceptedSteering).toHaveBeenCalledExactlyOnceWith([entry.text]);
     },
   );
 

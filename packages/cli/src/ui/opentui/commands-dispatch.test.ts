@@ -128,7 +128,11 @@ function createFakeHost(): FakeHost {
       push('clearItems');
       items.length = 0;
     },
-    loadHistory: () => push('loadHistory'),
+    loadHistory: (history) => {
+      items.splice(0, items.length, ...history);
+      push('loadHistory');
+    },
+    resetTranscript: () => push('resetTranscript'),
     refreshStatic: () => push('refreshStatic'),
     clearPendingState: () => push('clearPendingState'),
     cancelBtw: () => push('cancelBtw'),
@@ -1070,10 +1074,11 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     });
   });
 
-  it('load_history applies client history, clears, then re-adds items', async () => {
+  it('load_history applies client history and replaces the canonical replay batch', async () => {
     const setHistory = vi.fn();
     const config = {
-      getGeminiClient: () => ({ setHistory }),
+      getSessionId: () => 'original',
+      getLlmClient: () => ({ setHistory }),
     } as unknown as Config;
     const commands = [
       stub({
@@ -1096,9 +1101,56 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     expect(setHistory).toHaveBeenCalledWith([
       { role: 'user', parts: [{ text: 'hi' }] },
     ]);
-    expect(host.calls).toContain('clearItems');
+    expect(host.calls).toEqual(
+      expect.arrayContaining(['clearItems', 'loadHistory', 'resetTranscript']),
+    );
     expect(host.items.at(-1)).toMatchObject({ type: 'info', text: 'restored' });
   });
+
+  it.each(['session', 'same-session-history'] as const)(
+    'does not publish delayed load_history over %s',
+    async (change) => {
+      let release!: () => void;
+      let sessionId = 'original';
+      const setHistory = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const config = {
+        getSessionId: () => sessionId,
+        getLlmClient: () => ({ setHistory }),
+      } as unknown as Config;
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [
+          stub({
+            name: 'restore',
+            action: () => ({
+              type: 'load_history',
+              history: [{ type: 'info', text: 'old' }],
+              clientHistory: [],
+            }),
+          }),
+        ],
+      );
+      const pending = dispatcher.handle('/restore');
+      await vi.waitFor(() => expect(setHistory).toHaveBeenCalledOnce());
+      if (change === 'session') sessionId = 'new';
+      host.loadHistory([{ id: 900, type: 'user', text: 'successor' }]);
+      host.calls.length = 0;
+      release();
+      expect(await pending).toEqual({ kind: 'handled' });
+      expect(host.items).toEqual([
+        { id: 900, type: 'user', text: 'successor' },
+      ]);
+      expect(host.calls).not.toContain('clearItems');
+      expect(host.calls).not.toContain('resetTranscript');
+    },
+  );
 
   it('confirm_action: decline cancels, accept re-runs with overwriteConfirmed', async () => {
     const seenContexts: Array<boolean | undefined> = [];

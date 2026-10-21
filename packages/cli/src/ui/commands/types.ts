@@ -109,8 +109,9 @@ export interface CommandContext {
      * Loads a new set of history items, replacing the current history.
      *
      * @param history The array of history items to load.
+     * @param mode Expand existing rows without discarding live-only history.
      */
-    loadHistory: UseHistoryManagerReturn['loadHistory'];
+    loadHistory: (history: HistoryItem[], mode?: 'expand') => void;
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;

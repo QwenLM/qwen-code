@@ -25,6 +25,7 @@
  */
 
 import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
+import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
   useCallback,
@@ -36,11 +37,16 @@ import {
 import { readFileSync } from 'node:fs';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
+  MessageSenderType,
+  type Logger,
+} from '@qwen-code/qwen-code-core/core/logger.js';
+import {
   collectText,
   normalizeParts,
 } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
+import { debugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import {
   foldLiveEvent,
@@ -52,6 +58,7 @@ import {
   nextLivePromptId,
   type OpenTuiSteeringSubmission,
   type WaitingCallInfo,
+  type PreparedLiveRequest,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import {
@@ -103,6 +110,7 @@ export function imagePathsToParts(imagePaths: readonly string[]): {
 export interface UseOpenTuiLiveTurnOptions {
   config: Config;
   dualOutput?: DualOutputBridge | null;
+  logger?: Logger | null;
 }
 
 /**
@@ -111,6 +119,8 @@ export interface UseOpenTuiLiveTurnOptions {
  * memory refresh, and the post-turn callback.
  */
 export interface OpenTuiSubmitOptions {
+  promptId?: string;
+  toolCall?: { name: string; args: Record<string, unknown> };
   deferUntilIdle?: boolean;
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
@@ -163,10 +173,15 @@ export interface OpenTuiLiveTurn {
   ): boolean;
   /** Aborts the in-flight turn (Esc). */
   interrupt(onSettled?: OpenTuiCancelSettled): void;
+  retryLastPrompt(): void;
+  notifyInputProcessed(): void;
+  scheduleTool(name: string, args: Record<string, unknown>): boolean;
+  isCurrentHistory(snapshot: readonly LiveHistoryItem[]): boolean;
+  rewindTranscript(userId: string): readonly LiveHistoryItem[] | undefined;
   /** Replaces the transcript from a replay batch (session switch/resume). */
   resetTranscript(events: readonly OpenTuiStreamEvent[]): void;
   /** Folds one externally produced event (update notices, startup warnings). */
-  applyEvent(event: OpenTuiStreamEvent): void;
+  applyEvent(event: OpenTuiStreamEvent): readonly LiveHistoryItem[] | undefined;
   /** Drops a waiting call after its dialog settled. */
   settleWaitingCall(callId: string): void;
 }
@@ -188,8 +203,9 @@ export function foldBatch(
 export function useOpenTuiLiveTurn(
   options: UseOpenTuiLiveTurnOptions,
 ): OpenTuiLiveTurn {
-  const { config, dualOutput } = options;
+  const { config, dualOutput, logger } = options;
   const [items, setItems] = useState<readonly LiveHistoryItem[]>([]);
+  const itemsRef = useRef<readonly LiveHistoryItem[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [waitingCalls, setWaitingCalls] = useState<readonly WaitingCallInfo[]>(
     [],
@@ -209,10 +225,18 @@ export function useOpenTuiLiveTurn(
     [],
   );
   const abortRef = useRef<AbortController | null>(null);
+  const skipRetryDelayRef = useRef<(() => void) | undefined>(undefined);
+  const failedRequestRef = useRef<{
+    request: PreparedLiveRequest;
+    promptId: string;
+    options?: OpenTuiSubmitOptions;
+  } | null>(null);
   const activeTurnRef = useRef<{
     seq: number;
     prompt?: OpenTuiInputSubmission;
     toolStarted: boolean;
+    meaningfulContent: boolean;
+    canUndoLog: boolean;
     onCancelSettled?: OpenTuiCancelSettled;
   } | null>(null);
   const mountedRef = useRef(true);
@@ -245,7 +269,10 @@ export function useOpenTuiLiveTurn(
   }, []);
 
   const apply = useCallback((ev: OpenTuiStreamEvent) => {
-    setItems((prev) => foldLiveEvent(prev, ev));
+    if (!mountedRef.current) return;
+    itemsRef.current = foldLiveEvent(itemsRef.current, ev);
+    setItems(itemsRef.current);
+    return itemsRef.current;
   }, []);
 
   const pushQueue = useCallback(
@@ -289,12 +316,15 @@ export function useOpenTuiLiveTurn(
       promptId: string,
       turnOptions?: OpenTuiSubmitOptions,
       editablePrompt?: OpenTuiInputSubmission,
+      retry?: PreparedLiveRequest,
     ) => {
       const seq = ++turnSeqRef.current;
       const active: NonNullable<typeof activeTurnRef.current> = {
         seq,
         prompt: editablePrompt,
-        toolStarted: false,
+        toolStarted: turnOptions?.toolCall !== undefined,
+        meaningfulContent: false,
+        canUndoLog: Boolean(editablePrompt && logger),
       };
       activeTurnRef.current = active;
       const abort = new AbortController();
@@ -304,11 +334,40 @@ export function useOpenTuiLiveTurn(
       streamingCharsRef.current = 0;
       setReceiving(false);
       setBusy(true);
+      let prepared: PreparedLiveRequest | undefined;
+      let failed = false;
+      failedRequestRef.current = null;
+      skipRetryDelayRef.current = undefined;
       try {
+        if (editablePrompt && logger) {
+          await logger.logMessage(
+            MessageSenderType.USER,
+            editablePrompt.displayText ??
+              editablePrompt.submittedPrompt ??
+              editablePrompt.text,
+          );
+        }
+        if (seq !== turnSeqRef.current || abort.signal.aborted) return;
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
           dualOutput,
           modelOverride: turnOptions?.modelOverride,
+          toolCall: turnOptions?.toolCall,
+          retry,
+          onAcceptedSteering: (messages) => {
+            if (seq !== turnSeqRef.current) return;
+            active.canUndoLog = false;
+            for (const message of messages) {
+              void logger
+                ?.logMessage(MessageSenderType.USER, message)
+                .catch((error: unknown) =>
+                  debugLogger.debug('Could not log steering input', error),
+                );
+            }
+          },
+          onPreparedRequest: (request) => {
+            if (seq === turnSeqRef.current) prepared = request;
+          },
           submittedPrompt: turnOptions?.submittedPrompt,
           humanInput: turnOptions?.humanInput,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
@@ -328,10 +387,24 @@ export function useOpenTuiLiveTurn(
           },
         })) {
           if (seq !== turnSeqRef.current) return;
+          if (ev.type === 'retry-countdown')
+            skipRetryDelayRef.current = ev.skipDelay;
+          if (
+            ev.type === 'retry-countdown-clear' ||
+            ev.type === 'error' ||
+            ev.type === 'done'
+          )
+            skipRetryDelayRef.current = undefined;
+          if (ev.type === 'error') failed = true;
           // ink counts model text, thoughts and tool-args JSON toward the
           // token estimate, but only model text means content is arriving.
           // Tool output is tool-generated, so it counts nowhere.
           if (ev.type === 'tool-start') active.toolStarted = true;
+          if (
+            (ev.type === 'text' && ev.delta.length > 0) ||
+            ev.type === 'image'
+          )
+            active.meaningfulContent = true;
           switch (ev.type) {
             case 'text':
               streamingCharsRef.current += ev.delta.length;
@@ -359,15 +432,20 @@ export function useOpenTuiLiveTurn(
         // the seq guard alone cannot tell them apart — gate on the signal
         // (R6-6). A decline of every confirmation without Esc is a genuinely
         // completed turn and keeps firing.
-        if (seq === turnSeqRef.current && !abort.signal.aborted) {
+        if (seq === turnSeqRef.current && !abort.signal.aborted && !failed) {
           void turnOptions?.onComplete?.().catch(() => {});
         }
       } catch (error) {
         if (seq !== turnSeqRef.current) return;
         if (abort.signal.aborted) {
           // Esc: ink settles every open tool as interrupted.
-          setItems((prev) => settleOpenTools([...prev], 'interrupted'));
+          itemsRef.current = settleOpenTools(
+            [...itemsRef.current],
+            'interrupted',
+          );
+          setItems(itemsRef.current);
         } else {
+          failed = true;
           apply({
             type: 'error',
             text: error instanceof Error ? error.message : String(error),
@@ -377,16 +455,69 @@ export function useOpenTuiLiveTurn(
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
+          skipRetryDelayRef.current = undefined;
+          if (failed && prepared && !abort.signal.aborted) {
+            failedRequestRef.current = {
+              request: prepared,
+              promptId,
+              options: turnOptions,
+            };
+          }
           waitingCallsRef.current = [];
           setWaitingCalls([]);
           setBusy(false);
           if (activeTurnRef.current === active) activeTurnRef.current = null;
           if (abort.signal.aborted) {
-            active.onCancelSettled?.({
+            const restored = active.onCancelSettled?.({
               kind: 'cancelled',
               queued: popQueue(),
               prompt: active.toolStarted ? null : (active.prompt ?? null),
             });
+            if (
+              restored === true &&
+              !active.toolStarted &&
+              !active.meaningfulContent &&
+              queueRef.current.length === 0
+            ) {
+              const history = itemsRef.current;
+              const index = history.findLastIndex(
+                (item) => item.kind === 'user',
+              );
+              const user = history[index];
+              const onlySynthetic = history
+                .slice(index + 1)
+                .every((item) =>
+                  [
+                    'info',
+                    'error',
+                    'warning',
+                    'retry',
+                    'thinking',
+                    'away-recap',
+                    'stop-hook',
+                  ].includes(item.kind),
+                );
+              if (
+                user?.kind === 'user' &&
+                user.promptId === promptId &&
+                user.text ===
+                  (active.prompt?.displayText ?? active.prompt?.text) &&
+                onlySynthetic
+              ) {
+                itemsRef.current = history.slice(0, index);
+                setItems(itemsRef.current);
+                config.getLlmClient()?.stripOrphanedUserEntriesFromHistory();
+                if (active.canUndoLog)
+                  void logger
+                    ?.removeLastUserMessage()
+                    .catch((error: unknown) =>
+                      debugLogger.debug(
+                        'Could not undo cancelled input log',
+                        error,
+                      ),
+                    );
+              }
+            }
           } else {
             // A declined read consumes only its own queued submission.
             // Explicit aborts above never start another turn.
@@ -395,7 +526,8 @@ export function useOpenTuiLiveTurn(
               const [entry, ...remaining] = rest;
               queueRef.current = remaining;
               syncQueue();
-              const promptId = nextLivePromptId(config);
+              const promptId =
+                entry.turnOptions?.promptId ?? nextLivePromptId(config);
               if (!entry.turnOptions?.invocationEchoed) {
                 apply({
                   type: 'user',
@@ -436,6 +568,7 @@ export function useOpenTuiLiveTurn(
     },
     [
       config,
+      logger,
       dualOutput,
       apply,
       drainQueue,
@@ -529,7 +662,7 @@ export function useOpenTuiLiveTurn(
         });
         return true;
       }
-      const promptId = nextLivePromptId(config);
+      const promptId = options?.promptId ?? nextLivePromptId(config);
       if (!options?.invocationEchoed) {
         apply({
           type: 'user',
@@ -565,6 +698,8 @@ export function useOpenTuiLiveTurn(
   );
 
   const interrupt = useCallback((onSettled?: OpenTuiCancelSettled) => {
+    skipRetryDelayRef.current = undefined;
+    failedRequestRef.current = null;
     const active = activeTurnRef.current;
     if (active && active.seq === turnSeqRef.current) {
       active.onCancelSettled ??= onSettled;
@@ -574,9 +709,59 @@ export function useOpenTuiLiveTurn(
     }
   }, []);
 
+  const scheduleTool = useCallback(
+    (name: string, args: Record<string, unknown>) => {
+      if (!mountedRef.current || streamingRef.current) return false;
+      void runTurn([], nextLivePromptId(config), { toolCall: { name, args } });
+      return true;
+    },
+    [config, runTurn],
+  );
+
+  const notifyInputProcessed = useCallback(() => {
+    if (activeTurnRef.current) activeTurnRef.current.canUndoLog = false;
+  }, []);
+
+  const retryLastPrompt = useCallback(() => {
+    const skip = skipRetryDelayRef.current;
+    if (skip) {
+      skipRetryDelayRef.current = undefined;
+      apply({ type: 'retry-countdown-clear', isContinuation: true });
+      skip();
+      return;
+    }
+    if (streamingRef.current || waitingCallsRef.current.length) return;
+    const failed = failedRequestRef.current;
+    if (!failed) {
+      apply({ type: 'info', text: 'No failed request to retry.' });
+      return;
+    }
+    let request = failed.request;
+    if (request.inlineModelOverride) {
+      request = {
+        ...request,
+        modelOverride: undefined,
+        inlineModelOverride: false,
+      };
+      apply({
+        type: 'info',
+        text: `Inline model override cleared on retry — retrying on the session model (${config.getModel()}).`,
+      });
+    }
+    void runTurn(
+      request.content,
+      failed.promptId,
+      failed.options,
+      undefined,
+      request,
+    );
+  }, [apply, config, runTurn]);
+
   const resetTranscript = useCallback(
     (events: readonly OpenTuiStreamEvent[]) => {
       const onReset = activeTurnRef.current?.onCancelSettled;
+      skipRetryDelayRef.current = undefined;
+      failedRequestRef.current = null;
       // Commit the accepted partial before invalidating its generation; a late
       // finally must not finalize the successor adapter.
       dualOutput?.finalizeAssistantMessage();
@@ -601,10 +786,35 @@ export function useOpenTuiLiveTurn(
       // Synchronous: a submit right after the reset must start a fresh turn,
       // not land in the dying one's queue.
       setBusy(false);
-      setItems(foldBatch(events));
+      itemsRef.current = foldBatch(events);
+      setItems(itemsRef.current);
       onReset?.({ kind: 'reset' });
     },
     [dualOutput, setBusy, syncQueue],
+  );
+
+  const rewindTranscript = useCallback(
+    (userId: string) => {
+      const index = itemsRef.current.findIndex((item) => item.id === userId);
+      if (index < 0) return;
+      const retained = itemsRef.current
+        .slice(0, index)
+        .filter((item) => item.display?.kind !== 'collapse-summary')
+        .map(stripSuppressOnRestore);
+      resetTranscript([]);
+      itemsRef.current = retained;
+      setItems(retained);
+      return retained;
+    },
+    [resetTranscript],
+  );
+
+  const isCurrentHistory = useCallback(
+    (snapshot: readonly LiveHistoryItem[]) =>
+      mountedRef.current &&
+      !streamingRef.current &&
+      itemsRef.current === snapshot,
+    [],
   );
 
   const settleWaitingCall = useCallback((callId: string) => {
@@ -615,6 +825,8 @@ export function useOpenTuiLiveTurn(
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      skipRetryDelayRef.current = undefined;
+      failedRequestRef.current = null;
       dualOutput?.finalizeAssistantMessage();
       turnSeqRef.current += 1;
       activeTurnRef.current = null;
@@ -633,6 +845,11 @@ export function useOpenTuiLiveTurn(
     popQueue,
     submit,
     interrupt,
+    retryLastPrompt,
+    notifyInputProcessed,
+    scheduleTool,
+    isCurrentHistory,
+    rewindTranscript,
     resetTranscript,
     applyEvent: apply,
     settleWaitingCall,

@@ -80,7 +80,11 @@ import {
   SessionStatsProvider,
   useSessionStats,
 } from '../contexts/SessionContext.js';
-import { MessageType, type HistoryItemWithoutId } from '../types.js';
+import {
+  MessageType,
+  type HistoryItem,
+  type HistoryItemWithoutId,
+} from '../types.js';
 import { useUpdateNoticeFlush } from './use-update-notice-flush.js';
 import { applyOpenTuiTheme } from './theme.js';
 import { getActiveOpenTuiTheme } from './theme-parity.js';
@@ -102,7 +106,8 @@ import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
 import { Command, matchesCommand } from './key-map.js';
 import type { OpenTuiComposerHandle } from './input-submission.js';
-import { resumeEventsFromConfig } from './resume-session.js';
+import { buildUiHistoryItems } from './session-switch.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 import {
   armCapturedInputInjection,
   drainCapturedInputAsText,
@@ -121,6 +126,7 @@ interface OpenTuiEntryAppProps {
   settings: LoadedSettings;
   runtime: OpenTuiRuntime;
   startupWarnings: readonly string[];
+  startupHistory: HistoryItem[];
   extensionRefreshState?: ExtensionRefreshState;
   /** Decoded early-captured keystrokes; injected into the composer once. */
   capturedText: string;
@@ -133,6 +139,7 @@ function OpenTuiEntryApp({
   settings,
   runtime,
   startupWarnings,
+  startupHistory,
   extensionRefreshState,
   capturedText,
   initialDialog,
@@ -151,6 +158,7 @@ function OpenTuiEntryApp({
   const logger = useLogger(config.storage, config.getSessionId());
   const live = useOpenTuiLiveTurn({
     config,
+    logger,
     dualOutput: runtime.dualOutputBridge,
   });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
@@ -245,8 +253,9 @@ function OpenTuiEntryApp({
 
   // --- startup warnings + resume replay --------------------------------------
   useEffect(() => {
-    const resumeEvents = resumeEventsFromConfig(config);
-    if (resumeEvents) resetTranscript(resumeEvents);
+    if (startupHistory.length) {
+      resetTranscript(projectHistoryToStreamEvents(startupHistory, { config }));
+    }
     for (const warning of startupWarnings) {
       applyEvent({ type: 'warning', text: warning });
     }
@@ -399,6 +408,7 @@ function OpenTuiEntryApp({
       config={config}
       settings={settings}
       logger={logger}
+      startupHistory={startupHistory}
       getSessionStats={getSessionStats}
       sessionStats={stats}
       runtime={runtime}
@@ -406,6 +416,9 @@ function OpenTuiEntryApp({
       initialDialog={initialDialog}
       renderMain={renderMain}
       onSubmitPrompt={handleSubmitPrompt}
+      onScheduleTool={live.scheduleTool}
+      onRetryPrompt={live.retryLastPrompt}
+      onInputProcessed={live.notifyInputProcessed}
       onQuit={handleQuit}
       onToggleVim={toggleVimEnabled}
       vimMode={vimEnabled ? vimMode : undefined}
@@ -419,6 +432,9 @@ function OpenTuiEntryApp({
       isReceivingContent={live.isReceivingContent}
       onInterrupt={interrupt}
       userMessages={userMessages}
+      historyItems={live.items}
+      isCurrentHistory={live.isCurrentHistory}
+      onRewindTranscript={live.rewindTranscript}
       approvalMode={config.getApprovalMode()}
       messageQueue={live.messageQueue}
       onPopQueue={live.popQueue}
@@ -523,6 +539,11 @@ export async function startOpenTuiUI(
           }
         : null;
 
+    const resumedSession = config.getResumedSessionData();
+    const startupHistory = resumedSession
+      ? buildUiHistoryItems(resumedSession, { config, settings })
+      : [];
+
     root.render(
       // children must sit in the props object: the provider declares it as a
       // required prop, which createElement's rest-children overloads can't fill.
@@ -536,6 +557,7 @@ export async function startOpenTuiUI(
               settings={settings}
               runtime={runtime}
               startupWarnings={startupWarnings}
+              startupHistory={startupHistory}
               extensionRefreshState={options.extensionRefreshState}
               capturedText={capturedText}
               initialDialog={initialDialog}

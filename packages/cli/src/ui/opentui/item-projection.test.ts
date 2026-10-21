@@ -23,6 +23,7 @@ import {
   projectDoctor,
   projectExtensionsList,
   projectItemToStreamEvent,
+  projectHistoryToStreamEvents,
   projectMcpStatus,
   projectModelStats,
   projectQuit,
@@ -34,11 +35,22 @@ import {
   projectToolsList,
   type ItemProjectionContext,
 } from './item-projection.js';
+import { ToolCallStatus, isHistoryItemVisibleAfterRestore } from '../types.js';
+import {
+  foldLiveEvent,
+  rewindBoundaryHistory,
+  type LiveHistoryItem,
+} from './live-session-model.js';
+import {
+  applyCollapsePolicyAndSummary,
+  expandCollapsedHistory,
+} from '../utils/resumeHistoryUtils.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type {
   ContextCategoryBreakdown,
   HistoryItemWithoutId,
+  HistoryItem,
 } from '../types.js';
 
 // R1-93 tests the cached-items upgrade from the DISCONNECTED base state;
@@ -1105,5 +1117,106 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       totalDurationMs: 2000,
       agents: [agent],
     });
+  });
+});
+
+describe('canonical resumed tool projection', () => {
+  it.each(['fast', 'summarize'] as const)(
+    'keeps collapsed %s boundaries and full-array turn identities available for rewind',
+    (compressionKind) => {
+      const compression = {
+        isPending: false,
+        originalTokenCount: 10,
+        newTokenCount: 5,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        compressionKind,
+        originalTokenCountIsEstimated: true,
+      };
+      const canonical: HistoryItem[] = [
+        {
+          id: 90,
+          type: 'user',
+          text: 'first',
+          promptId: 'p1',
+          sentToModel: true,
+        },
+        { id: 91, type: 'info', text: 'retained command output' },
+        { id: 92, type: 'compression', compression },
+        {
+          id: 93,
+          type: 'user',
+          text: 'second',
+          promptId: 'p2',
+          sentToModel: true,
+        },
+      ];
+      const collapsed = applyCollapsePolicyAndSummary(canonical, true);
+      const items = projectHistoryToStreamEvents(collapsed, {}).reduce<
+        readonly LiveHistoryItem[]
+      >(foldLiveEvent, []);
+      expect(items).toHaveLength(5);
+      expect(items.filter(isHistoryItemVisibleAfterRestore)).toEqual([
+        expect.objectContaining({ display: { kind: 'collapse-summary' } }),
+      ]);
+      expect(rewindBoundaryHistory(items)).toEqual([
+        { ...collapsed[0], id: 0 },
+        { ...collapsed[2], id: 2 },
+        { ...collapsed[3], id: 3 },
+      ]);
+      const expanded = projectHistoryToStreamEvents(
+        expandCollapsedHistory(collapsed),
+        {},
+      ).reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+      expect(expanded).toHaveLength(4);
+      expect(expanded.every(isHistoryItemVisibleAfterRestore)).toBe(true);
+      expect(expanded.find((item) => item.kind === 'compaction')).toMatchObject(
+        { compression },
+      );
+    },
+  );
+
+  it('keeps exact image bytes and detailed read text through projection and folding', () => {
+    const history: HistoryItem[] = [
+      {
+        id: 41,
+        type: 'tool_group',
+        tools: [
+          {
+            callId: 'read-1',
+            name: 'read_file',
+            description: 'owned.txt',
+            status: ToolCallStatus.Success,
+            resultDisplay: 'Read 2 lines',
+            detailedDisplay: 'line one\nline two',
+            args: { absolute_path: '/owned.txt' },
+            images: [{ mimeType: 'image/png', data: 'exact-base64' }],
+            omittedImageCount: 2,
+          },
+        ],
+      },
+    ];
+    const events = projectHistoryToStreamEvents(history, {});
+    expect(events.filter((event) => event.type === 'image')).toEqual([
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        data: 'exact-base64',
+        historyId: 41,
+      },
+    ]);
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    expect(items.find((item) => item.kind === 'tool')).toMatchObject({
+      id: 'read-1',
+      output: 'Read 2 lines',
+      detailedDisplay: 'line one\nline two',
+      historyId: 41,
+      done: true,
+    });
+    expect(items.find((item) => item.kind === 'image')).toMatchObject({
+      data: 'exact-base64',
+      mimeType: 'image/png',
+      historyId: 41,
+    });
+    expect(items.find((item) => item.kind === 'info')?.historyId).toBe(41);
   });
 });

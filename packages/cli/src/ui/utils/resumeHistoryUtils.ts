@@ -348,6 +348,7 @@ function convertToHistoryItems(
           items.push({
             type: 'user',
             text: payload.rawCommand,
+            ...(promptId ? { promptId } : {}),
             ...(sentToModel === undefined ? {} : { sentToModel }),
           });
         }
@@ -696,7 +697,7 @@ function convertToHistoryItems(
  * @returns Array of HistoryItem with proper IDs
  */
 export function buildResumedHistoryItems(
-  sessionData: ResumedSessionData,
+  sessionData: Pick<ResumedSessionData, 'conversation' | 'historyGaps'>,
   config: Config | null,
   baseTimestamp: number = Date.now(),
 ): HistoryItem[] {
@@ -755,7 +756,9 @@ function createHistoryCollapseSummaryItem(
  * Strips the suppressOnRestore flag from a history item's display property.
  * Used when rewinding into collapsed history to ensure rewound items remain visible.
  */
-export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
+export function stripSuppressOnRestore<T extends Pick<HistoryItem, 'display'>>(
+  item: T,
+): T {
   if (!item.display?.suppressOnRestore) return item;
   const { suppressOnRestore: _, ...rest } = item.display;
   return {

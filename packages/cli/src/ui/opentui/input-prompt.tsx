@@ -67,6 +67,7 @@ import { randomUUID } from 'node:crypto';
 import { classifyPastedImagePaths } from '../utils/pasted-image-paths.js';
 import { editTextInExternalEditor } from '../utils/external-editor.js';
 import type { Key } from '../hooks/useKeypress.js';
+import { useDoublePress } from '../hooks/useDoublePress.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import {
@@ -244,6 +245,8 @@ export interface InputPromptProps {
   /** Esc-while-streaming hook (aborts the live turn in the parent). */
   onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   onCancelCommand?: () => boolean;
+  onRetry?: () => void;
+  onRewind?: () => void;
   approvalMode?: ApprovalMode;
   placeholder?: string;
   focus?: boolean;
@@ -390,6 +393,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     : completionIndex;
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [escapeArmed, setEscapeArmed] = useState(false);
+  const [rewindArmed, setRewindArmed] = useState(false);
+  const rewindPress = useDoublePress(() => props.onRewind?.(), setRewindArmed);
   const draftRef = useRef<Draft>(newDraft());
   const claimedDraftRef = useRef<Draft | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -827,6 +832,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         !claimedDraftRef.current
       ) {
         restoreSubmission(prompt);
+        return true;
       }
     });
   }, [onInterrupt, onPopQueue, restoreSubmission]);
@@ -1321,6 +1327,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setTextVersion((v) => v + 1);
       return;
     }
+    if (matchesCommand(Command.RETRY_LAST, key)) {
+      key.preventDefault();
+      props.onRetry?.();
+      return;
+    }
     if (key.name === 'r' && key.ctrl) {
       key.preventDefault();
       if (!searchActiveRef.current || shellModeActive) {
@@ -1663,6 +1674,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         if (popped) {
           restoreSubmission(popped, '\n');
         }
+        return;
+      }
+      if (!el.plainText && props.onRewind) {
+        rewindPress();
         return;
       }
       const effect = escapeRef.current!.handleEscape(el.plainText);
@@ -2164,6 +2179,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         </box>
       )}
       {escapeArmed && <text fg={C.dim}>{ESCAPE_ARM_HINT}</text>}
+      {rewindArmed && <text fg={C.dim}>{t('Press Esc again to rewind')}</text>}
     </box>
   );
 }
