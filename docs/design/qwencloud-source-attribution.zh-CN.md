@@ -52,11 +52,11 @@ Qwen Code 目前不发送这个头，所以它在这两个平台上的调用量�
 
 ## 设计决策
 
-- **精确匹配 host。** 先解析 URL，再精确比较 hostname，所以仿冒域名（`maas.qwencloudapi.com.evil.example`）和把域名放在路径里的写法都不会命中。忽略大小写和端口。
+- **精确匹配 host。** 先解析 URL，再精确比较 hostname，所以仿冒域名（`maas.qwencloudapi.com.evil.example`）和把域名放在路径里的写法都不会命中。忽略大小写和端口。这里刻意比消费同一份列表的两个端点门禁更窄：`isDashScopeProvider` 和 WebSearch 的端点检查都按后缀匹配 `QWENCLOUD_MAAS_HOSTS`，所以不在上表里的 MaaS 子域会被当成 DashScope 服务、也能通过搜索门禁，但不带来源标识。准入只需要选对 API 方言；来源标识会把 `channel`/`t2` 写进平台面板，因此只覆盖上面验证过的四个 host。这两个平台是否还会签发子域端点，与本文其余待确认项一样需要平台侧确认。
 - **Token Plan 不填 `t2`。** Token Plan 的个人版和团队版 key 都以 `sk-sp-` 开头，客户端分不出来。接入指南说明平台可以按 API Key 反查付费方式，不填可以避免错报。
-- **第一方取值优先。** `customHeaders` 中同名的项（不区分大小写）会被移除，所以来源标识既不会被覆盖，也不会重复发送。
+- **第一方取值优先。** `customHeaders` 中同名的项（不区分大小写）会被移除，所以来源标识既不会被覆盖，也不会重复发送。移除时刻意不给提示：被 `allowDynamicHeaderValues` 门禁丢掉的头会让请求失败、且有一个开关可以打开，这里则是文档化的策略、没有开关，请求本身照常成功。
 - **不加配置项。** 取值完全由 host 推导，没有需要用户配置的内容。
-- **单一 leaf 模块。** `packages/core/src/core/dashscope-source-config.ts` 不依赖任何模块，并维护 host 列表（`QWENCLOUD_MAAS_HOSTS`，由 DashScope provider 再导出），provider、Responses 链路和 WebSearch 都可以引用它，不会形成循环依赖。
+- **单一 leaf 模块。** `packages/core/src/core/dashscope-source-config.ts` 不依赖任何模块，并维护 `QWENCLOUD_MAAS_HOSTS`（由 DashScope provider 再导出），provider、Responses 链路和 WebSearch 都可以引用它，不会形成循环依赖。这个 leaf 不是两个 host 字符串的唯一副本：`telemetry/gen-ai-provider.ts` 仍按自己的字面量分类，`core/reasoning-overrides.ts` 用一段内联正则。本 PR 不做合并——两个文件都不在本次改动范围内——但 leaf 已经消掉了 `gen-ai-provider.ts` 注释里所说的循环依赖，合并因此成了一个普通的后续项。
 - **按配置的 host 判断，而非运行时 host。** 判断依据是配置的 `baseUrl`。Qwen OAuth 会在运行时替换客户端的端点，但它配置的 `baseUrl` 是无法解析的占位符 `DYNAMIC_QWEN_OAUTH_BASE_URL`，因此永远不会带上来源标识；有测试固定这一点。
 
 ## 不在范围内
