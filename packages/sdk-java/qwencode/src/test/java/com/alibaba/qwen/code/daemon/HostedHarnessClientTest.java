@@ -7181,18 +7181,28 @@ class HostedHarnessClientTest {
     }
 
     @Test
-    void anIdleAbortLandsInsideThePublishedWindow() throws Exception {
+    void idleWatchdogIntervalPinsTheTenthAndTheFloor() {
+        // The published tick formula, pinned on both sides: a tenth of the
+        // budget keeps the abort close to the bound, and the 100 ms floor
+        // bounds the single scheduler thread's wake rate.
+        assertEquals(200L,
+                HarnessEventStream.idleWatchdogIntervalMillis(2000L));
+        assertEquals(100L,
+                HarnessEventStream.idleWatchdogIntervalMillis(500L));
+    }
+
+    @Test
+    void anIdleAbortChargesTheFullBudgetBeforeFiring() throws Exception {
         // R4-4: the published abort window — between the budget and the
         // budget plus max(100 ms, a tenth of the budget) — is what an
-        // integrator sizes an outer supervisor deadline against, so the
-        // watchdog interval formula is pinned here. The queue probe pins
-        // the tick directly: the abort's wall-clock upper side also
-        // carries the scheduler's own latency, which a loaded runner can
-        // stretch past any fixed ceiling, while the tick value is fixed
-        // when the stream is created. Parking 300 ms in puts the park
-        // mid-interval for the shipped 200 ms tick, whose abort lands at
-        // ~2100 ms; the lower bound below still proves the budget is
-        // charged before anything fires.
+        // integrator sizes an outer supervisor deadline against. Its upper
+        // side is nominal: the realized abort also carries scheduler and
+        // reader-wake latency, which a loaded runner can push past the
+        // bound (2500 ms observed against the 2200 ms bound here). The
+        // tick is pinned structurally instead — the interval formula above
+        // and the queued period below — while the wall-clock assertions
+        // charge the full budget and reject a fire later than a sanity
+        // ceiling.
         advertiseEventKeepalive();
         createSessionRoute();
         CountDownLatch release = new CountDownLatch(1);
@@ -7222,14 +7232,34 @@ class HostedHarnessClientTest {
                             .session(session)
                             .eventEpoch(EVENT_EPOCH)
                             .build())) {
-                Delayed nextTick =
-                        (Delayed) client.scheduler().getQueue().peek();
+                long expectedTickMillis =
+                        HarnessEventStream.idleWatchdogIntervalMillis(2000L);
+                ScheduledThreadPoolExecutor scheduler = client.scheduler();
+                // A periodic task is off the delay queue while it runs, so
+                // the queue is read on the single scheduler thread, where
+                // a live watchdog must be queued.
+                int queued = scheduler.submit(
+                        () -> scheduler.getQueue().size()).get();
+                assertEquals(1, queued,
+                        "expected only the idle watchdog to be queued");
+                // The ticks run from the stream's creation, so parking a
+                // tick and a half in puts the park mid-interval on the
+                // shipped tick: the abort lands at ~2100 ms, while a
+                // coarse-tick regression (a 1000 ms tick) does not abort
+                // before ~2700 ms. The queued tick's delay then exposes a
+                // period that outgrew the interval.
+                Thread.sleep(expectedTickMillis
+                        + expectedTickMillis / 2);
+                Delayed nextTick = (Delayed) scheduler.submit(
+                        () -> scheduler.getQueue().peek()).get();
                 assertNotNull(nextTick,
-                        "the idle watchdog was not scheduled");
-                assertTrue(nextTick.getDelay(TimeUnit.MILLISECONDS) <= 250,
-                        "watchdog tick interval exceeds a tenth of the "
-                                + "budget");
-                Thread.sleep(300);
+                        "the idle watchdog is not queued");
+                long nextTickMillis =
+                        nextTick.getDelay(TimeUnit.MILLISECONDS);
+                assertTrue(nextTickMillis <= expectedTickMillis,
+                        "watchdog next tick " + nextTickMillis
+                                + " ms exceeds " + expectedTickMillis
+                                + " ms");
                 long parkedAt = System.nanoTime();
                 DaemonTransportException failure = assertThrows(
                         DaemonTransportException.class,
@@ -7241,12 +7271,12 @@ class HostedHarnessClientTest {
                         failure.getMessage());
                 assertTrue(elapsedMillis >= 1950,
                         "aborted before the budget: " + elapsedMillis);
-                // The queue probe above pins the window's upper side;
-                // this ceiling only catches a watchdog that never fires,
-                // not a tick the scheduler ran late.
-                assertTrue(elapsedMillis < 5000,
-                        "the idle watchdog did not fire within 5 s: "
-                                + elapsedMillis);
+                // A watchdog that never fires fails the assertThrows above
+                // when the 10 s preemptive timeout expires; this ceiling
+                // only bounds how late a firing watchdog may abort.
+                assertTrue(elapsedMillis < 3000,
+                        "the idle watchdog fired later than 3 s after the "
+                                + "park: " + elapsedMillis);
             }
         } finally {
             release.countDown();
