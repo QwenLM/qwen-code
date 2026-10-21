@@ -37,7 +37,6 @@ import {
   createCliRenderer,
   type CliRenderer,
   type KeyEvent,
-  type TextareaRenderable,
 } from '@opentui/core';
 import {
   createRoot,
@@ -85,7 +84,7 @@ import { useUpdateNoticeFlush } from './use-update-notice-flush.js';
 import { applyOpenTuiTheme } from './theme.js';
 import { getActiveOpenTuiTheme } from './theme-parity.js';
 import { useLogger } from '../hooks/useLogger.js';
-import { useVim } from '../hooks/vim.js';
+import { useVim, type VimBuffer } from '../hooks/vim.js';
 import { createVimBuffer } from './vim-buffer.js';
 import { useAwaySummary } from '../hooks/useAwaySummary.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
@@ -229,8 +228,11 @@ function OpenTuiEntryApp({
 
   // --- early-input injection (ink initialCapturedInput parity) -------------
   const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
-  const vimEditor = useRef<TextareaRenderable | null>(null);
-  const vimBuffer = useMemo(() => createVimBuffer(() => vimEditor.current), []);
+  const vimComposerBuffer = useRef<VimBuffer | null>(null);
+  const vimBuffer = useMemo(
+    () => createVimBuffer(() => vimComposerBuffer.current!),
+    [],
+  );
   const { handleInput: handleVimInput } = useVim(
     vimBuffer,
     (text) => {
@@ -427,8 +429,9 @@ function OpenTuiEntryApp({
       onRenderError={handleRenderError}
       composerHandle={composerHandle}
       vim={{
-        editor: vimEditor,
-        handleInput: handleVimInput,
+        buffer: vimComposerBuffer,
+        handleInput: (key) =>
+          Boolean(vimComposerBuffer.current) && handleVimInput(key),
         enabled: vimEnabled,
       }}
       promptSuggestion={promptSuggestion}

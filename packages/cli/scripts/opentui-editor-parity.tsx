@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 // @ts-expect-error Bun-only native runner; no Bun globals in the Node build.
 import { mock } from 'bun:test';
 import { act } from 'react';
+import type { OpenTuiComposerHandle } from '../src/ui/opentui/input-submission.js';
+import type { VimBuffer } from '../src/ui/hooks/vim.js';
 import { TextareaRenderable, type Renderable } from '@opentui/core';
 import { testRender } from '@opentui/react/test-utils';
 
@@ -23,6 +25,15 @@ const nodes = (node: Renderable): Renderable[] => [
 ];
 let ui: Awaited<ReturnType<typeof testRender>> | undefined;
 const submissions: string[] = [];
+const composer = { current: null as OpenTuiComposerHandle | null };
+const buffer = { current: null as VimBuffer | null };
+const moveTo = (row: number, col: number) => {
+  const owner = buffer.current!;
+  owner.vimMoveToLine(row + 1);
+  owner.vimMoveToLineStart();
+  if (col >= [...owner.lines[row]].length) owner.vimAppendAtLineEnd();
+  else if (col > 0) owner.vimMoveRight(col);
+};
 const longHistory = 'LONG_' + 'abcdef'.repeat(24) + '_TAIL_SENTINEL';
 let editorOutput = 'external 甲🙂';
 try {
@@ -48,6 +59,8 @@ try {
   await act(async () => {
     ui = await testRender(
       <OpenTuiInputPrompt
+        composerHandle={composer}
+        vim={{ buffer, handleInput: () => false, enabled: false }}
         userMessages={[longHistory, 'HISTORY_OLD', 'HISTORY_NEW']}
         onSubmit={(text) => {
           submissions.push(text);
@@ -82,8 +95,7 @@ try {
   assert(editor);
   const reset = (text: string) =>
     input(() => {
-      editor.setText(text);
-      editor.gotoBufferEnd();
+      composer.current!.setText(text);
     });
 
   for (const home of ['HOME', 'a']) {
@@ -107,7 +119,7 @@ try {
     await reset(mixed);
     if (fromStart)
       await input(() => {
-        editor.gotoBufferHome();
+        moveTo(0, 0);
       });
     await type(sequence);
     await type('WORD_MARK');
@@ -122,7 +134,7 @@ try {
   for (const direction of ['k', 'u']) {
     await reset('first\nsecond');
     await input(() =>
-      editor.setCursor(direction === 'k' ? 0 : 1, direction === 'k' ? 5 : 0),
+      moveTo(direction === 'k' ? 0 : 1, direction === 'k' ? 5 : 0),
     );
     await key(direction, true);
     assert.equal(editor.plainText, 'firstsecond');
@@ -150,12 +162,13 @@ try {
   assert.equal(editor.plainText, wrapped);
   assert(editor.cursorOffset < offset);
   await input(() => {
-    editor.gotoBufferHome();
+    moveTo(0, 0);
   });
   await key('p', true);
   assert.equal(editor.plainText, 'HISTORY_NEW');
   await input(() => {
-    editor.gotoBufferEnd();
+    buffer.current!.vimMoveToLastLine();
+    buffer.current!.vimAppendAtLineEnd();
   });
   await key('n', true);
   assert.equal(editor.plainText, wrapped);
@@ -186,7 +199,7 @@ try {
   await key('RETURN');
   assert.deepEqual(submissions, ['HISTORY_NEW_tail']);
   await reset('甲🙂tail');
-  await input(() => editor.setCursor(0, 4));
+  await input(() => moveTo(0, 2));
   await key('r', true);
   await type('no-match');
   await key('ESCAPE');

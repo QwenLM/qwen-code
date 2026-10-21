@@ -10,16 +10,19 @@ preserving B history from `e5143ba8e4cb431ef48f390f59922216544849fd` through
 `12039c2cb4fe4065fe73c57d392219c8a767cf08`. It integrates the frozen B v3 and
 [dual-output v6](2026-10-21-opentui-dual-output.md) drafts; they are not separate
 deliveries. The earlier A-based designs and evidence remain provenance. Input
-admission, attachments, cancellation and native undo retain their existing owners.
+admission, attachments and cancellation retain their existing owners. The Unicode
+repair below replaces the native editing/undo owner with the existing Ink buffer.
 
 The actual frozen setup on ba04 passed. Its unchanged dependency/lock inputs
 and eight installed tool/hook identities permit reuse; no reinstall is required.
 The ba04 build failed on two test/type declarations, and the f93 source reproduced
 five failing regression cases with six positive controls. Those original failures
 remain preserved. The declaration corrections and two production fixes are now
-committed, but fresh full build, typecheck, focused, native and product validation
-for the final combined source remain **NOT_RUN**. Earlier results do not certify
-this tree. OpenTUI remains `0.5.10`, Bun `1.3.14`.
+committed. The later d677 candidate passed its four initial build/type/unit gates,
+but its native Unicode gate and independent diagnostics failed as recorded below.
+The current Unicode repair is **SOURCE AUTHORING / VALIDATION NOT_RUN**; those
+older passes do not certify the changed owner. OpenTUI remains `0.5.10`, Bun
+`1.3.14`.
 
 The parent reset discard outcome releases only the cancellation latch, without
 popping queues or restoring old drafts. This batch retains that contract and
@@ -37,8 +40,9 @@ The original startup-fixture failure and both behavioral failures remain saved.
 
 - Reuse every existing Ink Vim command family, count, register, find/repeat and
   mode transition. Do not add visual mode, text objects or regex search.
-- Keep one native textarea, one native undo history and the existing Vim parser.
-  Reuse logical motion/range algorithms instead of native word/visual movement.
+- Keep one native textarea as the view, one existing Ink TextBuffer as the sole
+  text/cursor/undo owner, and the existing Vim parser. Do not add a cursor-history
+  ledger, shadow undo implementation or dependency.
 - Complete ordinary/shell recall and reverse search together with their actual
   live-user, host-history and session producers. Injected history is insufficient.
 - Preserve A's editing, external editor, claimed/pending paste, image and cancel
@@ -57,14 +61,16 @@ Provider changes still update the parser; the mode displayed is published state.
 The parser currently reads 33 Vim actions, live `text/lines/cursor`, range edit,
 undo and INSERT handling. Clearing now belongs to each real submission caller. Narrow the required input structurally;
 do not implement unused TextBuffer viewport/selection methods as fake values.
-Keep the existing geometry algorithm in place and retain its Ink compatibility
-entry. Native converts logical code-point positions with existing utilities.
+Keep the existing geometry algorithm and undo reducer unchanged. The native view
+receives a projection; its display coordinates never replace the owner’s exact
+code-point cursor after an edit.
 
 The parser lives in persistent OpenTuiEntryApp, matching Ink AppContainer's
 lifetime; modal changes and session reset do not invent a register/count/dot
-reset. Composer still unmounts under A's ownership contract. Its ref callback
-clears the native editor, and no modal key subscription reaches Vim or retains
-a disposed textarea. NORMAL Enter calls the current composer's submitDraft
+reset. Composer still unmounts under A's ownership contract. Its buffer ref
+clears on unmount, and no modal key subscription reaches Vim or retains
+a disposed textarea. The existing narrow adapter forwards to that live Ink buffer
+without storing text, coordinates or undo history. NORMAL Enter calls the current composer's submitDraft
 handle, retaining claimed/pending and rejection recovery. Native regression
 checks register/count/dot across unmount and that modal keys remain unconsumed.
 
@@ -79,10 +85,52 @@ visible category arrows, then Vim, then applicable search/completion/chip/defaul
 handling. Raw Backspace yields to the parser when Vim is enabled. INSERT shares
 the existing pure TextBuffer key dispatcher and nine editing callbacks; it never
 falls through to native default bindings. Word deletion uses the existing Ink
-geometry branches, while the native buffer alone records edits/undo/redo. Pending `r/f/F/t/T` owns Enter
+geometry branches, while the existing Ink buffer alone records edits/undo/redo. Pending `r/f/F/t/T` owns Enter
 before NORMAL submission. Only the parser's actual accepted Enter branch may
 call admission; move clearing to real caller ownership, preserving Ink behavior
 and OpenTUI's rejection/successor recovery. Do not intercept solely by mode.
+
+## Unicode repair and view boundary
+
+Exact d677 failed both the native gate and independent diagnostics: after
+`i甲🙂éZ`, Ink contains `甲🙂éZ` but the adapter contains `甲🙂eŹ`;
+Escape→x deletes different code points, and undo restores equal text with
+different logical cursors. The three-sequence diagnostic v2 completed with
+TEXT_DIVERGENCE; v1’s clipboard-stub control error remains separately preserved.
+No display-cell-only assertion may replace these exact text/cursor checks.
+
+Reuse `useTextBuffer` directly in the OpenTUI React composer. Its synchronous
+state ref/getters and existing reducer supply every edit and undo; no offscreen
+Ink renderer or copied reducer is needed. Keep the persistent entry’s `useVim`
+parser and pass its actions through a live composer-buffer ref. Vim hot toggles
+do not remount, replace, clear or migrate the buffer/history. Dialog unmount
+retains the existing composer lifetime and the parser’s register/count/dot state.
+
+The accepted history contract is Ink’s existing 100 undo entries, including
+no-op Vim snapshots and one changed external-editor import. Native history is
+not retained in parallel. Normal editing, raw backspace, bracketed/clipboard
+paste, completion, history/search, captured input, queue/cancel restoration and
+external editing must all write the same buffer. Source/attachment ownership
+stays in the existing composer transaction; a text/cursor change alone cannot
+claim pending images or invalidate a successor.
+
+Native textarea remains focused and renders text, selection and the terminal
+caret. Its default editing/paste handlers must not mutate a second text owner.
+Mouse and selection are explicit input events: map their visible bounds once
+to the buffer, perform a single existing range edit, and clear the selection.
+Projection-generated cursor events must not round-trip display columns back to
+code points. Native widthMethod, wrapping, scrolling and resize remain real
+view boundaries; combining marks and ZWJ clusters require next-edit assertions,
+not only equal cells. If the pinned API cannot preserve a required selection or
+projection behavior, report that specific boundary before adding an abstraction.
+
+Mandatory verification includes the original three strict sequences, ordinary
+input and selection replacement/undo/redo, mouse then typing, small/large/image
+paste, IME committed chunks and physical focus/caret, external editor and
+same-text imports, hot Vim toggles, wrapped/resize motion, and queue/session
+successors. Real-device IME and unexecuted platform legs remain NOT_RUN. This
+repair is source authoring only until fresh build/type/focused/native/product
+results are recorded; earlier d677 unit passes do not certify the new owner.
 
 ## History, search and mode consumers
 
@@ -100,8 +148,8 @@ and paste payload/ID mappings after an edited or cleared query. A selected histo
 row cannot reuse the abandoned draft's paste mappings. Vim's existing nonempty
 paste callback reaches the current composer and marks imported input unknown;
 empty clipboard paste leaves the draft's source unchanged. Ink keeps its real
-submission metadata and the same callback. No native undo or parser family changes
-are required for these merge boundaries.
+submission metadata and the same callback. No parser family changes are required for these merge boundaries. The Unicode
+repair changes the editing owner without changing the metadata contract.
 
 Search shares a renderer-free label calculation with Ink: 150 UTF-16 units,
 the same match window/highlight, and `→`/`←` on the active long candidate. Preserve

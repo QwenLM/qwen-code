@@ -1,17 +1,17 @@
 /** @jsxImportSource @opentui/react */
-/** Real native buffer/undo + shared parser, compared with the real Ink buffer. */
+/** Real native view + shared Ink text/undo owner, compared with the Ink reference. */
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as childProcess from 'node:child_process';
-import { act, useMemo, useRef, useState } from 'react';
+import { act, useMemo, useRef, useState, useLayoutEffect } from 'react';
 import type { OpenTuiComposerHandle } from '../src/ui/opentui/input-submission.js';
 // @ts-expect-error Bun-only native runner.
 import { mock } from 'bun:test';
 import { TextareaRenderable, type Renderable } from '@opentui/core';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useRenderer } from '@opentui/react';
 import { testRender } from '@opentui/react/test-utils';
 import type { LoadedSettings } from '../src/config/settings.js';
 import type { TextBuffer } from '../src/ui/components/shared/text-buffer.js';
@@ -40,6 +40,7 @@ let ui: Awaited<ReturnType<typeof testRender>> | undefined;
 let ink!: TextBuffer;
 let native!: TextareaRenderable;
 let adapter!: VimBuffer;
+let owned!: TextBuffer;
 let modes: string[] = [];
 let submissions: string[][] = [[], []];
 let decoded = 0;
@@ -83,15 +84,18 @@ try {
     '../src/ui/components/shared/text-buffer.js'
   );
   const { useVim } = await import('../src/ui/hooks/vim.js');
-  const { VimModeProvider } = await import(
+  const { VimModeProvider, useVimModeActions } = await import(
     '../src/ui/contexts/VimModeContext.js'
   );
   const { createVimBuffer } = await import('../src/ui/opentui/vim-buffer.js');
   const { toOriginalKey } = await import('../src/ui/opentui/key-map.js');
-  const { codePointIndexToDisplayCol } = await import(
-    '../src/ui/opentui/input-prompt-model.js'
+  const { projectTextBuffer } = await import(
+    '../src/ui/opentui/text-buffer-view.js'
   );
-  const settings = { merged: { general: { vimMode: true } } } as LoadedSettings;
+  const settings = {
+    merged: { general: { vimMode: true } },
+    setValue: () => {},
+  } as unknown as LoadedSettings;
   function Harness({ text }: { text: string }) {
     ink = useTextBuffer({
       initialText: text,
@@ -99,7 +103,19 @@ try {
       viewport: { width: 40, height: 12 },
       isValidPath: () => false,
     });
-    adapter = createVimBuffer(() => native ?? null);
+    owned = useTextBuffer({
+      initialText: text,
+      initialCursorOffset: 0,
+      viewport: { width: 40, height: 12 },
+      isValidPath: () => false,
+    });
+    const view = useRef<TextareaRenderable | null>(null);
+    const renderer = useRenderer();
+    useLayoutEffect(() => {
+      if (view.current)
+        projectTextBuffer(view.current, owned, renderer.widthMethod);
+    });
+    adapter = createVimBuffer(() => owned);
     const left = useVim(ink, (value) => submissions[0].push(value));
     const right = useVim(adapter, (value) => submissions[1].push(value));
     modes = [left.mode, right.mode];
@@ -116,16 +132,19 @@ try {
     });
     return (
       // eslint-disable-next-line react/no-unknown-property -- OpenTUI textarea props are not DOM attributes.
-      <textarea initialValue={text} focused={false} width={40} height={8} />
+      <textarea ref={view} focused width={40} height={8} />
     );
   }
   const idle = async () => act(async () => ui!.waitForVisualIdle());
-  const change = async (run: () => void) => {
-    await act(async () => run());
+  const change = async (run: () => void | Promise<void>) => {
+    await act(async () => {
+      await run();
+    });
     await idle();
   };
   const same = (label: string) => {
     assert.equal(adapter.text, ink.text, `${label}: text`);
+    assert.equal(native.plainText, ink.text, `${label}: projected native text`);
     assert.deepEqual(adapter.cursor, ink.cursor, `${label}: code-point caret`);
     assert.equal(modes[0], modes[1], `${label}: mode`);
   };
@@ -147,7 +166,7 @@ try {
       (node): node is TextareaRenderable => node instanceof TextareaRenderable,
     )!;
     assert(native);
-    await change(() => native.setCursor(0, 0));
+    same('mounted owner/view');
   };
   const send = async (bytes: string, count?: number) => {
     const before = decoded;
@@ -203,7 +222,7 @@ try {
     await mount('alpha beta\n  甲乙🙂tail\nlast word');
     await change(() => {
       ink.moveToOffset('alpha beta\n  甲'.length);
-      native.setCursor(1, codePointIndexToDisplayCol(ink.lines[1], 3));
+      owned.moveToOffset('alpha beta\n  甲'.length);
       apply(ink);
       apply(adapter);
     });
@@ -215,7 +234,7 @@ try {
     same(`${label} undo`);
     await change(() => {
       ink.redo();
-      native.redo();
+      owned.redo();
     });
     same(`${label} redo`);
   }
@@ -257,7 +276,7 @@ try {
   await mount('base');
   await change(() => {
     ink.setText('');
-    native.replaceText('');
+    owned.setText('');
     ink.vimDeleteLine(1);
     adapter.vimDeleteLine(1);
   });
@@ -288,6 +307,10 @@ try {
   assert.equal(adapter.text, 'base');
   for (const [bytes, count] of [
     ['i甲🙂e\u0301\x1b', 6],
+    ['i甲🙂e\u0301Z', 6],
+    ['i甲🙂e\u0301\x1bx', 7],
+    ['i甲🙂e\u0301\x1baZ\x1bu', 10],
+    ['i👨‍👩‍👧‍👦Z', 9],
     ['i\x01\x05\x1b', 4],
     ['i\x0b\x15\x18\x1b', 5],
     ['i\x7f\x1b', 3],
@@ -312,17 +335,29 @@ try {
   const accepted: string[] = [];
   let admit = false;
   let setModal!: (value: boolean) => void;
-  let getComposerEditor!: () => TextareaRenderable | null;
+  let getComposerBuffer!: () => VimBuffer | null;
+  let composerHandle!: OpenTuiComposerHandle;
+  let toggleVim!: () => Promise<boolean>;
+  let setFocus!: (value: boolean) => void;
   function Composer() {
+    toggleVim = useVimModeActions().toggleVimEnabled;
+    const [focused, updateFocus] = useState(true);
+    setFocus = updateFocus;
     const [modal, updateModal] = useState(false);
     setModal = updateModal;
-    const editor = useRef<TextareaRenderable | null>(null);
+    const liveBuffer = useRef<VimBuffer | null>(null);
     const composer = useRef<OpenTuiComposerHandle | null>(null);
-    const buffer = useMemo(() => createVimBuffer(() => editor.current), []);
+    const buffer = useMemo(
+      () => createVimBuffer(() => liveBuffer.current!),
+      [],
+    );
     const { handleInput, vimModeEnabled } = useVim(buffer, (text) => {
       void composer.current?.submitDraft?.(text);
     });
-    getComposerEditor = () => editor.current;
+    getComposerBuffer = () => liveBuffer.current;
+    useLayoutEffect(() => {
+      if (composer.current) composerHandle = composer.current;
+    });
     useKeyboard(() => {
       decoded++;
     });
@@ -331,7 +366,12 @@ try {
     ) : (
       <OpenTuiInputPrompt
         composerHandle={composer}
-        vim={{ editor, handleInput, enabled: vimModeEnabled }}
+        focus={focused}
+        vim={{
+          buffer: liveBuffer,
+          handleInput: (key) => Boolean(liveBuffer.current) && handleInput(key),
+          enabled: vimModeEnabled,
+        }}
         userMessages={[]}
         onSubmit={(text) => {
           accepted.push(text);
@@ -402,21 +442,27 @@ try {
   assert.equal(native.plainText, 'three');
   await composerInput('2');
   await change(() => setModal(true));
-  assert.equal(getComposerEditor(), null, 'unmounted textarea is not retained');
+  assert.equal(
+    getComposerBuffer(),
+    null,
+    'unmounted composer buffer is not retained',
+  );
   assert.match(ui!.captureCharFrame(), /Owned modal/);
   await composerInput('dwp.');
   assert.equal(clipboardCalls.length, writes, 'modal keys never reach Vim');
   await change(() => setModal(false));
-  native = getComposerEditor()!;
+  native = nodes(ui!.renderer.root).find(
+    (node): node is TextareaRenderable => node instanceof TextareaRenderable,
+  )!;
   assert(native);
   await change(() => {
-    native.setText('a b c d');
-    native.setCursor(0, 0);
+    composerHandle.setText('a b c d');
+    getComposerBuffer()!.vimMoveToLineStart();
   });
   await composerInput('w');
   assert.deepEqual(
     native.logicalCursor,
-    { row: 0, col: 4 },
+    { row: 0, col: 4, offset: 4 },
     'count survives modal',
   );
   await composerInput('0.');
@@ -432,6 +478,191 @@ try {
     writes,
     'paste uses retained register, not OS',
   );
+
+  for (const [suffix, expected, cursor] of [
+    ['Z', '甲🙂e\u0301Z', 5],
+    ['\x1bx', '甲🙂e', 2],
+    ['\x1baZ', '甲🙂e\u0301Z', 5],
+  ] as const) {
+    await change(() => composerHandle.setText(''));
+    await composerInput('i甲🙂e\u0301');
+    assert.deepEqual(getComposerBuffer()!.cursor, [0, 4]);
+    assert.deepEqual(
+      native.logicalCursor,
+      { row: 0, col: 5, offset: 5 },
+      'full combining cluster has five display cells',
+    );
+    await composerInput(suffix);
+    assert.equal(native.plainText, expected, 'real composer Unicode text');
+    assert.deepEqual(
+      getComposerBuffer()!.cursor,
+      [0, cursor],
+      'real composer exact code-point cursor',
+    );
+    await composerInput('\x1b');
+    await composerInput('u');
+    assert.equal(native.plainText, '甲🙂e\u0301');
+    // Undo restores the existing Ink snapshot, not a display-derived caret.
+    assert.deepEqual(getComposerBuffer()!.cursor, [
+      0,
+      suffix === '\x1bx' ? 3 : 4,
+    ]);
+  }
+  await change(() => composerHandle.setText(''));
+  await composerInput('i👨‍👩‍👧‍👦');
+  assert.deepEqual(getComposerBuffer()!.cursor, [0, 7]);
+  assert.deepEqual(
+    native.logicalCursor,
+    { row: 0, col: 2, offset: 2 },
+    'ZWJ family is one native glyph',
+  );
+  await composerInput('Z');
+  assert.equal(native.plainText, '👨‍👩‍👧‍👦Z');
+  await composerInput('\x1b');
+  const sameEditor = native;
+  await change(async () => {
+    assert.equal(await toggleVim(), false);
+  });
+  await change(() => composerHandle.setText('甲🙂e\u0301'));
+  await composerInput('Z');
+  assert.equal(
+    native.plainText,
+    '甲🙂e\u0301Z',
+    'ordinary input after hot toggle',
+  );
+  await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
+  assert.equal(
+    native.plainText,
+    '甲🙂e\u0301',
+    'ordinary undo shares the original owner',
+  );
+  await change(async () => {
+    assert.equal(await toggleVim(), true);
+  });
+  await composerInput('aZ');
+  assert.equal(native.plainText, '甲🙂e\u0301Z');
+  assert.equal(native, sameEditor, 'hot toggle does not remount the textarea');
+  await composerInput('\x1b');
+  await change(async () => {
+    assert.equal(await toggleVim(), false);
+  });
+
+  await change(() => composerHandle.setText('abcd'));
+  await change(() => ui!.mockInput.pressKey('HOME'));
+  await change(() => ui!.mockInput.pressArrow('right', { shift: true }));
+  await change(() => ui!.mockInput.pressArrow('right', { shift: true }));
+  assert.equal(
+    native.getSelectedText(),
+    'ab',
+    'real native keyboard selection',
+  );
+  await composerInput('Z');
+  assert.equal(
+    native.plainText,
+    'Zcd',
+    'selection replacement uses the Ink range edit',
+  );
+  await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
+  assert.equal(
+    native.plainText,
+    'abcd',
+    'selection replacement is one undo step',
+  );
+  await change(() => ui!.mockInput.pressKey('z', { ctrl: true, shift: true }));
+  assert.equal(native.plainText, 'Zcd');
+
+  await change(() => composerHandle.setText('abcd'));
+  await act(async () => {
+    await ui!.mockMouse.click(native.x + 1, native.y);
+  });
+  await idle();
+  assert.deepEqual(
+    getComposerBuffer()!.cursor,
+    [0, 1],
+    'real mouse boundary reaches the owner',
+  );
+  await composerInput('Z');
+  assert.equal(native.plainText, 'aZbcd');
+  await change(() => composerHandle.setText('abcd'));
+  await act(async () => {
+    await ui!.mockMouse.drag(native.x, native.y, native.x + 2, native.y);
+  });
+  await idle();
+  assert.equal(native.getSelectedText(), 'ab', 'real native drag selection');
+  await act(async () => {
+    await ui!.mockInput.pasteBracketedText('甲🙂e\u0301');
+  });
+  await idle();
+  assert.equal(
+    native.plainText,
+    '甲🙂e\u0301cd',
+    'paste replaces the selected range once',
+  );
+  await composerInput('Z');
+  assert.equal(native.plainText, '甲🙂e\u0301Zcd');
+
+  await change(() => composerHandle.setText('unchanged'));
+  await change(() => setFocus(false));
+  await change(() => ui!.mockInput.pressKey('X'));
+  assert.equal(
+    native.plainText,
+    'unchanged',
+    'unfocused default native input cannot edit',
+  );
+  await change(() => setFocus(true));
+  await composerInput('Z');
+  assert.equal(native.plainText, 'unchangedZ');
+  await change(() => {
+    composerHandle.setText('甲🙂e\u0301');
+    getComposerBuffer()!.vimMoveLeft(1);
+  });
+  const beforeNoopScroll = native.cursorOffset;
+  await change(() => ui!.mockMouse.scroll(native.x, native.y, 'up'));
+  assert.equal(
+    native.cursorOffset,
+    beforeNoopScroll,
+    'no native movement in a single-line scroll',
+  );
+  assert.deepEqual(
+    getComposerBuffer()!.cursor,
+    [0, 3],
+    'no-op scroll retains logical combining affinity',
+  );
+  await composerInput('Z');
+  assert.equal(native.plainText, '甲🙂eZ\u0301');
+  const scrollText = Array.from({ length: 20 }, (_, i) => `line${i}`).join(
+    '\n',
+  );
+  await change(() => composerHandle.setText(scrollText));
+  const beforeScroll = native.cursorOffset;
+  await change(() => ui!.mockMouse.scroll(native.x, native.y, 'up'));
+  const scrolledOffset = native.cursorOffset;
+  assert(
+    scrolledOffset < beforeScroll,
+    'native viewport scroll actually moves the caret',
+  );
+  const scrolledPrefix = native.editBuffer.getTextRange(0, scrolledOffset);
+  await composerInput('Z');
+  assert.equal(
+    native.plainText,
+    scrolledPrefix + 'Z' + scrollText.slice(scrolledPrefix.length),
+    'next edit follows the explicit native scroll position',
+  );
+  await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
+  assert.equal(native.plainText, scrollText);
+  await change(() => composerHandle.setText('甲🙂e\u0301'.repeat(20)));
+  const logicalBeforeResize = [...getComposerBuffer()!.cursor];
+  for (const width of [20, 60, 40]) {
+    await change(() => ui!.resize(width, 12));
+    assert.deepEqual(
+      getComposerBuffer()!.cursor,
+      logicalBeforeResize,
+      'resize keeps the exact logical caret',
+    );
+    assert.equal(native.plainText, '甲🙂e\u0301'.repeat(20));
+  }
+  await composerInput('Z');
+  assert.equal(native.plainText, '甲🙂e\u0301'.repeat(20) + 'Z');
 } catch (error) {
   if (ui) console.error(ui.captureCharFrame());
   failure = error;
@@ -458,5 +689,5 @@ try {
 
 if (failure) throw failure;
 console.log(
-  'PASS: 33 Vim actions, native undo/redo, batched parser, pending Enter, INSERT ownership; cleanup complete',
+  'PASS: 33 Vim actions, Ink undo/redo with native projection, strict Unicode edits, batched parser, pending Enter, INSERT ownership; cleanup complete',
 );
