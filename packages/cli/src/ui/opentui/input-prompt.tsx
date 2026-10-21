@@ -1237,18 +1237,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
     }
-    if (
-      selected < 0 &&
-      key.name === 'up' &&
-      !key.ctrl &&
-      !key.shift &&
-      el.scrollY + el.visualCursor.visualRow === 0 &&
-      draftRef.current.attachments.length > 0
-    ) {
-      setSelectedAttachment(draftRef.current.attachments.length - 1);
-      key.preventDefault();
-      return;
-    }
     if (handleEditorKey(el, key)) {
       setTextVersion((v) => v + 1);
       return;
@@ -1435,8 +1423,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         const popped = onPopQueue?.();
         if (popped) {
           restoreSubmission(popped, '\n');
+          return;
         }
-        return;
       }
       const effect = escapeRef.current!.handleEscape(el.plainText);
       if (effect === 'arm') {
@@ -1504,6 +1492,20 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         next = prev >= last ? 0 : prev + 1;
       }
       setActiveIndex(next);
+      return;
+    }
+
+    if (
+      selected < 0 &&
+      !shellModeActive &&
+      key.name === 'up' &&
+      !key.ctrl &&
+      !key.shift &&
+      el.scrollY + el.visualCursor.visualRow === 0 &&
+      draftRef.current.attachments.length > 0
+    ) {
+      setSelectedAttachment(draftRef.current.attachments.length - 1);
+      key.preventDefault();
       return;
     }
 

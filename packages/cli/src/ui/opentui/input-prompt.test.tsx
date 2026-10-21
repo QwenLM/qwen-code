@@ -2901,6 +2901,99 @@ describe('composer admission and attachment ownership', () => {
     return { promise, resolve };
   }
 
+  it.each([false, true])(
+    'completion Up then Enter takes precedence over attachment selection: attached=%s',
+    async (attached) => {
+      const submit = vi.fn(() => true);
+      const visible = vi.fn();
+      mocks.state.slashCommands = [
+        { name: 'model', description: 'First command', kind: 'built-in' },
+        { name: 'modem', description: 'Second command', kind: 'built-in' },
+      ];
+      renderPrompt({
+        onSubmit: submit,
+        onSuggestionsVisibilityChange: visible,
+      });
+      await act(async () => {});
+      if (attached) await press('v', true);
+      await typeText('/mod');
+      expect(visible).toHaveBeenLastCalledWith(true);
+      expect(currentEditor().plainText).toBe('/mod');
+      if (attached)
+        expect(screen.getByText('📎 clipboard-test.png')).toBeTruthy();
+      await press('up');
+      const selectedAfterUp = Boolean(
+        screen.queryByText('> clipboard-test.png'),
+      );
+      await press('return');
+      expect(currentEditor().plainText).toBe('/modem ');
+      expect(selectedAfterUp).toBe(false);
+      expect(submit).not.toHaveBeenCalled();
+      if (attached)
+        expect(screen.getByText('📎 clipboard-test.png')).toBeTruthy();
+    },
+  );
+
+  it('selects an attachment without completion and Enter only deselects it', async () => {
+    const submit = vi.fn(() => true);
+    renderPrompt({ onSubmit: submit });
+    await press('v', true);
+    await press('up');
+    expect(screen.getByText('> clipboard-test.png')).toBeTruthy();
+    await press('return');
+    expect(screen.getByText('📎 clipboard-test.png')).toBeTruthy();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it('does not select an image chip with Up in shell mode', async () => {
+    renderPrompt({ shellModeActive: true });
+    await press('v', true);
+    await press('up');
+    expect(screen.queryByText('> clipboard-test.png')).toBeNull();
+    expect(screen.getByText('📎 clipboard-test.png')).toBeTruthy();
+  });
+
+  it.each([0, 1])(
+    'an empty queue pop lets Esc arm and clear the draft: queueLength=%s',
+    async (queueLength) => {
+      const pop = vi.fn(() => null);
+      const armed = vi.fn();
+      renderPrompt({
+        queueLength,
+        onPopQueue: pop,
+        onEscapeArmedChange: armed,
+      });
+      await typeText('review owned draft');
+      await press('escape');
+      const firstArmed = [...armed.mock.calls];
+      await press('escape');
+      expect(firstArmed).toEqual([[true]]);
+      expect(currentEditor().plainText).toBe('');
+      expect(armed.mock.calls).toEqual([[true], [false]]);
+      expect(pop).toHaveBeenCalledTimes(queueLength ? 2 : 0);
+    },
+  );
+
+  it('restores a popped attachment with its text without arming Esc', async () => {
+    const pop = vi.fn(() => ({
+      text: 'owned queued',
+      imagePaths: ['/tmp/review-owned.png'],
+      submittedPrompt: 'owned queued',
+    }));
+    const armed = vi.fn();
+    renderPrompt({
+      queueLength: 1,
+      onPopQueue: pop,
+      onEscapeArmedChange: armed,
+    });
+    await typeText('draft');
+    await press('escape');
+    expect(pop).toHaveBeenCalledOnce();
+    expect(currentEditor().plainText).toBe('owned queued\ndraft');
+    expect(screen.getByText('📎 review-owned.png')).toBeTruthy();
+    expect(armed).not.toHaveBeenCalled();
+  });
+
   it('restores rejected text and images ahead of a later draft without duplicate admission', async () => {
     const admission = pending<boolean>();
     const onSubmit = vi
