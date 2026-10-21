@@ -744,6 +744,8 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
 
   it('runs the non-Hosted family on a MySQL leg and a MariaDB leg', () => {
     const mysql = parse(workflow).jobs['mysql-integration'];
+    // A MariaDB leg necessarily puts `mariadb` in this job block; what must
+    // stay absent is a service container, because the pool cannot command one.
     expect(mysql.services).toBeUndefined();
     expect(mysql.strategy['fail-fast']).toBe(false);
     // Both legs run the same non-Hosted family. Pinning the include list keeps
@@ -835,27 +837,24 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // The shell probe below cannot establish Actions cancellation scheduling.
     expect(cleanup.if).toBe('${{ always() }}');
     expect(cleanup.shell).toBe('bash');
-    // A MariaDB leg necessarily puts `mariadb` in this job block; what must
-    // stay absent is a service container, because the pool cannot command one.
-    expect(job('mysql-integration')).not.toMatch(/job\.services/);
   });
 
-  const databaseLegs = [
-    {
-      database: 'mysql',
-      image: 'mysql:8.4.6',
-      client: 'mysql',
-      engineArgs: '--innodb-use-native-aio=0 --skip-log-bin',
-      readiness: 'mysqladmin',
-    },
-    {
-      database: 'mariadb',
-      image: 'mariadb:10.11.18',
-      client: 'mariadb',
-      engineArgs: '--innodb-use-native-aio=0',
-      readiness: 'healthcheck.sh',
-    },
-  ];
+  // Derived from the matrix so the shell probe below executes the strings CI
+  // really passes; the `toEqual` pin above stays the one literal copy.
+  // `readiness` has no workflow counterpart (the start step derives it in
+  // shell from DATABASE_CLIENT), so it stays test-side.
+  const READINESS = { mysql: 'mysqladmin', mariadb: 'healthcheck.sh' };
+  const databaseLegs = parse(workflow).jobs[
+    'mysql-integration'
+  ].strategy.matrix.include.map(
+    ({ database, image, client, engine_args: engineArgs }) => ({
+      database,
+      image,
+      client,
+      engineArgs,
+      readiness: READINESS[database],
+    }),
+  );
 
   it
     .skipIf(process.platform === 'win32')
@@ -897,6 +896,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
           attempts=0
           docker() {
             printf 'DOCKER<%s>\\n' "$*" >> "$TRACE"
+            printf 'ARGC<%s>\\n' "$#" >> "$TRACE"
             case "$1" in
               run) return 0 ;;
               exec)
@@ -947,6 +947,11 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         expect(trace).toContain(
           `run --detach --name ${container} --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker ${image} ${engineArgs}`,
         );
+        // `"$*"` joins argv, so the trace above cannot tell N correctly split
+        // engine args from one argument containing spaces. The arg count can:
+        // 11 args precede them in `docker run`, and no other docker call here
+        // reaches that many. A joined element would report one fewer.
+        expect(trace).toContain(`ARGC<${11 + engineArgs.split(' ').length}>`);
         // Each leg must wait on the readiness signal its own image ships.
         expect(trace).toContain(`exec ${container} ${readiness}`);
         if (mode === 'ready') {
