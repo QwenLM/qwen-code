@@ -5580,17 +5580,17 @@ export const useLlmStream = (
       });
 
       if (continuationWasCancelled()) {
-        // This is the branch a cancelled Goal tool batch actually takes: the
+        // This is the branch a cancelled tool batch actually takes: the
         // controller retained across tool execution feeds the continuation
         // owner's signal, so pressing Esc while tools run aborts it here
         // rather than at either of the branches below. `markToolsAsSubmitted`
         // stops these callIds ever being submitted, so unless the responses
         // are written now the model's function calls stay unanswered and the
-        // next `/goal resume` sends a history with an unpaired call. The
+        // next turn sends a history with an unpaired call. The
         // all-cancelled branch below writes them for the batch it handles;
         // this branch owes its own batch the same pairing, whether or not
         // every tool in it was cancelled.
-        if (toolGoalBinding && llmClient) {
+        if (llmClient) {
           llmClient.addHistory({ role: 'user', parts: responsesToSend });
         }
         markToolsAsSubmitted(

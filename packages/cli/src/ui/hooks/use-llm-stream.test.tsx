@@ -8593,6 +8593,107 @@ describe('useLlmStream', () => {
     );
   });
 
+  it.each([
+    { batch: 'cancelled', statuses: ['cancelled'] as const },
+    { batch: 'mixed', statuses: ['success', 'cancelled'] as const },
+  ])(
+    'pairs finalized ordinary $batch tool responses after Esc without another model turn',
+    async ({ statuses }) => {
+      const promptId = 'prompt-ordinary-esc';
+      const requests = statuses.map((_, index) => ({
+        callId: `ordinary-esc-${index}`,
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: promptId,
+      }));
+      const executing = requests.map(
+        (request) =>
+          ({
+            request,
+            status: 'executing',
+            tool: { displayName: 'MockTool' },
+            invocation: {
+              getDescription: () => request.callId,
+            } as unknown as AnyToolInvocation,
+            startTime: Date.now(),
+          }) as TrackedExecutingToolCall,
+      );
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          for (const request of requests)
+            yield { type: ServerLlmEventType.ToolCallRequest, value: request };
+        })(),
+      );
+      const recordToolResult = vi.fn();
+      mockConfig.getChatRecordingService = vi
+        .fn()
+        .mockReturnValue({ recordToolResult });
+      const { result, client, rerenderWithToolCalls, completeToolRound } =
+        renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'run the tools',
+          SendMessageType.UserQuery,
+          promptId,
+        );
+      });
+      expect(mockScheduleToolCalls).toHaveBeenCalledOnce();
+      rerenderWithToolCalls(executing);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      act(() => result.current.cancelOngoingRequest());
+      expect(mockScheduleToolCalls.mock.calls[0][1].aborted).toBe(true);
+
+      const completed = executing.map((toolCall, index) => ({
+        ...toolCall,
+        status: statuses[index],
+        responseSubmittedToLlm: false,
+        response: {
+          callId: toolCall.request.callId,
+          responseParts: [{ text: `raw ${statuses[index]} response` }],
+          errorType: undefined,
+        },
+      })) as TrackedToolCall[];
+      const finalized = requests.map((request, index) => ({
+        callId: request.callId,
+        toolName: request.name,
+        responseParts: [
+          {
+            functionResponse: {
+              id: request.callId,
+              name: request.name,
+              response: { output: `finalized ${statuses[index]} response` },
+            },
+          },
+        ],
+      }));
+      mockFinalizeToolResponses.mockResolvedValueOnce(finalized);
+      client.addHistory.mockClear();
+      recordToolResult.mockClear();
+      await completeToolRound(completed);
+
+      expect(recordToolResult).toHaveBeenCalledTimes(requests.length);
+      finalized.forEach((entry, index) => {
+        expect(recordToolResult).toHaveBeenCalledWith(
+          entry.responseParts,
+          expect.objectContaining({
+            callId: entry.callId,
+            status: statuses[index],
+          }),
+          undefined,
+        );
+      });
+      expect(client.addHistory).toHaveBeenCalledExactlyOnceWith({
+        role: 'user',
+        parts: finalized.flatMap((entry) => entry.responseParts),
+      });
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(
+        requests.map((request) => request.callId),
+      );
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
+    },
+  );
+
   it('should handle all tool calls being cancelled', async () => {
     const cancelledToolCalls: TrackedToolCall[] = [
       {
