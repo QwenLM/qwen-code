@@ -208,23 +208,54 @@ describe('recent sessions', () => {
     expect(buttons()[0].textContent).toBe('next-chat');
   });
 
-  it('persists collapse and queries again when expanded', async () => {
-    window.localStorage.setItem(
-      'qwen.web-shell.sidebar.workspace-expanded:recent-sessions',
-      'false',
-    );
+  it('persists an expanded-to-collapsed-to-expanded round trip across remounts', async () => {
+    const key = 'qwen.web-shell.sidebar.workspace-expanded:recent-sessions';
+    window.localStorage.setItem(key, 'true');
     await render();
-    expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
-    const toggle = container.querySelector<HTMLButtonElement>('button')!;
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    await click(toggle);
     expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
-    await click(toggle);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
+
+    await click(container.querySelector<HTMLButtonElement>('button')!);
+    expect(window.localStorage.getItem(key)).toBe('false');
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    listWorkspaceSessionsPage.mockClear();
+    listStandaloneSessionsPage.mockClear();
+    await render();
     expect(
-      window.localStorage.getItem(
-        'qwen.web-shell.sidebar.workspace-expanded:recent-sessions',
-      ),
+      container.querySelector('button')?.getAttribute('aria-expanded'),
     ).toBe('false');
+    expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+    expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+
+    await click(container.querySelector<HTMLButtonElement>('button')!);
+    expect(window.localStorage.getItem(key)).toBe('true');
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    listWorkspaceSessionsPage.mockClear();
+    listStandaloneSessionsPage.mockClear();
+    await render();
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops polling while collapsed and reads again when expanded', async () => {
+    vi.useFakeTimers();
+    await render();
+    await click(container.querySelector<HTMLButtonElement>('button')!);
+    listWorkspaceSessionsPage.mockClear();
+    listStandaloneSessionsPage.mockClear();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+    expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+    await click(container.querySelector<HTMLButtonElement>('button')!);
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
   });
 
   it('keeps successful sources visible when another fails and supports retry', async () => {
