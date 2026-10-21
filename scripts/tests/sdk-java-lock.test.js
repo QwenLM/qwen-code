@@ -9,6 +9,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   utimesSync,
@@ -35,15 +36,24 @@ const flockStub = (behavior) => {
   return stubDir;
 };
 const freeFlock = '#!/bin/sh\nexit 0';
-const heldFlock = (held) => `#!/bin/sh
-if [ -f "${held}" ]; then
-  sleep 0.2
-  exit 1
-fi
-exit 0
+// fd 8 is the counter lock and must always succeed; fd 9 is the host lock
+// under test. A stub that failed both would abort at the counter, which an
+// errexit-suspending harness could not see.
+const heldFlock = (held, order) => `#!/bin/sh
+case "$*" in
+  *" 9")
+    if [ -f "${held}" ]; then
+      sleep 0.2
+      exit 1
+    fi
+    echo "$LOCK_LABEL" >> "${order}"
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
 `;
 
-const acquire = (home, wait, stubDir, extra = '', priority = '', env = {}) =>
+const acquire = (home, wait, stubDir, extra = '', label = '', env = {}) =>
   new Promise((resolve) => {
     const child = spawn(
       'bash',
@@ -53,13 +63,19 @@ const acquire = (home, wait, stubDir, extra = '', priority = '', env = {}) =>
         '-eo',
         'pipefail',
         '-c',
-        `source "${script}" && sdk_java_lock_acquire ${wait}${priority ? ` ${priority}` : ''} && echo "acquired"${extra ? ` && ${extra}` : ''}`,
+        [
+          `source "${script}"`,
+          `sdk_java_lock_acquire ${wait}`,
+          'echo "acquired"',
+          ...(extra ? [extra] : []),
+        ].join('\n'),
       ],
       {
         env: {
           ...process.env,
           HOME: home,
           PATH: `${stubDir}:${process.env.PATH}`,
+          LOCK_LABEL: label,
           ...env,
         },
       },
@@ -77,11 +93,12 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
     async () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-fifo-'));
       const held = join(home, 'held');
+      const order = join(home, 'order');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held));
-      const a = acquire(home, 30, stub, 'sleep 1');
+      const stub = flockStub(heldFlock(held, order));
+      const a = acquire(home, 30, stub, 'sleep 1', 'A');
       await new Promise((r) => setTimeout(r, 800));
-      const b = acquire(home, 30, stub);
+      const b = acquire(home, 30, stub, '', 'B');
       await new Promise((r) => setTimeout(r, 2500));
       rmSync(held);
       const [first, second] = await Promise.all([a, b]);
@@ -92,6 +109,12 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       expect(second.code).toBe(0);
       expect(second.out).toContain('acquired');
       expect(second.out).toContain('queue ticket 2');
+      // The observable ordering, not just the ticket number: the stub
+      // records who actually reached the lock first.
+      expect(readFileSync(order, 'utf8').trim().split('\n')).toEqual([
+        'A',
+        'B',
+      ]);
     },
   );
 
@@ -102,7 +125,7 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-reap-'));
       const queue = queueDir(home);
       mkdirSync(queue, { recursive: true });
-      const stale = join(queue, '0000000001.99999999.ticket');
+      const stale = join(queue, '0000000001-99999999');
       writeFileSync(stale, '');
       // Predate the reaping age-out; 99999999 outlives no PID namespace.
       const past = new Date(Date.now() - 30000);
@@ -159,13 +182,17 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-timeout-'));
       const held = join(home, 'held');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held));
+      const stub = flockStub(heldFlock(held, join(home, 'order')));
       const result = await acquire(home, 5, stub);
       expect(result.code).toBe(1);
-      expect(result.out).toContain('lock not acquired within');
-      expect(
-        readdirSync(queueDir(home)).filter((f) => f.endsWith('.ticket')),
-      ).toEqual([]);
+      // The `::error::` prefix is what the infra classifier matches: a bare
+      // echo would leave the check-run unannotated and the auto-rerun cold.
+      expect(result.out).toContain(
+        '::error::sdk-java host lock not acquired within',
+      );
+      expect(readdirSync(queueDir(home)).filter((f) => f !== '.seq')).toEqual(
+        [],
+      );
     },
   );
 });

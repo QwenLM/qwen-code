@@ -236,8 +236,21 @@ jobs:
         run: |-
           # Ticketed queue, not a bare flock: only the oldest live ticket
           # retries the lock — see the sourced helper.
-          source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-          sdk_java_lock_acquire 5400
+          if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
+            source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
+            sdk_java_lock_acquire 5400
+          else
+            # release-sdk-java.yml resumes an existing tag by checking out
+            # that immutable commit, which may predate this helper. Fall
+            # back to the bare lock this queue replaced rather than dying
+            # before Maven and wedging the release.
+            mkdir -p "${HOME}/.cache/qwen-code-ci"
+            exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
+            if ! flock --wait 5400 9; then
+              echo "::error::sdk-java host lock not acquired within 90 minutes"
+              exit 1
+            fi
+          fi
           mvn --batch-mode --no-transfer-progress clean test
           if [ "${MATRIX_JAVA}" = "21" ]; then
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
@@ -660,8 +673,21 @@ jobs:
           # host queue between installing and verifying. The ticketed queue
           # in sdk-java-lock.sh makes that one wait FIFO instead of a
           # wake-up race against sibling holds (qwen-code#14743).
-          source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-          sdk_java_lock_acquire 5400
+          if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
+            source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
+            sdk_java_lock_acquire 5400
+          else
+            # release-sdk-java.yml resumes an existing tag by checking out
+            # that immutable commit, which may predate this helper. Fall
+            # back to the bare lock this queue replaced rather than dying
+            # before Maven and wedging the release.
+            mkdir -p "${HOME}/.cache/qwen-code-ci"
+            exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
+            if ! flock --wait 5400 9; then
+              echo "::error::sdk-java host lock not acquired within 90 minutes"
+              exit 1
+            fi
+          fi
           # Seed from the host-shared repo (cache-restored on hosted runners)
           # so it and the egress proxy keep paying off for the job-local copy.
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true

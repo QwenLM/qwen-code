@@ -36,35 +36,39 @@ capacity is one hold at a time — no constant budget bounds the queue.
 ### Ticketed queue around the existing lock
 
 A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
-`exec 9>lock; flock --wait` block at all three acquisition sites.
+`exec 9>lock; flock --wait` block at both acquisition sites.
 
 - Tickets live in `<lock>.queue/`. Each acquirer takes the next sequence
-  number from a counter protected by a counter-lock directory (`mkdir` is
-  the atomic enter; a holder dying inside the section is aged out after one
-  minute).
+  number from a counter file whose read-increment-write runs under `flock`
+  on fd 8, and publishes its own ticket before that lock is released, so a
+  later ticket can never be visible while an earlier one is not.
 - Only the holder of the smallest live sequence number tries the lock —
-  as a blocking `flock --wait` call sliced at five seconds, not a
-  `--nonblock` poll. The fleet is mixed: main and older branches still run
-  the raw `flock --wait`, and a polled head loses every release to the
-  kernel wakeups those legacy waiters get (this PR's first live run starved
-  its full 5400 s budget as queue ticket 1 for exactly that reason). The
-  blocked head rejoins the same wake race on even terms; waiters ordering
-  applies between runs that use this helper, which becomes everyone once it
-  merges.
+  with a single blocking `flock --wait` for the remaining budget. The fleet
+  is mixed: main and older branches still run the raw `flock --wait`, and a
+  head that re-enters the kernel wait queue in slices loses every release
+  to waiters that stayed blocked. Entering once keeps its arrival position.
 - Tickets carry their owner's PID. A cancelled or killed step leaves an
-  orphaned ticket; the next head-of-line check reaps any ticket whose owner
-  PID is dead and whose mtime is older than 10 seconds (a live waiter touches
-  its ticket every loop, so the mtime guard skips mid-creation tickets and a
-  recycled PID alone is not enough to clear one).
-- On success the lock stays on fd 9 in the step shell, so it still releases
-  automatically at the step boundary — the helper changes acquisition order,
-  not release semantics. An EXIT/INT/TERM trap drops the ticket.
+  orphaned ticket; the next head-of-line check reaps a ticket whose owner
+  PID is dead and whose mtime is older than 10 seconds, and also one whose
+  mtime is older than 1800 seconds even if that PID was recycled to a live
+  process. A live waiter touches its ticket every loop, so a stale mtime
+  means the owner is gone and an untouched head cannot wedge an idle lock.
+- On success the ticket is removed immediately: a holder needs no place in
+  line once the kernel holds the lock, and a trap cannot see the helper's
+  local after `return`. The lock stays on fd 9 in the step shell, so it
+  still releases automatically at the step boundary — the helper changes
+  acquisition order, not release semantics.
 - On timeout the helper prints
   `::error::sdk-java host lock not acquired within N minutes as queue ticket S`
   and returns 1, keeping the existing error-message contract.
-- Wait observability: the helper prints its ticket number on the first wait
-  and at most once a minute after, which makes a hang attributable from the
-  log instead of silent.
+- Wait observability: the helper prints its ticket number and the remaining
+  budget on the first wait and at most once a minute after, which makes a
+  hang attributable from the log instead of silent.
+- Failing closed is worse than falling back here: `release-sdk-java.yml`
+  resumes an existing tag by checking out that immutable commit, which may
+  predate the helper. Both sites therefore fall back to the bare
+  `flock --wait 5400 9` lock they replaced when the helper file is absent,
+  rather than dying before Maven and wedging the release permanently.
 
 ### Why fairness over the alternatives
 

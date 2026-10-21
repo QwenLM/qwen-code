@@ -120,9 +120,11 @@ describe('SDK Java self-hosted workflow guards', () => {
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
     expect(block).toContain('sdk_java_lock_acquire 5400');
-    expect(readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8')).toContain(
-      'lock not acquired within',
-    );
+    // release-sdk-java.yml resumes an existing tag by checking out that
+    // immutable commit, which may predate this helper; the guarded bare-lock
+    // fallback keeps acquisition independent of the checkout's ref.
+    expect(block).toContain('flock --wait 5400 9');
+    expect(block).toContain('::error::sdk-java host lock not acquired within');
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -728,6 +730,12 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     const [step] = mavenSteps;
     expect(step.run).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
+    );
+    // Same ref-independence guard as the test job: a resumed release tag may
+    // predate the helper, so this site must also keep the bare-lock arm.
+    expect(step.run).toContain('flock --wait 5400 9');
+    expect(step.run).toContain(
+      '::error::sdk-java host lock not acquired within',
     );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock and waits behind this job, so one

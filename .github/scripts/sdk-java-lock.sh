@@ -34,7 +34,7 @@ sdk_java_lock_acquire() {
   : >"${ticket}"
   exec 8>&-
 
-  local start=${SECONDS} head name pid mtime age remaining announced=0
+  local start=${SECONDS} head name pid mtime age remaining last_log=-60
   while true; do
     # Drop owners that are gone. A live waiter re-touches every loop, so a
     # stale mtime means the owner is gone even when its PID was recycled to a
@@ -58,19 +58,19 @@ sdk_java_lock_acquire() {
     head=$(printf '%s\n' "${queue}/"* | grep -v '/\.seq$' | sort | sed -n '1p')
     remaining=$((wait_seconds - (SECONDS - start)))
     ((remaining < 0)) && remaining=0
-    # Head of line: block inside the kernel's wake race like the legacy
-    # inline `flock --wait` waiters still run elsewhere, in five-second slices
-    # so the budget stays sharp.
+    # Head of line: one blocking wait, so this ticket enters the kernel's
+    # wait queue once and keeps its arrival position. Re-entering every few
+    # seconds would put it behind every waiter that stayed blocked.
     if [[ ${head} == "${ticket}" && ${remaining} -gt 0 ]] \
-      && flock --wait "$((remaining < 5 ? remaining : 5))" 9; then
+      && flock --wait "${remaining}" 9; then
       # Leave the queue at acquisition: a holder needs no place in line once
       # the kernel holds the lock, and a trap cannot see this `local` anyway.
       rm -f "${ticket}"
       return 0
     fi
-    if ((!announced)); then
-      announced=1
-      echo "Waiting for the sdk-java host lock as queue ticket ${seq}"
+    if ((SECONDS - start - last_log >= 60)); then
+      last_log=$((SECONDS - start))
+      echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${remaining}s left in a ${wait_seconds}s budget)"
     fi
     if ((SECONDS - start >= wait_seconds)); then
       rm -f "${ticket}"
