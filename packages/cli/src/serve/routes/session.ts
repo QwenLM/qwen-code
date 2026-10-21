@@ -163,6 +163,10 @@ import {
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
+import {
+  readWorkspaceArtifactLibrary,
+  removeWorkspaceLibraryArtifact,
+} from '../server/session-artifact-library.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -309,6 +313,7 @@ interface RegisterSessionRoutesDeps {
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable?: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
@@ -7297,6 +7302,88 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  // Persisted workspace management neither borrows a session client identity
+  // nor loads cold sessions.
+  for (const operation of ['read', 'remove'] as const) {
+    const route =
+      '/workspaces/:workspace/session/:id/artifact-library' +
+      (operation === 'remove' ? '/:artifactId' : '');
+    const handler: RequestHandler = async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [sessionId],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const run = async () => {
+          assertOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return undefined;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return undefined;
+          }
+          if (liveOwner.kind === 'found' && liveOwner.runtime !== runtime) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return undefined;
+          }
+          const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
+            operation === 'read'
+              ? readWorkspaceArtifactLibrary(runtime, sessionId)
+              : removeWorkspaceLibraryArtifact(
+                  runtime,
+                  sessionId,
+                  req.params['artifactId']!,
+                  () => assertOpen?.(),
+                ),
+          );
+          assertOpen?.();
+          return result;
+        };
+        const result = await runOwnerRuntimeActivity(runtime, () =>
+          operation === 'read'
+            ? archiveCoordinator.runSharedMany([sessionId], run)
+            : archiveCoordinator.runExclusiveMany([sessionId], run),
+        );
+        if (result)
+          res.status(200).set('Cache-Control', 'no-store').json(result);
+      } catch (error) {
+        if (sendArtifactValidationError(res, error)) return;
+        sendBridgeError(res, error, { route, sessionId });
+      }
+    };
+    if (operation === 'read') app.get(route, handler);
+    else app.delete(route, mutate({ strict: true }), handler);
+  }
 
   app.get(
     '/session/:id/artifacts',

@@ -2647,9 +2647,9 @@ describe('standalone release packaging', () => {
     }
   });
 
-  itOnUnix(
-    'fails the release build when a node-pty prebuild is missing',
-    () => {
+  itOnUnix.each(['node', 'bun'])(
+    'fails the release build when a node-pty prebuild is missing under %s',
+    (runtime) => {
       const createdDist = ensureMinimalDist();
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
@@ -2666,6 +2666,7 @@ describe('standalone release packaging', () => {
             {},
             {
               nativeModulesDir,
+              runtime,
               env: { QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '1' },
             },
           ),
@@ -2773,6 +2774,46 @@ describe('standalone release packaging', () => {
     },
   );
 
+  itWithZip('omits node-pty only from the win-x64 bun archive', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    try {
+      const nativeModulesDir = createFakeNodePtyModules(tmpDir, {
+        prebuildDirName: 'win32-x64',
+        clipboard: '@teddyzhu/clipboard-win32-x64-msvc',
+      });
+      const archive = packageFakeStandalone(
+        tmpDir,
+        {},
+        {
+          nativeModulesDir,
+          runtime: 'bun',
+          target: 'win-x64',
+          nodeArchive: createFakeBunArchive(tmpDir, { target: 'win-x64' }),
+          env: { QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '1' },
+        },
+      );
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      extractZipForTest(archive, extractDir);
+      const scope = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@lydell',
+      );
+      expect(existsSync(path.join(scope, 'node-pty'))).toBe(false);
+      expect(existsSync(path.join(scope, 'node-pty-win32-x64'))).toBe(false);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'bun', 'bun.exe')),
+      ).toBe(true);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   itOnUnix(
     'packages the bun flavor as an opentui-preview archive with a renderer-default shim',
     () => {
@@ -2780,6 +2821,7 @@ describe('standalone release packaging', () => {
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
       try {
+        const nativeModulesDir = createFakeNodePtyModules(tmpDir);
         const bunOutDir = path.join(tmpDir, 'out-bun');
         mkdirSync(bunOutDir, { recursive: true });
         execFileSync(
@@ -2796,8 +2838,16 @@ describe('standalone release packaging', () => {
             '0.0.0-smoke',
             '--runtime',
             'bun',
+            '--native-modules-dir',
+            nativeModulesDir,
           ],
-          { stdio: 'pipe' },
+          {
+            stdio: 'pipe',
+            env: {
+              ...process.env,
+              QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD: '',
+            },
+          },
         );
 
         const archive = path.join(
@@ -2811,6 +2861,26 @@ describe('standalone release packaging', () => {
         });
 
         const packageRoot = path.join(extractDir, 'qwen-code');
+        const ptyScope = path.join(
+          packageRoot,
+          'lib',
+          'node_modules',
+          '@lydell',
+        );
+        expect(
+          existsSync(path.join(ptyScope, 'node-pty', 'lib', 'index.js')),
+        ).toBe(true);
+        expect(
+          readScript(
+            path.join(
+              ptyScope,
+              'node-pty-linux-x64',
+              'prebuilds',
+              'linux-x64',
+              'pty.node',
+            ),
+          ),
+        ).toBe('native\n');
         const shim = readScript(path.join(packageRoot, 'bin', 'qwen'));
         expect(shim).toContain(
           'export QWEN_TUI_RENDERER="${QWEN_TUI_RENDERER:-opentui}"',
@@ -5362,14 +5432,23 @@ function createFakeNodeArchive(tmpDir, options = {}) {
   return archive;
 }
 
-function createFakeBunArchive(tmpDir) {
-  const fakeBunDir = path.join(tmpDir, 'bun-linux-x64');
-  mkdirSync(path.join(fakeBunDir, 'bin'), { recursive: true });
-  writeFileSync(
-    path.join(fakeBunDir, 'bin', 'bun'),
-    '#!/usr/bin/env sh\necho 1.3.14\n',
+function createFakeBunArchive(tmpDir, { target = 'linux-x64' } = {}) {
+  const fakeBunDir = path.join(
+    tmpDir,
+    target === 'win-x64' ? 'bun-windows-x64' : 'bun-linux-x64',
   );
-  chmodSync(path.join(fakeBunDir, 'bin', 'bun'), 0o755);
+  const binary =
+    target === 'win-x64'
+      ? path.join(fakeBunDir, 'bun.exe')
+      : path.join(fakeBunDir, 'bin', 'bun');
+  mkdirSync(path.dirname(binary), { recursive: true });
+  writeFileSync(binary, '#!/usr/bin/env sh\necho 1.3.14\n');
+  chmodSync(binary, 0o755);
+  if (target === 'win-x64') {
+    const archive = path.join(tmpDir, 'bun-windows-x64.zip');
+    createZipForTest(archive, tmpDir, path.basename(fakeBunDir));
+    return archive;
+  }
 
   const archive = path.join(tmpDir, 'bun-linux-x64.tar.gz');
   execFileSync(
@@ -5620,7 +5699,13 @@ function extractZipForTest(archive, destination) {
 function packageFakeStandalone(
   tmpDir,
   nodeArchiveOptions = {},
-  { nativeModulesDir, env, target = 'linux-x64', nodeArchive } = {},
+  {
+    nativeModulesDir,
+    env,
+    target = 'linux-x64',
+    nodeArchive,
+    runtime = 'node',
+  } = {},
 ) {
   const outDir = path.join(tmpDir, 'out');
   mkdirSync(outDir, { recursive: true });
@@ -5629,7 +5714,10 @@ function packageFakeStandalone(
     '--target',
     target,
     '--node-archive',
-    nodeArchive || createFakeNodeArchive(tmpDir, nodeArchiveOptions),
+    nodeArchive ||
+      (runtime === 'bun'
+        ? createFakeBunArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir, nodeArchiveOptions)),
     '--out-dir',
     outDir,
     '--version',
@@ -5638,12 +5726,14 @@ function packageFakeStandalone(
   if (nativeModulesDir) {
     args.push('--native-modules-dir', nativeModulesDir);
   }
+  if (runtime === 'bun') args.push('--runtime', runtime);
   execFileSync('node', args, {
     stdio: 'pipe',
     env: { ...process.env, ...env },
   });
   const extension = target === 'win-x64' ? 'zip' : 'tar.gz';
-  return path.join(outDir, `qwen-code-${target}.${extension}`);
+  const flavor = runtime === 'bun' ? '-opentui-preview' : '';
+  return path.join(outDir, `qwen-code-${target}${flavor}.${extension}`);
 }
 
 function createFakeClipboardModules(tmpDir, nativePackages) {
