@@ -3179,6 +3179,60 @@ describe('PermissionManager.removePersistentRule', () => {
     expect(pm.removePersistentRule('Agent(review)', 'deny')).toBe(false);
     expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
   });
+
+  it('requires the exact stored raw, so a padded argument does not match', async () => {
+    // Deliberate contract pin: `parseRule` stores the trimmed raw while this
+    // method compares the caller's argument with `===`, so a padded argument
+    // is a no-op even though `addPersistentRule` accepts it. Pinned here so
+    // the asymmetry is a written-down choice rather than an accident.
+    const pm = makePm({ permissionsAllow: ['Agent(review)'] });
+
+    expect(pm.removePersistentRule(' Agent(review) ', 'allow')).toBe(false);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+  });
+
+  it('removes only the first of two identical raw rules', async () => {
+    // Seeding through config bypasses `addPersistentRule`'s raw dedupe: cli
+    // `config.ts` concatenates `permissions.allow` with the deprecated
+    // `tools.allowed`, so one raw can arrive twice.
+    const pm = makePm({
+      permissionsAllow: ['Agent(review)', 'Agent(review)'],
+    });
+    expect(pm.listRules().filter((r) => r.type === 'allow')).toHaveLength(2);
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    // The surviving copy still auto-approves.
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.listRules().filter((r) => r.type === 'allow')).toHaveLength(1);
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+  });
+
+  it('cannot reach a rule AUTO mode has stashed, until it is restored', async () => {
+    // Deliberate contract pin: `initialize()` strips the wildcard into
+    // `strippedAllowRules.persistent`, which this method does not scan, so it
+    // reports false while the grant is still live after `restoreDangerousRules`.
+    const pm = makePm({
+      approvalMode: 'auto',
+      permissionsAllow: ['Bash(python:*)'],
+    });
+    expect(
+      pm.getStrippedDangerousRules()?.persistent.map((r) => r.raw),
+    ).toEqual(['Bash(python:*)']);
+    expect(await pm.evaluate(sh('python foo.py'))).toBe('ask');
+
+    expect(pm.removePersistentRule('Bash(python:*)', 'allow')).toBe(false);
+    expect(
+      pm.getStrippedDangerousRules()?.persistent.map((r) => r.raw),
+    ).toEqual(['Bash(python:*)']);
+
+    pm.restoreDangerousRules();
+    expect(await pm.evaluate(sh('python foo.py'))).toBe('allow');
+  });
 });
 
 // ─── PermissionManager.findMatchingDenyRule ──────────────────────────────────
