@@ -793,10 +793,14 @@ describe('AnthropicContentGenerator', () => {
         ['experimental-x'],
         [SCOPE_BETA],
       ],
+      // Retention and cache scope are independent converter spreads, so a 1h
+      // body without the opt-in must not pull the scope beta along — the
+      // mixed shape 400s on a session's first prompt (issue #15039).
       [
         'sends extended-cache-ttl-2025-04-11 when cacheRetention is "1h"',
         { reasoning: false, cacheRetention: '1h' },
         [TTL_BETA],
+        [SCOPE_BETA],
       ],
       [
         'omits extended-cache-ttl-2025-04-11 when cacheRetention is unset (ephemeral default)',
@@ -893,14 +897,19 @@ describe('AnthropicContentGenerator', () => {
     it('ships the cache-scope beta when only tools (no systemInstruction) carry scope:"global"', async () => {
       // Two tools and no systemInstruction: only tools[1] carries
       // scope:'global', so the body-scan must walk past the unmarked
-      // tools[0] to find it.
-      const { headers } = await send(
+      // tools[0] to find it. Pin that shape — the converter marks exactly
+      // one anchor because the four-breakpoint cap rules out marking every
+      // tool of a real session (issue #15039).
+      const { req, headers } = await send(
         base({ reasoning: false, forceGlobalCacheScope: true }),
         {
           contents: 'Hi',
           config: { tools: twoTools() },
         },
       );
+      expect(req.tools).toHaveLength(2);
+      expect(req.tools?.[0]).not.toHaveProperty('cache_control');
+      expect(req.tools?.[1]?.cache_control).toEqual(GLOBAL_CACHE);
       expect(headers['anthropic-beta']).toBe(SCOPE_BETA);
     });
 
