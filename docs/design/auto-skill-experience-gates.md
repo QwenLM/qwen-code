@@ -40,6 +40,11 @@ even if a PostToolUse hook subsequently denies the result or the call settles
 cancelled after execution started. Denied and cancelled results remain excluded
 from experience accounting and unstarted writes do not set protection. Cancelled
 executions reserve their completion IDs so replay cannot renew skill protection.
+ACP marks code-mode nested and MCP App completions as non-model-facing. They do
+not create pending experience records, recent-tool hints or ordinary call-ID
+reservations, since no top-level model response can accept them. Local skill
+writes still set protection and reserve their IDs to prevent replay from renewing
+it; these intentional reservations last until the session resets.
 
 Stream ID normalization also reserves the client's session-level recorded
 completion IDs, not just IDs in current history. Compression and rewind/restore
@@ -124,8 +129,11 @@ session-switch controls permit ID reuse in a new session. ACP iterator failures
 before and after the first chunk retain exactly-once result acceptance. ACP
 cancellation tests cover unstarted, execution-stage and post-execution outcomes;
 a post-execution skill write still sets protection and reserves its call ID
-without contributing experience or recent-tool hints. No new shell
-process-cancellation semantics are introduced.
+without contributing experience or recent-tool hints. Nested read and ordinary
+write calls, and MCP App calls, leave no pending records or ordinary reservations;
+only their model-facing parent results count. Nested skill writes retain protection
+and their ID without a pending record, including cancelled or hook-denied writes.
+No new shell process-cancellation semantics are introduced.
 
 ## Risks and open questions
 

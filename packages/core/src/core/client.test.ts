@@ -11016,6 +11016,47 @@ Other open files:
         },
       );
 
+      it.each(['success', 'error', 'cancelled', 'not_started'] as const)(
+        'retains only skill protection for non-model-facing writes (%s)',
+        (executionStatus) => {
+          vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+            '/project',
+          );
+          client.recordCompletedToolCall(
+            'write_file',
+            { file_path: '/project/example.txt' },
+            {
+              ...completedOutcome('local-write'),
+              executionStatus,
+              modelFacing: false,
+            },
+          );
+          expect(client['recordedExperienceCallIds'].size).toBe(0);
+          expect(client['skillsModifiedInSession']).toBe(false);
+
+          const response: CompletedToolOutcome = {
+            ...completedOutcome('local-skill-write'),
+            executionStatus,
+            modelFacing: false,
+            errorType: ToolErrorType.EXECUTION_DENIED,
+          };
+          const args = { file_path: '/project/.qwen/skills/example/SKILL.md' };
+          client.recordCompletedToolCall('write_file', args, response);
+          expect(client['skillsModifiedInSession']).toBe(
+            executionStatus !== 'not_started',
+          );
+          expect([...client['recordedExperienceCallIds']]).toEqual(
+            executionStatus === 'not_started' ? [] : ['local-skill-write'],
+          );
+          client['skillsModifiedInSession'] = false;
+          client.recordCompletedToolCall('write_file', args, response);
+          expect(client['skillsModifiedInSession']).toBe(false);
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+          expect(client['toolCallCount']).toBe(0);
+          expect(client['recentCompletedToolNames']).toEqual([]);
+        },
+      );
+
       it('counts completed calls only after their results are accepted, once', async () => {
         client.recordCompletedToolCall(
           'read_file',

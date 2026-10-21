@@ -1481,6 +1481,19 @@ describe('Session', () => {
       return { raw, callTool, tool, registry };
     }
 
+    it('does not retain experience records for MCP App calls', async () => {
+      const { raw } = installAppTool();
+      const realClient = new core.LlmClient(mockConfig);
+      mockLlmClient.recordCompletedToolCall.mockImplementation(
+        realClient.recordCompletedToolCall.bind(realClient),
+      );
+
+      expect(await session.callMcpAppTool('app-only', request)).toEqual(raw);
+      expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+      expect(realClient['recordedExperienceCallIds'].size).toBe(0);
+      expect(realClient['toolCallCount']).toBe(0);
+    });
+
     it('requests permission and returns raw data only to the App', async () => {
       const { raw, callTool, tool } = installAppTool();
       const buildForApp = vi.spyOn(tool, 'buildForApp');
@@ -46289,6 +46302,40 @@ describe('Session', () => {
           .fn()
           .mockReturnValue(core.ToolMode.CodeModeOnly);
       });
+
+      it.each([
+        ['read_file', '/repo/example.txt', false],
+        ['write_file', '/repo/example.txt', false],
+        ['write_file', '/repo/.qwen/skills/example/SKILL.md', true],
+      ] as const)(
+        'retains only parent experience and skill-write protection for nested %s at %s',
+        async (name, filePath, skillWrite) => {
+          const realClient = new core.LlmClient(mockConfig);
+          mockLlmClient.recordCompletedToolCall.mockImplementation(
+            realClient.recordCompletedToolCall.bind(realClient),
+          );
+          const nested = nestedTool(name, core.Kind.Read, async () =>
+            output('nested result'),
+          );
+          const result = await runCode([nested], (runtime, signal) =>
+            runtime.dispatch(name, { file_path: filePath }, signal),
+          );
+
+          expect([...realClient['pendingExperienceOutcomes'].keys()]).toEqual([
+            'exec-parent',
+          ]);
+          expect([...realClient['recordedExperienceCallIds']]).toEqual(
+            skillWrite
+              ? ['exec-parent:code:1', 'exec-parent']
+              : ['exec-parent'],
+          );
+          expect(realClient['skillsModifiedInSession']).toBe(skillWrite);
+          realClient.acceptCompletedToolResults(result.parts);
+          realClient.acceptCompletedToolResults(result.parts);
+          expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+          expect(realClient['toolCallCount']).toBe(1);
+        },
+      );
 
       it('overlaps safe calls and keeps reversed results and persistence with their call IDs', async () => {
         const started = [deferred(), deferred()];

@@ -17845,6 +17845,7 @@ export class Session implements SessionContext {
               ? new Error(spanError ?? 'Tool execution failed')
               : undefined,
           status: terminalStatus,
+          modelFacing: !codeModeContext && !appExecution,
           errorType: terminalErrorType ?? executionErrorType,
           resultDisplay: completedResultDisplay,
         });

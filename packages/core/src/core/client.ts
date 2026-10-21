@@ -3364,7 +3364,9 @@ export class LlmClient {
       response.executionStatus === 'error' ||
       response.executionStatus === 'cancelled'
     ) {
-      this.recordedExperienceCallIds.add(response.callId);
+      if (response.modelFacing !== false) {
+        this.recordedExperienceCallIds.add(response.callId);
+      }
       // Cancellation cannot undo a skill write that already reached disk.
       if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
         const filePath =
@@ -3374,10 +3376,12 @@ export class LlmClient {
           isProjectSkillPath(filePath, this.config.getProjectRoot())
         ) {
           this.skillsModifiedInSession = true;
+          this.recordedExperienceCallIds.add(response.callId);
         }
       }
     }
     if (
+      response.modelFacing === false ||
       response.status === 'cancelled' ||
       response.executionStatus === 'cancelled'
     )
