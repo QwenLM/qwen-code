@@ -1040,6 +1040,34 @@ export function WorkspaceBindingCreator({
     }
   }
 
+  const suggestDirectories = useCallback(
+    async (prefix: string) => {
+      const { root, workspaceId } = directoryPicker!;
+      const clean = prefix.replace(/\/+$/, '') || '/';
+      if (workspaceId && clean !== root && !clean.startsWith(`${root}/`))
+        throw new Error(t('managed.workspaceDirectoryScope'));
+      const result = await binding.directories!(
+        workspaceId
+          ? {
+              workspaceId,
+              cwdRelative: clean.slice(root.length + 1) || '.',
+            }
+          : { localPath: clean },
+        { clientId, signal: commandLifetime.current?.signal },
+      );
+      return {
+        dir: workspaceId ? clean : result.root,
+        sep: '/',
+        truncated: result.truncated,
+        suggestions: result.directories.map((item) => ({
+          name: item.name,
+          path: `${workspaceId ? root : result.root.replace(/\/$/, '')}/${item.cwdRelative}`,
+        })),
+      };
+    },
+    [binding, clientId, directoryPicker, t],
+  );
+
   const sessionCreator = (
     <div
       className={`${directInput ? shellStyles.appChatEmpty : ''} flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2`}
@@ -1712,34 +1740,7 @@ export function WorkspaceBindingCreator({
             if (pendingWorkspaceRef.current) setWorkspaceDialogOpen(true);
             else onWorkspaceCreationOpenChange?.(false);
           }}
-          onSuggest={async (prefix) => {
-            const root = directoryPicker.root;
-            const clean = prefix.replace(/\/+$/, '') || '/';
-            if (
-              directoryPicker.workspaceId &&
-              clean !== root &&
-              !clean.startsWith(`${root}/`)
-            )
-              throw new Error(t('managed.workspaceDirectoryScope'));
-            const result = await binding.directories!(
-              directoryPicker.workspaceId
-                ? {
-                    workspaceId: directoryPicker.workspaceId,
-                    cwdRelative: clean.slice(root.length + 1) || '.',
-                  }
-                : { localPath: clean },
-              { clientId, signal: commandLifetime.current?.signal },
-            );
-            return {
-              dir: directoryPicker.workspaceId ? clean : result.root,
-              sep: '/',
-              truncated: result.truncated,
-              suggestions: result.directories.map((item) => ({
-                name: item.name,
-                path: `${directoryPicker.workspaceId ? root : result.root.replace(/\/$/, '')}/${item.cwdRelative}`,
-              })),
-            };
-          }}
+          onSuggest={suggestDirectories}
           onAdd={async (path, _persist, displayName) => {
             const root = directoryPicker.root;
             const clean = path.replace(/\/+$/, '') || '/';

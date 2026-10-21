@@ -1605,6 +1605,53 @@ describe('WorkspaceBindingCreator', () => {
     ).toBeNull();
   });
 
+  it.each([true, false])(
+    'keeps directory results visible across background renders (local import %s)',
+    async (localImport) => {
+      vi.useFakeTimers();
+      workspaceCreation();
+      const directories = vi.fn().mockResolvedValue({
+        root: '/projects',
+        cwdRelative: '.',
+        directories: [{ name: 'project', cwdRelative: 'project' }],
+        truncated: false,
+      });
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        directories,
+        list: vi.fn().mockResolvedValue({
+          data: [{ ...workspace, canSelectDirectory: true }],
+          defaultWorkspace: { ...workspace, canSelectDirectory: true },
+          supported: true,
+          canCreateWorkspace: true,
+          canSelectDirectory: true,
+          canImportLocalDirectory: localImport,
+        }),
+      };
+      await render();
+      await openWorkspaceCreation();
+      await click('Choose existing directory');
+      await act(async () => vi.advanceTimersByTimeAsync(150));
+      const list = document.querySelector('[role="listbox"]');
+      expect(list?.textContent).toContain('project');
+      const queries = directories.mock.calls.length;
+
+      await render();
+      expect(document.querySelector('[role="listbox"]')).toBe(list);
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(directories).toHaveBeenCalledTimes(queries);
+
+      await typeInput('add-workspace-path', '/projects/project/');
+      await act(async () => vi.advanceTimersByTimeAsync(150));
+      expect(directories).toHaveBeenLastCalledWith(
+        localImport
+          ? { localPath: '/projects/project' }
+          : { workspaceId: 'ws-a', cwdRelative: 'project' },
+        expect.objectContaining({ clientId: 'client-a' }),
+      );
+    },
+  );
+
   it('imports a local project without an authorized parent Workspace', async () => {
     const createWorkspace = workspaceCreation().mockResolvedValue({
       ...workspace,
