@@ -604,7 +604,12 @@ try {
     'abcd',
     'selection replacement is one undo step',
   );
-  await change(() => ui!.mockInput.pressKey('z', { ctrl: true, shift: true }));
+  const beforeRedo = decoded;
+  // Legacy mock input drops Shift for Ctrl+letters; CSI-u preserves it.
+  await change(() => {
+    ui!.renderer.stdin.emit('data', Buffer.from('\x1b[122;6u'));
+  });
+  assert.equal(decoded, beforeRedo + 1, 'Ctrl+Shift+Z decodes once');
   assert.equal(native.plainText, 'Zcd');
 
   await change(() => getComposerHandle()!.setText('abcd'));
