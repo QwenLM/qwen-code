@@ -13,6 +13,10 @@ input support this reminder. It is added to the model request separately from
 your displayed message. The next ordinary submission does not inherit it.
 Tool continuations and automatic retries do not add it again.
 
+Recalled history and Ink Vim register pastes remain unknown input, including
+after clearing the buffer or disabling Vim. Fresh Vim insert-mode input can
+still activate the reminder.
+
 `ultracode` ignores complete quoted/code spans and path-like tokens such as
 `ultracode.js`, `x-ultracode`, or `ultracode/file`. The existing `workflow`
 compatibility rule accepts standalone whitespace-separated words with edge

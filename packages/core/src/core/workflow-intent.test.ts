@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -16,6 +16,21 @@ import {
   detectWorkflowKeyword,
   resolveWorkflowIntent,
 } from './workflow-intent.js';
+
+const logDebug = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) => ({
+      ...actual.createDebugLogger(tag),
+      ...(tag === 'WORKFLOW_INTENT' ? { debug: logDebug } : {}),
+    }),
+  };
+});
+
+beforeEach(() => logDebug.mockClear());
 
 function fixture(
   options: {
@@ -126,9 +141,30 @@ describe('DW03: keyword matching', () => {
   it.each(ultracodeCases)('%s', (_id, text, expected) => {
     expect(detectUltracodeKeyword(text)).toBe(expected);
   });
+
+  it('handles many closed spans and a keyword before or after them', () => {
+    const quoted = '(ultracode) '.repeat(4096);
+    expect(detectUltracodeKeyword(quoted)).toBe(false);
+    expect(detectUltracodeKeyword(`${quoted}ultracode`)).toBe(true);
+    expect(detectUltracodeKeyword(`ultracode ${quoted}`)).toBe(true);
+  });
 });
 
 describe('DW03: workflow intent capability', () => {
+  it('traces a failed capability read without logging the human text', () => {
+    const { config } = fixture();
+    const error = new Error('registry unavailable');
+    vi.spyOn(config, 'getToolRegistry').mockImplementation(() => {
+      throw error;
+    });
+    const text = 'ultracode private human text';
+    expect(resolveWorkflowIntent(config, { text })).toBeNull();
+    expect(logDebug).toHaveBeenCalledWith(
+      'Workflow keyword intent unavailable:',
+      error,
+    );
+    expect(JSON.stringify(logDebug.mock.calls)).not.toContain(text);
+  });
   it('requires an explicit nonempty human input', () => {
     const { config } = fixture();
     expect(resolveWorkflowIntent(config, undefined)).toBeNull();

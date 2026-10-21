@@ -2028,8 +2028,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useLayoutEffect(() => {
     if (vimEnabled && buffer.text.length > 0) {
-      // Vim registers outlive buffer clears, so provenance cannot be recovered
-      // by pasting register contents and then disabling Vim.
+      // Vim edits cannot preserve Hook provenance. Register pastes separately
+      // invalidate human origin at the mutation site.
       submittedPromptProvenanceUnavailableRef.current = true;
     }
   }, [buffer.text, vimEnabled]);
@@ -3926,7 +3926,11 @@ export const AppContainer = (props: AppContainerProps) => {
     },
     [handleFinalSubmit],
   );
-  const { handleInput: vimHandleInput } = useVim(buffer, submitVimPrompt);
+  const { handleInput: vimHandleInput } = useVim(
+    buffer,
+    submitVimPrompt,
+    invalidateSubmittedPromptProvenance,
+  );
 
   /**
    * Determines if the input prompt should be active and accept user input.

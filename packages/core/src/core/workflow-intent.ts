@@ -17,6 +17,9 @@ import {
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
 import type { WorkflowTool } from '../tools/workflow/workflow.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('WORKFLOW_INTENT');
 
 export interface HumanPromptInput {
   readonly text: string;
@@ -80,9 +83,19 @@ export function detectUltracodeKeyword(text: string): boolean {
     }
   }
 
+  let quotedRangeIndex = 0;
   for (const match of text.matchAll(/\bultracode\b/gi)) {
     const index = match.index;
-    if (quotedRanges.some(([from, to]) => index >= from && index <= to)) {
+    while (
+      quotedRangeIndex < quotedRanges.length &&
+      quotedRanges[quotedRangeIndex][1] < index
+    ) {
+      quotedRangeIndex++;
+    }
+    if (
+      quotedRangeIndex < quotedRanges.length &&
+      quotedRanges[quotedRangeIndex][0] <= index
+    ) {
       continue;
     }
     const end = index + match[0].length;
@@ -173,7 +186,8 @@ export function resolveWorkflowIntent(
       trigger,
       reminder: `<system-reminder>\n${buildWorkflowSteeringNotice(surface, { trigger, bridgeWorkflowTool, nameOnly })}\n</system-reminder>`,
     };
-  } catch {
+  } catch (error) {
+    debugLogger.debug('Workflow keyword intent unavailable:', error);
     return null;
   }
 }

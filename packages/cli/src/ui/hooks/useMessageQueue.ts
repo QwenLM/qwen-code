@@ -26,6 +26,8 @@ export interface QueuedUserSubmission {
   kind: 'user';
   modelText: string;
   submittedPrompt?: string;
+  /** Editable user text; merged pastes can rename its placeholder IDs while
+   * submittedPrompt retains the original Hook declaration. */
   displayText?: string;
   humanInput?: HumanPromptInput;
   hasUnknownInput?: boolean;

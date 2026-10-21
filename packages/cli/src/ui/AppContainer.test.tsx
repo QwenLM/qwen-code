@@ -3570,6 +3570,56 @@ describe('AppContainer State Management', () => {
       });
     });
 
+    it.each([true, false])(
+      'keeps a Vim register paste unknown when Vim remains enabled: %s',
+      (keepVimEnabled) => {
+        const queue = vi.fn();
+        const raw = 'workflow recalled through a register';
+        mockedUseTextBuffer.mockReturnValue({ text: raw, setText: vi.fn() });
+        mockedUseVimModeState.mockReturnValue({
+          vimEnabled: true,
+          vimMode: 'NORMAL',
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+        });
+        const view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const onPaste = mockedUseVim.mock.calls.at(-1)?.[2] as () => void;
+        expect(onPaste).toBeTypeOf('function');
+        act(() => onPaste());
+        if (!keepVimEnabled) {
+          mockedUseVimModeState.mockReturnValue({
+            vimEnabled: false,
+            vimMode: 'NORMAL',
+          });
+          view.rerender(
+            <AppContainer
+              config={mockConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+        }
+        const submit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+          text: string,
+        ) => void;
+        act(() => submit(raw));
+        expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+          displayText: raw,
+          humanInput: undefined,
+        });
+      },
+    );
+
     it.each(['stash', 'reverse-search'])(
       'does not upgrade unknown %s text from composer metadata',
       (source) => {

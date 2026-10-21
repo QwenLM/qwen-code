@@ -151,6 +151,58 @@ describe(`DW03: ${renderer === 'opentui' ? 'OpenTUI' : 'Ink'} composer workflow 
     expect(counts()).toEqual([1, 0]);
   }, 120_000);
 
+  it.skipIf(renderer !== 'ink')(
+    'keeps recalled Vim register text unknown across buffer clears',
+    async () => {
+      await start(true);
+      session!.pressKey('i');
+      await session!.idle(300);
+      await session!.send('DW03_VIM_REGISTER workflow inspect');
+      await session!.waitForScreen(
+        (screen) => screen.includes('DW03_TUI_DONE_1'),
+        'fresh Vim keyword response',
+        45_000,
+      );
+      await session!.idle(500);
+      expect(counts()).toEqual([1]);
+      session!.pressKey('\x1b[A');
+      await session!.waitForScreen(
+        (screen) => (screen.match(/DW03_VIM_REGISTER/g)?.length ?? 0) >= 2,
+        'history recalled into the Vim buffer',
+        15_000,
+      );
+      session!.pressKey('\x1b');
+      await session!.idle(300);
+      session!.pressKey('d');
+      await session!.idle(100);
+      session!.pressKey('d');
+      await session!.idle(300);
+      for (const turn of [2, 3]) {
+        session!.pressKey('p');
+        await session!.idle(300);
+        session!.pressKey('\r');
+        await session!.waitForScreen(
+          (screen) => screen.includes(`DW03_TUI_DONE_${turn}`),
+          'register paste response',
+          45_000,
+        );
+        await session!.idle(500);
+        expect(counts()).toEqual(turn === 2 ? [1, 0] : [1, 0, 0]);
+      }
+      session!.pressKey('i');
+      await session!.idle(300);
+      await session!.send('DW03_VIM_FRESH ultracode: inspect');
+      await session!.waitForScreen(
+        (screen) => screen.includes('DW03_TUI_DONE_4'),
+        'fresh typing after the register paste',
+        45_000,
+      );
+      await session!.idle(500);
+      expect(counts()).toEqual([1, 0, 0, 1]);
+    },
+    120_000,
+  );
+
   it('preserves a literal leading envelope in display and recall (Vim on Ink)', async () => {
     await start(renderer === 'ink');
     const raw =

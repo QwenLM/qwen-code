@@ -7052,6 +7052,8 @@ export class Session implements SessionContext {
                 );
               }
             }
+            // ACP sends through LlmChat, bypassing LlmClient's injection.
+            // Resolve here before the interrupted-prompt reminder deduplication.
             const workflowIntent = resolveWorkflowIntent(
               this.config,
               workflowHumanInput,

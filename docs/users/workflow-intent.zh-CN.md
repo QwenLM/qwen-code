@@ -11,6 +11,9 @@ Ink 和 OpenTUI 的终端输入、IDE 编辑器输入框、Web Shell 输入框�
 提醒作为独立内容加入模型请求，显示的用户消息保持原文。下一次普通提交不会继承它。
 工具续段和自动重试不会再次添加提醒。
 
+历史召回和 Ink Vim 寄存器粘贴仍按 unknown 输入处理，清空缓冲区或关闭 Vim 后也不会
+恢复为新鲜人类输入。Vim 插入模式下的新输入仍可触发提醒。
+
 `ultracode` 排除完整引用、代码引用和路径形式的 token，例如 `ultracode.js`、
 `x-ultracode`、`ultracode/file`。已有 `workflow` 兼容规则接受按空白分隔、
 边缘带标点的独立词，例如 `(workflow)`，但不接受 `workflows` 或
