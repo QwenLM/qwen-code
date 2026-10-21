@@ -3191,6 +3191,8 @@ export class LocalManagedSessionAuthority {
       refs = [plan.planRef, plan.feedbackRef];
     } else if (domain === 'schedule') {
       refs = [parseScheduleRecord(record).promptRef];
+    } else if (domain === 'automation_run') {
+      refs = [parseAutomationRunRecord(record).gateOutputRef];
     } else if (domain === 'monitor_run') {
       const monitor = parseMonitorRun(record);
       refs = [

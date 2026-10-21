@@ -11,7 +11,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.lang.reflect.Constructor;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -64,6 +66,15 @@ public final class AutomationHarnessFake {
     /** The definition summary each committed mutation operation answered. */
     private final Map<String, Map<String, Object>> mutations =
             new LinkedHashMap<>();
+    /**
+     * A test seam: how the next fires of gated definitions decide, in order
+     * (`quiet`, `delivered`, `failed`, `blocked` or `unknown`, optionally
+     * `outcome:detail`); an empty queue delivers.
+     */
+    public final Deque<String> gateAnswers = new ArrayDeque<>();
+    /** The gate probes the fake ran, as `scheduleId|occurrenceKey`. */
+    public final List<String> probes = new ArrayList<>();
+
     /** A test seam: thrown once by the next fire_run, then cleared. */
     public volatile RuntimeException failNextFire;
     /** A test seam: the next fire_run commits its run, then loses its answer. */
@@ -241,6 +252,26 @@ public final class AutomationHarnessFake {
                 if (offered != (Long) schedule.get("definitionRevision")) {
                     throw refusal(409, "automation_revision_stale");
                 }
+                Map<String, Object> gate = null;
+                if (schedule.get("gate") instanceof String) {
+                    // The probe runs before any claim, under identities
+                    // derived from the occurrence; only a delivery claims.
+                    probes.add(scheduleId + "|" + occurrenceKey);
+                    String scripted = gateAnswers.pollFirst();
+                    String outcome = scripted == null ? "delivered"
+                            : scripted.split(":", 2)[0];
+                    gate = new LinkedHashMap<>();
+                    gate.put("outcome", outcome);
+                    if (scripted != null && scripted.contains(":")) {
+                        gate.put("detail", scripted.split(":", 2)[1]);
+                    }
+                    if (!"delivered".equals(outcome)) {
+                        result.put("run", null);
+                        result.put("replayed", false);
+                        result.put("gate", gate);
+                        break;
+                    }
+                }
                 Map<String, Object> run = runs.computeIfAbsent(
                         sessionId + "|" + runId, ignored -> {
                             Map<String, Object> created = new LinkedHashMap<>();
@@ -261,6 +292,9 @@ public final class AutomationHarnessFake {
                 result.put("inputId", AutomationLedgerStore
                         .automationInputId(runId));
                 result.put("replayed", false);
+                if (gate != null) {
+                    result.put("gate", gate);
+                }
             }
             case "reconcile_run" -> {
                 RuntimeException failure = failNextReconcile;
@@ -315,7 +349,7 @@ public final class AutomationHarnessFake {
     /** The definition's field set, shared by apply, replayCheck and digest. */
     private static final List<String> DEFINITION_FIELDS = List.of("goal",
             "cron", "timezone", "sessionMode", "overlap", "catchUp",
-            "catchUpLimit", "enabled", "prompt");
+            "catchUpLimit", "enabled", "prompt", "gate");
 
     private static void apply(Map<String, Object> schedule,
             Map<?, ?> definition) {

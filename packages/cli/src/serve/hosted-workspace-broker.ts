@@ -336,6 +336,56 @@ export class HostedWorkspaceBroker {
     return id;
   }
 
+  /**
+   * A reservation that may already be settled: the managed automation gate
+   * derives its call id from the occurrence, so a retried fire prepares the
+   * same key again. The Broker answers a terminal record under that key
+   * with the identical reference as that record, and this reads its settled
+   * result back instead of refusing the non-fresh state as `prepare` does.
+   */
+  async prepareReplayable(
+    callId: string,
+    digest: string,
+  ): Promise<{
+    executionCallId: string;
+    settled?: ManagedToolResultPayload;
+  }> {
+    const reservation = {
+      idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
+      turnId: this.identity.runtimeSessionId,
+      toolCallId: callId,
+      requestDigest: digest,
+      reference: {
+        sessionId: this.identity.runtimeSessionId,
+        promptId: this.identity.runtimeSessionId,
+        callId,
+        argsDigest: digest,
+      },
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request('/executions:prepare', reservation);
+    } catch (cause) {
+      if (
+        !(cause instanceof TypeError) &&
+        !(cause instanceof DOMException && cause.name === 'TimeoutError')
+      )
+        throw cause;
+      response = await this.request('/executions:prepare', reservation);
+    }
+    const id = response['executionCallId'];
+    if (typeof id !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/u.test(id))
+      throw new Error('Hosted Workspace Broker did not name the execution.');
+    const status = object(response['status']);
+    if (status['state'] === 'prepared') return { executionCallId: id };
+    if (status['state'] === 'settled') {
+      return { executionCallId: id, settled: settledResult(status) };
+    }
+    throw new Error(
+      'Hosted Workspace Broker answered a reservation that is neither fresh nor settled.',
+    );
+  }
+
   async prepareV3(
     callId: string,
     argsDigest: string,
@@ -1002,6 +1052,25 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime Broker response identity changed.');
     return parsed;
   }
+}
+
+/** The settled result of an execution status, in Tool v2's shape. */
+function settledResult(
+  status: Record<string, unknown>,
+): ManagedToolResultPayload {
+  const result = object(status['result']);
+  if (
+    !['success', 'error', 'cancelled', 'not_started'].includes(
+      String(result['executionStatus']),
+    ) ||
+    (result['responseParts'] !== undefined &&
+      !Array.isArray(result['responseParts']))
+  )
+    throw new Error('Runtime execution result is invalid.');
+  return {
+    ...result,
+    responseParts: result['responseParts'] ?? [],
+  } as unknown as ManagedToolResultPayload;
 }
 
 /**

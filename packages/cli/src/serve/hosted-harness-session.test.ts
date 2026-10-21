@@ -3348,7 +3348,7 @@ describe('Hosted Harness no-tool session', () => {
         trigger: 'scheduled',
         firedAt: Date.parse('2026-03-08T07:00:05Z'),
       });
-      if (cancel) await automations.requestCancel(fired.run.automationRunId);
+      if (cancel) await automations.requestCancel(fired.run!.automationRunId);
       return fired.inputId;
     } finally {
       await managed.close().catch(() => undefined);
@@ -3439,7 +3439,7 @@ describe('Hosted Harness no-tool session', () => {
         daemonPromptId: fired.inputId,
         message: { role: 'user', parts: [{ text: 'queued' }] },
       } as never);
-      if (cancel) await automations.requestCancel(fired.run.automationRunId);
+      if (cancel) await automations.requestCancel(fired.run!.automationRunId);
       return fired.inputId;
     } finally {
       await managed.close().catch(() => undefined);
@@ -21018,7 +21018,7 @@ describe('Hosted Harness no-tool session', () => {
       });
       const originalRun = managed.authority.extensionRecord(
         'automation_run',
-        queued.run.automationRunId,
+        queued.run!.automationRunId,
       );
       expect(originalRun).toBeDefined();
       const before = managed.authority.eventsInSequenceRange(
@@ -21093,7 +21093,10 @@ describe('Hosted Harness no-tool session', () => {
         ),
       ).toBe(false);
       expect(
-        authority.extensionRecord('automation_run', queued.run.automationRunId),
+        authority.extensionRecord(
+          'automation_run',
+          queued.run!.automationRunId,
+        ),
       ).toEqual(originalRun);
       expect(state.model).toHaveBeenCalledOnce();
       expect(state.model.mock.calls[0]?.[0].promptId).toBe(PROMPT_ID);

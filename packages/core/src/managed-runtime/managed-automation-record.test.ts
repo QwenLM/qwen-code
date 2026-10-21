@@ -133,6 +133,7 @@ describe('managed-automation-record/1 shared contract', () => {
         'definitionDigest',
         'definitionRevision',
         'enabled',
+        'gate',
         'goal',
         'kind',
         'overlap',
@@ -149,6 +150,7 @@ describe('managed-automation-record/1 shared contract', () => {
       [
         'automationRunId',
         'definitionRevision',
+        'gateOutputRef',
         'kind',
         'occurrenceKey',
         'run',
@@ -164,6 +166,7 @@ describe('managed-automation-record/1 shared contract', () => {
       [
         'automationRunId',
         'definitionRevision',
+        'gateOutputRef',
         'kind',
         'occurrenceKey',
         'scheduleId',

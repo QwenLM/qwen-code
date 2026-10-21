@@ -53,6 +53,10 @@ public class AutomationScanner {
     public static final String REASON_REVISION_STALE = "revision_stale";
     public static final String REASON_DEFINITION_RETIRED = "definition_retired";
     public static final String REASON_ANSWER_UNOBTAINABLE = "answer_unobtainable";
+    /** The gate probe withheld the fire (docs/design/2026-10-22-managed-automation-gate.md). */
+    public static final String REASON_GATE_QUIET = "gate_quiet";
+    public static final String REASON_GATE_FAILED = "gate_failed";
+    public static final String REASON_GATE_UNKNOWN = "gate_unknown";
     /** The fire route's refusal codes a retry can never change (R3-11). */
     private static final Set<String> DEFINITIVE_REFUSALS = Set.of(
             "invalid_automation_operation", "automation_mode_disabled",
@@ -441,9 +445,10 @@ public class AutomationScanner {
         body.put("occurrenceKey", occurrence.occurrenceKey());
         body.put("trigger", occurrence.trigger());
         body.put("firedAt", now);
+        Map<String, Object> answer;
         try {
-            harness.runAutomationOperation(row.tenantId(), row.sessionId(),
-                    body);
+            answer = harness.runAutomationOperation(row.tenantId(),
+                    row.sessionId(), body);
         } catch (DaemonHttpException error) {
             String code = errorCode(error);
             if ("automation_revision_stale".equals(code)) {
@@ -498,6 +503,29 @@ public class AutomationScanner {
                 return false;
             }
             throw error;
+        }
+        // A gated definition answers how its probe decided: only a delivery
+        // claimed a run; every other outcome settles the slot skipped under
+        // its own reason, with the detail, and moves the definition's
+        // gate status — nothing of it touched the journal.
+        if (answer != null && answer.get("gate") instanceof Map<?, ?> gate) {
+            String outcome = String.valueOf(gate.get("outcome"));
+            String detail = gate.get("detail") instanceof String text
+                    ? text : null;
+            store.recordGateOutcome(row, owner, fence, outcome, detail, now);
+            if (!AutomationLedgerStore.GATE_DELIVERED.equals(outcome)) {
+                String reason = switch (outcome) {
+                    case AutomationLedgerStore.GATE_QUIET -> REASON_GATE_QUIET;
+                    case AutomationLedgerStore.GATE_UNKNOWN ->
+                        REASON_GATE_UNKNOWN;
+                    default -> REASON_GATE_FAILED;
+                };
+                store.settleOccurrence(row.tenantId(), row.scheduleId(),
+                        occurrence.occurrenceKey(),
+                        AutomationLedgerStore.OUTCOME_SKIPPED, reason, detail,
+                        owner, fence, now);
+                return false;
+            }
         }
         return store.settleOccurrence(row.tenantId(), row.scheduleId(),
                 occurrence.occurrenceKey(), AutomationLedgerStore.OUTCOME_FIRED,

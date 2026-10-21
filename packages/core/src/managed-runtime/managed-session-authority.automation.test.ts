@@ -146,6 +146,7 @@ const definition: AutomationDefinition = Object.freeze({
   catchUp: 'none',
   catchUpLimit: null,
   enabled: true,
+  gate: null,
 });
 
 async function prompt(harness: Harness): Promise<ManagedSessionDurableRef> {

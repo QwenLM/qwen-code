@@ -264,7 +264,7 @@ E2E 计划：`.qwen/e2e-tests/2026-10-21-scheduled-task-gate.md`——在沙盒�
 2. **PR 1b**：daemon REST 路由、当前会话创建链路传递、`scheduledTaskGate` 能力、Web Shell 表单和卡片。
 3. **第 2 步**：探针——`qwen autofix-pr snapshot --gate`（延续 PR #15057，加入已报事件记录和 check rollup 翻页）以及仓库级探针，覆盖新开和被 push 的 PR，支持作者、draft、label 和评审请求过滤。
 4. **第 3 步**：skill——`/autofix-pr`（先 `--once`，再 watch 模式）和评审者监视，对每个事件运行 `/qreview` 或一次验证。
-5. **独立设计——托管自动化**：托管 schedule 记录上的 `gate`（TypeScript 与 Java 校验器、摘要、DTO、OpenAPI、契约夹具、一次 `ma_schedule` 迁移）、由 `fire_run` 在 claim 之前运行、带派生持久身份的 Runtime "gate probe" 操作、带失败连段的 `skipped/gate_quiet` 与 `skipped/gate_failed` occurrence、定义时审批，以及针对回复丢失、崩溃和未知结果的 FG11 风格故障门禁。
+5. **托管自动化**：托管 schedule 记录上的同一闸门，在 claim 之前作为 Runtime 探针、以从 occurrence 派生的身份运行——设计与实现见[Managed 自动化闸门](2026-10-22-managed-automation-gate.zh-CN.md)。
 
 ## 12. 待定问题
 

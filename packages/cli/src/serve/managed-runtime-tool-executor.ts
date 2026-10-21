@@ -27,6 +27,7 @@ import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
 import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
+import { ManagedAutomationGateTool } from './managed-automation-gate-tool.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -239,6 +240,9 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
+  // The managed automation gate probe: the Harness's own execution, never
+  // a model's (docs/design/2026-10-22-managed-automation-gate.md).
+  ManagedAutomationGateTool.Name,
 ]);
 
 /** Live background Shells one Session may hold, by the H3 design contract. */
@@ -2698,6 +2702,7 @@ export function createManagedToolSet(
           executionTimeoutMs: 5_000,
         }),
         new ShellTool(config),
+        new ManagedAutomationGateTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
   };

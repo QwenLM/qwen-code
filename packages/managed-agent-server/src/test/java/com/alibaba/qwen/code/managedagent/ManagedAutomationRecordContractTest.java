@@ -26,18 +26,19 @@ class ManagedAutomationRecordContractTest {
         assertEquals("managed-automation-record/1",
                 fixtures.required("contract").textValue());
         assertEquals(List.of("catchUp", "catchUpLimit", "cron",
-                "definitionDigest", "definitionRevision", "enabled", "goal",
-                "kind", "overlap", "ownerScopeId", "promptRef", "run",
+                "definitionDigest", "definitionRevision", "enabled", "gate",
+                "goal", "kind", "overlap", "ownerScopeId", "promptRef", "run",
                 "scheduleId", "sessionMode", "targetSessionId", "timezone"),
                 jsonList(fixtures.required("keys").required("schedule")));
-        assertEquals(List.of("automationRunId", "definitionRevision", "kind",
-                "occurrenceKey", "run", "scheduleId", "sessionMode",
-                "targetSessionId"),
+        assertEquals(List.of("automationRunId", "definitionRevision",
+                "gateOutputRef", "kind", "occurrenceKey", "run", "scheduleId",
+                "sessionMode", "targetSessionId"),
                 jsonList(fixtures.required("keys").required("automation_run")));
         assertEquals(List.of("kind", "ownerScopeId", "scheduleId"),
                 jsonList(fixtures.required("fixedKeys").required("schedule")));
-        assertEquals(List.of("automationRunId", "definitionRevision", "kind",
-                "occurrenceKey", "scheduleId", "sessionMode", "targetSessionId"),
+        assertEquals(List.of("automationRunId", "definitionRevision",
+                "gateOutputRef", "kind", "occurrenceKey", "scheduleId",
+                "sessionMode", "targetSessionId"),
                 jsonList(fixtures.required("fixedKeys").required("automation_run")));
         assertEquals(ManagedExtensionRecords.SCHEDULE_OVERLAP_POLICIES,
                 jsonList(fixtures.required("overlapPolicies")));

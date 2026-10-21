@@ -215,6 +215,7 @@ import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   AutomationNotFoundError,
   AutomationOperationConflictError,
+  AutomationGateUnsupportedError,
   AutomationQuotaError,
   AutomationRetiredError,
   AutomationRevisionStaleError,
@@ -222,6 +223,7 @@ import {
   isAutomationScheduleId,
   isAutomationTrigger,
 } from './hosted-automation-session.js';
+import { createHostedAutomationGateRunner } from './hosted-automation-gate.js';
 import {
   AUTOMATION_INPUT_SOURCE,
   automationInputId,
@@ -5334,6 +5336,24 @@ export function registerHostedHarnessSessionRoutes(
           sink: managed.sink,
         },
         managed.authority.sessionHeader.sessionKey,
+        {
+          // The gate probe runs in the Workspace Runtime through the
+          // Broker; a Harness without one blocks every gated fire.
+          ...(brokerOptions
+            ? {
+                gate: createHostedAutomationGateRunner({
+                  broker: {
+                    ...brokerOptions,
+                    lifecycleAuthority: () => session.lifecycle,
+                  },
+                  sessionKey: managed.authority.sessionHeader.sessionKey,
+                  toolProfile: () => session.toolProfile,
+                }),
+              }
+            : {}),
+          shellAvailable: () =>
+            isHostedWorkspaceShellProfile(session.toolProfile),
+        },
       );
       // H5b: every hosted Session owns its channel funnel — a channel input
       // needs no Runtime, and its reply plans from the settled turn alone.
@@ -11167,6 +11187,7 @@ export function registerHostedHarnessSessionRoutes(
       catchUp: schedule.catchUp,
       catchUpLimit: schedule.catchUpLimit,
       enabled: schedule.enabled,
+      gate: schedule.gate,
       state: schedule.run.state,
     });
     const runSummary = (run: AutomationRun) => ({
@@ -11243,9 +11264,12 @@ export function registerHostedHarnessSessionRoutes(
             firedAt: firedAt as number,
           });
           result = {
-            run: runSummary(fired.run),
-            inputId: fired.inputId,
+            // A gate that withheld the fire claimed nothing: no run.
+            ...(fired.run === undefined
+              ? { run: null }
+              : { run: runSummary(fired.run), inputId: fired.inputId }),
             replayed: fired.replayed,
+            ...(fired.gate === undefined ? {} : { gate: fired.gate }),
           };
           break;
         }
@@ -11367,6 +11391,14 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 404, 'automation_not_found', undefined, message);
       if (cause instanceof AutomationQuotaError)
         return error(res, 409, 'automation_count_limit', undefined, message);
+      if (cause instanceof AutomationGateUnsupportedError)
+        return error(
+          res,
+          409,
+          'automation_gate_unsupported',
+          undefined,
+          message,
+        );
       if (cause instanceof ManagedSessionModeGateError)
         return error(res, 409, 'automation_mode_disabled', undefined, message);
       // Typed classification, no message substrings: a dead writer is not a

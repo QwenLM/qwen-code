@@ -25,7 +25,10 @@ import { ToolNames } from '../tools/tool-names.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import {
+  backgroundsAnyPart,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
 import type { CronJob } from './cronScheduler.js';
 
@@ -101,6 +104,35 @@ async function unattendedVerdict(
   };
 }
 
+/** Longest gate command accepted by `cron_create`, the daemon routes and a
+ * managed definition. */
+export const MAX_CRON_GATE_CHARS = 2048;
+
+/**
+ * Why `gate` cannot be a gate command, or null when it can. Shared by every
+ * entry point so each refuses the same strings: empty or whitespace-only
+ * commands, commands past the cap, and anything backgrounded with `&` — a
+ * backgrounded gate returns at once with nothing on stdout, so every fire
+ * would be quiet. `backgroundsAnyPart` also looks inside a wrapper's script,
+ * behind a prefix too (`nohup bash -c './probe.sh &'`).
+ */
+export function gateCommandError(gate: unknown): string | null {
+  if (
+    typeof gate !== 'string' ||
+    gate.trim() === '' ||
+    normalizeMonitorCommand(gate).safetyCommand.trim() === ''
+  ) {
+    return 'must be a non-empty shell command';
+  }
+  if (gate.length > MAX_CRON_GATE_CHARS) {
+    return `must be at most ${MAX_CRON_GATE_CHARS} characters`;
+  }
+  if (backgroundsAnyPart(gate) || /(^|[^&])&\s*$/.test(gate.trim())) {
+    return 'must not background any part of the command with "&"';
+  }
+  return null;
+}
+
 /**
  * The `Monitor(...)` rule(s) that would let the gate run unattended. Derived
  * from the same normalized command the `cron_create` dialog offers and the
@@ -126,7 +158,11 @@ export async function suggestedGateRule(gate: string): Promise<string> {
  * `!{}` shell processor use. In the daemon that is the ACP child's `Config`,
  * so the command sees the workspace environment, not the daemon's.
  */
-export function createCronGateRunner(config: Config): CronGateRunner {
+export function createCronGateRunner(
+  config: Config,
+  options: { readonly timeoutMs?: number } = {},
+): CronGateRunner {
+  const timeoutMs = options.timeoutMs ?? CRON_GATE_TIMEOUT_MS;
   return async (gate, { signal, approvedInProcess }) => {
     const cwd = config.getTargetDir();
     const verdict = await unattendedVerdict(
@@ -144,7 +180,7 @@ export function createCronGateRunner(config: Config): CronGateRunner {
     }
 
     const startedAt = Date.now();
-    const timeout = AbortSignal.timeout(CRON_GATE_TIMEOUT_MS);
+    const timeout = AbortSignal.timeout(timeoutMs);
     const binary = new AbortController();
     const combined = AbortSignal.any([signal, timeout, binary.signal]);
     let stdout = '';
@@ -210,7 +246,7 @@ export function createCronGateRunner(config: Config): CronGateRunner {
     if (result.error) return failed(`could not start: ${result.error.message}`);
     if (binary.signal.aborted) return failed('printed binary output');
     if (timeout.aborted) {
-      return failed(`timed out after ${CRON_GATE_TIMEOUT_MS / 1000} s`);
+      return failed(`timed out after ${timeoutMs / 1000} s`);
     }
     if (result.aborted) return failed('was cancelled');
     if (result.exitCode !== 0) {
