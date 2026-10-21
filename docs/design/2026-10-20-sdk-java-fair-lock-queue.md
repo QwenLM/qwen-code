@@ -4,8 +4,9 @@
 
 ## Problem
 
-`.github/workflows/sdk-java.yml` serializes every self-hosted Maven step on one
-file, `~/.cache/qwen-code-ci/sdk-java-tests.lock`, via `flock --wait`. On
+`.github/workflows/sdk-java.yml` serializes the self-hosted Maven steps that
+share the host Maven cache on one file,
+`~/.cache/qwen-code-ci/sdk-java-tests.lock`, via `flock --wait`. On
 2026-10-18/19 and 2026-10-20 the shared ECS pool starved repeatedly: jobs
 waited the full 2400 s, then 3600 s, then 5400 s budget and failed before
 executing a test, on at least three physical hosts at once (#14566, #14743).
@@ -32,7 +33,8 @@ hold at a time — no constant budget bounds the queue.
 - Non-goal: reducing total occupancy. Sharding the lock by suite, capping
   registrations per host, or adding hosts are orthogonal and can follow;
   fairness makes their remaining work measurable instead of urgent.
-- Non-goal: changing the 5400 s budget or the 150/280-minute job ceilings.
+- Non-goal: changing the 5400 s wait budget or the fast tier's 150-minute
+  ceiling.
 
 ## Design
 
@@ -77,11 +79,29 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   `flock --wait 5400 9` lock they replaced when the helper file is absent,
   rather than dying before Maven and wedging the release permanently.
 
+### What the lock covers
+
+The lock covers the fast tier's Maven run, which resolves from the host-shared
+`~/.m2` repository. The `mysql-integration` lane resolves from a job-local
+repository seeded from that cache, so only its cache write-back takes the lock;
+its multi-hour `clean verify` does not. Holding the lock across that suite
+starved the fast tier deterministically: on 2026-10-21, run 39628985638's
+integration lane held it for about three hours while run 39593018205's
+fast-tier job burned its full 5400 s wait and failed before Maven started
+(issue #15108). The 5400 s budget and the fast tier's 150-minute ceiling are
+unchanged; the integration lane's ceiling moves from 200 to 300 minutes so
+the post-Maven write-back wait fits the same job bound, and the lane no longer
+contributes a multi-hour hold to the queue.
+
 ### Why fairness over the alternatives
 
 - Shard the lock by suite: reduces queue frequency but each shard is still a
   bare flock, and it rides on an untested assumption that concurrent suites
-  share the host safely on a pool that just OOMed a build.
+  share the host safely on a pool that just OOMed a build. The integration
+  lane is exempt from the long hold for the narrower reason above: its Maven
+  run is already isolated by a job-local repository and a per-job database,
+  and the pool's other long Maven suites (for example
+  `hosted-harness-mysql`) do not take this lock at all.
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
@@ -112,14 +132,18 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   with `flock` stubbed on `PATH`.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` now pins the sourced helper and
-  the `sdk_java_lock_acquire 5400` budget at each acquisition site, and the
-  `.size-baseline` records the workflow's new size.
+  the `sdk_java_lock_acquire 5400` budget at each acquisition site, including
+  that the integration site acquires only after both Maven runs and only
+  around the write-back, and the `.size-baseline` records the workflow's new
+  size.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
 ## Acceptance criteria
 
-- Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s.
+- Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
+  the integration site does so only for its shared-cache write-back, after
+  both Maven runs.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
