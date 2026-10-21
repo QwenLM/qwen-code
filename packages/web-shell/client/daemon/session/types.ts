@@ -411,6 +411,12 @@ export interface SendPromptOptions {
   submittedPrompt?: string;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  /**
+   * Existing transcript user block the admitted prompt binds to. Needed when
+   * `optimisticUserMessage: false` reuses the block a failed attempt already
+   * appended, so admission still has a block to bind.
+   */
+  bindBlockId?: string;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -436,7 +442,7 @@ export interface SendPromptOptions {
 }
 
 export interface SubmitPromptOptions
-  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source'> {
+  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source' | 'bindBlockId'> {
   sessionId?: string;
   signal?: AbortSignal;
 }

@@ -618,6 +618,7 @@ export interface DaemonUiSessionRewoundEvent extends DaemonUiEventBase {
   type: 'session.rewound';
   sessionId?: string;
   promptId: string;
+  daemonPromptId?: string;
   targetTurnIndex: number;
 }
 

@@ -119,9 +119,12 @@ Daemon-backed surfaces carry the existing admitted `daemonPromptId` on the
 checkpoint catalog and the rewind notification; `turnIndex` remains the raw
 snapshot position, including retry gaps and compressed prefixes. Recorder
 projections recover the association from existing records, and with recording
-disabled ACP retains it only for live file-history snapshots. Resolving that
-association in Web Shell, VS Code and the SDK is a separate change: this one
-changes what the daemon publishes, not how those clients resolve it.
+disabled ACP retains it only for live file-history snapshots. Web Shell and
+VS Code select a uniquely associated user block and checkpoint by this ID;
+the SDK applies the rewind notification at that block, not the raw index.
+Missing or ambiguous associations disable the target rather than guessing.
+Admission binds the existing optimistic block, including a failed submission
+reused by retry; no new transcript event or identity counter is needed.
 
 Acceptance requires the same legacy fixture to cut at its source record,
 identified turns to keep resolving, unlinked/ambiguous targets to refuse, and

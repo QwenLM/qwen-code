@@ -553,7 +553,16 @@ function applyDaemonTranscriptEvent(
       // transcript mutation.
       break;
     case 'session.rewound':
-      rewindTranscriptToUserTurn(next, event.targetTurnIndex);
+      if (event.daemonPromptId) {
+        const block = findDaemonRewindUserBlock(
+          next.blocks,
+          event.daemonPromptId,
+        );
+        if (block)
+          truncateTranscriptBeforeBlock(next, next.blocks.indexOf(block));
+      } else {
+        rewindTranscriptToUserTurn(next, event.targetTurnIndex);
+      }
       break;
     case 'session.branched':
       appendStatusBlock(
@@ -2143,9 +2152,22 @@ function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
   ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
-// Applies a daemon rewind event to this in-memory transcript only. The target
-// user turn and everything after it are removed so the rendered session view
-// matches the already-rewound backend state.
+export function findDaemonRewindUserBlock(
+  blocks: readonly DaemonTranscriptBlock[],
+  promptId: string,
+): DaemonTextTranscriptBlock | undefined {
+  // Injected mid-turn rows may share their owner's prompt ID.
+  const matches = blocks.filter(
+    (block): block is DaemonTextTranscriptBlock =>
+      block.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification' &&
+      block.meta?.['source'] !== 'mid_turn_message_injected' &&
+      block.promptId === promptId,
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+// Applies a legacy daemon rewind event to this in-memory transcript only.
 function rewindTranscriptToUserTurn(
   state: DaemonTranscriptState,
   targetTurnIndex: number,

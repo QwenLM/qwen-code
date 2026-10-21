@@ -7,8 +7,104 @@ import {
 } from '../src/daemon/ui/transcript.js';
 import type { DaemonUiEvent } from '../src/daemon/ui/types.js';
 import { matchTurnEvent } from '../src/daemon/DaemonClient.js';
+import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
 
 describe('daemon transcript rewind', () => {
+  it.each([2, 6])(
+    'rewinds by daemon identity instead of raw snapshot position %i',
+    (rawPosition) => {
+      const events: DaemonUiEvent[] = ['A', 'B', 'C'].flatMap((text) => [
+        { type: 'user.text.delta', text, promptId: `daemon-${text}` },
+        { type: 'assistant.text.delta', text: `${text} reply` },
+        { type: 'assistant.done' },
+      ]);
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        [
+          ...events,
+          ...normalizeDaemonEvent({
+            v: 1,
+            type: 'session_rewound',
+            data: {
+              sessionId: 'session',
+              promptId: 'session########7',
+              daemonPromptId: 'daemon-B',
+              targetTurnIndex: rawPosition,
+              filesChanged: [],
+              filesFailed: [],
+            },
+          }),
+        ],
+      );
+      expect(
+        state.blocks.map((block) => ('text' in block ? block.text : '')),
+      ).toEqual(['A', 'A reply']);
+    },
+  );
+
+  it.each(['missing', 'duplicate'])(
+    'does not truncate another user for a %s daemon association',
+    (kind) => {
+      const events: DaemonUiEvent[] = ['A', 'B', 'C'].flatMap((text) => [
+        {
+          type: 'user.text.delta',
+          text,
+          promptId:
+            kind === 'duplicate' && text === 'A'
+              ? 'daemon-B'
+              : `daemon-${text}`,
+        },
+        { type: 'assistant.text.delta', text: `${text} reply` },
+        { type: 'assistant.done' },
+      ]);
+      const before = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        events,
+      );
+      const after = reduceDaemonTranscriptEvents(before, [
+        {
+          type: 'session.rewound',
+          promptId: 'session########7',
+          daemonPromptId: kind === 'missing' ? 'absent' : 'daemon-B',
+          targetTurnIndex: 0,
+        },
+      ]);
+      expect(after.blocks).toEqual(before.blocks);
+    },
+  );
+
+  it('ignores injected rows sharing the ordinary target daemon identity', () => {
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'user.text.delta', text: 'A', promptId: 'daemon-A' },
+      { type: 'assistant.done' },
+      { type: 'user.text.delta', text: 'B', promptId: 'daemon-B' },
+      {
+        type: 'user.text.delta',
+        text: 'notification',
+        promptId: 'daemon-B',
+        meta: { source: 'background_notification', qwenDiscreteMessage: true },
+      },
+      {
+        type: 'user.text.delta',
+        text: 'injected',
+        promptId: 'daemon-B',
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+      {
+        type: 'session.rewound',
+        promptId: 'session########7',
+        daemonPromptId: 'daemon-B',
+        targetTurnIndex: 2,
+      },
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['A']);
+  });
+
   it('drops the target user turn and later transcript blocks', () => {
     const events: DaemonUiEvent[] = [
       { type: 'user.text.delta', text: 'first' },
