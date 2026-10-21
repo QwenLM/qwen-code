@@ -10,6 +10,7 @@ import {
   extensionConsentString,
   requestConsentOrFail,
   requestChoicePluginNonInteractive,
+  requestConsentNonInteractive,
 } from './consent.js';
 import type {
   ExtensionConfig,
@@ -30,6 +31,12 @@ vi.mock('../../i18n/index.js', () => ({
 }));
 
 vi.mock('prompts');
+
+const readlineMock = vi.hoisted(() => ({ createInterface: vi.fn() }));
+
+vi.mock('node:readline', () => ({
+  createInterface: readlineMock.createInterface,
+}));
 
 describe('extensionConsentString', () => {
   it('should include extension name', () => {
@@ -487,5 +494,62 @@ describe('requestChoicePluginNonInteractive', () => {
     await expect(
       requestChoicePluginNonInteractive(marketplace),
     ).rejects.toThrow('Plugin selection cancelled.');
+  });
+});
+
+describe('requestConsentNonInteractive', () => {
+  /**
+   * A stand-in for readline's Interface: `once`/`emit` plus the two calls the
+   * consent prompt makes. `answer === undefined` models stdin at EOF, where
+   * readline closes without ever invoking the question callback.
+   */
+  const fakeInterface = (answer: string | undefined) => {
+    const handlers = new Map<string, Array<() => void>>();
+    const fake = {
+      once(event: string, cb: () => void) {
+        handlers.set(event, [...(handlers.get(event) ?? []), cb]);
+        return fake;
+      },
+      emit(event: string) {
+        for (const cb of handlers.get(event) ?? []) cb();
+        handlers.delete(event);
+      },
+      question(_prompt: string, cb: (value: string) => void) {
+        setImmediate(() => {
+          if (answer === undefined) fake.emit('close');
+          else cb(answer);
+        });
+      },
+      close() {
+        fake.emit('close');
+      },
+    };
+    return fake;
+  };
+
+  beforeEach(() => {
+    readlineMock.createInterface.mockReset();
+  });
+
+  it('treats a closed stdin as a refusal instead of hanging into exit 0', async () => {
+    // `qwen extensions install` / `link` under a non-interactive stdin: the
+    // prompt is printed, readline closes at EOF, and the command used to exit
+    // 0 having installed nothing. A refused operation must not report success.
+    readlineMock.createInterface.mockReturnValue(fakeInterface(undefined));
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(false);
+  });
+
+  it.each([
+    ['y', true],
+    ['', true],
+    ['n', false],
+    ['yes', false],
+  ])('maps answer %j to %s', async (answer, expected) => {
+    readlineMock.createInterface.mockReturnValue(fakeInterface(answer));
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(
+      expected,
+    );
   });
 });

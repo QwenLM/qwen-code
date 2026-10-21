@@ -112,7 +112,16 @@ async function promptForConsentNonInteractive(
   });
 
   return new Promise((resolve) => {
+    let answered = false;
+    // EOF on a stdin that is not a terminal closes the interface without ever
+    // invoking the question callback. Left unhandled, the pending promise is
+    // simply dropped and the process exits 0 having printed a consent prompt
+    // and done nothing — a refused operation reports success. Fail closed.
+    rl.once('close', () => {
+      if (!answered) resolve(false);
+    });
     rl.question(prompt, (answer) => {
+      answered = true;
       rl.close();
       resolve(['y', ''].includes(answer.trim().toLowerCase()));
     });
