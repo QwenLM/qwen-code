@@ -2540,6 +2540,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
    * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
+   * `qwen/notify/session/mcp-changed`,
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -2553,6 +2554,17 @@ export class BridgeClient implements Client {
       typeof notificationSessionId === 'string' &&
       this.abandonedRestoreIds.has(notificationSessionId)
     ) {
+      return;
+    }
+    if (method === 'qwen/notify/session/mcp-changed') {
+      const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string' || !this.ownsSession(sessionId)) return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      entry.events.publish({
+        type: 'settings_changed',
+        data: { key: 'mcp' },
+      });
       return;
     }
     if (method === 'qwen/notify/session/sources-changed') {
