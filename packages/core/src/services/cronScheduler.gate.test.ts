@@ -21,7 +21,14 @@ import type {
   CronGateRunner,
 } from './cron-gate.js';
 import { CronScheduler, type CronJob } from './cronScheduler.js';
-import { readCronTasks, taskHasLegacyCondition } from './cronTasksFile.js';
+import {
+  readCronTasks,
+  taskHasLegacyCondition,
+  updateCronTasks,
+  withTaskGate,
+  writeCronTasks,
+  type DurableCronTask,
+} from './cronTasksFile.js';
 
 const at = (h: number, m: number, sec = 0) => new Date(2025, 0, 15, h, m, sec);
 
@@ -230,6 +237,61 @@ describe('CronScheduler gate', () => {
     expect(fired).toHaveLength(0);
   });
 
+  it('delivers to the consumer a later start() installed while the gate ran', async () => {
+    // ACP installs a fresh callback through start() after every turn while
+    // the timer keeps running; a gate mid-run must not lose its output to it.
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    const later: CronJob[] = [];
+    scheduler.start((job) => later.push(job));
+    await script.release(output('event: push\n'));
+    expect(fired).toHaveLength(0);
+    expect(later).toHaveLength(1);
+    expect(later[0]!.prompt).toContain(
+      '<gate-output>\nevent: push\n</gate-output>',
+    );
+  });
+
+  it('counts a final fire whose gate still runs and reports a quiet settlement', async () => {
+    // An expiring recurring job (like a one-shot) leaves the map before its
+    // gate runs. Until the gate settles it is still this session's work, and
+    // a quiet settlement reaches no consumer, so the listener is what lets a
+    // headless run notice it is done.
+    scheduler.destroy();
+    scheduler = new CronScheduler(null, 60_000, { runGate: script.runner });
+    scheduler.start((job) => fired.push(job));
+    const skipped = vi.fn();
+    scheduler.setGateSkippedListener(skipped);
+    createGated();
+    expect(scheduler.sessionSize).toBe(1);
+    scheduler.tick(at(10, 30, 59)); // past expiresAt (10:29 + 60 s): final fire
+    expect(scheduler.list()).toHaveLength(0);
+    expect(scheduler.sessionSize).toBe(1);
+    expect(skipped).not.toHaveBeenCalled();
+    await script.release(quiet);
+    expect(fired).toHaveLength(0);
+    expect(skipped).toHaveBeenCalledTimes(1);
+    expect(scheduler.sessionSize).toBe(0);
+  });
+
+  it('tells the listener about a counted failure but not a delivered fire', async () => {
+    const skipped = vi.fn();
+    scheduler.setGateSkippedListener(skipped);
+    createGated();
+    scheduler.tick(at(10, 30, 59));
+    await script.release(failed); // first of the streak: a notice is delivered
+    expect(fired).toHaveLength(1);
+    expect(skipped).not.toHaveBeenCalled();
+    scheduler.tick(at(10, 31, 59));
+    await script.release(failed); // counted only
+    expect(fired).toHaveLength(1);
+    expect(skipped).toHaveBeenCalledTimes(1);
+    scheduler.tick(at(10, 32, 59));
+    await script.release(output('back\n'));
+    expect(fired).toHaveLength(2);
+    expect(skipped).toHaveBeenCalledTimes(1);
+  });
+
   it('gates a forced fire too', async () => {
     const job = createGated();
     expect(scheduler.forceFireJob(job.id)).toBe(true);
@@ -272,6 +334,88 @@ describe('CronScheduler gate', () => {
         retryDelay: 20,
       });
     });
+
+    const reload = () =>
+      (
+        scheduler as unknown as {
+          loadFileTasks(handleMissed: boolean): Promise<void>;
+        }
+      ).loadFileTasks(false);
+
+    it.each<[string, (tasks: DurableCronTask[]) => DurableCronTask[]]>([
+      ['disabled', (tasks) => tasks.map((t) => ({ ...t, enabled: false }))],
+      ['removed', () => []],
+      [
+        'given another gate',
+        (tasks) => tasks.map((t) => withTaskGate(t, './other.sh')),
+      ],
+    ])(
+      'aborts a running gate when the task is %s on disk',
+      async (_what, edit) => {
+        // The paths another session or the daemon's task controls take:
+        // cancelling through the file must stop the command like delete()
+        // does, not let it finish and drop the result.
+        await scheduler.createDurable('* * * * *', 'p', true, './probe.sh');
+        await scheduler.enableDurable('session-1');
+        scheduler.start((j) => fired.push(j));
+        scheduler.tick(at(10, 30, 59));
+        const { signal } = script.calls[0]!.options;
+        expect(signal.aborted).toBe(false);
+        await updateCronTasks(tmpDir, edit);
+        await reload();
+        expect(signal.aborted).toBe(true);
+        await script.release(output('too late\n'));
+        expect(fired).toHaveLength(0);
+      },
+    );
+
+    it.each([
+      ['quiet', quiet, 0],
+      ['delivering', output('event: comment\n'), 1],
+    ] as const)(
+      'stamps a gated catch-up at once and books its run only at settlement (%s)',
+      async (_what, result, runs) => {
+        const createdAt = at(7, 0).getTime();
+        await writeCronTasks(tmpDir, [
+          withTaskGate(
+            {
+              id: 'cu1',
+              cron: '0 * * * *',
+              prompt: 'overdue',
+              recurring: true,
+              createdAt,
+              lastFiredAt: createdAt,
+            },
+            './probe.sh',
+          ),
+        ]);
+        await scheduler.enableDurable('session-1');
+        scheduler.start((j) => fired.push(j));
+        expect(script.calls).toHaveLength(1);
+        // The stamp lands before the gate decides, so a restart cannot
+        // replay the catch-up; the run does not.
+        let task: DurableCronTask | undefined;
+        await vi.waitFor(async () => {
+          [task] = await readCronTasks(tmpDir);
+          expect(task?.lastFiredAt).toBe(at(10, 29).getTime());
+        });
+        expect(task?.runs ?? []).toHaveLength(0);
+        await script.release(result);
+        expect(fired).toHaveLength(runs);
+        await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+          .pendingPersist;
+        [task] = await readCronTasks(tmpDir);
+        expect(task?.runs ?? []).toHaveLength(runs);
+        if (runs > 0) {
+          expect(task?.runs?.[0]).toMatchObject({
+            at: at(10, 29).getTime(),
+            kind: 'catch-up',
+            gate: 'delivered',
+            sessionId: 'session-1',
+          });
+        }
+      },
+    );
 
     it('persists the gate with its downgrade fuse, the status and delivered runs', async () => {
       const job = await scheduler.createDurable(

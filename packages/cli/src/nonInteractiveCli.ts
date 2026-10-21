@@ -3174,6 +3174,10 @@ export async function runNonInteractive(
                 reject(err);
               };
 
+              // A gate that settles quietly reaches no consumer, so nothing
+              // above would re-check after the final fire of a one-shot or
+              // an expiring recurring job; the scheduler reports it here.
+              scheduler.setGateSkippedListener(checkCronDone);
               scheduler.start((job: CronJob) => {
                 // A bare loop sentinel can't expand in a headless run, so the
                 // tick is skipped. skipHeadlessLoopSentinel also deletes a

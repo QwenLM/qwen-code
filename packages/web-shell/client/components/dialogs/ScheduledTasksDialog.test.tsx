@@ -33,6 +33,7 @@ interface MockTask {
   sessionMode?: 'persistent' | 'per_run';
   modelServiceId: string | null;
   groupId: string | null;
+  gate?: string | null;
   runs: Array<{
     at: number;
     kind?: 'scheduled' | 'catch-up';
@@ -61,7 +62,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspaceActions: () => actions,
 }));
 
-const { ScheduledTasksDialog } = await import('./ScheduledTasksDialog');
+const { ScheduledTasksDialog, gatedManualRunPrompt } = await import(
+  './ScheduledTasksDialog'
+);
 const { I18nProvider } = await import('../../i18n');
 const { WebShellPortalRootContext } = await import('../../portalRoot');
 
@@ -1226,6 +1229,31 @@ describe('ScheduledTasksDialog run now', () => {
     // Server-side run record (updates last-run) + client run in the bound session.
     expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
+  });
+
+  it('asks the model to run the gate first on a manual run of a gated task', async () => {
+    const onRunPrompt = vi.fn();
+    await mount(
+      [
+        baseTask({
+          sessionId: 'sess-9',
+          prompt: 'handle the events below',
+          gate: './probe.sh --gate',
+        }),
+      ],
+      { onRunPrompt },
+    );
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledTimes(1);
+    const [text, sessionId] = onRunPrompt.mock.calls[0]!;
+    expect(sessionId).toBe('sess-9');
+    expect(text).toBe(
+      gatedManualRunPrompt('./probe.sh --gate', 'handle the events below'),
+    );
+    expect(text.startsWith('Manual run of a gated scheduled task.')).toBe(true);
+    expect(text).toContain('\n./probe.sh --gate\n');
+    expect(text.endsWith('\n\nhandle the events below')).toBe(true);
   });
 
   it('passes a null sessionId through for an unbound task', async () => {

@@ -432,9 +432,17 @@ export class CronScheduler {
   private readonly runGate: CronGateRunner | null;
 
   /** Gate runs in flight, by job id. A slot that matches while its gate is
-   * still running is consumed without a second run; delete() and stop()
-   * abort the controller so a late result delivers nothing. */
-  private readonly gatesInFlight = new Map<string, AbortController>();
+   * still running is consumed without a second run; delete(), stop() and a
+   * disk reload that drops the job abort the controller so a late result
+   * delivers nothing. The job rides along for `sessionSize`: a one-shot or
+   * final fire leaves the map before its gate runs. */
+  private readonly gatesInFlight = new Map<
+    string,
+    { controller: AbortController; job: CronJob }
+  >();
+
+  /** See {@link setGateSkippedListener}. */
+  private gateSkippedListener: (() => void) | null = null;
 
   /**
    * Creates a new session-only cron job. Returns the created job.
@@ -692,6 +700,11 @@ export class CronScheduler {
     let count = this.wakeups.size;
     for (const job of this.jobs.values()) {
       if (!job.durable) count++;
+    }
+    // A session-only one-shot or final fire leaves the map before its gate
+    // runs; until that gate settles the fire is still this session's work.
+    for (const { job } of this.gatesInFlight.values()) {
+      if (!job.durable && !this.jobs.has(job.id)) count++;
     }
     return count;
   }
@@ -1021,6 +1034,10 @@ export class CronScheduler {
       if (job.durable && !diskIds.has(job.id)) {
         this.jobs.delete(job.id);
         this.armedDurableOneShots.delete(job.id);
+        // Disabled or deleted through the file (another session, the
+        // daemon's task controls): the running gate is cancelled like
+        // delete() cancels it, not left to finish and be dropped.
+        this.abortGate(job.id);
       }
     }
     for (const id of this.pendingRemoval) {
@@ -1044,6 +1061,11 @@ export class CronScheduler {
           `Durable task ${task.id} skipped — durable cap (${MAX_JOBS}) reached.`,
         );
         continue;
+      }
+      // The command changed under a running gate: its result would describe
+      // a gate the task no longer has.
+      if (existing?.gate && existing.gate !== task.gate) {
+        this.abortGate(task.id);
       }
       const job = durableTaskToJob(task, this.recurringMaxAgeMs, existing);
       if (existing?.lastFiredAt !== undefined) {
@@ -1187,7 +1209,7 @@ export class CronScheduler {
             );
             continue;
           }
-          this.fire(job, onFire);
+          this.fire(job, onFire, 'catch-up');
           fired.push(id);
         }
         this.persistCatchUpStamps(fired);
@@ -1230,9 +1252,14 @@ export class CronScheduler {
   private persistCatchUpStamps(ids: string[]): void {
     if (!this.projectRoot || ids.length === 0) return;
     const stamps = new Map<string, number>();
+    // A gated catch-up has not reached a session yet: its stamp persists
+    // now, its run is booked by the settlement — as 'catch-up', and only
+    // when the gate delivers — the way a gated tick fire is.
+    const gated = new Set<string>();
     for (const id of ids) {
-      const fired = this.jobs.get(id)?.lastFiredAt;
-      if (fired !== undefined) stamps.set(id, fired);
+      const job = this.jobs.get(id);
+      if (job?.lastFiredAt !== undefined) stamps.set(id, job.lastFiredAt);
+      if (job?.gate) gated.add(id);
     }
     if (stamps.size === 0) return;
     // Guard the just-delivered ids against re-detection by any reload that
@@ -1254,6 +1281,7 @@ export class CronScheduler {
           // Mirrors the tick persist's guard.
           if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp) return t;
           changed = true;
+          if (gated.has(t.id)) return { ...t, lastFiredAt: stamp };
           // Late fire (overdue while no session owned the schedule) — record it
           // as 'catch-up' so the history distinguishes it from an on-time fire.
           return {
@@ -1344,6 +1372,18 @@ export class CronScheduler {
   }
 
   /**
+   * Installs a listener called after a gate settles without delivering a
+   * fire: a quiet gate, a failure or block past the first of its streak, or
+   * a result dropped because the job is gone. Such a settlement reaches no
+   * consumer, so a headless run re-checks its hold-open from here — a
+   * one-shot or final fire whose gate stays quiet would otherwise pin the
+   * process with no work left. Replaces any previous listener; null removes.
+   */
+  setGateSkippedListener(listener: (() => void) | null): void {
+    this.gateSkippedListener = listener;
+  }
+
+  /**
    * Immediately fires a job by ID, bypassing the cron schedule check.
    * Sets lastFiredAt to prevent the normal tick from re-firing the same
    * minute slot. Returns true if the job existed and was fired, false
@@ -1364,7 +1404,11 @@ export class CronScheduler {
    * first. Every fire kind except the missed-task carrier (whose prompt is a
    * notice, not the task's command) comes through here.
    */
-  private fire(job: CronJob, onFire: (job: CronJob) => void): void {
+  private fire(
+    job: CronJob,
+    onFire: (job: CronJob) => void,
+    kind: 'scheduled' | 'catch-up' = 'scheduled',
+  ): void {
     if (!job.gate) {
       onFire(job);
       return;
@@ -1378,7 +1422,7 @@ export class CronScheduler {
     // nothing.
     const expectLive = this.jobs.get(job.id) === job;
     const ac = new AbortController();
-    this.gatesInFlight.set(job.id, ac);
+    this.gatesInFlight.set(job.id, { controller: ac, job });
     const run: Promise<CronGateResult> = this.runGate
       ? this.runGate(job.gate, {
           signal: ac.signal,
@@ -1398,27 +1442,46 @@ export class CronScheduler {
         }),
       )
       .then((result) => {
-        // Superseded (delete/stop aborted it, or a restart replaced it).
-        if (this.gatesInFlight.get(job.id) !== ac) return;
+        // Superseded (delete/stop/reload aborted it, or a restart replaced it).
+        if (this.gatesInFlight.get(job.id)?.controller !== ac) return;
         this.gatesInFlight.delete(job.id);
-        if (ac.signal.aborted || this.onFire !== onFire) return;
+        if (ac.signal.aborted) return;
+        // The consumer current now, not the one the fire started with: ACP
+        // installs a fresh callback through start() after every turn while
+        // the timer keeps running, and a gate mid-run must not lose its
+        // output to that. Only stop() — which aborts the gate — ends the
+        // subscription.
+        const consumer = this.onFire;
         const live = this.jobs.get(job.id);
-        if (expectLive && !live) {
+        let delivered = false;
+        if (!consumer) {
+          debugLogger.debug(`gate for ${job.id} settled with no consumer`);
+        } else if (expectLive && !live) {
           debugLogger.debug(
             `gate for ${job.id} settled after the job was removed; dropped`,
           );
-          return;
+        } else {
+          delivered = this.settleGate(
+            live ?? job,
+            consumer,
+            result,
+            firedAt,
+            kind,
+          );
         }
-        this.settleGate(live ?? job, onFire, result, firedAt);
+        if (!delivered) this.gateSkippedListener?.();
       });
   }
 
+  /** Records the outcome and delivers the fire when there is one. Returns
+   * whether a fire reached the consumer. */
   private settleGate(
     job: CronJob,
     onFire: (job: CronJob) => void,
     result: CronGateResult,
     firedAt: Date,
-  ): void {
+    kind: 'scheduled' | 'catch-up',
+  ): boolean {
     const previous = job.gateStatus;
     const outcome: CronGateStatus['lastOutcome'] =
       result.kind === 'output' ? 'delivered' : result.kind;
@@ -1463,9 +1526,12 @@ export class CronScheduler {
         job,
         text !== null ? (outcome as CronGateRunOutcome) : undefined,
         job.lastFiredAt ?? at,
+        kind,
       );
     }
-    if (text !== null) onFire({ ...job, prompt: text });
+    if (text === null) return false;
+    onFire({ ...job, prompt: text });
+    return true;
   }
 
   /** Stores the gate status summary and, for a fire that reached a session,
@@ -1475,6 +1541,7 @@ export class CronScheduler {
     job: CronJob,
     run: CronGateRunOutcome | undefined,
     at: number,
+    kind: 'scheduled' | 'catch-up',
   ): void {
     if (!this.projectRoot) return;
     const status = job.gateStatus;
@@ -1490,7 +1557,7 @@ export class CronScheduler {
                   ? {
                       runs: appendCronRun(t.runs, {
                         at,
-                        kind: 'scheduled',
+                        kind,
                         gate: run,
                         ...(t.sessionMode !== 'per_run' && this.sessionId
                           ? { sessionId: this.sessionId }
@@ -1505,10 +1572,10 @@ export class CronScheduler {
   }
 
   private abortGate(id: string): void {
-    const ac = this.gatesInFlight.get(id);
-    if (!ac) return;
+    const inFlight = this.gatesInFlight.get(id);
+    if (!inFlight) return;
     this.gatesInFlight.delete(id);
-    ac.abort();
+    inFlight.controller.abort();
   }
 
   /** Attributes an already-persisted per-run fire to the session it ran in,
@@ -1692,7 +1759,9 @@ export class CronScheduler {
     this.wakeupChainStartedAt = null;
     this.onFire = null;
     this.armedDurableOneShots.clear();
-    for (const ac of this.gatesInFlight.values()) ac.abort();
+    for (const { controller } of this.gatesInFlight.values()) {
+      controller.abort();
+    }
     this.gatesInFlight.clear();
 
     if (this.durableEnabled) {

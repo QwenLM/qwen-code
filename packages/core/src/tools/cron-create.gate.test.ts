@@ -147,6 +147,53 @@ describe('CronCreateTool gate', () => {
     });
   });
 
+  describe('in auto mode', () => {
+    // The classifier sees the gate in its input — unless a bare allow rule
+    // takes the allow fast path around it, in which case nobody has looked
+    // at the command. `evaluate` answers the tool-only lookup and the
+    // monitor lookup separately.
+    const rules = (tool: string, monitor: string) =>
+      vi.fn(async (ctx: PermissionCheckContext) =>
+        ctx.toolName === 'cron_create' ? tool : monitor,
+      );
+    const withRules = (evaluate: ReturnType<typeof rules>) => {
+      config._scheduler.destroy();
+      config = makeConfig({ mode: ApprovalMode.AUTO, evaluate });
+      tool = new CronCreateTool(config);
+      return evaluate;
+    };
+
+    it('accepts the gate the classifier saw when no bare rule skipped it', async () => {
+      const evaluate = withRules(rules('default', 'ask'));
+      const result = await tool.build(params).execute(signal());
+      expect(result.error).toBeUndefined();
+      expect(config._scheduler.list()[0]?.gateApproved).toBe(true);
+      expect(evaluate).toHaveBeenCalledWith({
+        toolName: 'cron_create',
+        cwd: tmpDir,
+      });
+      expect(evaluate).not.toHaveBeenCalledWith(
+        expect.objectContaining({ toolName: 'monitor' }),
+      );
+    });
+
+    it('refuses a gate that a bare cron_create allow rule let through unseen', async () => {
+      withRules(rules('allow', 'ask'));
+      const result = await tool.build(params).execute(signal());
+      expect(result.error?.message).toContain(
+        'The gate command was not confirmed',
+      );
+      expect(config._scheduler.list()).toHaveLength(0);
+    });
+
+    it('accepts that gate once a Monitor rule covers the command', async () => {
+      withRules(rules('allow', 'allow'));
+      const result = await tool.build(params).execute(signal());
+      expect(result.error).toBeUndefined();
+      expect(config._scheduler.list()[0]?.gateApproved).toBe(true);
+    });
+  });
+
   it('rejects a gate with sessionMode "current"', async () => {
     const result = await tool
       .build({ ...params, durable: true, sessionMode: 'current' })

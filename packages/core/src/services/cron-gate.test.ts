@@ -190,6 +190,21 @@ describe('createCronGateRunner', () => {
       },
     );
 
+    it.each([ApprovalMode.YOLO, ApprovalMode.AUTO])(
+      'blocks in %s mode when a rule denies the command',
+      async (mode) => {
+        // Deny precedes the mode shortcut, as it does for an ordinary tool
+        // call: a persisted gate stops the moment the user saves the rule.
+        const evaluate = vi.fn(async () => 'deny');
+        const result = await run(makeConfig({ mode, evaluate }), true);
+        expect(result).toMatchObject({
+          kind: 'blocked',
+          reason: 'a permission rule denies it',
+        });
+        expect(mockRuntimeShell).not.toHaveBeenCalled();
+      },
+    );
+
     it('blocks in default mode with no rule and no confirmation, naming the rule to add', async () => {
       const result = await run(makeConfig());
       expect(result).toMatchObject({

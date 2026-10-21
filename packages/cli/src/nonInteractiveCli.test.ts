@@ -8871,6 +8871,65 @@ describe('runNonInteractive', () => {
     expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
   });
 
+  it('exits once the final fire of a gated session job settles quietly', async () => {
+    // An expiring recurring job (like a one-shot) leaves the scheduler before
+    // its gate runs; a quiet gate then reaches no consumer, so the hold-open
+    // must be re-checked from the gate's settlement or the run pins forever.
+    setupMetricsMock();
+    let settleGate:
+      | ((result: { kind: 'quiet'; durationMs: number }) => void)
+      | undefined;
+    const scheduler = new CronScheduler(null, 60_000, {
+      runGate: () =>
+        new Promise((resolve) => {
+          settleGate = resolve;
+        }),
+    });
+    const job = scheduler.create('* * * * *', 'gated', true, 'true');
+    job.gateApproved = true;
+    // Park the job past the wall clock so the scheduler's own 1 s tick never
+    // fires it; the test ticks it explicitly, past its expiry.
+    job.lastFiredAt = Date.now() + 10 * 60_000;
+    const startSpy = vi.spyOn(scheduler, 'start');
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'ok' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    let finished = false;
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'test',
+      'p-cron-gate-final',
+    ).then(() => {
+      finished = true;
+    });
+    await vi.waitFor(() => expect(startSpy).toHaveBeenCalled());
+    expect(scheduler.sessionSize).toBe(1);
+
+    const slot = job.lastFiredAt + 120_000;
+    scheduler.tick(new Date(slot - (slot % 60_000) + 59_000));
+    await vi.waitFor(() => expect(settleGate).toBeDefined());
+    // Final fire: gone from the map, still counted while its gate runs.
+    expect(scheduler.list()).toHaveLength(0);
+    expect(scheduler.sessionSize).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(finished).toBe(false);
+
+    settleGate!({ kind: 'quiet', durationMs: 1 });
+    await run;
+    expect(scheduler.sessionSize).toBe(0);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
   describe('--json-schema structured output', () => {
     // Helper: walk an emitted event and extract the first tool_use_id when
     // it represents a tool_result block. Returns undefined for any other

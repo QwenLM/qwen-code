@@ -137,15 +137,32 @@ class CronCreateInvocation extends BaseToolInvocation<
    * shell commands, must not approve a gate on its own. When no dialog ran
    * and the mode would have asked, the gate has to pass as a `monitor`
    * command: a saved `Monitor(...)`/`Bash(...)` rule or the read-only check.
+   *
+   * Yolo mode confirms nothing, and the gate runs unattended in yolo mode
+   * anyway. Auto mode's safety net is the classifier, which sees the gate in
+   * its input — unless that bare allow rule took the allow fast path around
+   * it, in which case nobody has looked at the command and it is held to the
+   * default-mode check.
    */
   private async assertGateApproved(gate: string): Promise<void> {
     if (this.gateConfirmed) return;
     const mode = this.config.getApprovalMode();
-    if (mode === ApprovalMode.YOLO || mode === ApprovalMode.AUTO) return;
-    const decision = await this.config.getPermissionManager?.()?.evaluate({
+    if (mode === ApprovalMode.YOLO) return;
+    const pm = this.config.getPermissionManager?.();
+    const cwd = this.config.getTargetDir();
+    if (mode === ApprovalMode.AUTO) {
+      // A tool-only evaluation matches only rules without a specifier: the
+      // bare rule that skips the classifier.
+      const toolDecision = await pm?.evaluate({
+        toolName: ToolNames.CRON_CREATE,
+        cwd,
+      });
+      if (toolDecision !== 'allow') return;
+    }
+    const decision = await pm?.evaluate({
       toolName: ToolNames.MONITOR,
       command: gate,
-      cwd: this.config.getTargetDir(),
+      cwd,
     });
     if (decision === 'allow') return;
     throw new Error(

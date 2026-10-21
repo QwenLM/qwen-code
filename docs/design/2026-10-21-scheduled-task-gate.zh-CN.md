@@ -159,10 +159,11 @@ Tell the user, and suggest a fix if the cause is clear (for example expired
 时间槽匹配时的顺序：
 
 1. 写入 `lastFiredAt`，像今天一样处理一次性任务和过期任务的移除，并给任务打上 `gateInFlight` 标记。标记存在期间再匹配到的时间槽返回 `none`。
-2. 异步运行闸门。结束后清除标记，并重新检查任务仍然存在且处于启用状态：运行期间的删除或停用会丢弃结果（安全删除设计中的"删除立即生效"）。然后记录结果，要么返回（`quiet`、被抑制的 `failed`/`blocked`），要么以拼好的任务调用 `onFire`。
-3. `stop()` 中止运行中的闸门。没有运行器的调度器（无法执行 shell 命令的 `Config`）把每个带闸门的触发都视为 `blocked`。
+2. 异步运行闸门。结束后清除标记，记录结果，要么返回（`quiet`、被抑制的 `failed`/`blocked`），要么以拼好的任务调用 `onFire`。投递给的是闸门结束时安装的消费方，而不是闸门开始时的那个：ACP 在每个回合结束后都会在计时器仍在运行的情况下通过 `start()` 重新安装回调，这不能把正在运行的闸门丢掉。
+3. 闸门运行期间的删除、停用或移除会中止它，无论走哪条路：`delete()`、`stop()`，或者一次任务文件重载发现任务不在了、被停用了、或换了另一条闸门（其他会话和 daemon 的任务控制走的就是这些路径）。安全删除的"删除立即生效"覆盖的是正在运行的命令，而不只是它的结果。没有运行器的调度器（无法执行 shell 命令的 `Config`）把每个带闸门的触发都视为 `blocked`。
+4. 没有投递任何内容的结束会报告给一个监听器（`setGateSkippedListener`）。无头运行据此重新检查它的保持打开条件：一次性任务和到期的循环任务在闸门运行之前就离开了任务表，`sessionSize` 在闸门结束前继续把这次触发计在内，所以安静的最后一次闸门会结束运行而不是把进程钉住。
 
-错过任务的载体永远不运行闸门：它的提示词是一条通知，不是任务的命令。catch-up 触发、final 触发和 `forceFireJob` 都会运行闸门，所以 `QWEN_CODE_TEST_CRON_FAST` 集成钩子走的是同一条路径。
+错过任务的载体永远不运行闸门：它的提示词是一条通知，不是任务的命令。catch-up 触发、final 触发和 `forceFireJob` 都会运行闸门，所以 `QWEN_CODE_TEST_CRON_FAST` 集成钩子走的是同一条路径。带闸门的 catch-up 立即持久化它的 `lastFiredAt` 戳记，这样重启不会重放它；运行记录只在闸门投递时才记入，类型为 `catch-up`。
 
 ### 5.3 结果记录
 
@@ -174,9 +175,9 @@ Tell the user, and suggest a fix if the cause is clear (for example expired
 
 闸门在没有模型参与的情况下运行一条 shell 命令，所以它在命令被提出的地方审批，在运行的地方再检查一次。
 
-- **由模型提出（带 `gate` 的 `cron_create`）。** 工具的默认权限就是 `Monitor` 对这条闸门命令会给出的结果：只读 AST 检查通过则 `allow`，否则 `ask`。确认对话框是 `exec` 类型，包含命令、命令根、由 `extractCommandRules` 得到的 `Monitor(...)` 规则，以及"将按计划无人值守运行"的警告。因此"总是允许"保存的是 `Monitor(...)` 规则，而不是 `cron_create` 规则。auto 模式的分类器输入包含闸门。本次改动之前保存的裸 `cron_create` 允许规则不覆盖闸门：带闸门的调用把规则查找限定到闸门命令。
+- **由模型提出（带 `gate` 的 `cron_create`）。** 工具的默认权限就是 `Monitor` 对这条闸门命令会给出的结果：只读 AST 检查通过则 `allow`，否则 `ask`。确认对话框是 `exec` 类型，包含命令、命令根、由 `extractCommandRules` 得到的 `Monitor(...)` 规则，以及"将按计划无人值守运行"的警告。因此"总是允许"保存的是 `Monitor(...)` 规则，而不是 `cron_create` 规则。auto 模式的分类器输入包含闸门。本次改动之前保存的裸 `cron_create` 允许规则不覆盖闸门。这样的规则在 default 模式下绕过对话框、在 auto 模式下绕过分类器走允许快速路径，于是没有人看过这条命令；此时工具要求闸门有已保存的 `Monitor(...)`/`Bash(...)` 规则或通过只读检查，否则拒绝这次调用。yolo 模式不确认任何东西，闸门在 yolo 模式下本来就无人值守运行。
 - **由用户书写（Web Shell 表单、手工编辑的任务文件）。** 与权限规则本身同等信任：文件位于 Qwen 主目录下，紧邻保存这些规则的 settings，能写它的进程本来就能写规则。
-- **触发时**，运行器把命令当作一次 `monitor` 调用来评估（`PermissionManager.evaluate`）。当会话的审批模式是 `yolo` 或 `auto`、已保存的 `Monitor(...)` 或 `Bash(...)` 规则或只读检查允许该命令、或者这个任务在本进程内已确认过时，闸门运行。否则这次触发为 `blocked`，投递一条通知写明确切的待添加规则。plan 模式阻止。daemon 的默认审批模式是 auto，所以在 daemon 对话里创建的带闸门任务重启后仍能工作。
+- **触发时**，运行器把命令当作一次 `monitor` 调用来评估（`PermissionManager.evaluate`）。显式的拒绝规则在任何模式下都阻止它，而且在模式捷径之前检查——就像普通工具调用在 yolo 或 auto 模式批准之前先被拒绝一样——所以用户一保存规则，已持久化的闸门就停下来。否则，当会话的审批模式是 `yolo` 或 `auto`、已保存的 `Monitor(...)` 或 `Bash(...)` 规则或只读检查允许该命令、或者这个任务在本进程内已确认过时，闸门运行。其余情况这次触发为 `blocked`，投递一条通知写明确切的待添加规则。plan 模式阻止。daemon 的默认审批模式是 auto，所以在 daemon 对话里创建的带闸门任务重启后仍能工作。
 - **输出是数据。** 闸门输出按 `Monitor` 行的方式净化（去掉控制字符，消解信封标签名，`gate-output` 和 `gate-stderr` 加入该列表），包在第 4.2 节的文本里，经现有 cron 路径投递——该路径无法应答待确认的权限提示，并跳过 `UserPromptSubmit` 钩子。顺带一个修复：TUI 的 drain 为 cron 触发显式传入"非 shell"意图，这样在输入框处于 `!` 模式时到达的触发永远不会被当作 shell 命令执行。
 - 闸门继承 `sanitizeChildEnv`，它剔除 Qwen 的凭据但保留 `GH_TOKEN` 这类工具凭据；GitHub 探针需要它们。
 
@@ -234,13 +235,14 @@ Tell the user, and suggest a fix if the cause is clear (for example expired
 
 单元测试：
 
-- `cronScheduler.test.ts`：quiet、delivered、failed、blocked 和无运行器的结果；拼好的提示词文本；in-flight 跳过；闸门运行期间任务被删除或停用；`stop()` 中止闸门；持久任务的 `gateStatus` 和运行环；错过载体从不过闸门；catch-up、final 和 `forceFireJob` 过闸门。
+- `cronScheduler.gate.test.ts`：quiet、delivered、failed、blocked 和无运行器的结果；拼好的提示词文本；in-flight 跳过；闸门运行期间任务被删除；`stop()` 中止闸门；后来的 `start()` 收到运行中闸门的输出；final 触发在闸门结束前计入 `sessionSize`，以及"未投递结束"监听器；重载发现任务被停用、移除或换了闸门时中止闸门；带闸门的 catch-up 立即戳记、仅在投递时记入运行；持久任务的 `gateStatus` 和运行环；错过载体从不过闸门；`forceFireJob` 过闸门。
 - `cronTasksFile.test.ts`：`gate` 与 `gateStatus` 往返；保险丝随闸门写入和清除；有无 `gate` 时的 `taskHasLegacyCondition`。
-- `cron-create.test.ts`：默认权限与 `Monitor` 一致；`exec` 确认细节和 `Monitor(...)` 规则；分类器输入；裸 `cron_create` 规则不覆盖闸门；持久和当前会话创建携带闸门。`cron-list.test.ts`：闸门和状态行。
-- 闸门运行器：环境、cwd、超时、输出上限、净化、各审批模式下的 `monitor` 权限评估。
+- `cron-create.gate.test.ts`：`exec` 确认细节和 `Monitor(...)` 规则；分类器输入；裸 `cron_create` 规则在 default 模式和 auto 模式（它在那里绕过分类器）下都不覆盖闸门；持久创建携带闸门。`cron-list.test.ts`：闸门和状态行。
+- 闸门运行器（`cron-gate.test.ts`）：环境、cwd、超时、输出上限、净化、各审批模式下的 `monitor` 权限评估、拒绝规则在 yolo 和 auto 模式下阻止。
 - `use-llm-stream.test.tsx`：cron 触发永不路由到 shell 模式。
-- `Session.test.ts` 和 `nonInteractiveCli.test.ts`：拼好的提示词原样通过；`per_run` 加头部包装。
-- Daemon（PR 1b）：REST 的接受、清除、视图和能力；当前会话创建链路传递；Web Shell 字段、卡片行和"立即运行"文本。
+- `nonInteractiveCli.test.ts`：带闸门任务的最后一次触发安静结束后，无头运行退出。
+- `scheduled-task-run.test.ts`、`scheduled-tasks.test.ts` 和 `ScheduledTasksDialog.test.tsx`：带闸门任务的手动运行要求模型先运行闸门，覆盖 `per_run` 任务（daemon 路由）和持久任务（Web Shell）；任务视图携带 `gate` 和 `gateStatus`。
+- Daemon（PR 1b）：REST 的接受、清除和能力；当前会话创建链路传递；Web Shell 字段和卡片行。
 
 集成测试：`integration-tests/cli/cron-tools.test.ts` 配合 `QWEN_CODE_TEST_CRON_FAST` 和一个第二次运行才打印内容的闸门脚本。
 
@@ -257,8 +259,8 @@ E2E 计划：`.qwen/e2e-tests/2026-10-21-scheduled-task-gate.md`——在沙盒�
 
 ## 11. 交付
 
-1. **PR 1a**（本设计）：`CronScheduler`、`cronTasksFile`、闸门运行器、`cron_create` / `cron_list`、TUI shell 意图修复、用户文档。
-2. **PR 1b**：daemon REST 路由、当前会话创建链路传递、`scheduledTaskGate` 能力、Web Shell 表单、卡片和"立即运行"。
+1. **PR 1a**（本设计）：`CronScheduler`、`cronTasksFile`、闸门运行器、`cron_create` / `cron_list`、TUI shell 意图修复、无头保持打开条件、带闸门任务的手动运行提示词（daemon 路由和 Web Shell 的"立即运行"——工具创建的持久带闸门任务在那里已经可见）、用户文档。
+2. **PR 1b**：daemon REST 路由、当前会话创建链路传递、`scheduledTaskGate` 能力、Web Shell 表单和卡片。
 3. **第 2 步**：探针——`qwen autofix-pr snapshot --gate`（延续 PR #15057，加入已报事件记录和 check rollup 翻页）以及仓库级探针，覆盖新开和被 push 的 PR，支持作者、draft、label 和评审请求过滤。
 4. **第 3 步**：skill——`/autofix-pr`（先 `--once`，再 watch 模式）和评审者监视，对每个事件运行 `/qreview` 或一次验证。
 5. **独立设计——托管自动化**：托管 schedule 记录上的 `gate`（TypeScript 与 Java 校验器、摘要、DTO、OpenAPI、契约夹具、一次 `ma_schedule` 迁移）、由 `fire_run` 在 claim 之前运行、带派生持久身份的 Runtime "gate probe" 操作、带失败连段的 `skipped/gate_quiet` 与 `skipped/gate_failed` occurrence、定义时审批，以及针对回复丢失、崩溃和未知结果的 FG11 风格故障门禁。

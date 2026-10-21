@@ -229,17 +229,30 @@ Sequence for a slot that matches:
 1. Stamp `lastFiredAt`, apply the one-shot and expiry removals exactly as
    today, and mark the job `gateInFlight`. A later slot that matches while the
    flag is set returns `none`.
-2. Run the gate asynchronously. When it settles, clear the flag and re-check
-   that the job still exists and is enabled: a delete or disable during the run
-   drops the result (the safe-delete design's "delete takes effect
-   immediately"). Then record the outcome and either return (`quiet`,
-   suppressed `failed`/`blocked`) or call `onFire` with the composed job.
-3. `stop()` aborts in-flight gates. A scheduler without a runner (a `Config`
-   that cannot execute shell commands) treats every gated fire as `blocked`.
+2. Run the gate asynchronously. When it settles, clear the flag, record the
+   outcome and either return (`quiet`, suppressed `failed`/`blocked`) or call
+   `onFire` with the composed job. The consumer is the one installed when the
+   gate settles, not when it started: ACP re-installs its callback through
+   `start()` after every turn while the timer keeps running, and that must
+   not drop a gate that was mid-run.
+3. A delete, a disable or a removal while the gate runs aborts it, whichever
+   path it takes: `delete()`, `stop()`, or a reload of the tasks file that no
+   longer lists the job, lists it disabled, or lists it with another gate (the
+   paths another session and the daemon's task controls use). The safe-delete
+   rule "delete takes effect immediately" covers the running command, not
+   only its result. A scheduler without a runner (a `Config` that cannot
+   execute shell commands) treats every gated fire as `blocked`.
+4. A settlement that delivers nothing is reported to a listener
+   (`setGateSkippedListener`). The headless run re-checks its hold-open
+   from it: a one-shot or an expiring recurring job leaves the map before
+   its gate runs, and `sessionSize` keeps counting that fire until the gate
+   settles, so a quiet final gate ends the run instead of pinning it.
 
 Missed-task carriers never run a gate: their prompt is a notice, not the
 task's command. Catch-up fires, final fires and `forceFireJob` run it, so the
-`QWEN_CODE_TEST_CRON_FAST` integration hook exercises the same path.
+`QWEN_CODE_TEST_CRON_FAST` integration hook exercises the same path. A gated
+catch-up persists its `lastFiredAt` stamp at once, so a restart cannot replay
+it, and books its run only when the gate delivers, as a `catch-up` run.
 
 ### 5.3 Outcome records
 
@@ -266,19 +279,27 @@ the command is proposed and checked again where it runs.
   `extractCommandRules`, and a warning that it runs unattended on the schedule.
   "Always allow" therefore saves a `Monitor(...)` rule, not a `cron_create`
   rule. The classifier input for auto mode includes the gate. A bare
-  `cron_create` allow rule saved before this change does not cover a gate: a
-  gated call scopes its rule lookup to the gate command.
+  `cron_create` allow rule saved before this change does not cover a gate.
+  Such a rule takes the allow fast path around the dialog in default mode and
+  around the classifier in auto mode, so nobody has looked at the command;
+  the tool then requires a saved `Monitor(...)`/`Bash(...)` rule or the
+  read-only check for the gate and refuses the call otherwise. Yolo mode
+  confirms nothing, and the gate runs unattended in yolo mode anyway.
 - **Written by the user (Web Shell form, a hand-edited tasks file).** Trusted
   like the permission rules themselves: the file lives under the Qwen home
   next to the settings that hold those rules, and a process that can write it
   can already write them.
 - **At fire time** the runner evaluates the command as a `monitor` call
-  (`PermissionManager.evaluate`). It runs when the session's approval mode is
-  `yolo` or `auto`, when a saved `Monitor(...)` or `Bash(...)` rule or the
-  read-only check allows the command, or when this job was confirmed in this
-  process. Otherwise the fire is `blocked`, with one notice naming the exact
-  rule to add. Plan mode blocks. The daemon's default is auto mode, so a gated
-  task created in a daemon conversation keeps working after a restart.
+  (`PermissionManager.evaluate`). An explicit deny rule blocks it in every
+  mode, checked before the mode shortcut the way an ordinary tool call is
+  denied before yolo or auto mode approves it, so a persisted gate stops the
+  moment the user saves the rule. Otherwise it runs when the session's
+  approval mode is `yolo` or `auto`, when a saved `Monitor(...)` or
+  `Bash(...)` rule or the read-only check allows the command, or when this
+  job was confirmed in this process. Anything else is `blocked`, with one
+  notice naming the exact rule to add. Plan mode blocks. The daemon's default
+  is auto mode, so a gated task created in a daemon conversation keeps working
+  after a restart.
 - **Output is data.** Gate output is sanitized like `Monitor` lines (control
   characters stripped, envelope tag names defanged, `gate-output` and
   `gate-stderr` added to that list), wrapped in the text of Section 4.2, and
@@ -385,25 +406,33 @@ Rejected:
 
 Unit tests:
 
-- `cronScheduler.test.ts`: quiet, delivered, failed, blocked and no-runner
-  outcomes; composed prompt text; in-flight skip; a job deleted or disabled
-  while its gate runs; `stop()` aborting a gate; `gateStatus` and the run ring
-  for durable tasks; missed carriers never gated; catch-up, final and
-  `forceFireJob` gated.
+- `cronScheduler.gate.test.ts`: quiet, delivered, failed, blocked and
+  no-runner outcomes; composed prompt text; in-flight skip; a job deleted
+  while its gate runs; `stop()` aborting a gate; a later `start()` receiving
+  the output of a gate that was mid-run; a final fire counted in `sessionSize`
+  until its gate settles and the skipped-settlement listener; a reload that
+  disables, removes or rewrites the task aborting its gate; a gated catch-up
+  stamped at once and booked only on delivery; `gateStatus` and the run ring
+  for durable tasks; missed carriers never gated; `forceFireJob` gated.
 - `cronTasksFile.test.ts`: `gate` and `gateStatus` round trip; the fuse is
   written and cleared with the gate; `taskHasLegacyCondition` with and without
   `gate`.
-- `cron-create.test.ts`: default permission mirrors `Monitor`; `exec`
-  confirmation details and `Monitor(...)` rules; classifier input; a bare
-  `cron_create` rule does not cover a gate; durable and current-session
-  creation carry the gate. `cron-list.test.ts`: gate and status line.
-- The gate runner: environment, cwd, timeout, output caps, sanitization,
-  the `monitor` permission evaluation per approval mode.
+- `cron-create.gate.test.ts`: `exec` confirmation details and `Monitor(...)`
+  rules; classifier input; a bare `cron_create` rule does not cover a gate in
+  default mode nor in auto mode, where it skips the classifier; durable
+  creation carries the gate. `cron-list.test.ts`: gate and status line.
+- The gate runner (`cron-gate.test.ts`): environment, cwd, timeout, output
+  caps, sanitization, the `monitor` permission evaluation per approval mode,
+  a deny rule blocking in yolo and auto mode.
 - `use-llm-stream.test.tsx`: cron fires are never routed to shell mode.
-- `Session.test.ts` and `nonInteractiveCli.test.ts`: composed prompts pass
-  through unchanged; `per_run` wraps them.
-- Daemon (PR 1b): REST accept, clear, view and capability; current-session
-  creator threading; Web Shell field, card line and "Run now" text.
+- `nonInteractiveCli.test.ts`: a headless run exits once the final fire of a
+  gated job settles quietly.
+- `scheduled-task-run.test.ts`, `scheduled-tasks.test.ts` and
+  `ScheduledTasksDialog.test.tsx`: a manual run of a gated task asks the model
+  to run the gate first, for `per_run` tasks (daemon route) and persistent
+  tasks (Web Shell); the task view carries `gate` and `gateStatus`.
+- Daemon (PR 1b): REST accept, clear and capability; current-session creator
+  threading; Web Shell field and card line.
 
 Integration: `integration-tests/cli/cron-tools.test.ts` with
 `QWEN_CODE_TEST_CRON_FAST` and a gate script that prints on its second run.
@@ -430,9 +459,12 @@ Web Shell-created gated task across a daemon restart.
 ## 11. Delivery
 
 1. **PR 1a** (this design): `CronScheduler`, `cronTasksFile`, the gate runner,
-   `cron_create` / `cron_list`, the TUI shell-intent fix, user documentation.
+   `cron_create` / `cron_list`, the TUI shell-intent fix, the headless
+   hold-open, the manual-run prompt for gated tasks (daemon route and Web
+   Shell "Run now", since a tool-created durable gated task is already
+   visible there), user documentation.
 2. **PR 1b**: daemon REST routes, current-session creator threading,
-   `scheduledTaskGate` capability, Web Shell form, card and "Run now".
+   `scheduledTaskGate` capability, Web Shell form and card.
 3. **Step 2**: probes — `qwen autofix-pr snapshot --gate` (continuing
    PR #15057 with a surfaced-event record and check-rollup paging) and a
    repository-level probe for opened and pushed PRs with author, draft, label

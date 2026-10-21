@@ -62,8 +62,9 @@ type GateJob = Pick<CronJob, 'id' | 'cronExpr' | 'prompt' | 'gate'>;
 
 /**
  * Whether a gate may run with no one to ask. Mirrors how the session would
- * treat a `monitor` call for the same command: a permissive approval mode, a
- * saved `Monitor(...)`/`Bash(...)` rule or the read-only check lets it run; an
+ * treat a `monitor` call for the same command: an explicit deny rule stops it
+ * in every mode; otherwise a permissive approval mode, a saved
+ * `Monitor(...)`/`Bash(...)` rule or the read-only check lets it run; an
  * in-process confirmation covers the session that created it; anything else
  * is blocked rather than run.
  */
@@ -73,6 +74,17 @@ async function unattendedVerdict(
   cwd: string,
   approvedInProcess: boolean,
 ): Promise<{ ok: true } | { ok: false; reason: string; rule?: string }> {
+  // Deny before the mode shortcut, as an ordinary tool call is denied before
+  // yolo/auto mode gets to approve it: a `Monitor(...)`/`Bash(...)` deny rule
+  // stops a persisted gate from the moment it is saved.
+  const decision = await config.getPermissionManager?.()?.evaluate({
+    toolName: ToolNames.MONITOR,
+    command: gate,
+    cwd,
+  });
+  if (decision === 'deny') {
+    return { ok: false, reason: 'a permission rule denies it' };
+  }
   const mode = config.getApprovalMode();
   if (mode === ApprovalMode.YOLO || mode === ApprovalMode.AUTO) {
     return { ok: true };
@@ -80,18 +92,7 @@ async function unattendedVerdict(
   if (mode === ApprovalMode.PLAN) {
     return { ok: false, reason: 'the session is in plan mode' };
   }
-  const pm = config.getPermissionManager?.();
-  if (pm) {
-    const decision = await pm.evaluate({
-      toolName: ToolNames.MONITOR,
-      command: gate,
-      cwd,
-    });
-    if (decision === 'allow') return { ok: true };
-    if (decision === 'deny') {
-      return { ok: false, reason: 'a permission rule denies it' };
-    }
-  }
+  if (decision === 'allow') return { ok: true };
   if (approvedInProcess) return { ok: true };
   return {
     ok: false,
