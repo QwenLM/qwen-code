@@ -303,6 +303,99 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
+    let resolve!: (value: { displayName: string }) => void;
+    const renameSession = vi.fn().mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    provider = { ...provider, renameSession };
+    const canRename = (title: string) =>
+      summary('s1', {
+        title,
+        capabilities: { canSend: true, canCancel: false, canRename: true },
+      });
+    mocks.client.getSession.mockResolvedValue(canRename('Original'));
+    let oldList!: (value: { sessions: ManagedAgentSessionSummary[] }) => void;
+    mocks.client.listSessions
+      .mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            oldList = done;
+          }),
+      )
+      .mockResolvedValue({ sessions: [canRename('Stored name')] });
+    await render('s1');
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Rename')!
+        .click();
+    });
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename"]',
+    )!;
+    expect(input.value).toBe('Original');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '  Requested name  ');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await flush();
+    });
+    expect(renameSession).toHaveBeenCalledWith(
+      's1',
+      'Requested name',
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(container.textContent).toContain('Original');
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    mocks.client.getSession.mockResolvedValue(canRename('Stored name'));
+    await act(async () => {
+      resolve({ displayName: 'Stored name' });
+      await flush();
+    });
+    await act(async () => {
+      oldList({ sessions: [canRename('Original')] });
+      await flush();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('nav')?.textContent).toContain(
+      'Stored name',
+    );
+    expect(container.textContent).not.toContain('Original');
+    expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not expose rename when permission or interactivity is missing', async () => {
+    provider = { ...provider, renameSession: vi.fn() };
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Rename',
+      ),
+    ).toBe(false);
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, canRename: true },
+      }),
+    );
+    await render('s1', 'en', provider, null, false);
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Rename',
+      ),
+    ).toBe(false);
+  });
+
   it('binds tool detail reads to the selected Session and distinguishes recorded empty output from missing output', async () => {
     const get = vi.fn().mockResolvedValue({
       input: { command: 'true' },
