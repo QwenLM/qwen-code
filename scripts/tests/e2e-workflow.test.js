@@ -14,6 +14,19 @@ describe('TUI product evidence', () => {
   );
   const steps = workflow.jobs.parity.steps;
 
+  it('treats unhandled errors as acceptance failures on every runner', () => {
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    const commands = product.run
+      .split('\n')
+      .filter((line) => line.includes('npx vitest run'));
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      expect(command).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    }
+  });
+
   it('keeps fresh evidence retrievable when the same head is rerun', () => {
     const upload = steps.find(
       (step) => step.name === 'Upload product acceptance evidence',
