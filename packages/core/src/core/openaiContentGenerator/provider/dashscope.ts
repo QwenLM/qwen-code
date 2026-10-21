@@ -25,6 +25,7 @@ import { getEffectiveReasoning } from '../../reasoning-overrides.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import { withDashScopeSourceConfig } from '../../dashscope-source-config.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
@@ -326,9 +327,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
     }
 
-    return customHeaders
-      ? { ...defaultHeaders, ...customHeaders }
-      : defaultHeaders;
+    return withDashScopeSourceConfig(
+      customHeaders ? { ...defaultHeaders, ...customHeaders } : defaultHeaders,
+      this.contentGeneratorConfig.baseUrl,
+    );
   }
 
   override buildClient(): OpenAI {

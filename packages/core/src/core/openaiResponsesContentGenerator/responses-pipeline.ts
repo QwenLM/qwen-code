@@ -51,6 +51,7 @@ import {
 } from '../openaiContentGenerator/constants.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
+import { withDashScopeSourceConfig } from '../dashscope-source-config.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
@@ -655,7 +656,7 @@ export class ResponsesPipeline {
 
     const fetchOpts: RequestInit & { dispatcher?: unknown } = {
       method: 'POST',
-      headers,
+      headers: withDashScopeSourceConfig(headers, this.config.baseUrl),
       body,
       signal: connectController.signal,
     };

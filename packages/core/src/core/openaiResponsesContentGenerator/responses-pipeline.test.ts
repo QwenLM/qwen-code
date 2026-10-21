@@ -1213,6 +1213,25 @@ describe('ResponsesPipeline', () => {
       );
     });
 
+    it('sends one first-party source attribution to a QwenCloud Token Plan endpoint', async () => {
+      await executeDone(
+        pipe({
+          baseUrl: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode',
+          customHeaders: { 'X-DashScope-Source-Config': 'user' },
+        }),
+      );
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBe(
+        '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code"}}',
+      );
+    });
+
+    it('sends no source attribution to other endpoints', async () => {
+      await executeDone();
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBeNull();
+    });
+
     it('expands ${session_id} per request when the consent gate is on', async () => {
       await executeDone(
         pipe(

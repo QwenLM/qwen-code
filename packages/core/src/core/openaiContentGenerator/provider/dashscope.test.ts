@@ -517,6 +517,29 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'X-DashScope-OssResourceResolve',
       );
     });
+
+    it('should attribute QwenCloud requests over a conflicting custom header', () => {
+      const headers = gen({
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+        customHeaders: { 'x-dashscope-source-config': 'user', 'X-Custom': '1' },
+      }).buildHeaders();
+
+      expect(headers['X-DashScope-Source-Config']).toBe(
+        '{"channel":"qwencloud-inner-agents","source":"model","tags":{"t1":"qwen-code","t2":"payg"}}',
+      );
+      expect(headers).not.toHaveProperty('x-dashscope-source-config');
+      expect(headers['X-Custom']).toBe('1');
+    });
+
+    it('should not attribute other DashScope-compatible endpoints', () => {
+      const headers = gen({
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      }).buildHeaders();
+
+      expect(headers).not.toHaveProperty('X-DashScope-Source-Config');
+    });
   });
 
   describe('buildClient', () => {

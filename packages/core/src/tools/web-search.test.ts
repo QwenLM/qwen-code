@@ -1263,6 +1263,29 @@ describe('WebSearchTool execute', () => {
     };
     expect(opts.defaultHeaders['X-Gateway-Route']).toBe('ds');
     expect(opts.defaultHeaders['User-Agent']).toContain('QwenCode/');
+    expect(opts.defaultHeaders).not.toHaveProperty('X-DashScope-Source-Config');
+  });
+
+  it('attributes searches sent to a QwenCloud endpoint', async () => {
+    respond([SEARCH_ITEM, MESSAGE_ITEM]);
+    await runSearch(
+      makeConfig({
+        models: [
+          dsModel({
+            baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1',
+            generationConfig: {
+              customHeaders: { 'X-DashScope-Source-Config': 'user' },
+            },
+          }),
+        ],
+      }),
+    );
+    const opts = mockCtorOpts.current as {
+      defaultHeaders: Record<string, string>;
+    };
+    expect(opts.defaultHeaders['X-DashScope-Source-Config']).toBe(
+      '{"channel":"qianwenai-inner-agents","source":"model","tags":{"t1":"qwen-code","t2":"payg"}}',
+    );
   });
 
   it('installs dynamic header expansion on the search client fetch', async () => {
