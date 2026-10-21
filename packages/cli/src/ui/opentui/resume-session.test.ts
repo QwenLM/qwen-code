@@ -214,7 +214,12 @@ describe('opentui resume mapping', () => {
             toolCallResult: {
               callId: 'c1',
               status: 'success',
-              resultDisplay: { fileDiff, fileName: 'a.txt' },
+              resultDisplay: {
+                fileDiff,
+                fileName: 'a.txt',
+                originalContent: 'old',
+                newContent: 'new',
+              },
             },
           },
         ],

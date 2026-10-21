@@ -813,9 +813,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     const session = sessionRef.current;
     cancelPendingRef.current = true;
     onInterrupt((settlement) => {
-      if (session !== sessionRef.current || !draftRef.current.valid) return;
+      if (session !== sessionRef.current || !draftRef.current.valid)
+        return undefined;
       cancelPendingRef.current = false;
-      if (settlement.kind === 'reset') return;
+      if (settlement.kind === 'reset') return undefined;
       const { queued, prompt } = settlement;
       const popped = onPopQueue?.();
       const pending = [queued, popped].filter((entry) => entry != null);
@@ -834,6 +835,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         restoreSubmission(prompt);
         return true;
       }
+      return undefined;
     });
   }, [onInterrupt, onPopQueue, restoreSubmission]);
 

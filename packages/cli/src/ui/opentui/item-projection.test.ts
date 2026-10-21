@@ -1186,6 +1186,7 @@ describe('canonical resumed tool projection', () => {
             name: 'read_file',
             description: 'owned.txt',
             status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
             resultDisplay: 'Read 2 lines',
             detailedDisplay: 'line one\nline two',
             args: { absolute_path: '/owned.txt' },

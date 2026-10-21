@@ -94,6 +94,7 @@ import {
 import type { RestoreOption } from './session-rewind.js';
 import { realUserPromptTexts } from '../utils/historyUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { t } from '../../i18n/index.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';

@@ -31,15 +31,16 @@ async function restoreAction(
   let restoreNoticeId: number | undefined;
   const isCurrent = () => {
     const history = ui.history;
+    const loaded = loadedHistory;
     return (
       !context.abortSignal?.aborted &&
       config?.getSessionId() === sessionId &&
       ui.isIdleRef.current &&
       ((history.length === expectedHistory.length &&
         history.every((item, index) => item === expectedHistory[index])) ||
-        (loadedHistory !== undefined &&
-          history.length === loadedHistory.length &&
-          history.every((item, index) => item === loadedHistory[index])) ||
+        (loaded !== undefined &&
+          history.length === loaded.length &&
+          history.every((item, index) => item === loaded[index])) ||
         (restoreNoticeId !== undefined &&
           history.length === expectedHistory.length + 1 &&
           history.at(-1)?.id === restoreNoticeId &&

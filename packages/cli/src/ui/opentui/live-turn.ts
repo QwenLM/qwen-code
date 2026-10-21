@@ -46,7 +46,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
-import { debugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import {
   foldLiveEvent,
@@ -67,6 +67,8 @@ import {
   type OpenTuiInputSubmission,
   type OpenTuiCancelSettled,
 } from './input-submission.js';
+
+const debugLogger = createDebugLogger('OPENTUI_LIVE_TURN');
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
