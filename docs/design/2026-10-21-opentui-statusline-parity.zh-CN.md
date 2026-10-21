@@ -3,6 +3,12 @@
 [English](2026-10-21-opentui-statusline-parity.md) |
 [简体中文](2026-10-21-opentui-statusline-parity.zh-CN.md)
 
+当前交付（2026-10-21）：本工作与输入所有权、编辑和状态栏统一整合到
+[#14964](https://github.com/QwenLM/qwen-code/pull/14964)。下文原分批边界、代码基线、
+验证结果及 stacked PR 转正式步骤均为历史记录；当前推进顺序以
+[交付计划](2026-10-20-opentui-migration-delivery.zh-CN.md)为准。
+统一验收仍待完成，必须以整合提交的新结果为依据。
+
 ## 状态与代码基准
 
 2026-10-21 已实现。本机作者验证通过：build/typecheck、325 项定向测试、

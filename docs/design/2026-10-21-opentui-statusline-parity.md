@@ -3,6 +3,13 @@
 [English](2026-10-21-opentui-statusline-parity.md) |
 [简体中文](2026-10-21-opentui-statusline-parity.zh-CN.md)
 
+Current delivery (2026-10-21): this work is consolidated with input ownership,
+editing and status lines in [#14964](https://github.com/QwenLM/qwen-code/pull/14964).
+The original batch boundaries, source bases, validation results and stack-promotion
+steps below are historical. Follow the [delivery plan](2026-10-20-opentui-migration-delivery.md)
+for the active sequence. Combined acceptance requires fresh results for the
+integrated commit and is still pending.
+
 ## Status and source
 
 Implemented on 2026-10-21. Local author validation passed: build/typecheck,
