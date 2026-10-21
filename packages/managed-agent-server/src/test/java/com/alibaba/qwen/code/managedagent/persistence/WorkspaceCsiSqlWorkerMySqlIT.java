@@ -606,13 +606,7 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
                 var connections = warmed.values().stream().map(row -> ((Number) row.get("connectionId")).longValue()).toList();
                 while (System.nanoTime() < until) {
-                    waits = jdbc.queryForList("SELECT DISTINCT requester.PROCESSLIST_ID AS requester, blocker.PROCESSLIST_ID AS blocker,"
-                            + " locks.OBJECT_NAME AS table_name, requester.PROCESSLIST_INFO AS sql_text"
-                            + " FROM performance_schema.data_lock_waits waits"
-                            + " JOIN performance_schema.data_locks locks ON locks.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID"
-                            + " JOIN performance_schema.threads requester ON requester.THREAD_ID=waits.REQUESTING_THREAD_ID"
-                            + " JOIN performance_schema.threads blocker ON blocker.THREAD_ID=waits.BLOCKING_THREAD_ID"
-                            + " WHERE locks.OBJECT_SCHEMA=DATABASE()");
+                    waits = lockWaits(jdbc);
                     var direct = waits.stream().filter(row -> ((Number) row.get("blocker")).longValue() == holderId)
                             .map(row -> ((Number) row.get("requester")).longValue()).toList();
                     if (direct.containsAll(connections)) {
@@ -637,6 +631,34 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             } finally {
                 stop();
             }
+        }
+
+        // MySQL 8 reports row-lock waits through performance_schema.data_lock_waits;
+        // MariaDB 10.11 kept the older information_schema.INNODB_LOCK_WAITS pair and
+        // dropped the performance_schema tables. Both yield the same four columns.
+        private static List<Map<String, Object>> lockWaits(ManagedSchemaJdbcTemplate jdbc) {
+            boolean mariaDb = jdbc.queryForObject("SELECT VERSION()", String.class)
+                    .contains("MariaDB");
+            if (!mariaDb) {
+                return jdbc.queryForList("SELECT DISTINCT requester.PROCESSLIST_ID AS requester,"
+                        + " blocker.PROCESSLIST_ID AS blocker, locks.OBJECT_NAME AS table_name,"
+                        + " requester.PROCESSLIST_INFO AS sql_text"
+                        + " FROM performance_schema.data_lock_waits waits"
+                        + " JOIN performance_schema.data_locks locks ON locks.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID"
+                        + " JOIN performance_schema.threads requester ON requester.THREAD_ID=waits.REQUESTING_THREAD_ID"
+                        + " JOIN performance_schema.threads blocker ON blocker.THREAD_ID=waits.BLOCKING_THREAD_ID"
+                        + " WHERE locks.OBJECT_SCHEMA=DATABASE()");
+            }
+            return jdbc.queryForList("SELECT DISTINCT requester.trx_mysql_thread_id AS requester,"
+                    + " blocker.trx_mysql_thread_id AS blocker,"
+                    + " REPLACE(SUBSTRING_INDEX(blocking_lock.lock_table, '.', -1), '`', '') AS table_name,"
+                    + " processlist.INFO AS sql_text"
+                    + " FROM information_schema.INNODB_LOCK_WAITS waits"
+                    + " JOIN information_schema.INNODB_TRX requester ON requester.trx_id=waits.REQUESTING_TRX_ID"
+                    + " JOIN information_schema.INNODB_TRX blocker ON blocker.trx_id=waits.BLOCKING_TRX_ID"
+                    + " JOIN information_schema.INNODB_LOCKS blocking_lock ON blocking_lock.lock_id=waits.BLOCKING_LOCK_ID"
+                    + " LEFT JOIN information_schema.PROCESSLIST processlist ON processlist.ID=requester.trx_mysql_thread_id"
+                    + " WHERE blocking_lock.lock_table LIKE CONCAT('`', DATABASE(), '`', '.%')");
         }
 
         private static void await(CountDownLatch latch) {

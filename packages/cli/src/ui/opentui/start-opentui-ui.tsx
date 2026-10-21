@@ -357,6 +357,9 @@ function OpenTuiEntryApp({
       extensionRefreshState={extensionRefreshState}
       initialDialog={initialDialog}
       renderMain={renderMain}
+      userMessages={live.items.flatMap((item) =>
+        item.kind === 'user' ? [item.recallText ?? item.text] : [],
+      )}
       onSubmitPrompt={handleSubmitPrompt}
       onQuit={handleQuit}
       onTranscriptReset={resetTranscript}

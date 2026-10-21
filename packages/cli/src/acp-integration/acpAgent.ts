@@ -3153,6 +3153,7 @@ export async function runAcpAgent(
       // pool-routed discovery, so bootstrap-level spawns would be
       // redundant subprocess leaks (W119).
       skipMcpDiscovery: true,
+      disableBundledGeneratedUi: true,
       // Bind the workspace-level manager's SDK callback so a runtime-added
       // client-hosted MCP server (#5626) round-trips over the parent WS.
       sendSdkMcpMessage: bootstrapClientMcpSender,
@@ -4546,9 +4547,10 @@ class QwenAgent implements Agent {
     return this.enqueueWorkspaceMcpDiscovery('reload', async () => {
       const settings = loadSettings(this.config.getTargetDir());
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
+      const sessions = this.getActiveSessions();
       const liveConfigs = new Set([
         this.config,
-        ...this.getActiveSessions().map((session) => session.getConfig()),
+        ...sessions.map((session) => session.getConfig()),
         ...(discoveryConfig ? [discoveryConfig] : []),
       ]);
       const syncErrors: unknown[] = [];
@@ -4594,6 +4596,20 @@ class QwenAgent implements Agent {
           }
         } catch (error) {
           syncErrors.push(error);
+        } finally {
+          // Policy can change even when reconnecting fails.
+          for (const session of sessions) {
+            if (session.getConfig() !== config) continue;
+            void this.connection
+              .extNotification('qwen/notify/session/mcp-changed', {
+                sessionId: session.getId(),
+              })
+              .catch((error: unknown) => {
+                debugLogger.debug(
+                  `MCP reload notification failed for session ${session.getId()}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
+          }
         }
       }
       if (!discoveryConfig) {
@@ -4867,11 +4883,17 @@ class QwenAgent implements Agent {
   ): T {
     const backgroundTurn = session?.getBackgroundTurn?.();
     const hasRunningBackgroundTasks = session?.hasRunningBackgroundTasks?.();
-    if (backgroundTurn || hasRunningBackgroundTasks !== undefined) {
+    const generatedUi = session?.getConfig().getBundledGeneratedUiStatus?.();
+    if (
+      backgroundTurn ||
+      hasRunningBackgroundTasks !== undefined ||
+      generatedUi
+    ) {
       response = {
         ...response,
         _meta: {
           ...response._meta,
+          ...(generatedUi ? { generatedUi } : {}),
           ...(backgroundTurn ? { backgroundTurn } : {}),
           ...(hasRunningBackgroundTasks !== undefined
             ? { hasRunningBackgroundTasks }
@@ -5937,6 +5959,13 @@ class QwenAgent implements Agent {
             withExecutionEngineReceipt<NewSessionResponse>(
               {
                 sessionId: session.getId(),
+                ...(config.getBundledGeneratedUiStatus?.()
+                  ? {
+                      _meta: {
+                        generatedUi: config.getBundledGeneratedUiStatus(),
+                      },
+                    }
+                  : {}),
                 models: this.buildAvailableModels(config),
                 modes: this.buildModesData(config),
                 configOptions: this.buildConfigOptions(
@@ -9105,12 +9134,15 @@ class QwenAgent implements Agent {
   ): Promise<ServeSessionContextStatus> {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
+    const recovery = await session.getRecoveryStatusForClient();
+    const generatedUi = config.getBundledGeneratedUiStatus?.();
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
-      recovery: await session.getRecoveryStatusForClient(),
+      recovery,
       state: {
+        ...(generatedUi ? { _meta: { generatedUi } } : {}),
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
         configOptions: this.buildConfigOptions(
@@ -15406,6 +15438,9 @@ class QwenAgent implements Agent {
             // cannot self-grant here any more than at construction.
             const workflowsWereEnabled = config.isWorkflowsEnabled();
             config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
+            config.setWorkflowKeywordTriggerEnabled(
+              newMerged.ui?.disableWorkflowKeywordTrigger !== true,
+            );
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
               // The `workflows` slash command comes and goes with the
               // flag; a client holding the old list would keep offering
