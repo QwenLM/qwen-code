@@ -59,6 +59,11 @@ public final class StoreFaultGate {
         return attempts.get();
     }
 
+    /** FG13a: the fault is owed to the transaction's after-commit callback. */
+    boolean ackArmed() {
+        return loseAck && phase != null;
+    }
+
     void inspect(byte[] recordBytes,
             Function<String, StoredResource> resources) {
         if (!loseAck) {
