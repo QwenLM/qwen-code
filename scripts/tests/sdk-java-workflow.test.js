@@ -1110,7 +1110,9 @@ describe('setup-java Maven cache stays on hosted runners', () => {
 // and qwen-autofix.yml already absorb (#11726); the heap class is capped in
 // pnpm-workspace.yaml, and a retry only offers it a quieter host. Pin the
 // recipe on every install so a new bare step fails here instead of on main.
-// Each attempt re-runs prepare's build (~4m32s observed), not just backoff.
+// For the five installs that do not set QWEN_SKIP_PREPARE, each attempt
+// re-runs prepare's build (~4m32s observed), not just backoff; daemon-e2e
+// skips the build and only runs `npm run generate` on each attempt.
 describe('SDK Java install-transient retry', () => {
   const installs = Object.entries(parse(workflow).jobs).flatMap(
     ([jobName, job]) =>
