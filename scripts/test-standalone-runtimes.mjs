@@ -15,6 +15,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const script = fileURLToPath(import.meta.url);
 const repo = path.dirname(path.dirname(script));
+// The release validation pool shares a runner with the rest of the matrix, so
+// this suite's hundreds of subprocess probes run about twice as slowly there.
+// Release run 39621619809 failed at the old 300 s per-worker and 600 s total
+// spawn caps; budget for the slow pool instead.
+const WORKER_TIMEOUT_MS = 600_000;
+const CI_TIMEOUT_MS = 1_500_000;
 const sha = (file) =>
   createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const run = (bin, args, options = {}) => {
@@ -997,7 +1003,7 @@ async function ci() {
     const result = spawnSync(node, [script], {
       env: { ...process.env, PINNED_NODE: node, PINNED_BUN: bun },
       stdio: 'inherit',
-      timeout: 600_000,
+      timeout: CI_TIMEOUT_MS,
     });
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null);
@@ -1069,7 +1075,7 @@ if (process.argv[2] === '--ci') {
           cwd: root,
           env,
           encoding: 'utf8',
-          timeout: 300_000,
+          timeout: WORKER_TIMEOUT_MS,
           maxBuffer: 8 * 1024 * 1024,
         },
       );
