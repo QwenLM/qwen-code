@@ -2101,6 +2101,9 @@ describe('ManagedSessionsPage', () => {
     expect(binding?.textContent).toContain('Relative directory');
     expect(binding?.textContent).toContain('ws-a');
     expect(binding?.textContent).toContain('services/api');
+    // The compact summary belongs to the home layout only: rendering it here
+    // would repeat the row above the two labeled lines, inside a plain div.
+    expect(binding?.querySelector('summary')).toBeNull();
   });
 
   it('lets the creator send a later Turn to a bound Session', async () => {
