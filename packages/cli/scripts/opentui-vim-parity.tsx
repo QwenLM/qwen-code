@@ -310,8 +310,8 @@ try {
   for (const [bytes, count] of [
     ['i甲🙂e\u0301\x1b', 6],
     ['i甲🙂e\u0301Z', 6],
-    ['i甲🙂e\u0301\x1bx', 7],
-    ['i甲🙂e\u0301\x1baZ\x1bu', 10],
+    [['i甲🙂e\u0301', '\x1b', 'x'], 7],
+    [['i甲🙂e\u0301', '\x1b', 'aZ', '\x1b', 'u'], 10],
     ['i👨‍👩‍👧‍👦Z', 9],
     ['i\x01\x05\x1b', 4],
     ['i\x0b\x15\x18\x1b', 5],
@@ -321,7 +321,17 @@ try {
     ['i\x1b[1;5D\x1b', 3],
   ] as const) {
     await mount('alpha,甲乙🙂 beta\nnext');
-    await send(bytes, count);
+    if (typeof bytes === 'string') {
+      await send(bytes, count);
+    } else {
+      for (const chunk of bytes) {
+        await send(chunk, [...chunk].length);
+        if (chunk === '\x1b') {
+          assert.deepEqual(modes, ['NORMAL', 'NORMAL']);
+        }
+      }
+      assert.equal(decoded, count, 'complete Unicode sequence event count');
+    }
     // Native receives the real decoded event once; unrecognized controls are consumed.
     await change(() => {
       ink.undo();
