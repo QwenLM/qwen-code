@@ -355,7 +355,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/ui/utils/terminal-image-renderer.ts',
   'packages/cli/src/ui/utils/terminalSetup.ts',
   'packages/cli/src/ui/utils/updateCheck.ts',
-  'packages/cli/src/ui/utils/workflow-keyword.ts',
   'packages/cli/src/ui/voice/native-audio-recorder.ts',
   'packages/cli/src/ui/voice/qwen-asr-realtime-session.ts',
   'packages/cli/src/ui/voice/voice-availability.ts',

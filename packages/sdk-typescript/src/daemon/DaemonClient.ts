@@ -151,6 +151,7 @@ import type {
   DaemonRuntimeStopOptions,
   DaemonWorkspaceRuntimeStopResult,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceSkillsSnapshot,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
@@ -8083,6 +8084,17 @@ export class WorkspaceDaemonClient {
       '/skills/refresh',
       'POST /workspaces/:workspace/skills/refresh',
       { method: 'POST', body: options ?? {}, clientId, mode: 'rest' },
+    );
+  }
+
+  workspaceSkillsSnapshot(
+    signal?: AbortSignal,
+  ): Promise<DaemonWorkspaceSkillsSnapshot> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/config/skills/snapshot',
+      'GET /workspaces/:workspace/config/skills/snapshot',
+      { mode: 'rest', signal },
     );
   }
 

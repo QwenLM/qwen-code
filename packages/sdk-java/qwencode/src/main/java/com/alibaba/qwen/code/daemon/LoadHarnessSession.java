@@ -17,6 +17,7 @@ public final class LoadHarnessSession {
     private Map<String, Object> lifecycleAuthority;
     private int lifecycleProtocolVersion = 1;
     private Map<String, Object> agentDefinition;
+    private Map<String, Object> sessionSkillsRef;
     private List<Map<String, Object>> mcpServers;
     private Map<String, Object> hookCatalog;
     private boolean stopMessages;
@@ -32,6 +33,11 @@ public final class LoadHarnessSession {
 
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
+    public LoadHarnessSession withSessionSkillsRef(Map<String, Object> value) {
+        this.sessionSkillsRef = value == null ? null : Map.copyOf(value);
         return this;
     }
 
@@ -63,6 +69,7 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
         copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
@@ -80,6 +87,7 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
         copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
@@ -106,6 +114,7 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
         copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
@@ -124,6 +133,7 @@ public final class LoadHarnessSession {
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
                 suppressChildAgents);
         copy.agentDefinition = agentDefinition;
+        copy.sessionSkillsRef = sessionSkillsRef;
         copy.mcpServers = mcpServers;
         copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
@@ -230,6 +240,9 @@ public final class LoadHarnessSession {
         }
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
+        }
+        if (sessionSkillsRef != null) {
+            result.put("sessionSkillsRef", sessionSkillsRef);
         }
         if (mcpServers != null) {
             result.put("mcpServers", mcpServers);

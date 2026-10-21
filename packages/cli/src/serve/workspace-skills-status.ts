@@ -55,6 +55,17 @@ export interface WorkspaceSkillsStatusProvider {
   invalidate?(workspaceCwd: string): void;
 }
 
+export interface WorkspaceSkillsSnapshot {
+  workspaceCwd: string;
+  skills: Array<{
+    name: string;
+    description: string;
+    body: string;
+    model_invocable?: boolean;
+    user_invocable?: boolean;
+  }>;
+}
+
 export interface WorkspaceSkillsStatusProviderOptions {
   workspaceTrusted?: boolean;
   /** Read inert on-disk Skill manifests without loading workspace settings. */
@@ -94,7 +105,9 @@ interface WorkspaceSkillManagers {
 
 export function createWorkspaceSkillsStatusProvider(
   options: WorkspaceSkillsStatusProviderOptions = {},
-): WorkspaceSkillsStatusProvider {
+): WorkspaceSkillsStatusProvider & {
+  snapshot(workspaceCwd: string): Promise<WorkspaceSkillsSnapshot>;
+} {
   // Reuse one SkillManager per workspace so repeat queries hit its in-memory
   // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
   // globs for) every level on each call. This is a best-effort pre-child
@@ -107,8 +120,57 @@ export function createWorkspaceSkillsStatusProvider(
       managers,
       options.workspaceTrusted ?? true,
       options.includeUntrustedSkills ?? false,
-    )) as WorkspaceSkillsStatusProvider;
+    )) as WorkspaceSkillsStatusProvider & {
+    snapshot(workspaceCwd: string): Promise<WorkspaceSkillsSnapshot>;
+  };
   provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
+  provider.snapshot = async (workspaceCwd) => {
+    if (options.workspaceTrusted === false)
+      throw new Error('Skills snapshots require a trusted Workspace.');
+    const freshManagers = new Map<string, WorkspaceSkillManagers>();
+    const status = await buildWorkspaceSkillsStatus(
+      workspaceCwd,
+      freshManagers,
+      true,
+      false,
+    );
+    const manager = freshManagers.get(workspaceCwd)?.skillManager;
+    if (
+      !status.initialized ||
+      status.errors?.length ||
+      !manager ||
+      manager.hasDiscoveryErrors()
+    )
+      throw new Error('The enabled Skills could not be completely discovered.');
+    const configured = new Map(
+      manager.getCachedSkills()!.map((skill) => [skill.name, skill]),
+    );
+    const skills = status.skills
+      .filter((skill) => skill.status === 'ok')
+      .map((entry) => {
+        const skill = configured.get(entry.name);
+        if (!skill)
+          throw new Error('An enabled Skill is missing its instructions.');
+        return {
+          name: entry.name,
+          description: entry.description,
+          body: skill.body,
+          ...(entry.modelInvocable ? {} : { model_invocable: false }),
+          ...(entry.userInvocable === false ? { user_invocable: false } : {}),
+        };
+      });
+    if (
+      skills.length > 256 ||
+      skills.some(
+        (skill) => Buffer.byteLength(skill.body, 'utf8') > 512 * 1024,
+      ) ||
+      Buffer.byteLength(JSON.stringify(skills), 'utf8') > 2 * 1024 * 1024
+    )
+      throw new Error(
+        'Enabled Skills exceed the 256-item, 512-KiB/body or 2-MiB catalog limit.',
+      );
+    return { workspaceCwd, skills };
+  };
   return provider;
 }
 

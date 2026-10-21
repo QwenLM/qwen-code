@@ -36,6 +36,17 @@ export interface DaemonDiscoveryRecord {
   startedAt: string;
   auth: DaemonDiscoveryAuth;
   tokenGenerated?: boolean;
+  /**
+   * The explicit startup workspaces, without the persisted registrations the
+   * daemon restored at boot. `workspaces` merges both, so only this list can
+   * be replayed as `--workspace` without pinning a restored registration.
+   * Absent on records written before this field existed.
+   */
+  startupWorkspaces?: string[];
+  /** Whether the Web Shell was enabled at startup. */
+  web?: boolean;
+  /** Whether `--require-auth` was set at startup. */
+  requireAuth?: boolean;
   logPath?: string;
   /**
    * The writer's PID namespace (`pid:[4026531836]`). A reader outside it
@@ -120,6 +131,14 @@ function isValidRecord(value: unknown): value is DaemonDiscoveryRecord {
     (record['auth'] === 'none' || record['auth'] === 'bearer') &&
     (record['tokenGenerated'] === undefined ||
       typeof record['tokenGenerated'] === 'boolean') &&
+    (record['startupWorkspaces'] === undefined ||
+      (Array.isArray(record['startupWorkspaces']) &&
+        record['startupWorkspaces'].every(
+          (workspace) => typeof workspace === 'string' && workspace.length > 0,
+        ))) &&
+    (record['web'] === undefined || typeof record['web'] === 'boolean') &&
+    (record['requireAuth'] === undefined ||
+      typeof record['requireAuth'] === 'boolean') &&
     (record['logPath'] === undefined ||
       typeof record['logPath'] === 'string') &&
     (record['pidNamespace'] === undefined ||

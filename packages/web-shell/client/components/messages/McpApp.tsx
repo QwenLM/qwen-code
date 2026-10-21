@@ -5,10 +5,12 @@ import {
 } from '@modelcontextprotocol/ext-apps/app-bridge';
 import {
   McpAppHostContext,
+  useMcpAppAdmission,
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
+import { useI18n } from '../../i18n';
 import { useTheme } from '../../themeContext';
 import styles from './McpApp.module.css';
 
@@ -17,6 +19,7 @@ type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
 
 export interface McpAppDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;
@@ -159,7 +162,26 @@ function acquireAppToolSlot(signal: AbortSignal): Promise<() => void> {
   });
 }
 
+export function GeneratedUiFallback({ display }: { display: McpAppDisplay }) {
+  const { t } = useI18n();
+  return (
+    <div className={styles.fallback}>
+      <div>{display.fallbackText}</div>
+      <div>{t('mcpApp.generatedUi.unavailable')}</div>
+    </div>
+  );
+}
+
 export function McpApp({ display }: { display: McpAppDisplay }) {
+  const allowed = useMcpAppAdmission(display);
+  return allowed ? (
+    <McpAppRuntime display={display} />
+  ) : (
+    <GeneratedUiFallback display={display} />
+  );
+}
+
+function McpAppRuntime({ display }: { display: McpAppDisplay }) {
   const daemonBaseUrl = useContext(McpAppHostContext);
   const sessionId = useContext(McpAppSessionContext);
   const tools = useContext(McpAppToolsContext);

@@ -88,6 +88,7 @@ import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import { WebShellNavigationBoundary } from './navigation';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -98,6 +99,8 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
       onSelectSession: (id: string | undefined) => void;
       navigationTarget?: HTMLElement | null;
       interactive?: boolean;
+      onManageSkills?: () => void;
+      creationSkills?: { workspaceCwd: string };
     }) => {
       const [draft, setDraft] = React.useState('');
       return (
@@ -105,7 +108,14 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
           data-testid="managed-conversation"
           data-session={props.sessionId ?? 'new'}
           data-interactive={props.interactive}
+          data-skills-workspace={props.creationSkills?.workspaceCwd}
         >
+          <button
+            data-testid="managed-manage-skills"
+            onClick={props.onManageSkills}
+          >
+            Manage Skills
+          </button>
           <input
             aria-label="Managed draft"
             value={draft}
@@ -11692,6 +11702,7 @@ function renderApp(
   props: React.ComponentProps<typeof App> = {},
   notificationTarget?: EventTarget,
   standalone = false,
+  urlNavigation = false,
 ): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
@@ -11707,7 +11718,21 @@ function renderApp(
           <TurnNotificationNavigationContext.Provider
             value={notificationTarget}
           >
-            <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
+            {urlNavigation ? (
+              <WebShellNavigationBoundary options={{}} externalTarget={{}}>
+                {(target, onChange) => (
+                  <App
+                    sidebar={{ enabled: true }}
+                    header={{}}
+                    {...nextProps}
+                    {...target}
+                    onSessionIdChange={onChange}
+                  />
+                )}
+              </WebShellNavigationBoundary>
+            ) : (
+              <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
+            )}
           </TurnNotificationNavigationContext.Provider>
         </StandaloneContext.Provider>,
       );
@@ -49177,4 +49202,140 @@ describe('Managed home integration', () => {
     ).toBeNull();
     expect(window.location.search).toBe('?host=ordinary');
   });
+
+  it.each([undefined, ''])(
+    'waits for a Skills source workspace (%s)',
+    async (cwd) => {
+      window.history.replaceState(null, '', '/?managed=1');
+      mockWorkspace.workspaceCwd = cwd;
+      mockWorkspace.capabilities = undefined;
+      const props = {
+        managedAgentProvider: managedProvider(),
+        language: 'en' as const,
+      };
+      const { container, rerender } = renderApp(props);
+      await flush();
+      const sourceCwd = () =>
+        container
+          .querySelector('[data-testid="managed-conversation"]')
+          ?.getAttribute('data-skills-workspace');
+      expect(sourceCwd()).toBeNull();
+      mockWorkspace.workspaceCwd = '/work/ready';
+      rerender(props);
+      await flush();
+      expect(sourceCwd()).toBe('/work/ready');
+    },
+  );
+
+  it('consumes Manage Skills navigation intent before reopening from the URL', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    const { container } = renderApp(
+      { managedAgentProvider: managedProvider(), language: 'en' },
+      undefined,
+      false,
+      true,
+    );
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="managed-manage-skills"]',
+        )!
+        .click(),
+    );
+    await flush();
+    const selected = () =>
+      container.querySelector(
+        '[data-testid="inline-panel"] [role="tab"][aria-selected="true"]',
+      )?.textContent;
+    expect(selected()).toBe('Skills');
+    await act(async () =>
+      container.querySelector('[data-testid="inline-panel"]')!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    await act(async () => {
+      window.history.pushState(null, '', '/plugins?managed=1');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await flush();
+    expect(selected()).toBe('Extensions');
+  });
+
+  it.each([false, true])(
+    'keeps plugin entry tabs and focus independent (shadow DOM: %s)',
+    async (shadowDom) => {
+      window.history.replaceState(null, '', '/?managed=1');
+      const { container } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+        shadowDom: { plugins: shadowDom, portals: false },
+      });
+      await flush();
+
+      const tabRoot = () => {
+        const panel = container.querySelector('[data-testid="inline-panel"]');
+        expect(panel).not.toBeNull();
+        const shadowRoot = panel!.querySelector(
+          '[data-web-shell-shadow-host="plugins"]',
+        )?.shadowRoot;
+        expect(Boolean(shadowRoot)).toBe(shadowDom);
+        return shadowRoot ?? panel!;
+      };
+      const expectSelectedTab = (label: string) => {
+        const content = tabRoot();
+        const selected = content.querySelector(
+          '[role="tab"][aria-selected="true"]',
+        );
+        expect(selected?.textContent).toBe(label);
+        expect(
+          content instanceof ShadowRoot
+            ? content.activeElement
+            : document.activeElement,
+        ).toBe(selected);
+      };
+      const click = async (button: HTMLButtonElement | null) => {
+        expect(button).not.toBeNull();
+        await act(async () => {
+          button!.focus();
+          button!.click();
+        });
+        await flush();
+      };
+
+      await click(
+        container.querySelector('[data-testid="managed-manage-skills"]'),
+      );
+      expectSelectedTab('Skills');
+      await click(
+        Array.from(
+          tabRoot().querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+        ).find((tab) => tab.textContent === 'Extensions') ?? null,
+      );
+      expectSelectedTab('Extensions');
+
+      await act(async () => {
+        container.querySelector('[data-testid="inline-panel"]')!.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'Escape',
+          }),
+        );
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+
+      await click(container.querySelector('[data-testid="open-plugins"]'));
+      expectSelectedTab('Extensions');
+    },
+  );
 });

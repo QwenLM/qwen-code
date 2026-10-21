@@ -37,7 +37,16 @@
 //! idempotent so explicit-detect + later-drop is safe.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+static INTENTIONAL_EPOCH: AtomicU64 = AtomicU64::new(0);
+pub fn intentional_epoch() -> u64 {
+    INTENTIONAL_EPOCH.load(Ordering::Acquire)
+}
+pub fn note_intentional_activation() {
+    INTENTIONAL_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
 
 use crate::apps;
 use crate::focus_steal::{self, SuppressionLease};
@@ -149,7 +158,7 @@ impl Changes {
 /// Default poll deadline — new windows triggered by a click typically
 /// appear within ~200ms on macOS; 1.0s gives the wildcard suppressor
 /// time to fire and settle.
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1000);
+const DEFAULT_TIMEOUT: Duration = Duration::ZERO;
 
 /// Default inter-poll interval. Matches Swift's 50ms.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);

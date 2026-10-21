@@ -24,17 +24,14 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
+import { resolveUbrn } from "./resolve-ubrn.mjs"
 import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const driverRoot = resolve(scriptDirectory, "..")
 const typescriptRoot = join(driverRoot, "typescript")
-const upstreamRoot = join(
-  typescriptRoot,
-  "node_modules",
-  "uniffi-bindgen-react-native",
-)
+const upstreamRoot = resolveUbrn(typescriptRoot)
 const outputIndex = process.argv.indexOf("--output")
 if (outputIndex < 0 || !process.argv[outputIndex + 1]) {
   throw new Error("usage: build-node-runtime.mjs --output <path> [--target <triple>]")
@@ -66,7 +63,7 @@ const manifest = JSON.parse(readFileSync(join(typescriptRoot, "package.json"), "
 const expectedVersion = manifest.devDependencies?.["uniffi-bindgen-react-native"]
 const upstreamManifestPath = join(upstreamRoot, "package.json")
 if (!existsSync(upstreamManifestPath)) {
-  throw new Error("missing pinned UBRN source; run npm ci in packages/cua-driver/typescript")
+  throw new Error("missing pinned UBRN source; run corepack pnpm install at the repository root")
 }
 const actualVersion = JSON.parse(readFileSync(upstreamManifestPath, "utf8")).version
 if (actualVersion !== expectedVersion) {
@@ -170,9 +167,12 @@ try {
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`cargo exited with status ${result.status}`)
 
+  const cargoTargetDirectory = process.env.CARGO_TARGET_DIR
+    ? resolve(process.env.CARGO_TARGET_DIR)
+    : join(runtimeRoot, "napi", "target")
   const targetDirectory = target
-    ? join(runtimeRoot, "napi", "target", target, "release")
-    : join(runtimeRoot, "napi", "target", "release")
+    ? join(cargoTargetDirectory, target, "release")
+    : join(cargoTargetDirectory, "release")
   const candidates = [
     "libuniffi_runtime_napi.dylib",
     "libuniffi_runtime_napi.so",
