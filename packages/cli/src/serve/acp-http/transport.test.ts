@@ -12255,7 +12255,11 @@ describe('ACP WebSocket transport security', () => {
             sessionId: opts.desktopRelaySessionId,
           })
         : undefined;
-      if (opts.webShellToken) credentials!.addWebShellToken(opts.webShellToken);
+      if (opts.webShellToken)
+        credentials!.addWebShellToken(
+          'test-web-shell-device',
+          opts.webShellToken,
+        );
       if (opts.localControlToken) {
         credentials!.addPairingToken('test-pairing', opts.localControlToken);
       }
