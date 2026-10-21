@@ -32,6 +32,10 @@ import {
   WorkspaceRuntimeStillStartingError,
 } from '../workspace-runtime-coordinator.js';
 import { sendBridgeError } from './error-response.js';
+import {
+  SessionArtifactLibraryError,
+  SessionStorageEntryError,
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { DaemonDrainingError } from './session-archive.js';
 import {
   BridgeTimeoutError,
@@ -55,6 +59,48 @@ function responseMock(): {
   json.mockReturnValue(response);
   return { response: response as unknown as Response, set, status, json };
 }
+
+describe('artifact library errors', () => {
+  it.each([
+    'foreign_project',
+    'ambiguous_project',
+    'unknown_project',
+    'non_regular',
+  ] as const)('maps %s storage failures explicitly', (reason) => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new SessionStorageEntryError('session-1', reason),
+    );
+    expect(status).toHaveBeenCalledWith(
+      reason === 'foreign_project' ? 404 : 409,
+    );
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code:
+          reason === 'foreign_project'
+            ? 'session_not_found'
+            : 'session_storage_conflict',
+      }),
+    );
+  });
+  it('keeps artifact mutation refusal distinct from resume failures', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new SessionArtifactLibraryError(
+        'session-1',
+        'artifact_mutation_requires_managed_authority',
+        'Artifact mutation must use its managed session authority.',
+      ),
+    );
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      code: 'artifact_mutation_requires_managed_authority',
+      error: 'Artifact mutation must use its managed session authority.',
+    });
+  });
+});
 
 describe('message deletion errors', () => {
   it('does not certify a later request as persisted while context recovery is required', () => {

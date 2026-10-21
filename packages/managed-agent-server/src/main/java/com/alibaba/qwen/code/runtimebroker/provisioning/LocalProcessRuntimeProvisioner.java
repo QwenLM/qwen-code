@@ -32,6 +32,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -60,6 +61,11 @@ public final class LocalProcessRuntimeProvisioner
     private static final Pattern CAPABILITY_DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final SecureRandom RANDOM = new SecureRandom();
+    // Workers run model-directed tools. The control plane's own settings,
+    // its credentials among them, stay out of their environment; Spring also
+    // binds lower-case variable names.
+    private static final List<String> CONTROL_PLANE_ENV_PREFIXES =
+            List.of("QWEN_MANAGED_AGENT_", "QWEN_MANAGEDAGENT_", "SPRING_", "OSS_");
 
     private final String ownerDomain = UUID.randomUUID().toString();
     private final List<String> command;
@@ -522,10 +528,7 @@ public final class LocalProcessRuntimeProvisioner
                             "Managed Runtime provisioner is closed.");
                     throw closedRefusal;
                 }
-                process = new ProcessBuilder(command)
-                        .directory(workingDirectory.toFile())
-                        .redirectError(ProcessBuilder.Redirect.DISCARD)
-                        .start();
+                process = workerProcess().start();
                 ownedProcess = new OwnedProcess(process, null, seed);
                 starting.add(ownedProcess);
             }
@@ -656,6 +659,20 @@ public final class LocalProcessRuntimeProvisioner
                 endpoint, seed.getToken(), seed.getLeaseId(), seed.getEpoch());
     }
 
+    private ProcessBuilder workerProcess() {
+        ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile())
+                .redirectError(ProcessBuilder.Redirect.DISCARD);
+        removeControlPlaneEnvironment(builder.environment());
+        return builder;
+    }
+
+    static void removeControlPlaneEnvironment(Map<String, String> environment) {
+        environment.keySet().removeIf(name -> {
+            String upper = name.toUpperCase(Locale.ROOT);
+            return CONTROL_PLANE_ENV_PREFIXES.stream().anyMatch(upper::startsWith);
+        });
+    }
+
     private RuntimeLease startDurable(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         Map<String, Object> document = boot(request, seed);
         return store.locked(request, seed, null, false, (resource, original) -> {
@@ -666,8 +683,7 @@ public final class LocalProcessRuntimeProvisioner
             if (registration.state() == LocalRuntimeStore.State.INTENT) {
                 resource.save(registration.withState(LocalRuntimeStore.State.LAUNCHING));
                 Path output = resource.createReady();
-                Process process = new ProcessBuilder(command).directory(workingDirectory.toFile())
-                        .redirectError(ProcessBuilder.Redirect.DISCARD).redirectOutput(output.toFile()).start();
+                Process process = workerProcess().redirectOutput(output.toFile()).start();
                 try {
                     String started = LocalRuntimeStore.startIdentity(process.toHandle());
                     if (started == null) {
