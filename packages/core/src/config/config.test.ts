@@ -10412,6 +10412,21 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('defaults loopProtection to warn', () => {
+      expect(makeConfig().getLoopProtection()).toBe('warn');
+      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
+        'stop',
+      );
+    });
+
+    it('falls back to warn for an unknown loopProtection mode', () => {
+      expect(
+        makeConfig({
+          loopProtection: 'Stop' as never,
+        }).getLoopProtection(),
+      ).toBe('warn');
+    });
+
     it('should use a custom maxToolCallsPerTurn if provided', () => {
       const config = makeConfig({ maxToolCallsPerTurn: 42 });
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
