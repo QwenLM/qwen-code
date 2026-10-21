@@ -153,6 +153,40 @@ export function removeDaemonToken(
 }
 
 /**
+ * Remove token sidecars for the same port that belong to other instances.
+ * A new daemon on a reused port must not inherit the previous instance's
+ * plaintext credential.
+ */
+export function removeStaleDaemonTokens(
+  port: number,
+  keepPid: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): string[] {
+  const prefix = `${RECORD_PREFIX}${port}-`;
+  const suffix = '.token';
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue;
+    const pid = Number(name.slice(prefix.length, -suffix.length));
+    if (!Number.isInteger(pid) || pid === keepPid) continue;
+    try {
+      fs.unlinkSync(path.join(dir, name));
+      removed.push(name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  return removed;
+}
+
+/**
  * The URL a local client can dial. A wildcard bind (`0.0.0.0` / `[::]`) is
  * reachable, but not addressable as written; probe it through loopback the
  * same way `--open` rewrites its browser URL.

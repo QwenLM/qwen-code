@@ -16,6 +16,7 @@ import {
   readDaemonToken,
   removeDaemonDiscovery,
   removeDaemonToken,
+  removeStaleDaemonTokens,
   resolveDaemonDiscoveryDir,
   writeDaemonToken,
   type DaemonDiscoveryEntry,
@@ -853,6 +854,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
   }
 
   if (record) {
+    removeStaleDaemonTokens(record.port, record.pid);
     if (argv['save-token']) {
       try {
         writeDaemonToken(record.port, record.pid, token!);
@@ -943,6 +945,8 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
         })
       ) {
         kept.push(row);
+      } else {
+        removeDaemonToken(row.entry.record.port, row.entry.record.pid);
       }
     }
     rows = kept;
