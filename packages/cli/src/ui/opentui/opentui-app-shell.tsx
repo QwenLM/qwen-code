@@ -75,10 +75,11 @@ import {
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
-import type {
-  OpenTuiInputSubmission,
-  OpenTuiCancelSettled,
-  OpenTuiComposerHandle,
+import {
+  restoreInputSubmissions,
+  type OpenTuiInputSubmission,
+  type OpenTuiCancelSettled,
+  type OpenTuiComposerHandle,
 } from './input-submission.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
@@ -140,6 +141,7 @@ export interface OpenTuiAppProps {
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
   renderMain?: () => ReactNode;
+  userMessages?: readonly string[];
   /**
    * Runs a model turn for a plain prompt or a `submit_prompt` outcome. A
    * composer prompt passes its pasted image paths as a second, structured
@@ -618,6 +620,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     host.setStreaming(!!streaming);
   }, [host, streaming]);
 
+  useEffect(() => {
+    config.setWorkflowKeywordTriggerEnabled?.(
+      settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+    );
+  }, [config, settings.merged.ui?.disableWorkflowKeywordTrigger]);
+
   const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
   // Slash and shell submissions held back while a model turn streams (ink's
@@ -654,21 +662,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     );
     setDeferredRevision((revision) => revision + 1);
     if (!live && prompts.length === 0) return null;
-    return {
-      text: [live?.text, ...prompts.map((entry) => entry.text)]
-        .filter(Boolean)
-        .join('\n\n'),
-      imagePaths: [
-        ...(live?.imagePaths ?? []),
-        ...prompts.flatMap((entry) => entry.imagePaths ?? []),
-      ],
-      submittedPrompt: [
-        live?.submittedPrompt ?? live?.text,
-        ...prompts.map((entry) => entry.options?.submittedPrompt ?? entry.text),
-      ]
-        .filter(Boolean)
-        .join('\n\n'),
-    };
+    return restoreInputSubmissions([
+      ...(live ? [live] : []),
+      ...prompts.map((entry) => ({
+        ...entry.options,
+        text: entry.text,
+        imagePaths: entry.imagePaths,
+      })),
+    ]);
   }, [onPopQueue]);
   const queueSessionId = config.getSessionId();
   const queueSessionRef = useRef(queueSessionId);
@@ -1046,7 +1047,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     config,
   ]);
 
-  const userMessages = useMemo(
+  const hostUserMessages = useMemo(
     () =>
       host
         .getHistory()
@@ -1206,7 +1207,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 onSubmit={onSubmit}
                 onNotice={notify}
                 preferredEditor={settings.merged.general?.preferredEditor}
-                userMessages={userMessages}
+                userMessages={props.userMessages ?? hostUserMessages}
                 config={config}
                 focus
                 streaming={streaming}

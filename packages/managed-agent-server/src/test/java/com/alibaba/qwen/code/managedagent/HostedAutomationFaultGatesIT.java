@@ -1383,6 +1383,91 @@ class HostedAutomationFaultGatesIT {
         request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-close-retire", 202);
     }
 
+    // FG11d: a close cannot cut a turn that is in flight. The Session answers
+    // `409 turn_active`, so an automation input queued behind that turn is
+    // decided by the turn rather than by the close attempt — the refusal is what
+    // this arm can pin, because no close ever reaches the queue.
+    @Test
+    @Timeout(600)
+    void fg11dCloseIsRefusedWhileATurnIsActiveOnMySql() throws Exception {
+        workspaceLifecycle = true;
+        boot("fg11d");
+        String session = createSession("close-turn-active");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11A_HOLD", "0 0 1 1 *"), "fg11d-active-base", 202).path("id").asText();
+        // The fire parks on the model, so the Session carries an active turn.
+        request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-active-held", 202);
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("manual:fg11d-active-held")));
+        HttpResponse<String> refused = send("POST", "/v1/agents/sessions/" + session + "/close", null,
+                "fg11d-close-active");
+        assertThat(refused.statusCode()).as("a close cannot cut an active turn").isEqualTo(409);
+        assertThat(refused.body()).as("the refusal names the turn").contains("turn_active");
+        heldModel.countDown();
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-active-retire", 202);
+    }
+
+    // FG11d: a retry under the same key reuses the run it already created. The
+    // second POST answers that run, records no second occurrence and starts no
+    // second Turn, so a client retrying a lost answer cannot double the work.
+    @Test
+    @Timeout(600)
+    void fg11dRetriedFireReusesItsRunOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("retry-reuse");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_RETRY", "0 0 1 1 *"), "fg11d-retry-base", 202).path("id").asText();
+        String first = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-retry-run", 202)
+                .path("id").asText();
+        String second = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-retry-run", 202)
+                .path("id").asText();
+        assertThat(second).as("the retry answers the run it already made").isEqualTo(first);
+        // The fire commits asynchronously: wait for the occurrence and for the
+        // Turn it starts before judging what the retry did not add.
+        waiting().atMost(Duration.ofSeconds(60)).untilAsserted(() -> assertThat(jdbc.queryForList(
+                "SELECT occurrence_key FROM ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ?",
+                String.class, tenant, id)).as("one occurrence").hasSize(1));
+        waiting().atMost(Duration.ofSeconds(60)).until(() -> modelPrompts.stream()
+                .anyMatch(prompt -> prompt.contains("Automation ID: " + id)));
+        assertThat(modelPrompts).filteredOn(prompt -> prompt.contains("Automation ID: " + id))
+                .as("both requests share one Turn").hasSize(1);
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-retry-retire", 202);
+    }
+
+    // FG11d: a run that completes on its own keeps its outcome. A cancel that
+    // arrives after the run settled is refused with
+    // `409 task_action_unavailable`, and neither the run nor its occurrence is
+    // rewritten.
+    @Test
+    @Timeout(600)
+    void fg11dSettledRunKeepsItsOutcomeOnMySql() throws Exception {
+        boot("fg11d");
+        String session = createSession("settled-outcome");
+        String id = request("POST", "/v1/agent-automations",
+                definition(session, "FG11D_SETTLED", "0 0 1 1 *"), "fg11d-settled-base", 202).path("id").asText();
+        String run = request("POST", "/v1/agent-automations/" + id + "/runs", null, "fg11d-settled-run", 202)
+                .path("id").asText();
+        waiting().atMost(Duration.ofSeconds(90)).untilAsserted(() -> assertThat(runState(run))
+                .as("the run completes on its own").isEqualTo("completed"));
+        JsonNode task = request("GET", "/v1/agents/sessions/" + session + "/tasks", null, null, 200)
+                .path("data").path(0);
+        assertThat(task.path("kind").asText()).as("the newest task is the run's").isEqualTo("automation_run");
+        HttpResponse<String> refused = send("POST",
+                "/v1/agents/sessions/" + session + "/tasks/" + task.path("id").asText() + "/cancel", null,
+                "fg11d-settled-cancel");
+        assertThat(refused.statusCode()).as("a settled run is not cancellable: %s", refused.body()).isEqualTo(409);
+        // The refusal is the projection's "does not accept a cancellation now",
+        // not `task_already_settled`: the settled task is no longer a cancel
+        // target at all, so the coordinator never reaches its terminal branch.
+        assertThat(refused.body()).as("the refusal names the closed window")
+                .contains("task_action_unavailable");
+        assertThat(runState(run)).as("the run keeps its own outcome").isEqualTo("completed");
+        assertThat(jdbc.queryForMap("SELECT outcome FROM ma_schedule_occurrence WHERE tenant_id = ?"
+                + " AND schedule_id = ? AND occurrence_key = ?", tenant, id, "manual:fg11d-settled-run"))
+                .as("the occurrence stays fired").containsEntry("outcome", "fired");
+        request("DELETE", "/v1/agent-automations/" + id, null, "fg11d-settled-retire", 202);
+    }
+
     private void boot(String letter) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("FG11 requires real MySQL").startsWith("jdbc:mysql:");
         this.letter = letter;

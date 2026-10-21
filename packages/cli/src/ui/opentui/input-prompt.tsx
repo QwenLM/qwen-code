@@ -68,10 +68,12 @@ import {
   allowEditorTypeInSandbox,
   isValidEditorType,
 } from '@qwen-code/qwen-code-core/utils/editor.js';
-import type {
-  OpenTuiInputSubmission,
-  OpenTuiCancelSettled,
-  OpenTuiComposerHandle,
+import {
+  restoreInputSubmissions,
+  type OpenTuiRestoredDraft,
+  type OpenTuiInputSubmission,
+  type OpenTuiCancelSettled,
+  type OpenTuiComposerHandle,
 } from './input-submission.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
@@ -215,10 +217,7 @@ export interface InputPromptProps {
   onSubmit: (
     text: string,
     imagePaths?: readonly string[],
-    options?: Pick<
-      OpenTuiInputSubmission,
-      'submittedPrompt' | 'deferUntilIdle'
-    >,
+    options?: Omit<OpenTuiInputSubmission, 'text' | 'imagePaths'>,
   ) => boolean | Promise<boolean>;
   onNotice?: (text: string) => void;
   preferredEditor?: string;
@@ -241,7 +240,7 @@ export interface InputPromptProps {
   };
   /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
   queueLength?: number;
-  /** Pops all queued prompts into the composer (returns joined text). */
+  /** Returns editable queued payloads with their attachments and source. */
   onPopQueue?: () => OpenTuiInputSubmission | null;
   /** Recently used slash commands feeding recency-weighted ranking. */
   recentSlashCommands?: ReadonlyMap<string, RecentSlashCommand>;
@@ -366,6 +365,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // History-restored text suppresses re-opening the dropdown, like the
   // original's isHistoryRestoredText.
   const historyRestoredTextRef = useRef<string | null>(null);
+  const unknownHistoryInputRef = useRef(false);
+  const restoredQueueDraftRef = useRef<OpenTuiRestoredDraft | null>(null);
   const dismissedUntilChangeRef = useRef<string | null>(null);
   const commandsRef = useRef<readonly SlashCommand[]>([]);
   // Query-relative replacement range for the current buffer's SLASH target.
@@ -382,6 +383,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // submit (ink pendingPastes).
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const activePlaceholderIdsRef = useRef<Map<number, Set<number>>>(new Map());
+  useLayoutEffect(
+    () => () => {
+      restoredQueueDraftRef.current = null;
+    },
+    [],
+  );
 
   // U-7: follow-up suggestion lifecycle, shared with ink via the
   // renderer-neutral controller hook. Acceptance inserts into the composer
@@ -412,6 +419,23 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     followupState.isVisible || promptSuggestion
       ? (followupState.suggestion ?? promptSuggestion ?? null)
       : null;
+
+  const restoreQueuedDraft = useCallback((draft: OpenTuiRestoredDraft) => {
+    const snapshot = draft.pasteExpansions ?? new Map<string, string>();
+    pendingPastesRef.current = new Map(snapshot);
+    unknownHistoryInputRef.current = draft.hasUnknownInput;
+    restoredQueueDraftRef.current = draft;
+    activePlaceholderIdsRef.current.clear();
+    for (const placeholder of snapshot.keys()) {
+      const parsed = parsePastePlaceholder(placeholder);
+      if (!parsed) continue;
+      const ids =
+        activePlaceholderIdsRef.current.get(parsed.charCount) ??
+        new Set<number>();
+      ids.add(parsed.id);
+      activePlaceholderIdsRef.current.set(parsed.charCount, ids);
+    }
+  }, []);
 
   // Shell mode overrides the approval chrome (ink InputPrompt order: `!` wins
   // over the approval-mode prefix). The label itself lives in the footer, as
@@ -569,6 +593,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   useEffect(() => {
     const el = editorRef.current;
     if (!el || textVersion === 0) return;
+    if (el.plainText.length === 0) {
+      unknownHistoryInputRef.current = false;
+      restoredQueueDraftRef.current = null;
+      pendingPastesRef.current.clear();
+      activePlaceholderIdsRef.current.clear();
+    }
     // Any real edit that moves away from a restored history entry re-enables
     // completions, mirroring the original's historyRestoredText handling.
     if (
@@ -605,6 +635,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     draftRef.current.valid = false;
     draftRef.current = newDraft();
     editorRef.current?.clear();
+    unknownHistoryInputRef.current = false;
+    restoredQueueDraftRef.current = null;
     pendingPastesRef.current.clear();
     activePlaceholderIdsRef.current.clear();
     restoredProvenanceRef.current = null;
@@ -618,7 +650,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const cancelPendingRef = useRef(false);
   useLayoutEffect(() => {
     if (sessionRef.current !== sessionId) {
-      clearDraft();
+      // Session rotation invalidates asynchronous owners, while the mounted
+      // editor keeps its visible text and its matching paste/source snapshot.
+      draftRef.current = newDraft();
+      setSelectedAttachment(-1);
+      showAttachments();
       cancelPendingRef.current = false;
       sessionRef.current = sessionId;
     }
@@ -627,14 +663,44 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       draftRef.current.valid = false;
       if (claimedDraftRef.current) claimedDraftRef.current.valid = false;
     };
-  }, [sessionId, clearDraft]);
+  }, [sessionId, showAttachments, setSelectedAttachment]);
 
   const restoreSubmission = useCallback(
     (submission: OpenTuiInputSubmission, separator = '\n\n') => {
       const el = editorRef.current;
       if (!el) return;
       const current = el.plainText;
-      const text = [submission.text, current].filter(Boolean).join(separator);
+      const expandedCurrent = expandPendingPastePlaceholders(
+        current,
+        pendingPastesRef.current,
+      );
+      const restored = restoreInputSubmissions(
+        [
+          submission,
+          ...(current
+            ? [
+                {
+                  text: expandedCurrent,
+                  displayText: current,
+                  submittedPrompt:
+                    restoredProvenanceRef.current?.text === current
+                      ? restoredProvenanceRef.current.submittedPrompt
+                      : current,
+                  humanInput: unknownHistoryInputRef.current
+                    ? undefined
+                    : { text: expandedCurrent },
+                  hasUnknownInput: unknownHistoryInputRef.current,
+                  pasteExpansions: new Map(pendingPastesRef.current),
+                  restoredDraft: restoredQueueDraftRef.current ?? undefined,
+                },
+              ]
+            : []),
+        ],
+        separator,
+        pendingPastesRef.current,
+      );
+      const text = restored.text;
+      restoreQueuedDraft(restored.restoredDraft!);
       el.setText(text);
       el.gotoBufferEnd();
       draftRef.current.attachments.unshift(
@@ -651,7 +717,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       showAttachments();
       setTextVersion((v) => v + 1);
     },
-    [showAttachments],
+    [showAttachments, restoreQueuedDraft],
   );
 
   const cancelTurn = useCallback(() => {
@@ -672,16 +738,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       const popped = onPopQueue?.();
       const pending = [queued, popped].filter((entry) => entry != null);
       if (pending.length) {
-        restoreSubmission(
-          {
-            text: pending.map((entry) => entry.text).join('\n\n'),
-            imagePaths: pending.flatMap((entry) => entry.imagePaths ?? []),
-            submittedPrompt: pending
-              .map((entry) => entry.submittedPrompt ?? entry.text)
-              .join('\n\n'),
-          },
-          '\n',
-        );
+        restoreSubmission(restoreInputSubmissions(pending), '\n');
       } else if (
         empty &&
         prompt &&
@@ -725,8 +782,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         restoredProvenanceRef.current?.text === raw
           ? restoredProvenanceRef.current.submittedPrompt
           : raw;
+      const pasteExpansions = new Map(pendingPastesRef.current);
+      const hasUnknownInput = unknownHistoryInputRef.current;
+      const restoredDraft = restoredQueueDraftRef.current ?? undefined;
       draftRef.current = newDraft();
       el.clear();
+      unknownHistoryInputRef.current = false;
+      restoredQueueDraftRef.current = null;
       pendingPastesRef.current.clear();
       activePlaceholderIdsRef.current.clear();
       restoredProvenanceRef.current = null;
@@ -750,11 +812,30 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             .filter(Boolean)
             .join('\n\n'),
           deferUntilIdle,
+          displayText: [raw.trim(), ...draft.fallback]
+            .filter(Boolean)
+            .join('\n\n'),
+          humanInput: hasUnknownInput
+            ? undefined
+            : {
+                text: [text, ...draft.fallback].filter(Boolean).join('\n\n'),
+              },
+          hasUnknownInput,
+          ...(pasteExpansions.size ? { pasteExpansions } : {}),
+          ...(restoredDraft ? { restoredDraft } : {}),
         };
         const accepted = await onSubmit(
           submission.text,
           submission.imagePaths?.length ? submission.imagePaths : undefined,
-          { submittedPrompt: submission.submittedPrompt, deferUntilIdle },
+          {
+            submittedPrompt: submission.submittedPrompt,
+            deferUntilIdle,
+            displayText: submission.displayText,
+            humanInput: submission.humanInput,
+            hasUnknownInput: submission.hasUnknownInput,
+            pasteExpansions: submission.pasteExpansions,
+            restoredDraft: submission.restoredDraft,
+          },
         );
         if (!accepted && draft.valid) restoreSubmission(submission);
       } catch (error) {
@@ -1512,7 +1593,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.setCursor(0, 0);
         return;
       }
+      restoredQueueDraftRef.current = null;
       historyRestoredTextRef.current = decision.text;
+      unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
       el.setCursor(0, 0);
       setTextVersion((v) => v + 1);
@@ -1538,7 +1621,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.gotoLineEnd();
         return;
       }
+      restoredQueueDraftRef.current = null;
       historyRestoredTextRef.current = decision.text;
+      unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
       setTextVersion((v) => v + 1);
       return;

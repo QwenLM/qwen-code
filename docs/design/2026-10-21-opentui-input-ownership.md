@@ -36,6 +36,26 @@ Global Ctrl+C and exit-handler ordering are not accepted in this batch. U2B
 will establish a product baseline against current Ink; this delivery does not
 claim to fix or fully align cancellation and exit keys.
 
+## Integration with main input provenance
+
+The normal merge with fixed main `8545558a25db342683cb84a6814e591c6fcf6c67`
+retains #14876's workflow opt-out, human-input descriptor, display/recall split
+and paste expansion snapshots. Metadata travels with the existing structured
+submission through the composer, shell deferral, live queue and cancellation
+restore; there is no second queue or ambient popped-text fallback. Claim text,
+source and paste maps before waiting for images. A successor draft cannot change
+that snapshot. Unchanged mixed restores retain only the original known human
+members; editing unknown-source text does not grant human origin. Queue return
+preserves images and renames colliding placeholders using the existing helper.
+
+Session rotation invalidates pending images, claimed admissions and cancellation
+callbacks. A mounted editor retains synchronous visible text, paste mappings and
+unknown-source eligibility, as main's regression cases require. A reset settlement
+only clears the cancellation latch: it cannot pop queues or restore old content.
+Fresh combined validation is pending; previous branch results do not cover this
+merge. Keep both parents' regression cases and add pending-image/successor,
+rejected-admission and session-rotation source checks before accepting it.
+
 ## Baseline decisions
 
 Real Node+Ink and Bun+Ink PTYs on the exact U1 artifact established:
@@ -65,8 +85,9 @@ failure cannot acknowledge success.
 
 Clear the claimed editor draft immediately so later typing has a separate owner.
 Keep the snapshot until acknowledgement. On rejection restore expanded text and
-images ahead of later input, using the existing blank-line aggregation convention;
-do not re-collapse old placeholders. Preserve provenance for an unchanged retry,
+images ahead of later input, using the existing blank-line aggregation convention.
+Keep a restored display placeholder paired with its captured expansion map.
+Preserve provenance for an unchanged retry,
 and recompute it when combined or edited. Release the claim in `finally`.
 Completion/chip reset affects the claimed draft only. Session rotation or unmount
 invalidates late restoration and paste completion.

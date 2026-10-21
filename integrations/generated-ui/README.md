@@ -1,10 +1,20 @@
 # Generated UI
 
-An optional private Qwen Code extension for complete, locally interactive views such as parameter simulations and weighted option comparisons. The model supplies HTML, CSS and JavaScript through `generated_ui_show`; the existing MCP Apps host displays the completed view. Each call creates an independent immutable card.
+Generated UI is bundled with Qwen Code behind the default-off `experimental.generatedUi` setting. It creates complete, locally interactive views such as parameter simulations and weighted option comparisons. The model supplies HTML, CSS and JavaScript through `generated_ui_show`; the existing MCP Apps host displays the completed view. Each call creates an independent immutable card.
 
 This is a restricted JavaScript environment with a small UI API. Layout is generated freely within the supported HTML/CSS subset; JavaScript executes in QuickJS in a dedicated Worker. Generated scripts never execute in the browser document. There is no browser DOM API, networking, imports, timers, filesystem access, MCP tool access, or message submission in generated code.
 
-## Build and configure
+## Enable the bundled feature
+
+Enable **Generated UI** in Experimental settings, or set `experimental.generatedUi` to `true` in your Qwen Code settings. Recreate the owning CLI/daemon session to apply the change. Refreshing the browser or reattaching to an existing session does not apply a setting that requires restart. The same restart requirement applies when disabling the feature; after it takes effect, built-in historical cards display their text summary without starting the interactive runtime.
+
+The built-in provider supports trusted local sessions and their Web Shell/Desktop clients. It is unavailable in Safe/Bare, managed, SSH or other execution environments, shell execution sandboxes, read-only Agent Hosts, and untrusted or unresolved workspaces. Existing MCP and skill restrictions still apply. CLI/TUI output uses the readable summary.
+
+The built-in provider uses `ui://qwen-code-generated-ui/view-v1.html`. A manually installed `generated-ui` extension keeps the legacy URI `ui://generated-ui/view-v1.html` and its existing behavior. An active manually configured provider with the same server name prevents built-in activation with a diagnostic; its configuration is preserved.
+
+The product package includes the server, fixed App HTML, writer skill and third-party licenses under `generated-ui/`. Worker code and WASM are embedded build data, so using the installed feature does not download a runtime or library.
+
+## Build and configure the optional extension
 
 Requires Node.js 22 or newer. From the repository root:
 

@@ -15,6 +15,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { LiveHistoryItem } from './live-session-model.js';
 import { createInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   ModSession,
@@ -54,7 +55,9 @@ const mocks = vi.hoisted(() => {
     keyboard: [] as Array<
       (key: { name: string; ctrl: boolean; eventType?: string }) => void
     >,
+    items: [] as LiveHistoryItem[],
     appProps: null as {
+      userMessages?: readonly string[];
       renderMain?: () => unknown;
       composerHandle?: {
         current: {
@@ -143,7 +146,7 @@ vi.mock('./transcript-view.js', () => ({
 }));
 vi.mock('./live-turn.js', () => ({
   useOpenTuiLiveTurn: () => ({
-    items: [],
+    items: mocks.state.items,
     streaming: mocks.state.streaming,
     streamingCharsRef: { current: 0 },
     isReceivingContent: false,
@@ -243,6 +246,7 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.waitingCalls = [];
     mocks.state.streaming = false;
     mocks.state.interrupt.mockClear();
+    mocks.state.items = [];
     mocks.state.appProps = null;
     mocks.state.keyboard = [];
     vi.mocked(exitSession).mockClear();
@@ -445,6 +449,18 @@ describe('startOpenTuiUI fallback contract', () => {
   // here reads that tree's elements without executing them.
   it('threads the parked call and the args setting into the transcript', async () => {
     mocks.state.waitingCalls = [{ callId: 'q1' }, { callId: 'q2' }];
+    const raw = '<system-reminder>literal user text</system-reminder> workflow';
+    const recalledPaste = `${raw}\npasted body`;
+    mocks.state.items = [
+      { kind: 'user', id: 'user', text: raw },
+      {
+        kind: 'user',
+        id: 'pasted-user',
+        text: '[Pasted Content 1200 chars]',
+        recallText: recalledPaste,
+      },
+      { kind: 'info', id: 'info', text: 'machine context' },
+    ];
     const started = await startOpenTuiUI(
       buildConfig(),
       {
@@ -479,6 +495,7 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(props?.['awaitingCallId']).toBe('q1');
     expect(props?.['showToolCallArgs']).toBe(true);
     expect(props?.['mouseTracking']).toBe(false);
+    expect(mocks.state.appProps?.userMessages).toEqual([raw, recalledPaste]);
     // The renderer takes no pointer events when the setting is off.
     expect(createCliRenderer).toHaveBeenLastCalledWith(
       expect.objectContaining({ useMouse: false }),

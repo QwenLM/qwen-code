@@ -28,10 +28,11 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ApprovalMode, Storage } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, Storage, type Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import type { OpenTuiCancelSettled } from './input-submission.js';
+import { useOpenTuiLiveTurn, type OpenTuiLiveTurn } from './live-turn.js';
 import { cpLen, cpSlice } from '../utils/textUtils.js';
 import {
   codePointIndexToDisplayCol,
@@ -89,6 +90,11 @@ const mocks = vi.hoisted(() => {
     clipboardHasImage:
       vi.fn<(onUnavailable?: () => void) => Promise<boolean>>(),
     saveClipboardImage: vi.fn<() => Promise<string | null>>(),
+    liveTurns: [] as Array<{
+      prompt: unknown;
+      options: Record<string, unknown>;
+    }>,
+    liveWaiters: [] as Array<() => void>,
   };
 
   function createFakeEditor() {
@@ -325,6 +331,23 @@ vi.mock('./theme.js', () => ({
 vi.mock('./slash-dispatch.js', () => ({
   loadInteractiveCommands: async () => mocks.state.slashCommands,
 }));
+vi.mock('./live-session.js', () => ({
+  nextLivePromptId: () => `source-test-${mocks.state.liveTurns.length}`,
+  async *livePromptEvents(
+    _config: unknown,
+    prompt: unknown,
+    _signal: AbortSignal,
+    options: Record<string, unknown>,
+  ) {
+    mocks.state.liveTurns.push({ prompt, options });
+    if (mocks.state.liveTurns.length === 1) {
+      await new Promise<void>((resolve) =>
+        mocks.state.liveWaiters.push(resolve),
+      );
+    }
+    yield { type: 'done' };
+  },
+}));
 vi.mock('../utils/clipboardUtils.js', () => ({
   clipboardHasImage: (onUnavailable?: () => void) =>
     mocks.state.clipboardHasImage(onUnavailable),
@@ -406,6 +429,183 @@ async function pressKey(name: string, ctrl = false) {
     lastKeyboardHandler()(baseKeyEvent({ name, ctrl, sequence: '' })),
   );
 }
+describe('OpenTuiInputPrompt queued source restoration', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+    mocks.state.liveTurns.length = 0;
+    mocks.state.liveWaiters.length = 0;
+  });
+
+  it('recalls a completed pasted turn as editable full text without granting human origin', async () => {
+    const config = {} as Config;
+    const body = 'workflow pasted body'.padEnd(1200, 'x');
+    const placeholder = '[Pasted Content 1200 chars]';
+    let currentLive: OpenTuiLiveTurn = null!;
+    function Harness() {
+      const live = useOpenTuiLiveTurn({ config });
+      currentLive = live;
+      return (
+        <OpenTuiInputPrompt
+          onSubmit={(text, images, metadata) => live.submit(text, images, metadata)}
+          userMessages={live.items.flatMap((item) =>
+            item.kind === 'user' ? [item.recallText ?? item.text] : [],
+          )}
+          streaming={live.streaming}
+        />
+      );
+    }
+    const press = async (name: string, sequence: string) => {
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name, sequence }));
+      });
+    };
+    render(<Harness />);
+    const paste = mocks.state.pasteHandlers.at(-1);
+    if (!paste) throw new Error('no paste handler registered');
+    await act(async () => {
+      paste({ bytes: new TextEncoder().encode(body), preventDefault: vi.fn() });
+    });
+    expect(currentEditor().plainText).toBe(placeholder);
+    await press('return', '\r');
+    expect(mocks.state.liveTurns[0]?.prompt).toBe(body);
+    expect(mocks.state.liveTurns[0]?.options['humanInput']).toEqual({
+      text: body,
+    });
+    await act(async () => {
+      for (const wake of mocks.state.liveWaiters.splice(0)) wake();
+    });
+    expect(currentLive.streaming).toBe(false);
+    expect(currentLive.items).toContainEqual(
+      expect.objectContaining({ kind: 'user', text: placeholder }),
+    );
+    await press('up', '\x1b[A');
+    expect(currentEditor().plainText).toBe(body);
+    await typeText('edited instruction ');
+    const edited = currentEditor().plainText;
+    expect(edited).toBe(`edited instruction ${body}`);
+    await press('return', '\r');
+    expect(mocks.state.liveTurns[1]?.prompt).toBe(edited);
+    expect(edited).toContain(body);
+    expect(edited).not.toContain(placeholder);
+    expect(mocks.state.liveTurns[1]?.options['humanInput']).toBeUndefined();
+  });
+
+  it.each([
+    ['unknown', 'edit'],
+    ['mixed', 'edit'],
+    ['known', 'edit'],
+    ['mixed', 'unchanged'],
+    ['mixed', 'repop-edit'],
+    ['unknown', 'clear'],
+    ['mixed', 'clear'],
+    ['known', 'clear'],
+    ['unknown', 'remount'],
+    ['known', 'recall'],
+  ] as const)(
+    'retains the %s source after pop and %s through the actual composer and live queue',
+    async (source, action) => {
+      const unknown = 'workflow recalled unknown';
+      const known =
+        action === 'recall' ? 'workflow known human' : 'known human';
+      const config = {} as Config;
+      let currentLive: OpenTuiLiveTurn = null!;
+      let setComposerVisible: (visible: boolean) => void = () => {};
+      function Harness() {
+        const live = useOpenTuiLiveTurn({ config });
+        const [visible, setVisible] = useState(true);
+        currentLive = live;
+        setComposerVisible = setVisible;
+        if (!visible) return null;
+        return (
+          <OpenTuiInputPrompt
+            onSubmit={(text, images, metadata) => live.submit(text, images, metadata)}
+            userMessages={[action === 'recall' ? known : unknown]}
+            streaming={live.streaming}
+            queueLength={live.messageQueue.length}
+            onPopQueue={live.popQueue}
+          />
+        );
+      }
+      const press = async (name: string, sequence: string, ctrl = false) => {
+        await act(async () => {
+          lastKeyboardHandler()(baseKeyEvent({ name, sequence, ctrl }));
+        });
+      };
+      render(<Harness />);
+      act(() => currentLive.submit('active turn'));
+      if (source !== 'known') {
+        await press('up', '\x1b[A');
+        expect(currentEditor().plainText).toBe(unknown);
+        await press('return', '\r');
+      }
+      if (source !== 'unknown') {
+        await typeText(known);
+        await press('return', '\r');
+      }
+      expect(currentEditor().plainText).toBe('');
+      await press('up', '\x1b[A');
+      const popped =
+        source === 'mixed'
+          ? `${unknown}\n\n${known}`
+          : source === 'known'
+            ? known
+            : unknown;
+      expect(currentEditor().plainText).toBe(popped);
+      if (action === 'repop-edit') {
+        await press('return', '\r');
+        await press('up', '\x1b[A');
+        expect(currentEditor().plainText).toBe(popped);
+      }
+      if (action === 'clear' || action === 'remount') {
+        if (action === 'remount') {
+          act(() => setComposerVisible(false));
+          act(() => setComposerVisible(true));
+        } else {
+          await press('c', '\x03', true);
+        }
+        expect(currentEditor().plainText).toBe('');
+        await act(async () => {
+          currentEditor().insertText(popped);
+          (mocks.state.textareaProps?.['onContentChange'] as () => void)();
+        });
+      } else if (action === 'edit' || action === 'repop-edit') {
+        await typeText(' append instruction');
+      } else if (action === 'recall') {
+        currentEditor().setCursor(0, 0);
+        await press('up', '\x1b[A');
+        expect(currentEditor().plainText).toBe(popped);
+      }
+      const submitted = currentEditor().plainText;
+      await press('return', '\r');
+      await act(async () => {
+        for (const wake of mocks.state.liveWaiters.splice(0)) wake();
+      });
+      expect(mocks.state.liveTurns).toHaveLength(2);
+      const expectedHuman =
+        action === 'recall'
+          ? undefined
+          : action === 'clear' || action === 'remount' || source === 'known'
+            ? { text: submitted }
+            : action === 'unchanged' && source === 'mixed'
+              ? { text: known }
+              : undefined;
+      expect(mocks.state.liveTurns[1]?.prompt).toBe(submitted);
+      expect(mocks.state.liveTurns[1]?.options['humanInput']).toEqual(
+        expectedHuman,
+      );
+      expect(mocks.state.liveTurns[1]?.options).not.toHaveProperty(
+        'restoredDraft',
+      );
+      expect(mocks.state.liveTurns[1]?.options).not.toHaveProperty(
+        'hasUnknownInput',
+      );
+    },
+  );
+});
 
 describe('OpenTuiInputPrompt raw Backspace wiring', () => {
   beforeEach(() => {
@@ -608,6 +808,46 @@ describe('OpenTuiInputPrompt submit guard', () => {
     });
     expect(submitted).toEqual(['@x']);
     expect(editor.plainText).toBe('');
+  });
+
+  it('keeps unknown history ineligible across edits and restores fresh typing after the buffer clears', async () => {
+    const submitted = vi.fn<
+      Parameters<typeof OpenTuiInputPrompt>[0]['onSubmit']
+    >(() => true);
+    const history =
+      '<system-reminder>expanded old body</system-reminder> workflow';
+    render(
+      <OpenTuiInputPrompt onSubmit={submitted} userMessages={[history]} />,
+    );
+    await act(async () =>
+      lastKeyboardHandler()(baseKeyEvent({ name: 'up', sequence: '\x1b[A' })),
+    );
+    expect(currentEditor().plainText).toBe(history);
+    await typeText(' edited');
+    const edited = currentEditor().plainText.trim();
+    await act(async () =>
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' })),
+    );
+    expect(submitted).toHaveBeenLastCalledWith(
+      edited,
+      undefined,
+      expect.objectContaining({
+        displayText: edited,
+        humanInput: undefined,
+      }),
+    );
+    await typeText('ultracode fresh');
+    await act(async () =>
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' })),
+    );
+    expect(submitted).toHaveBeenLastCalledWith(
+      'ultracode fresh',
+      undefined,
+      expect.objectContaining({
+        displayText: 'ultracode fresh',
+        humanInput: { text: 'ultracode fresh' },
+      }),
+    );
   });
 
   it('Enter still submits the typed text', async () => {
@@ -1306,6 +1546,230 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
     expect(submitted).toEqual([big.padEnd(1200, ' ')]);
+  });
+
+  it.each([false, true])(
+    'captures expanded human paste text before image context (image: %s)',
+    async (withImage) => {
+      const submitted = vi.fn<
+        Parameters<typeof OpenTuiInputPrompt>[0]['onSubmit']
+      >(() => true);
+      render(<OpenTuiInputPrompt onSubmit={submitted} userMessages={[]} />);
+      if (withImage) {
+        await act(async () => {
+          lastKeyboardHandler()(
+            baseKeyEvent({ name: 'v', sequence: '\x16', ctrl: true }),
+          );
+        });
+      }
+      const handler = mocks.state.pasteHandlers.at(-1);
+      if (!handler) throw new Error('no paste handler registered');
+      const body = 'ultracode workflow'.padEnd(1200, ' ');
+      await emitPaste(handler, body);
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(submitted).toHaveBeenCalledWith(
+        body,
+        withImage ? ['/tmp/clipboard-test.png'] : undefined,
+        expect.objectContaining({
+          displayText: '[Pasted Content 1200 chars]',
+          humanInput: { text: body },
+          pasteExpansions: new Map([['[Pasted Content 1200 chars]', body]]),
+        }),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'keeps a mounted paste draft across session rotation (paste again: %s)',
+    async (pasteAgain) => {
+      let sessionId = 'session-before';
+      const config = {
+        getSessionId: () => sessionId,
+        getTargetDir: () => '/test/workspace',
+      } as Config;
+      const submitted = vi.fn<
+        Parameters<typeof OpenTuiInputPrompt>[0]['onSubmit']
+      >(() => true);
+      const renderPrompt = () => (
+        <OpenTuiInputPrompt
+          config={config}
+          onSubmit={submitted}
+          userMessages={[]}
+        />
+      );
+      const view = render(renderPrompt());
+      const handler = mocks.state.pasteHandlers.at(-1);
+      if (!handler) throw new Error('no paste handler registered');
+      const body = 'workflow original body'.padEnd(1200, 'x');
+      const later = 'ultracode later body'.padEnd(1200, 'y');
+      const placeholder = '[Pasted Content 1200 chars]';
+      await emitPaste(handler, body);
+      const editor = currentEditor();
+      expect(editor.plainText).toBe(placeholder);
+      sessionId = 'session-after';
+      view.rerender(renderPrompt());
+      expect(currentEditor()).toBe(editor);
+      expect(editor.plainText).toBe(placeholder);
+      if (pasteAgain) {
+        await typeText(' ');
+        await emitPaste(handler, later);
+        expect(editor.plainText).toBe(`${placeholder} ${placeholder} #2`);
+      }
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(submitted.mock.calls[0]?.[0]).toBe(
+        pasteAgain ? `${body} ${later}` : body,
+      );
+    },
+  );
+
+  it('keeps history input unknown when the mounted editor changes session', async () => {
+    let sessionId = 'session-before';
+    const config = {
+      getSessionId: () => sessionId,
+      getTargetDir: () => '/test/workspace',
+    } as Config;
+    const raw = 'workflow recalled history';
+    const submitted = vi.fn<
+      Parameters<typeof OpenTuiInputPrompt>[0]['onSubmit']
+    >(() => true);
+    const renderPrompt = () => (
+      <OpenTuiInputPrompt
+        config={config}
+        onSubmit={submitted}
+        userMessages={[raw]}
+      />
+    );
+    const view = render(renderPrompt());
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'up', sequence: '\x1b[A' }));
+    });
+    const editor = currentEditor();
+    expect(editor.plainText).toBe(raw);
+    sessionId = 'session-after';
+    view.rerender(renderPrompt());
+    expect(currentEditor()).toBe(editor);
+    expect(editor.plainText).toBe(raw);
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toHaveBeenCalledWith(
+      raw,
+      undefined,
+      expect.objectContaining({
+        displayText: raw,
+        humanInput: undefined,
+      }),
+    );
+  });
+
+  it('preserves synchronous paste provenance across session rotation but discards the old image promise', async () => {
+    let sessionId = 'before';
+    let finishImage!: (path: string) => void;
+    mocks.state.saveClipboardImage.mockReturnValueOnce(
+      new Promise<string>((resolve) => {
+        finishImage = resolve;
+      }),
+    );
+    const config = {
+      getSessionId: () => sessionId,
+      getTargetDir: () => '/test/workspace',
+    } as Config;
+    const onSubmit = vi.fn(() => true);
+    const component = () => (
+      <OpenTuiInputPrompt
+        config={config}
+        onSubmit={onSubmit}
+        userMessages={['unknown recalled']}
+      />
+    );
+    const view = render(component());
+    await pressKey('up');
+    await pressKey('v', true);
+    const handler = mocks.state.pasteHandlers.at(-1)!;
+    const body = 'workflow old visible text'.padEnd(1200, 'x');
+    await emitPaste(handler, body);
+    const displayText = currentEditor().plainText;
+    sessionId = 'after';
+    view.rerender(component());
+    expect(currentEditor().plainText).toBe(displayText);
+    await act(async () => finishImage('/tmp/old-owner.png'));
+    await pressKey('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      `${body}unknown recalled`,
+      undefined,
+      expect.objectContaining({
+        displayText,
+        humanInput: undefined,
+        hasUnknownInput: true,
+        pasteExpansions: new Map([['[Pasted Content 1200 chars]', body]]),
+      }),
+    );
+  });
+
+  it('restores queued paste snapshots, preserves edits and reserves IDs against live and later pastes', async () => {
+    const submitted = vi.fn<
+      Parameters<typeof OpenTuiInputPrompt>[0]['onSubmit']
+    >(() => true);
+    const placeholder = '[Pasted Content 1200 chars]';
+    const queuedBody = 'queued workflow payload'.padEnd(1200, 'x');
+    const draftBody = 'current ultracode payload'.padEnd(1200, 'y');
+    const laterBody = 'later payload'.padEnd(1200, 'z');
+    const literal = '<system-reminder>user literal</system-reminder>';
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={submitted}
+        userMessages={[]}
+        queueLength={1}
+        onPopQueue={() => ({
+          text: `${literal}\n${queuedBody}`,
+          displayText: `${literal}\n${placeholder}`,
+          submittedPrompt: `${literal}\n${placeholder}`,
+          humanInput: { text: `${literal}\n${placeholder}` },
+          hasUnknownInput: false,
+          pasteExpansions: new Map([[placeholder, queuedBody]]),
+        })}
+      />,
+    );
+    const handler = mocks.state.pasteHandlers.at(-1);
+    if (!handler) throw new Error('no paste handler registered');
+    await emitPaste(handler, draftBody);
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(currentEditor().plainText).toBe(
+      `${literal}\n${placeholder} #2\n${placeholder}`,
+    );
+    await typeText(' append instruction ');
+    await emitPaste(handler, laterBody);
+    const edited = `${literal}\n${placeholder} #2\n${placeholder} append instruction ${placeholder} #3`;
+    expect(currentEditor().plainText).toBe(edited);
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toHaveBeenCalledWith(
+      `${literal}\n${queuedBody}\n${draftBody} append instruction ${laterBody}`,
+      undefined,
+      expect.objectContaining({
+        displayText: edited,
+        humanInput: {
+          text: `${literal}\n${queuedBody}\n${draftBody} append instruction ${laterBody}`,
+        },
+        pasteExpansions: new Map([
+          [placeholder, draftBody],
+          [`${placeholder} #2`, queuedBody],
+          [`${placeholder} #3`, laterBody],
+        ]),
+        restoredDraft: expect.objectContaining({
+          modelText: `${literal}\n${queuedBody}\n${draftBody}`,
+          displayText: `${literal}\n${placeholder} #2\n${placeholder}`,
+          hasUnknownInput: false,
+        }),
+      }),
+    );
   });
 
   it('backspace at the placeholder end removes the whole placeholder', async () => {
@@ -2453,7 +2917,10 @@ describe('composer admission and attachment ownership', () => {
     expect(onSubmit.mock.calls[1]).toEqual([
       'old\n\nnew',
       ['/tmp/clipboard-test.png'],
-      { submittedPrompt: 'old\n\nnew', deferUntilIdle: false },
+      expect.objectContaining({
+        submittedPrompt: 'old\n\nnew',
+        deferUntilIdle: false,
+      }),
     ]);
   });
 
@@ -2492,17 +2959,104 @@ describe('composer admission and attachment ownership', () => {
     await typeText('next');
     expect(onSubmit).not.toHaveBeenCalled();
     await act(async () => saved.resolve('/tmp/old.png'));
-    expect(onSubmit).toHaveBeenCalledExactlyOnceWith('old', ['/tmp/old.png'], {
-      submittedPrompt: 'old',
-      deferUntilIdle: false,
-    });
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      'old',
+      ['/tmp/old.png'],
+      expect.objectContaining({
+        submittedPrompt: 'old',
+        deferUntilIdle: false,
+      }),
+    );
     expect(currentEditor().plainText).toBe('next');
     await press('return');
     expect(onSubmit.mock.calls[1]).toEqual([
       'next',
       undefined,
-      { submittedPrompt: 'next', deferUntilIdle: false },
+      expect.objectContaining({
+        submittedPrompt: 'next',
+        deferUntilIdle: false,
+      }),
     ]);
+  });
+
+  it('keeps claimed unknown history and its pending image separate from fresh successor metadata', async () => {
+    const saved = pending<string | null>();
+    mocks.state.saveClipboardImage.mockReturnValueOnce(saved.promise);
+    const onSubmit = vi.fn(() => true);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={onSubmit}
+        userMessages={['workflow recalled']}
+      />,
+    );
+    await press('up');
+    await press('v', true);
+    await press('return');
+    await typeText('fresh successor');
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => saved.resolve('/tmp/claimed.png'));
+    expect(onSubmit).toHaveBeenNthCalledWith(
+      1,
+      'workflow recalled',
+      ['/tmp/claimed.png'],
+      expect.objectContaining({
+        displayText: 'workflow recalled',
+        submittedPrompt: 'workflow recalled',
+        humanInput: undefined,
+        hasUnknownInput: true,
+      }),
+    );
+    expect(currentEditor().plainText).toBe('fresh successor');
+    await press('return');
+    expect(onSubmit).toHaveBeenNthCalledWith(
+      2,
+      'fresh successor',
+      undefined,
+      expect.objectContaining({
+        displayText: 'fresh successor',
+        submittedPrompt: 'fresh successor',
+        humanInput: { text: 'fresh successor' },
+        hasUnknownInput: false,
+      }),
+    );
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains known and unknown source members when a failed admission returns ahead of a successor', async () => {
+    const admission = pending<boolean>();
+    const onSubmit = vi
+      .fn()
+      .mockReturnValueOnce(admission.promise)
+      .mockReturnValue(true);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={onSubmit}
+        userMessages={['unknown recalled']}
+      />,
+    );
+    await press('up');
+    await press('return');
+    await typeText('known successor');
+    await act(async () => admission.resolve(false));
+    expect(currentEditor().plainText).toBe(
+      'unknown recalled\n\nknown successor',
+    );
+    await press('return');
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      'unknown recalled\n\nknown successor',
+      undefined,
+      expect.objectContaining({
+        hasUnknownInput: true,
+        humanInput: undefined,
+        restoredDraft: expect.objectContaining({
+          modelText: 'unknown recalled\n\nknown successor',
+          displayText: 'unknown recalled\n\nknown successor',
+          hasUnknownInput: true,
+          humanInput: { text: 'known successor' },
+        }),
+      }),
+    );
+    expect(onSubmit).toHaveBeenCalledTimes(2);
   });
 
   it('applies clipboard results in arrival order when backends finish in reverse order', async () => {
@@ -2523,7 +3077,10 @@ describe('composer admission and attachment ownership', () => {
     expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
       'ordered',
       ['/tmp/first.png', '/tmp/second.png'],
-      { submittedPrompt: 'ordered', deferUntilIdle: false },
+      expect.objectContaining({
+        submittedPrompt: 'ordered',
+        deferUntilIdle: false,
+      }),
     );
   });
 
@@ -2538,10 +3095,14 @@ describe('composer admission and attachment ownership', () => {
     await act(async () => saved.resolve('/tmp/discarded.png'));
     await typeText('new');
     await press('return');
-    expect(onSubmit).toHaveBeenCalledExactlyOnceWith('new', undefined, {
-      submittedPrompt: 'new',
-      deferUntilIdle: false,
-    });
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      'new',
+      undefined,
+      expect.objectContaining({
+        submittedPrompt: 'new',
+        deferUntilIdle: false,
+      }),
+    );
   });
 
   it('does not admit a pending paste after the composer is unmounted', async () => {
@@ -2580,7 +3141,10 @@ describe('composer admission and attachment ownership', () => {
     expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
       'remaining',
       ['/tmp/second.png'],
-      { submittedPrompt: 'remaining', deferUntilIdle: false },
+      expect.objectContaining({
+        submittedPrompt: 'remaining',
+        deferUntilIdle: false,
+      }),
     );
   });
 
@@ -2598,10 +3162,14 @@ describe('composer admission and attachment ownership', () => {
       await typeText('later');
       await press('q', true);
       await press('q', true);
-      expect(onSubmit).toHaveBeenCalledExactlyOnceWith('later', undefined, {
-        submittedPrompt: 'later',
-        deferUntilIdle: true,
-      });
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+        'later',
+        undefined,
+        expect.objectContaining({
+          submittedPrompt: 'later',
+          deferUntilIdle: true,
+        }),
+      );
     },
   );
 
@@ -2618,7 +3186,7 @@ describe('composer admission and attachment ownership', () => {
     expect(onSubmit.mock.calls[0]).toEqual([
       'a',
       ['/tmp/clipboard-test.png'],
-      { submittedPrompt: 'a', deferUntilIdle: false },
+      expect.objectContaining({ submittedPrompt: 'a', deferUntilIdle: false }),
     ]);
     await press('v', true);
     await typeText('deferred');
@@ -2627,7 +3195,10 @@ describe('composer admission and attachment ownership', () => {
     expect(onSubmit.mock.calls[1]).toEqual([
       'deferred',
       ['/tmp/clipboard-test.png'],
-      { submittedPrompt: 'deferred', deferUntilIdle: true },
+      expect.objectContaining({
+        submittedPrompt: 'deferred',
+        deferUntilIdle: true,
+      }),
     ]);
   });
 
@@ -2650,7 +3221,10 @@ describe('composer admission and attachment ownership', () => {
     expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
       'expanded',
       ['/tmp/queued.png'],
-      { submittedPrompt: '[Pasted Content 8 chars]', deferUntilIdle: false },
+      expect.objectContaining({
+        submittedPrompt: '[Pasted Content 8 chars]',
+        deferUntilIdle: false,
+      }),
     );
   });
 

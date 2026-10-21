@@ -24,6 +24,8 @@
  * queue instead of dropping them.
  */
 
+import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
   useCallback,
   useEffect,
@@ -51,9 +53,11 @@ import {
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
-import type {
-  OpenTuiInputSubmission,
-  OpenTuiCancelSettled,
+import {
+  restoreInputSubmissions,
+  type OpenTuiRestoredDraft,
+  type OpenTuiInputSubmission,
+  type OpenTuiCancelSettled,
 } from './input-submission.js';
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
@@ -116,6 +120,11 @@ export interface OpenTuiSubmitOptions {
    * also submits without provenance.
    */
   submittedPrompt?: string;
+  humanInput?: HumanPromptInput;
+  hasUnknownInput?: boolean;
+  displayText?: string;
+  pasteExpansions?: ReadonlyMap<string, string>;
+  restoredDraft?: OpenTuiRestoredDraft;
   /**
    * The transcript already holds the user row for this submit, because the
    * dispatcher echoed the typed invocation. Set by a `submit_prompt` outcome:
@@ -191,8 +200,8 @@ export function useOpenTuiLiveTurn(
     () =>
       setQueue(
         queueRef.current.map(
-          ({ text, imagePaths }) =>
-            text || `[${imagePaths?.length ?? 0} image]`,
+          ({ text, displayText, imagePaths }) =>
+            displayText ?? (text || `[${imagePaths?.length ?? 0} image]`),
         ),
       ),
     [],
@@ -269,14 +278,7 @@ export function useOpenTuiLiveTurn(
     // be reconstructed as editable composer text, so they remain queued.
     queueRef.current = queueRef.current.filter((entry) => entry.generated);
     syncQueue();
-    return {
-      text: entries.map((entry) => entry.text).join('\n\n'),
-      imagePaths: entries.flatMap((entry) => entry.imagePaths ?? []),
-      submittedPrompt: entries
-        .map((entry) => entry.submittedPrompt ?? entry.text)
-        .join('\n\n'),
-      deferUntilIdle: entries.every((entry) => entry.deferUntilIdle),
-    };
+    return restoreInputSubmissions(entries);
   }, [syncQueue]);
 
   const runTurn = useCallback(
@@ -305,6 +307,7 @@ export function useOpenTuiLiveTurn(
           promptId,
           modelOverride: turnOptions?.modelOverride,
           submittedPrompt: turnOptions?.submittedPrompt,
+          humanInput: turnOptions?.humanInput,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
           drainSteering: () => (seq === turnSeqRef.current ? drainQueue() : []),
@@ -393,7 +396,15 @@ export function useOpenTuiLiveTurn(
               if (!entry.turnOptions?.invocationEchoed) {
                 apply({
                   type: 'user',
-                  text: entry.text,
+                  text: entry.displayText ?? entry.text,
+                  ...(entry.pasteExpansions?.size
+                    ? {
+                        recallText: expandPendingPastePlaceholders(
+                          entry.displayText ?? entry.text,
+                          entry.pasteExpansions,
+                        ),
+                      }
+                    : {}),
                   promptId,
                   sentToModel: true,
                 });
@@ -407,6 +418,10 @@ export function useOpenTuiLiveTurn(
                   ? entry.turnOptions
                   : {
                       ...entry.turnOptions,
+                      humanInput: entry.humanInput,
+                      displayText: entry.displayText,
+                      hasUnknownInput: entry.hasUnknownInput,
+                      pasteExpansions: entry.pasteExpansions,
                       submittedPrompt: entry.submittedPrompt ?? entry.text,
                     },
                 entry.generated ? undefined : entry,
@@ -435,10 +450,41 @@ export function useOpenTuiLiveTurn(
       options?: OpenTuiSubmitOptions,
     ): boolean => {
       if (!mountedRef.current) return false;
-      const text =
+      let text =
         typeof content === 'string'
           ? content
           : collectText(normalizeParts(content));
+      const popped = options?.restoredDraft;
+      if (popped) {
+        options = { ...options };
+        delete options.restoredDraft;
+        const displayText = options.displayText ?? text;
+        if (displayText === popped.displayText) {
+          content = popped.modelText;
+          text = popped.modelText;
+          options = {
+            ...options,
+            displayText: popped.displayText,
+            submittedPrompt: popped.submittedPrompt,
+            humanInput: popped.humanInput,
+            hasUnknownInput: popped.hasUnknownInput,
+            pasteExpansions: popped.pasteExpansions,
+          };
+        } else {
+          if (popped.pasteExpansions?.size && !options.pasteExpansions?.size) {
+            content = expandPendingPastePlaceholders(
+              text,
+              popped.pasteExpansions,
+            );
+            text = content;
+            options.pasteExpansions = popped.pasteExpansions;
+          }
+          if (popped.hasUnknownInput) {
+            options.humanInput = undefined;
+            options.hasUnknownInput = true;
+          }
+        }
+      }
       const { parts, notices } = imagePathsToParts(imagePaths ?? []);
       for (const notice of notices) apply({ type: 'warning', text: notice });
       if (notices.length > 0) return false;
@@ -456,8 +502,15 @@ export function useOpenTuiLiveTurn(
         options?.refreshContextFilesOnWrite !== undefined ||
         options?.onComplete !== undefined ||
         (typeof content !== 'string' && options?.submittedPrompt === undefined);
+      const inputMetadata = {
+        displayText: options?.displayText,
+        humanInput: options?.humanInput,
+        hasUnknownInput: options?.hasUnknownInput,
+        pasteExpansions: options?.pasteExpansions,
+      };
       if (streamingRef.current) {
         pushQueue({
+          ...inputMetadata,
           text,
           content: prompt,
           imagePaths: imagePaths ? [...imagePaths] : undefined,
@@ -474,7 +527,20 @@ export function useOpenTuiLiveTurn(
       }
       const promptId = nextLivePromptId(config);
       if (!options?.invocationEchoed) {
-        apply({ type: 'user', text, promptId, sentToModel: true });
+        apply({
+          type: 'user',
+          text: options?.displayText ?? text,
+          ...(options?.pasteExpansions?.size
+            ? {
+                recallText: expandPendingPastePlaceholders(
+                  options.displayText ?? text,
+                  options.pasteExpansions,
+                ),
+              }
+            : {}),
+          promptId,
+          sentToModel: true,
+        });
       }
       void runTurn(
         prompt,
@@ -483,6 +549,7 @@ export function useOpenTuiLiveTurn(
         generated
           ? undefined
           : {
+              ...inputMetadata,
               text,
               imagePaths: imagePaths ? [...imagePaths] : undefined,
               submittedPrompt: options?.submittedPrompt ?? text,
