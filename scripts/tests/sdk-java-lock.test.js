@@ -259,6 +259,9 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       // of reach and the timeout has to name what blocked it.
       const name = `0000000001-${process.pid}`;
       writeFileSync(join(queue, name), '');
+      // Seed the counter so the acquirer takes ticket 2. With an empty
+      // counter it can reuse ticket 1 and sort ahead of this head by PID.
+      writeFileSync(join(queue, '.seq'), '1\n');
       const stub = flockStub(freeFlock);
       const result = await acquire(home, 3, stub);
       expect(result.code).toBe(1);

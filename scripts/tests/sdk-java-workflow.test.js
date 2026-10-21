@@ -130,7 +130,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('keeps the host lock out of every Maven child', () => {
+  it('keeps the host lock out of every child that can outlive the step', () => {
     const jobs = parse(workflow).jobs;
     const lockedSteps = ['test', 'mysql-integration'].flatMap((name) =>
       jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
@@ -139,10 +139,24 @@ describe('SDK Java self-hosted workflow guards', () => {
     // lock-bearing steps are the test job's and this job's single one.
     expect(lockedSteps).toHaveLength(2);
     for (const s of lockedSteps) {
-      const commands = s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm);
-      expect(commands?.length, s.name).toBeGreaterThan(0);
+      // A child that keeps fd 9 after the step shell dies holds the host lock
+      // until the child exits (#15106), so every external command in the
+      // locked section closes it. Pipeline stages are judged separately: a
+      // leak through either tar keeps the whole lock.
+      const commands = s.run
+        .replace(/\\\n/g, ' ')
+        .split('\n')
+        .flatMap((line) => line.split('|'))
+        .map((command) => command.trim())
+        .filter((command) => /^(?:mvn|cp|mkdir|tar)\b/.test(command));
+      expect(commands.length, s.name).toBeGreaterThan(0);
       for (const command of commands) {
-        expect(command.trim(), s.name).toMatch(/ 9>&-$/);
+        // The bare-lock fallback creates its lock directory before the lock
+        // exists; no fd 9 is open there to inherit.
+        if (command.includes('mkdir -p "${HOME}/.cache/qwen-code-ci"')) {
+          continue;
+        }
+        expect(command, s.name).toContain('9>&-');
       }
     }
   });
