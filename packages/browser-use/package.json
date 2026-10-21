@@ -1,7 +1,6 @@
 {
   "name": "@qwen-code/browser-use",
-  "private": true,
-  "version": "0.25.3",
+  "version": "0.26.0",
   "description": "Browser Use SDK for the Qwen Code Node REPL",
   "type": "module",
   "license": "Apache-2.0",
@@ -26,7 +25,8 @@
     "dist/sdk/types.d.ts",
     "dist/native-host.js",
     "dist/scripts/native-host-setup.js",
-    "NOTICE"
+    "NOTICE",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"
@@ -40,7 +40,8 @@
     "smoke:qwen-saucedemo": "npm run build --workspace=@qwen-code/node-repl-mcp && npm run build --workspace=@qwen-code/chrome-bridge && npm run build && npm --prefix ../.. run bundle && node dist/scripts/smoke-qwen-saucedemo.js",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -51,5 +52,8 @@
   },
   "dependencies": {
     "playwright-core": "1.62.1"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
