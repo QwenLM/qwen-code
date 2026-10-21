@@ -316,6 +316,7 @@ vi.mock('../hooks/useStatusLine.js', () => ({
 }));
 
 const CONFIG = {
+  getSessionId: () => 'test-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
   getTargetDir: () => '/repo',
@@ -743,8 +744,127 @@ describe('OpenTuiApp shell wiring', () => {
     expect(setText).toHaveBeenCalledWith('/arena start --models a,b ');
   });
 
+  async function admit(
+    text: string,
+    images?: readonly string[],
+    options?: { submittedPrompt?: string; deferUntilIdle?: boolean },
+  ) {
+    const callback = mocks.state.inputProps?.['onSubmit'] as (
+      text: string,
+      images?: readonly string[],
+      options?: { submittedPrompt?: string; deferUntilIdle?: boolean },
+    ) => Promise<boolean>;
+    let accepted = false;
+    await act(async () => {
+      accepted = await callback(text, images, options);
+    });
+    return accepted;
+  }
+
+  it('acknowledges only an owner that accepts the complete prompt', async () => {
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onSubmitPrompt = vi
+      .fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    renderApp({ onSubmitPrompt });
+    await settle();
+    expect(await admit('retry', ['/tmp/a.png'])).toBe(false);
+    expect(await admit('retry', ['/tmp/a.png'])).toBe(true);
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a missing live owner and failed gateway admission', async () => {
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const view = renderApp();
+    await settle();
+    expect(await admit('keep draft')).toBe(false);
+    expect(
+      screen.getByText('The live prompt turn is not wired in this shell.'),
+    ).toBeTruthy();
+    view.unmount();
+    mocks.state.loadRejects = true;
+    renderApp({ commands: undefined });
+    await settle();
+    expect(await admit('/help')).toBe(false);
+  });
+
+  it('routes an attached slash prompt to the model with defer and raw provenance', async () => {
+    const onSubmitPrompt = vi.fn(() => true);
+    renderApp({ onSubmitPrompt, streaming: true });
+    await settle();
+    expect(
+      await admit('/help', ['/tmp/a.png'], {
+        submittedPrompt: '/help',
+        deferUntilIdle: true,
+      }),
+    ).toBe(true);
+    expect(mocks.state.handledTexts).toEqual([]);
+    expect(onSubmitPrompt).toHaveBeenCalledExactlyOnceWith(
+      '/help',
+      ['/tmp/a.png'],
+      { submittedPrompt: '/help', deferUntilIdle: true },
+    );
+  });
+
+  it('rejects image-bearing shell input without executing or admitting any part', async () => {
+    const onSubmitPrompt = vi.fn(() => true);
+    renderApp({ onSubmitPrompt });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(await admit('echo unsafe', ['/tmp/a.png'])).toBe(false);
+    expect(mocks.state.handledTexts).toEqual([]);
+    expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+    expect(screen.getByText(/Exit shell mode and try again/)).toBeTruthy();
+  });
+
+  it('retains a previously accepted shell-blocked prompt when later live admission fails', async () => {
+    let release!: () => void;
+    const shellDone = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.state.executeUserShell.mockReturnValue(shellDone);
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onSubmitPrompt = vi.fn(() => false);
+    renderApp({ onSubmitPrompt, onTranscriptEvent: vi.fn() });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(await admit('sleep 1')).toBe(true);
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(
+      await admit('queued', ['/tmp/a.png'], {
+        submittedPrompt: 'raw queued',
+        deferUntilIdle: true,
+      }),
+    ).toBe(true);
+    await act(async () => {
+      release();
+      await shellDone;
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+    expect(mocks.state.inputProps?.['queueLength']).toBe(1);
+    let popped: unknown;
+    await act(async () => {
+      popped = (mocks.state.inputProps?.['onPopQueue'] as () => unknown)();
+    });
+    expect(popped).toEqual({
+      text: 'queued',
+      imagePaths: ['/tmp/a.png'],
+      submittedPrompt: 'raw queued',
+    });
+    expect(mocks.state.inputProps?.['queueLength']).toBe(0);
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it('sends a submit_prompt outcome to the live-turn seam', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = {
@@ -768,7 +888,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it("forwards a submit_prompt outcome's per-turn options to the seam", async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     const onComplete = async () => {};
     renderApp({ onSubmitPrompt });
     await settle();
@@ -828,7 +948,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('sends a non-slash input (dispatcher returns false) as a plain prompt', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -844,7 +964,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('passes pasted image paths through structured, not folded into the text', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -860,7 +980,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('forwards an @-mention raw, leaving expansion to the stream layer', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -927,7 +1047,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('rejects submissions after a failed dispatcher init', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     mocks.state.loadRejects = true;
     renderApp({ commands: undefined, onSubmitPrompt });
     await settle();
@@ -1298,7 +1418,7 @@ describe('OpenTuiApp shell wiring', () => {
     } satisfies OpenTuiDispatchOutcome);
     const onQuit = vi.fn();
     const onInterrupt = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({
       onQuit,
       onInterrupt,
@@ -1335,7 +1455,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.executeUserShell.mockImplementation(() => shellDone);
     mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
     const onTranscriptEvent = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt, onTranscriptEvent });
     await settle();
     await act(async () => {
@@ -1373,7 +1493,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.executeUserShell.mockImplementation(() => shellDone);
     mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
     const onTranscriptEvent = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt, onTranscriptEvent });
     await settle();
     await act(async () => {
@@ -1619,7 +1739,7 @@ describe('OpenTuiApp shell wiring', () => {
       return command.startsWith('/') && command !== '/quit';
     };
     const onQuit = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ streaming: true, onQuit, onSubmitPrompt });
     await settle();
     mocks.state.handleResult = {
@@ -1688,7 +1808,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it('replays held commands in submission order, pausing behind a submit_prompt', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     mocks.state.deferDuringStreaming = true;
     mocks.state.handleResults = [
       { kind: 'submit_prompt', content: 'generated' },
@@ -1817,7 +1937,7 @@ describe('OpenTuiApp shell wiring', () => {
   it('drops both mid-turn queues when a quit exits during the turn', async () => {
     const onQuit = vi.fn();
     const onInterrupt = vi.fn();
-    const onPopQueue = vi.fn(() => 'queued prompt');
+    const onPopQueue = vi.fn(() => ({ text: 'queued prompt' }));
     mocks.state.deferDuringStreaming = true;
     const props = {
       config: CONFIG,

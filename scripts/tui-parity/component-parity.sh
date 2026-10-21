@@ -14,3 +14,5 @@ bun packages/cli/scripts/opentui-wrap-parity.ts
 bun packages/cli/scripts/opentui-dialog-layout.tsx
 bun packages/cli/scripts/opentui-hook-content.tsx
 bun packages/cli/scripts/opentui-statusline-parity.tsx
+bun packages/cli/scripts/opentui-input-ownership.tsx
+bun packages/cli/scripts/opentui-editor-parity.tsx

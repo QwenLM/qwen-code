@@ -24,10 +24,14 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, useState } from 'react';
-import { render, screen } from '@testing-library/react';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { render, screen, waitFor } from '@testing-library/react';
+import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ApprovalMode, Storage } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
+import type { OpenTuiCancelSettled } from './input-submission.js';
 import { cpLen, cpSlice } from '../utils/textUtils.js';
 import {
   codePointIndexToDisplayCol,
@@ -49,6 +53,10 @@ interface FakeEditor {
   setCursorByOffset(offset: number): void;
   clear(): void;
   gotoLineEnd(): void;
+  replaceText(text: string): void;
+  replacements: string[];
+  scrollY: number;
+  visualCursor: { visualRow: number };
   newLine(): void;
 }
 
@@ -71,6 +79,16 @@ const mocks = vi.hoisted(() => {
     sessionSuggestions: [] as MockSuggestion[],
     extensionSuggestions: [] as MockSuggestion[],
     textareaProps: null as Record<string, unknown> | null,
+    editExternally:
+      vi.fn<
+        (
+          text: string,
+          options: { beforeLaunch: () => void; preferredEditor?: string },
+        ) => string
+      >(),
+    clipboardHasImage:
+      vi.fn<(onUnavailable?: () => void) => Promise<boolean>>(),
+    saveClipboardImage: vi.fn<() => Promise<string | null>>(),
   };
 
   function createFakeEditor() {
@@ -101,6 +119,43 @@ const mocks = vi.hoisted(() => {
       },
       set cursorOffset(offset: number) {
         setColFromDisplay(offset);
+      },
+      scrollY: 0,
+      visualCursor: { visualRow: 0 },
+      replacements: [] as string[],
+      replaceText(t: string) {
+        editor.replacements.push(t);
+        editor.setText(t);
+        col = 0;
+      },
+      gotoVisualLineHome() {
+        col = 0;
+        return true;
+      },
+      gotoVisualLineEnd() {
+        col = cpLen(text);
+        return true;
+      },
+      deleteToLineEnd() {
+        text = cpSlice(text, 0, col);
+        return true;
+      },
+      deleteToLineStart() {
+        text = cpSlice(text, col);
+        col = 0;
+        return true;
+      },
+      deleteChar() {
+        text = cpSlice(text, 0, col) + cpSlice(text, col + 1);
+        return true;
+      },
+      undo: vi.fn(() => true),
+      redo: vi.fn(() => true),
+      gotoBufferHome() {
+        col = 0;
+      },
+      gotoBufferEnd() {
+        col = cpLen(text);
       },
       deleteCharBackwardCalls: 0,
       deleteWordBackwardCalls: 0,
@@ -155,6 +210,8 @@ const mocks = vi.hoisted(() => {
   }
 
   const renderer = {
+    suspend: vi.fn(),
+    resume: vi.fn(),
     addInputHandler(handler: (sequence: string) => boolean) {
       state.inputHandlers.push(handler);
     },
@@ -220,6 +277,12 @@ const mocks = vi.hoisted(() => {
   return { state, renderer, buildJsxRuntime };
 });
 
+vi.mock('../utils/external-editor.js', () => ({
+  editTextInExternalEditor: (
+    ...args: Parameters<typeof mocks.state.editExternally>
+  ) => mocks.state.editExternally(...args),
+}));
+
 vi.mock('@opentui/react', () => ({
   useKeyboard: (handler: (key: unknown) => void) => {
     mocks.state.keyboardHandlers.push(handler);
@@ -263,10 +326,24 @@ vi.mock('./slash-dispatch.js', () => ({
   loadInteractiveCommands: async () => mocks.state.slashCommands,
 }));
 vi.mock('../utils/clipboardUtils.js', () => ({
-  clipboardHasImage: async () => true,
-  saveClipboardImage: async () => '/tmp/clipboard-test.png',
+  clipboardHasImage: (onUnavailable?: () => void) =>
+    mocks.state.clipboardHasImage(onUnavailable),
+  saveClipboardImage: () => mocks.state.saveClipboardImage(),
   cleanupOldClipboardImages: async () => {},
 }));
+
+beforeEach(() => {
+  mocks.state.editExternally.mockReset().mockImplementation((text, options) => {
+    options.beforeLaunch();
+    return text;
+  });
+  mocks.renderer.suspend.mockReset();
+  mocks.renderer.resume.mockReset();
+  mocks.state.clipboardHasImage.mockReset().mockResolvedValue(true);
+  mocks.state.saveClipboardImage
+    .mockReset()
+    .mockResolvedValue('/tmp/clipboard-test.png');
+});
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -316,6 +393,20 @@ async function pressRaw(sequence: string): Promise<boolean> {
   return consumed;
 }
 
+function renderPrompt(
+  props: Partial<Parameters<typeof OpenTuiInputPrompt>[0]> = {},
+) {
+  return render(
+    <OpenTuiInputPrompt userMessages={[]} onSubmit={() => true} {...props} />,
+  );
+}
+
+async function pressKey(name: string, ctrl = false) {
+  await act(async () =>
+    lastKeyboardHandler()(baseKeyEvent({ name, ctrl, sequence: '' })),
+  );
+}
+
 describe('OpenTuiInputPrompt raw Backspace wiring', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
@@ -326,20 +417,20 @@ describe('OpenTuiInputPrompt raw Backspace wiring', () => {
   });
 
   it('registers the raw input handler via useLayoutEffect before paint', () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     expect(mocks.state.inputHandlers).toHaveLength(1);
   });
 
   it('removes the raw input handler on unmount', () => {
     const view = render(
-      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+      <OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />,
     );
     view.unmount();
     expect(mocks.state.inputHandlers).toHaveLength(0);
   });
 
   it('consumes legacy DEL/BS and each valid kitty form, deleting one char each', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('abcdef');
     expect(editor.plainText).toBe('abcdef');
@@ -358,7 +449,7 @@ describe('OpenTuiInputPrompt raw Backspace wiring', () => {
   });
 
   it('calls deleteCharBackward exactly once per consumed sequence', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('xy');
     await pressRaw('\x1b[127u');
@@ -367,7 +458,7 @@ describe('OpenTuiInputPrompt raw Backspace wiring', () => {
   });
 
   it('rejects kitty release, modified and invalid forms', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('xy');
     for (const sequence of [
@@ -388,7 +479,7 @@ describe('OpenTuiInputPrompt raw Backspace wiring', () => {
   it('consumes nothing while unfocused', async () => {
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         focus={false}
       />,
@@ -410,7 +501,7 @@ describe('OpenTuiInputPrompt printable fallback', () => {
   });
 
   it('preserves ASCII, CJK and emoji, inserting each exactly once', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('a中😀');
     expect(editor.plainText).toBe('a中😀');
@@ -418,7 +509,7 @@ describe('OpenTuiInputPrompt printable fallback', () => {
   });
 
   it('accepts Shift-produced printable input', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await act(async () => {
       lastKeyboardHandler()(
@@ -429,7 +520,7 @@ describe('OpenTuiInputPrompt printable fallback', () => {
   });
 
   it('rejects ctrl/meta/option/super/hyper combinations', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     for (const overrides of [
       { sequence: 'w', ctrl: true },
@@ -448,7 +539,7 @@ describe('OpenTuiInputPrompt printable fallback', () => {
   });
 
   it('rejects release events', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await act(async () => {
       lastKeyboardHandler()(baseKeyEvent({ eventType: 'release' }));
@@ -457,7 +548,7 @@ describe('OpenTuiInputPrompt printable fallback', () => {
   });
 
   it('rejects controls, tabs and escape-coded editing/navigation keys', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     for (const overrides of [
       { name: 'tab', sequence: '\t' },
@@ -496,7 +587,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text) => submitted.push(text)}
+        onSubmit={(text) => !!submitted.push(text)}
         userMessages={[]}
       />,
     );
@@ -523,7 +614,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text) => submitted.push(text)}
+        onSubmit={(text) => !!submitted.push(text)}
         userMessages={[]}
       />,
     );
@@ -540,7 +631,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text) => submitted.push(text)}
+        onSubmit={(text) => !!submitted.push(text)}
         userMessages={[]}
       />,
     );
@@ -562,10 +653,10 @@ describe('OpenTuiInputPrompt submit guard', () => {
   });
 
   it('Ctrl+V attaches the clipboard image and submits it with the text', async () => {
-    const submitted: Array<{ text: string; images?: string[] }> = [];
+    const submitted: Array<{ text: string; images?: readonly string[] }> = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text, images) => submitted.push({ text, images })}
+        onSubmit={(text, images) => !!submitted.push({ text, images })}
         userMessages={[]}
       />,
     );
@@ -589,10 +680,10 @@ describe('OpenTuiInputPrompt submit guard', () => {
   it('Esc pops queued prompts into the composer before the clear window', async () => {
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         queueLength={1}
-        onPopQueue={() => 'queued text'}
+        onPopQueue={() => ({ text: 'queued text' })}
       />,
     );
     const editor = currentEditor();
@@ -602,11 +693,138 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(editor.plainText).toBe('queued text');
   });
 
+  it('merges late cancelled queue images before the current draft without restoring the older prompt', async () => {
+    let settle!: OpenTuiCancelSettled;
+    const submit = vi.fn(() => false);
+    renderPrompt({
+      onSubmit: submit,
+      streaming: true,
+      onPopQueue: () => ({
+        text: 'queued later',
+        imagePaths: ['/tmp/later.png'],
+      }),
+      onInterrupt: (callback) => {
+        settle = callback!;
+      },
+    });
+    await pressKey('escape');
+    await typeText('successor');
+    await act(async () =>
+      settle({
+        queued: { text: 'queued earlier', imagePaths: ['/tmp/earlier.png'] },
+        prompt: { text: 'old prompt', imagePaths: ['/tmp/old.png'] },
+      }),
+    );
+    expect(currentEditor().plainText).toBe(
+      'queued earlier\n\nqueued later\nsuccessor',
+    );
+    await pressKey('return');
+    expect(submit).toHaveBeenCalledExactlyOnceWith(
+      'queued earlier\n\nqueued later\nsuccessor',
+      ['/tmp/earlier.png', '/tmp/later.png'],
+      expect.any(Object),
+    );
+  });
+
+  it.each([false, true])(
+    'restores cancelled prompt provenance only when the draft remains untouched: successor=%s',
+    async (successor) => {
+      let settle!: OpenTuiCancelSettled;
+      const submit = vi.fn(() => false);
+      renderPrompt({
+        onSubmit: submit,
+        streaming: true,
+        onInterrupt: (callback) => {
+          settle = callback!;
+        },
+      });
+      await pressKey('escape');
+      if (successor) await typeText('successor');
+      await act(async () =>
+        settle({
+          queued: null,
+          prompt: {
+            text: 'expanded original',
+            submittedPrompt: 'typed original',
+            imagePaths: ['/tmp/original.png'],
+          },
+        }),
+      );
+      expect(currentEditor().plainText).toBe(
+        successor ? 'successor' : 'expanded original',
+      );
+      await pressKey('return');
+      expect(submit).toHaveBeenCalledExactlyOnceWith(
+        successor ? 'successor' : 'expanded original',
+        successor ? undefined : ['/tmp/original.png'],
+        expect.objectContaining({
+          submittedPrompt: successor ? 'successor' : 'typed original',
+        }),
+      );
+    },
+  );
+
+  it.each(['claim', 'paste', 'session', 'unmount'] as const)(
+    'does not restore an old prompt across %s ownership',
+    async (mode) => {
+      let settle!: OpenTuiCancelSettled;
+      let admit!: (value: boolean) => void;
+      let finishPaste!: (value: string) => void;
+      const admission = new Promise<boolean>((resolve) => {
+        admit = resolve;
+      });
+      const clipboard = new Promise<string>((resolve) => {
+        finishPaste = resolve;
+      });
+      mocks.state.saveClipboardImage.mockReturnValueOnce(clipboard);
+      let sessionId = 'old';
+      const config = {
+        getSessionId: () => sessionId,
+        getProjectRoot: () => '/tmp/project',
+        getTargetDir: () => '/tmp/project',
+      } as import('@qwen-code/qwen-code-core').Config;
+      const component = () => (
+        <OpenTuiInputPrompt
+          config={config}
+          userMessages={[]}
+          streaming
+          onSubmit={() => admission}
+          onInterrupt={(callback) => {
+            settle = callback!;
+          }}
+        />
+      );
+      const view = render(component());
+      await pressKey('escape');
+      if (mode === 'claim') {
+        await typeText('successor');
+        await pressKey('return');
+      } else if (mode === 'paste') {
+        await pressKey('v', true);
+      } else if (mode === 'session') {
+        sessionId = 'new';
+        view.rerender(component());
+      } else view.unmount();
+      await act(async () =>
+        settle({
+          queued: null,
+          prompt: { text: 'old prompt', imagePaths: ['/tmp/old.png'] },
+        }),
+      );
+      if (mode !== 'unmount') expect(currentEditor().plainText).toBe('');
+      await act(async () => {
+        admit(true);
+        finishPaste('/tmp/new.png');
+      });
+      if (mode !== 'unmount') expect(currentEditor().plainText).toBe('');
+    },
+  );
+
   it('an empty-buffer ! toggles shell mode on and off (U-33)', async () => {
     let toggleCount = 0;
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         onToggleShellMode={() => {
           toggleCount += 1;
@@ -629,7 +847,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
     let shellActive = false;
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         onToggleShellMode={() => {
           shellActive = !shellActive;
@@ -657,7 +875,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
   it('a non-empty buffer inserts ! instead of toggling (U-33)', async () => {
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         onToggleShellMode={() => {
           throw new Error('must not toggle');
@@ -674,11 +892,11 @@ describe('OpenTuiInputPrompt submit guard', () => {
 
   it('Esc cancels a running slash command before restoring the prompt queue', async () => {
     const onCancelCommand = vi.fn(() => true);
-    const onPopQueue = vi.fn(() => 'queued text');
+    const onPopQueue = vi.fn(() => ({ text: 'queued text' }));
     const onInterrupt = vi.fn();
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         onCancelCommand={onCancelCommand}
         onInterrupt={onInterrupt}
@@ -705,10 +923,10 @@ describe('OpenTuiInputPrompt submit guard', () => {
   it('Esc in shell mode exits the mode before the queue restore (U-33)', async () => {
     const onToggleShellMode = vi.fn();
     const onCancelCommand = vi.fn(() => true);
-    const onPopQueue = vi.fn(() => 'queued text');
+    const onPopQueue = vi.fn(() => ({ text: 'queued text' }));
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         shellModeActive
         onToggleShellMode={onToggleShellMode}
@@ -735,7 +953,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
       const onCancelCommand = vi.fn(() => true);
       render(
         <OpenTuiInputPrompt
-          onSubmit={() => {}}
+          onSubmit={() => true}
           userMessages={[]}
           streaming
           shellModeActive={shellModeActive}
@@ -764,7 +982,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
     const onToggleShellMode = vi.fn();
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         onToggleShellMode={onToggleShellMode}
       />,
@@ -798,13 +1016,13 @@ describe('OpenTuiInputPrompt submit guard', () => {
     let queued: string | null = 'from queue';
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         queueLength={1}
         onPopQueue={() => {
           const q = queued;
           queued = null;
-          return q;
+          return q ? { text: q } : null;
         }}
       />,
     );
@@ -816,10 +1034,10 @@ describe('OpenTuiInputPrompt submit guard', () => {
   });
 
   it('Up and ctrl+p touch neither the queue nor the history in shell mode', async () => {
-    const onPopQueue = vi.fn(() => 'queued text');
+    const onPopQueue = vi.fn(() => ({ text: 'queued text' }));
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={['npm test']}
         shellModeActive
         queueLength={1}
@@ -851,7 +1069,7 @@ describe('OpenTuiInputPrompt `\\`+Enter continuation (G3)', () => {
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text) => submitted.push(text)}
+        onSubmit={(text) => !!submitted.push(text)}
         userMessages={[]}
       />,
     );
@@ -869,7 +1087,7 @@ describe('OpenTuiInputPrompt `\\`+Enter continuation (G3)', () => {
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text) => submitted.push(text)}
+        onSubmit={(text) => !!submitted.push(text)}
         userMessages={[]}
       />,
     );
@@ -884,7 +1102,7 @@ describe('OpenTuiInputPrompt `\\`+Enter continuation (G3)', () => {
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text) => submitted.push(text)}
+        onSubmit={(text) => !!submitted.push(text)}
         userMessages={[]}
       />,
     );
@@ -906,7 +1124,7 @@ describe('OpenTuiInputPrompt DELETE_WORD_BACKWARD (G9)', () => {
   });
 
   it('consumes the MinTTY/legacy \\x1f byte raw and deletes one word', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('foo bar');
     expect(await pressRaw('\x1f')).toBe(true);
@@ -915,7 +1133,7 @@ describe('OpenTuiInputPrompt DELETE_WORD_BACKWARD (G9)', () => {
   });
 
   it('handles parsed ctrl+backspace (kitty CSI 127;5u shape)', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('foo bar');
     await act(async () => {
@@ -932,7 +1150,7 @@ describe('OpenTuiInputPrompt DELETE_WORD_BACKWARD (G9)', () => {
   });
 
   it('handles command/super+backspace', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('foo bar');
     await act(async () => {
@@ -944,7 +1162,7 @@ describe('OpenTuiInputPrompt DELETE_WORD_BACKWARD (G9)', () => {
   });
 
   it('ignores backspace release events', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();
     await typeText('foo');
     await act(async () => {
@@ -971,7 +1189,7 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
   });
 
   function registerPasteListener() {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const handler = mocks.state.pasteHandlers.at(-1);
     if (!handler) throw new Error('no paste handler registered');
     return handler;
@@ -994,7 +1212,7 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
 
   it('registers and unregisters the paste interceptor', () => {
     const view = render(
-      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+      <OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />,
     );
     expect(mocks.state.pasteHandlers).toHaveLength(1);
     view.unmount();
@@ -1028,7 +1246,7 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text) => submitted.push(text)}
+        onSubmit={(text) => !!submitted.push(text)}
         userMessages={[]}
       />,
     );
@@ -1043,7 +1261,7 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
   });
 
   it('backspace at the placeholder end removes the whole placeholder', async () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const handler = mocks.state.pasteHandlers.at(-1);
     if (!handler) throw new Error('no paste handler registered');
     await emitPaste(handler, 'y'.repeat(1500));
@@ -1061,7 +1279,7 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
     // display offset (4 + placeholder width) is NOT its code-point index
     // (2 + placeholder length). Placeholder deletion must convert first —
     // the old code sliced with the display offset and never matched.
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const handler = mocks.state.pasteHandlers.at(-1);
     if (!handler) throw new Error('no paste handler registered');
     const editor = currentEditor();
@@ -1083,7 +1301,7 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
     const submitted: string[] = [];
     render(
       <OpenTuiInputPrompt
-        onSubmit={(text) => submitted.push(text)}
+        onSubmit={(text) => !!submitted.push(text)}
         userMessages={[]}
       />,
     );
@@ -1115,7 +1333,10 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     mocks.state.slashCommands = commands;
     render(
       <OpenTuiInputPrompt
-        onSubmit={onSubmit}
+        onSubmit={(text) => {
+          onSubmit(text);
+          return true;
+        }}
         userMessages={[]}
         onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
       />,
@@ -1382,7 +1603,7 @@ describe('OpenTuiInputPrompt approval-mode indicator', () => {
   const renderWithMode = (approvalMode: ApprovalMode) =>
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         approvalMode={approvalMode}
       />,
@@ -1422,7 +1643,7 @@ describe('OpenTuiInputPrompt approval-mode indicator', () => {
   it('replaces the prefix with ! while shell mode is active (R1-16)', () => {
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         approvalMode={ApprovalMode.YOLO}
         shellModeActive
@@ -1463,6 +1684,7 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
         onSubmit={(text) => {
           submitted.push(text);
           overrides.onSubmit?.(text);
+          return true;
         }}
         userMessages={[]}
         promptSuggestion={SUGGESTION}
@@ -1481,7 +1703,7 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
   });
 
   it('keeps the default placeholder without a suggestion', () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const placeholder = mocks.state.textareaProps?.['placeholder'];
     expect(typeof placeholder).toBe('string');
     expect(placeholder).not.toBe(SUGGESTION);
@@ -1531,7 +1753,7 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
       const [suggestion, setSuggestion] = useState<string | null>(SUGGESTION);
       return (
         <OpenTuiInputPrompt
-          onSubmit={() => {}}
+          onSubmit={() => true}
           userMessages={[]}
           promptSuggestion={suggestion}
           onPromptSuggestionDismiss={() => {
@@ -1571,6 +1793,7 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
         <OpenTuiInputPrompt
           onSubmit={(text) => {
             submitted.push(text);
+            return true;
           }}
           userMessages={[]}
           promptSuggestion={suggestion}
@@ -1602,7 +1825,7 @@ describe('OpenTuiInputPrompt follow-up suggestion (U-7)', () => {
       const [suggestion, setSuggestion] = useState<string | null>(SUGGESTION);
       return (
         <OpenTuiInputPrompt
-          onSubmit={() => {}}
+          onSubmit={() => true}
           userMessages={[]}
           promptSuggestion={suggestion}
           onPromptSuggestionDismiss={() => {
@@ -1658,7 +1881,7 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
   async function dropdownText(command: Record<string, unknown>) {
     mocks.state.slashCommands = [command];
     const { container } = render(
-      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+      <OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />,
     );
     // Let loadInteractiveCommands resolve into commandsRef.
     await act(async () => {});
@@ -1832,7 +2055,7 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
       },
     ];
     const { container } = render(
-      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+      <OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />,
     );
     await act(async () => {});
     await typeText('/');
@@ -1864,7 +2087,7 @@ describe('OpenTuiInputPrompt Windows Tab approval-mode fallback (F-2)', () => {
   function renderWithCycle(onCycleApprovalMode: () => void) {
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         onCycleApprovalMode={onCycleApprovalMode}
       />,
@@ -1944,7 +2167,7 @@ describe('OpenTuiInputPrompt Windows Tab approval-mode fallback (F-2)', () => {
     let cycles = 0;
     render(
       <OpenTuiInputPrompt
-        onSubmit={() => {}}
+        onSubmit={() => true}
         userMessages={[]}
         onCycleApprovalMode={() => {
           cycles += 1;
@@ -1985,7 +2208,7 @@ describe('OpenTuiInputPrompt @ completion categories (#143)', () => {
 
   async function openAtCompletion() {
     const { container } = render(
-      <OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />,
+      <OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />,
     );
     await act(async () => {});
     await typeText('@');
@@ -2127,10 +2350,510 @@ describe('OpenTuiInputPrompt caret', () => {
   });
 
   it('pins a steady block caret instead of the library blinking default', () => {
-    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     expect(mocks.state.textareaProps?.['cursorStyle']).toEqual({
       style: 'block',
       blinking: false,
     });
+  });
+});
+
+describe('composer admission and attachment ownership', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+    mocks.state.fileSearchResults = [];
+    mocks.state.fileSearchDelay = Promise.resolve();
+    mocks.state.sessionSuggestions = [];
+  });
+
+  async function press(name: string, ctrl = false) {
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name, sequence: '', ctrl }));
+    });
+  }
+
+  function pending<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  it('restores rejected text and images ahead of a later draft without duplicate admission', async () => {
+    const admission = pending<boolean>();
+    const onSubmit = vi
+      .fn()
+      .mockReturnValueOnce(admission.promise)
+      .mockReturnValue(true);
+    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    await press('v', true);
+    await typeText('old');
+    await press('return');
+    expect(currentEditor().plainText).toBe('');
+    await typeText('new');
+    await press('return');
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    await act(async () => admission.resolve(false));
+    expect(currentEditor().plainText).toBe('old\n\nnew');
+    await press('return');
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+    expect(onSubmit.mock.calls[1]).toEqual([
+      'old\n\nnew',
+      ['/tmp/clipboard-test.png'],
+      { submittedPrompt: 'old\n\nnew', deferUntilIdle: false },
+    ]);
+  });
+
+  it('restores a throwing admission, reports the error and releases the submit guard', async () => {
+    const onSubmit = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('gateway unavailable');
+      })
+      .mockReturnValue(true);
+    const onNotice = vi.fn();
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={onSubmit}
+        onNotice={onNotice}
+        userMessages={[]}
+      />,
+    );
+    await typeText('retry me');
+    await press('return');
+    expect(currentEditor().plainText).toBe('retry me');
+    expect(onNotice).toHaveBeenCalledWith('gateway unavailable');
+    await press('return');
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+    expect(currentEditor().plainText).toBe('');
+  });
+
+  it('waits for the claimed draft paste without attaching it to successor input', async () => {
+    const saved = pending<string | null>();
+    mocks.state.saveClipboardImage.mockReturnValueOnce(saved.promise);
+    const onSubmit = vi.fn(() => true);
+    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    await typeText('old');
+    await press('v', true);
+    await press('return');
+    await typeText('next');
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => saved.resolve('/tmp/old.png'));
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith('old', ['/tmp/old.png'], {
+      submittedPrompt: 'old',
+      deferUntilIdle: false,
+    });
+    expect(currentEditor().plainText).toBe('next');
+    await press('return');
+    expect(onSubmit.mock.calls[1]).toEqual([
+      'next',
+      undefined,
+      { submittedPrompt: 'next', deferUntilIdle: false },
+    ]);
+  });
+
+  it('applies clipboard results in arrival order when backends finish in reverse order', async () => {
+    const first = pending<string | null>();
+    const second = pending<string | null>();
+    mocks.state.saveClipboardImage
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const onSubmit = vi.fn(() => true);
+    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    await press('v', true);
+    await press('v', true);
+    await act(async () => second.resolve('/tmp/second.png'));
+    await typeText('ordered');
+    await press('return');
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => first.resolve('/tmp/first.png'));
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      'ordered',
+      ['/tmp/first.png', '/tmp/second.png'],
+      { submittedPrompt: 'ordered', deferUntilIdle: false },
+    );
+  });
+
+  it('invalidates clipboard completions when the draft is explicitly cleared', async () => {
+    const saved = pending<string | null>();
+    mocks.state.saveClipboardImage.mockReturnValueOnce(saved.promise);
+    const onSubmit = vi.fn(() => true);
+    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    await typeText('discard');
+    await press('v', true);
+    await press('c', true);
+    await act(async () => saved.resolve('/tmp/discarded.png'));
+    await typeText('new');
+    await press('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith('new', undefined, {
+      submittedPrompt: 'new',
+      deferUntilIdle: false,
+    });
+  });
+
+  it('does not admit a pending paste after the composer is unmounted', async () => {
+    const saved = pending<string | null>();
+    mocks.state.saveClipboardImage.mockReturnValueOnce(saved.promise);
+    const onSubmit = vi.fn(() => true);
+    const view = render(
+      <OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />,
+    );
+    await typeText('old session');
+    await press('v', true);
+    await press('return');
+    view.unmount();
+    await act(async () => saved.resolve('/tmp/old.png'));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('keeps image-only Enter as a no-op and supports chip selection/removal', async () => {
+    mocks.state.saveClipboardImage
+      .mockResolvedValueOnce('/tmp/first.png')
+      .mockResolvedValueOnce('/tmp/second.png');
+    const onSubmit = vi.fn(() => true);
+    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    await press('v', true);
+    await press('v', true);
+    await press('return');
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText('📎 first.png')).toBeTruthy();
+    await press('up');
+    await press('left');
+    await press('delete');
+    await press('return');
+    expect(onSubmit).not.toHaveBeenCalled();
+    await typeText('remaining');
+    await press('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      'remaining',
+      ['/tmp/second.png'],
+      { submittedPrompt: 'remaining', deferUntilIdle: false },
+    );
+  });
+
+  it.each([false, true])(
+    'Ctrl+Q claims one draft with deferUntilIdle while streaming=%s',
+    async (streaming) => {
+      const onSubmit = vi.fn(() => true);
+      render(
+        <OpenTuiInputPrompt
+          onSubmit={onSubmit}
+          userMessages={[]}
+          streaming={streaming}
+        />,
+      );
+      await typeText('later');
+      await press('q', true);
+      await press('q', true);
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith('later', undefined, {
+        submittedPrompt: 'later',
+        deferUntilIdle: true,
+      });
+    },
+  );
+
+  it('leaves chip selection on ordinary typing and still dispatches Ctrl+Q', async () => {
+    const onSubmit = vi.fn(() => true);
+    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    await press('v', true);
+    await press('up');
+    await act(async () =>
+      lastKeyboardHandler()(baseKeyEvent({ name: 'a', sequence: 'a' })),
+    );
+    expect(screen.getByText('📎 clipboard-test.png')).toBeTruthy();
+    await press('return');
+    expect(onSubmit.mock.calls[0]).toEqual([
+      'a',
+      ['/tmp/clipboard-test.png'],
+      { submittedPrompt: 'a', deferUntilIdle: false },
+    ]);
+    await press('v', true);
+    await typeText('deferred');
+    await press('up');
+    await press('q', true);
+    expect(onSubmit.mock.calls[1]).toEqual([
+      'deferred',
+      ['/tmp/clipboard-test.png'],
+      { submittedPrompt: 'deferred', deferUntilIdle: true },
+    ]);
+  });
+
+  it('restores popped images with their text and raw provenance', async () => {
+    const onSubmit = vi.fn(() => true);
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={onSubmit}
+        userMessages={[]}
+        queueLength={1}
+        onPopQueue={() => ({
+          text: 'expanded',
+          imagePaths: ['/tmp/queued.png'],
+          submittedPrompt: '[Pasted Content 8 chars]',
+        })}
+      />,
+    );
+    await press('up');
+    await press('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      'expanded',
+      ['/tmp/queued.png'],
+      { submittedPrompt: '[Pasted Content 8 chars]', deferUntilIdle: false },
+    );
+  });
+
+  it('reports unavailable clipboard once and stays silent for ordinary text clipboard', async () => {
+    const onNotice = vi.fn();
+    mocks.state.clipboardHasImage
+      .mockResolvedValueOnce(false)
+      .mockImplementation(async (report) => {
+        report?.();
+        return false;
+      });
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => true}
+        onNotice={onNotice}
+        userMessages={[]}
+      />,
+    );
+    await press('v', true);
+    expect(onNotice).not.toHaveBeenCalled();
+    await press('v', true);
+    await press('v', true);
+    expect(onNotice).toHaveBeenCalledTimes(1);
+    expect(mocks.state.saveClipboardImage).not.toHaveBeenCalled();
+  });
+
+  it('retains a rejected submit-on-accept completion and its attachment for retry', async () => {
+    mocks.state.slashCommands = [
+      {
+        name: 'skills',
+        description: 'Skills',
+        kind: 'built-in',
+        submitOnAccept: true,
+      },
+    ];
+    const onSubmit = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    await act(async () => {});
+    await press('v', true);
+    await typeText('/skil');
+    await press('return');
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(currentEditor().plainText).toBe('/skills');
+    expect(screen.getByText('📎 clipboard-test.png')).toBeTruthy();
+    await press('return');
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+    expect(onSubmit.mock.calls[1]?.[1]).toEqual(['/tmp/clipboard-test.png']);
+  });
+  it.each([false, true])(
+    'promotes pure image paths before collapse, retaining the whole paste on partial failure=%s',
+    async (partialFailure) => {
+      const scratch = await mkdtemp(join(tmpdir(), 'qwen-paste-test-'));
+      const tempDir = vi
+        .spyOn(Storage, 'getGlobalTempDir')
+        .mockReturnValue(scratch);
+      try {
+        const image = join(scratch, 'image 甲.png');
+        const bytes = Buffer.from('owned image bytes');
+        await writeFile(image, bytes);
+        const paths = partialFailure
+          ? [image, join(scratch, 'missing.png')]
+          : Array.from({ length: 11 }, () => image);
+        const pasted = paths.map((file) => JSON.stringify(file)).join('\n');
+        const onNotice = vi.fn();
+        const onSubmit = vi.fn(() => true);
+        render(
+          <OpenTuiInputPrompt
+            onSubmit={onSubmit}
+            onNotice={onNotice}
+            userMessages={[]}
+          />,
+        );
+        const preventDefault = vi.fn();
+        await act(async () => {
+          mocks.state.pasteHandlers.at(-1)!({
+            bytes: new TextEncoder().encode(pasted),
+            preventDefault,
+          });
+        });
+        expect(preventDefault).toHaveBeenCalledOnce();
+        if (partialFailure) {
+          await waitFor(() => expect(currentEditor().plainText).toBe(pasted));
+          expect(onNotice).toHaveBeenCalledOnce();
+          expect(screen.queryByText(/📎/)).toBeNull();
+          expect(await readdir(join(scratch, 'clipboard'))).toEqual([]);
+        } else {
+          await waitFor(() =>
+            expect(screen.getAllByText(/📎 clipboard-/)).toHaveLength(
+              paths.length,
+            ),
+          );
+          expect(currentEditor().plainText).toBe('');
+          await typeText('caption');
+          await press('return');
+          const sent = onSubmit.mock.calls[0] as unknown as [string, string[]];
+          expect(sent[0]).toBe('caption');
+          expect(sent[1]).toHaveLength(paths.length);
+          for (const file of sent[1])
+            expect(await readFile(file)).toEqual(bytes);
+          expect(onNotice).not.toHaveBeenCalled();
+        }
+      } finally {
+        tempDir.mockRestore();
+        await rm(scratch, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe('OpenTuiInputPrompt external editor ownership', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+  const paste = async (text: string) => {
+    await act(async () =>
+      mocks.state.pasteHandlers.at(-1)!({
+        bytes: Buffer.from(text),
+        preventDefault() {},
+      }),
+    );
+  };
+
+  it.each(['unchanged', 'changed', 'throw'])(
+    'restores the renderer after an external editor %s outcome',
+    async (mode) => {
+      const notice = vi.fn();
+      const submit = vi.fn(() => true);
+      mocks.state.editExternally.mockImplementation((text, options) => {
+        options.beforeLaunch();
+        if (mode === 'throw') throw new Error('editor failed');
+        return mode === 'changed' ? 'edited' : text;
+      });
+      renderPrompt({
+        onSubmit: submit,
+        onNotice: notice,
+        preferredEditor: 'vim',
+      });
+      await typeText('original');
+      await pressKey('v', true);
+      await pressKey('x', true);
+      expect(mocks.renderer.suspend).toHaveBeenCalledTimes(1);
+      expect(mocks.renderer.resume).toHaveBeenCalledTimes(1);
+      expect(currentEditor().replacements).toEqual(
+        mode === 'changed' ? ['edited'] : [],
+      );
+      expect(mocks.state.editExternally.mock.calls[0][1].preferredEditor).toBe(
+        'vim',
+      );
+      if (mode === 'throw')
+        expect(notice).toHaveBeenCalledWith(
+          expect.stringContaining('editor failed'),
+        );
+      await typeText('_after');
+      await pressKey('return');
+      expect(submit).toHaveBeenCalledExactlyOnceWith(
+        mode === 'changed' ? 'edited_after' : 'original_after',
+        ['/tmp/clipboard-test.png'],
+        expect.any(Object),
+      );
+    },
+  );
+
+  it.each(['clear', 'submit', 'unmount', 'session', 'keep'])(
+    'waits for a pending paste and respects %s ownership before opening an editor',
+    async (action) => {
+      let resolve!: (path: string) => void;
+      const pending = new Promise<string>((done) => {
+        resolve = done;
+      });
+      mocks.state.saveClipboardImage.mockReturnValueOnce(pending);
+      mocks.state.editExternally.mockImplementation((text, options) => {
+        options.beforeLaunch();
+        return text + '_edited';
+      });
+      const submit = vi.fn(() => true);
+      let id = 'first';
+      const config = {
+        getSessionId: () => id,
+        getTargetDir: () => '/tmp/project',
+        getProjectRoot: () => '/tmp/project',
+      } as import('@qwen-code/qwen-code-core').Config;
+      const component = () => (
+        <OpenTuiInputPrompt
+          config={config}
+          userMessages={[]}
+          onSubmit={submit}
+        />
+      );
+      const view = render(component());
+      await typeText('old');
+      await pressKey('v', true);
+      await pressKey('x', true);
+      await pressKey('x', true);
+      expect(mocks.state.editExternally).not.toHaveBeenCalled();
+      if (action === 'clear') await pressKey('c', true);
+      if (action === 'submit') await pressKey('return');
+      if (action === 'session') {
+        id = 'second';
+        view.rerender(component());
+      }
+      if (action === 'unmount') view.unmount();
+      else if (action !== 'keep') await typeText('successor');
+      await act(async () => resolve('/tmp/late.png'));
+      if (action === 'keep') {
+        expect(mocks.state.editExternally).toHaveBeenCalledTimes(1);
+        expect(currentEditor().plainText).toBe('old_edited');
+        await pressKey('return');
+        expect(submit).toHaveBeenCalledExactlyOnceWith(
+          'old_edited',
+          ['/tmp/late.png'],
+          expect.any(Object),
+        );
+      } else {
+        expect(mocks.state.editExternally).not.toHaveBeenCalled();
+        if (action !== 'unmount')
+          expect(currentEditor().plainText).toBe('successor');
+        if (action === 'submit')
+          expect(submit).toHaveBeenCalledExactlyOnceWith(
+            'old',
+            ['/tmp/late.png'],
+            expect.any(Object),
+          );
+      }
+    },
+  );
+
+  it('expands collapsed paste for the editor without discarding its original undo payload', async () => {
+    const text = 'line\n'.repeat(30);
+    const submit = vi.fn(() => true);
+    mocks.state.editExternally.mockImplementation((value, options) => {
+      options.beforeLaunch();
+      expect(value).toBe(text);
+      return 'replacement';
+    });
+    renderPrompt({ onSubmit: submit });
+    await paste(text);
+    const placeholder = currentEditor().plainText;
+    expect(placeholder).toContain('Pasted Content');
+    await pressKey('x', true);
+    expect(currentEditor().replacements).toEqual(['replacement']);
+    // Native undo is tested separately; this restores its original buffer value.
+    currentEditor().setText(placeholder);
+    await pressKey('return');
+    expect(submit).toHaveBeenCalledExactlyOnceWith(
+      text,
+      undefined,
+      expect.any(Object),
+    );
   });
 });
