@@ -119,7 +119,7 @@ const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
 const APPENDED_METADATA_SEPARATOR = '\n\n';
 
 export const SHELL_RECORD_ARTIFACT_REMINDER =
-  'If this command created or rewrote a deliverable file (csv, html, sql, py, md, json, image, or pdf), call record_artifact for each one with a workspace-relative workspacePath. Do not call it for files already recorded by write_file, edit, or notebook_edit.';
+  'If this command created or rewrote a deliverable file (csv, html, sql, py, md, json, notebook, image, pdf, or an office document), call record_artifact for each one. workspacePath is relative to the current execution directory, and title is required. Do not call it for files already recorded by write_file, edit, or notebook_edit.';
 
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
@@ -3187,13 +3187,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const longRunHint = shouldAppendLongRunHint
       ? buildLongRunningForegroundHint(elapsedMs)
       : null;
-    const recordArtifactReminder =
-      !result.aborted &&
-      !result.error &&
-      !isSignalTermination(result.signal) &&
-      !isShellExitError(this.params.command, result.exitCode)
-        ? SHELL_RECORD_ARTIFACT_REMINDER
-        : null;
+    const recordArtifactReminder = (await this.shouldRemindToRecordArtifact(
+      result,
+    ))
+      ? SHELL_RECORD_ARTIFACT_REMINDER
+      : null;
     const appendedMetadata = [longRunHint, attributionWarning].filter(
       (s): s is string => s !== null,
     );
@@ -3406,6 +3404,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
       ...executionError,
     };
+  }
+
+  /**
+   * The model only sees this after a command that may have written a file.
+   * Disabled sessions have no record_artifact tool. Commands the AST proves
+   * read-only did not create one.
+   */
+  private async shouldRemindToRecordArtifact(
+    result: ShellExecutionResult,
+  ): Promise<boolean> {
+    if (!this.config.isRecordArtifactEnabled()) return false;
+    if (
+      result.aborted ||
+      result.error ||
+      isSignalTermination(result.signal) ||
+      isShellExitError(this.params.command, result.exitCode)
+    ) {
+      return false;
+    }
+    try {
+      const readOnly = await isShellCommandReadOnlyASTInDirectory(
+        stripShellWrapper(this.params.command),
+        this.params.directory || this.config.getTargetDir(),
+      );
+      return !readOnly;
+    } catch {
+      return true;
+    }
   }
 
   /**

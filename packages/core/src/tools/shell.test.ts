@@ -360,6 +360,7 @@ describe('ShellTool', () => {
       getPermissionsAsk: vi.fn().mockReturnValue([]),
       getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(true),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getSessionId: vi.fn().mockReturnValue('test-session'),
       getWorkspaceContext: vi
@@ -2143,6 +2144,32 @@ describe('ShellTool', () => {
       expect(
         (result.returnDisplay as { text?: string }).text ?? '',
       ).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when recording is disabled', async () => {
+      vi.mocked(mockConfig.isRecordArtifactEnabled).mockReturnValue(false);
+
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact after a read-only command', async () => {
+      const result = await runFg('ls', { output: 'orders.csv', exitCode: 0 });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command exits non-zero', async () => {
+      const result = await runFg('python rewrite.py', {
+        exitCode: 2,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
     });
 
     it('does not ask for record_artifact when the command fails', async () => {
