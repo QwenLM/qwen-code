@@ -817,7 +817,11 @@ async function enableVim(context: Context) {
   await context.type('/vim');
   await context.press('\r');
   await context.session.waitFor('Entered Vim mode.', 12_000);
-  await context.session.waitFor('-- NORMAL --', 12_000);
+  await context.session.waitForScreen(
+    (screen) => screen.includes('-- NORMAL --'),
+    '-- NORMAL --',
+    12_000,
+  );
   await context.frame('vim-enabled');
   expect(context.server.requests).toHaveLength(0);
 }
@@ -828,10 +832,18 @@ for (const paced of [false, true]) {
     scenario(name, async (context) => {
       await enableVim(context);
       await context.press('i');
-      await context.session.waitFor('-- INSERT --', 12_000);
+      await context.session.waitForScreen(
+        (screen) => screen.includes('-- INSERT --'),
+        '-- INSERT --',
+        12_000,
+      );
       await context.type('one two three');
       await context.press('\x1b');
-      await context.session.waitFor('-- NORMAL --', 12_000);
+      await context.session.waitForScreen(
+        (screen) => screen.includes('-- NORMAL --'),
+        '-- NORMAL --',
+        12_000,
+      );
       await context.press('0');
       if (paced) for (const key of '2dw') await context.press(key);
       else await context.press('2dw');
@@ -848,7 +860,11 @@ it('vim-pending-character-keeps-enter-and-draft', () =>
     await context.press('i');
     await context.type('pending draft');
     await context.press('\x1b');
-    await context.session.waitFor('-- NORMAL --', 12_000);
+    await context.session.waitForScreen(
+      (screen) => screen.includes('-- NORMAL --'),
+      '-- NORMAL --',
+      12_000,
+    );
     for (const command of ['r', 'f', 'F', 't', 'T']) {
       await context.press(command + '\r');
       expect(await context.frame(`pending-${command}`)).toContain(
