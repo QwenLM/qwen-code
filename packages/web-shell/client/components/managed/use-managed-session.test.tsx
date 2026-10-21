@@ -54,6 +54,135 @@ describe('useManagedSession', () => {
     return null;
   }
 
+  it('keeps a confirmed title when an earlier summary read returns and accepts a later external rename', async () => {
+    let resolve!: (value: { sessionId: string; title: string }) => void;
+    const getSession = vi
+      .fn()
+      .mockResolvedValueOnce({ sessionId: 'session-1', title: 'Original' })
+      .mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      )
+      .mockResolvedValue({ sessionId: 'session-1', title: 'External rename' });
+    const provider = {
+      getSession,
+      getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+      async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+        await new Promise((done) =>
+          opts.signal.addEventListener('abort', done),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    root = createRoot(document.createElement('div'));
+    await act(async () => {
+      root!.render(<Probe provider={provider} />);
+    });
+    let read!: Promise<unknown>;
+    act(() => {
+      read = latest!.refreshSummary();
+    });
+    act(() => latest!.applyTitle('session-1', 'Confirmed rename'));
+    expect(latest!.summary?.title).toBe('Confirmed rename');
+    await act(async () => {
+      resolve({ sessionId: 'session-1', title: 'Original' });
+      await read;
+    });
+    expect(latest!.summary?.title).toBe('Confirmed rename');
+    await act(async () => {
+      await latest!.refreshSummary();
+    });
+    expect(latest!.summary?.title).toBe('External rename');
+    act(() => latest!.applyTitle('another-session', 'Wrong owner'));
+    expect(latest!.summary?.title).toBe('External rename');
+  });
+
+  it('does not restore a pre-rename snapshot while it waits for its transcript leg', async () => {
+    let emit!: () => void;
+    const gate = new Promise<void>((done) => {
+      emit = done;
+    });
+    let finishTranscript!: (value: ManagedAgentSessionTranscript) => void;
+    const getTranscript = vi
+      .fn()
+      .mockResolvedValueOnce(transcript(1))
+      .mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            finishTranscript = done;
+          }),
+      );
+    let emitted = false;
+    const provider = {
+      getSession: vi
+        .fn()
+        .mockResolvedValue({ sessionId: 'session-1', title: 'Original' }),
+      getTranscript,
+      async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+        if (!emitted) {
+          await gate;
+          emitted = true;
+          yield { ...event(2), type: 'stream_gap' as const };
+        }
+        await new Promise((done) =>
+          opts.signal.addEventListener('abort', done),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    root = createRoot(document.createElement('div'));
+    await act(async () => {
+      root!.render(<Probe provider={provider} />);
+    });
+    await act(async () => {
+      emit();
+    });
+    expect(getTranscript).toHaveBeenCalledTimes(2);
+    act(() => latest!.applyTitle('session-1', 'Confirmed rename'));
+    await act(async () => {
+      finishTranscript(transcript(2));
+    });
+    expect(latest!.summary?.title).toBe('Confirmed rename');
+  });
+
+  it('retains a rename confirmed while a manual refresh has no summary yet', async () => {
+    let finishTranscript!: (value: ManagedAgentSessionTranscript) => void;
+    const provider = {
+      getSession: vi
+        .fn()
+        .mockResolvedValue({ sessionId: 'session-1', title: 'Original' }),
+      getTranscript: vi
+        .fn()
+        .mockResolvedValueOnce(transcript(1))
+        .mockImplementationOnce(
+          () =>
+            new Promise((done) => {
+              finishTranscript = done;
+            }),
+        ),
+      async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+        await new Promise((done) =>
+          opts.signal.addEventListener('abort', done),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    root = createRoot(document.createElement('div'));
+    await act(async () => {
+      root!.render(<Probe provider={provider} />);
+    });
+    await act(async () => {
+      latest!.reload();
+    });
+    expect(latest!.summary).toBeUndefined();
+    act(() => latest!.applyTitle('session-1', 'Confirmed rename'));
+    await act(async () => {
+      finishTranscript(transcript(2));
+    });
+    expect(latest!.summary?.title).toBe('Confirmed rename');
+  });
+
   it('does not resurrect older model or approval selections from a delayed summary', async () => {
     const getSession = vi
       .fn()

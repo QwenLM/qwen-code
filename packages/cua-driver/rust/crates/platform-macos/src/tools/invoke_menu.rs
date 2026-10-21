@@ -77,7 +77,7 @@ unsafe fn semantic_children(parent: AXUIElementRef) -> Vec<AXUIElementRef> {
     out
 }
 
-unsafe fn resolve_exact_prefix(
+pub(super) unsafe fn resolve_exact_prefix(
     menu_bar: AXUIElementRef,
     prefix: &[String],
 ) -> Result<AXUIElementRef, String> {

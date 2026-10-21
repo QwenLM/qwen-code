@@ -25,6 +25,11 @@
  */
 
 import {
+  expandPendingPastePlaceholders,
+  restorePasteDraft,
+} from '../utils/paste-placeholders.js';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
   useCallback,
   useEffect,
   useRef,
@@ -99,6 +104,15 @@ export interface UseOpenTuiLiveTurnOptions {
  * (ink SubmitPromptResult parity): per-turn model override, context-file
  * memory refresh, and the post-turn callback.
  */
+export interface OpenTuiRestoredDraft {
+  readonly modelText: string;
+  readonly displayText: string;
+  readonly submittedPrompt: string;
+  readonly humanInput?: HumanPromptInput;
+  readonly hasUnknownInput: boolean;
+  readonly pasteExpansions?: ReadonlyMap<string, string>;
+}
+
 export interface OpenTuiSubmitOptions {
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
@@ -110,6 +124,11 @@ export interface OpenTuiSubmitOptions {
    * also submits without provenance.
    */
   submittedPrompt?: string;
+  humanInput?: HumanPromptInput;
+  hasUnknownInput?: boolean;
+  displayText?: string;
+  pasteExpansions?: ReadonlyMap<string, string>;
+  restoredDraft?: OpenTuiRestoredDraft;
   /**
    * The transcript already holds the user row for this submit, because the
    * dispatcher echoed the typed invocation. Set by a `submit_prompt` outcome:
@@ -134,7 +153,10 @@ export interface OpenTuiLiveTurn {
   /** Mid-turn queued prompts, oldest first (composer badge + Esc pop-back). */
   messageQueue: readonly string[];
   /** Pops the whole queue back into the composer (Esc parity). */
-  popQueue(): string | null;
+  popQueue(
+    pendingPastes?: ReadonlyMap<string, string>,
+    restoreDraft?: (draft: OpenTuiRestoredDraft, release: () => void) => void,
+  ): string | null;
   /**
    * Submits a prompt (or queues it when a turn is in flight). A
    * `submit_prompt` outcome's per-turn options travel in `options`.
@@ -172,11 +194,23 @@ export function useOpenTuiLiveTurn(
   const [waitingCalls, setWaitingCalls] = useState<readonly WaitingCallInfo[]>(
     [],
   );
-  const queueRef = useRef<string[]>([]);
+  const queueRef = useRef<
+    Array<{ text: string; options?: OpenTuiSubmitOptions }>
+  >([]);
+  const drainedSteeringRef = useRef<typeof queueRef.current>([]);
+  const poppedQueueRef = useRef<OpenTuiRestoredDraft | null>(null);
   // queueRef stays the synchronous source — a turn drains and restores within
   // one tick, before any render. This mirror only exists to be displayed.
   const [queue, setQueue] = useState<readonly string[]>([]);
-  const syncQueue = useCallback(() => setQueue([...queueRef.current]), []);
+  const syncQueue = useCallback(
+    () =>
+      setQueue(
+        queueRef.current.map(
+          ({ text, options }) => options?.displayText ?? text,
+        ),
+      ),
+    [],
+  );
   const abortRef = useRef<AbortController | null>(null);
 
   const streamingRef = useRef(false);
@@ -211,8 +245,8 @@ export function useOpenTuiLiveTurn(
   }, []);
 
   const pushQueue = useCallback(
-    (text: string) => {
-      queueRef.current.push(text);
+    (text: string, options?: OpenTuiSubmitOptions) => {
+      queueRef.current.push({ text, options });
       syncQueue();
     },
     [syncQueue],
@@ -221,13 +255,22 @@ export function useOpenTuiLiveTurn(
   const drainQueue = useCallback((): string[] => {
     const drained = queueRef.current;
     queueRef.current = [];
+    drainedSteeringRef.current = drained;
     syncQueue();
-    return drained;
+    return drained.map(({ text }) => text);
   }, [syncQueue]);
 
   const restoreQueue = useCallback(
     (texts: readonly string[]) => {
-      const restored = texts.map((text) => text.trim()).filter(Boolean);
+      const drained = [...drainedSteeringRef.current];
+      const restored = texts
+        .map((text) => {
+          const index = drained.findIndex((entry) => entry.text === text);
+          const entry = index >= 0 ? drained.splice(index, 1)[0] : { text };
+          return { ...entry, text: entry.text.trim() };
+        })
+        .filter(({ text }) => text.trim().length > 0);
+      drainedSteeringRef.current = [];
       if (restored.length === 0) return;
       queueRef.current = [...restored, ...queueRef.current];
       syncQueue();
@@ -254,6 +297,7 @@ export function useOpenTuiLiveTurn(
           promptId,
           modelOverride: turnOptions?.modelOverride,
           submittedPrompt: turnOptions?.submittedPrompt,
+          humanInput: turnOptions?.humanInput,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           drainSteering: drainQueue,
           restoreSteering: restoreQueue,
@@ -324,14 +368,31 @@ export function useOpenTuiLiveTurn(
           // matching ink's pop-one-submission-per-settle drain.
           const rest = queueRef.current;
           if (rest.length > 0) {
-            const [text, ...remaining] = rest;
+            const [entry, ...remaining] = rest;
             queueRef.current = remaining;
             syncQueue();
-            apply({ type: 'user', text });
+            apply({
+              type: 'user',
+              text: entry.options?.displayText ?? entry.text,
+              ...(entry.options?.pasteExpansions?.size
+                ? {
+                    recallText: expandPendingPastePlaceholders(
+                      entry.options.displayText ?? entry.text,
+                      entry.options.pasteExpansions,
+                    ),
+                  }
+                : {}),
+            });
             // ink keeps provenance for a queued submission, and the raw text
             // is what the stream layer expands `@path` mentions from.
-            void runTurn(text, nextLivePromptId(config), {
-              submittedPrompt: text,
+            void runTurn(entry.text, nextLivePromptId(config), {
+              ...entry.options,
+              ...(!entry.options?.invocationEchoed
+                ? {
+                    submittedPrompt:
+                      entry.options?.submittedPrompt ?? entry.text,
+                  }
+                : {}),
             });
           }
         }
@@ -346,10 +407,43 @@ export function useOpenTuiLiveTurn(
       imagePaths?: readonly string[],
       options?: OpenTuiSubmitOptions,
     ) => {
-      const text =
+      let text =
         typeof content === 'string'
           ? content
           : collectText(normalizeParts(content));
+      const popped = options?.restoredDraft ?? poppedQueueRef.current;
+      if (poppedQueueRef.current === popped) poppedQueueRef.current = null;
+      if (options?.restoredDraft) {
+        options = { ...options };
+        delete options.restoredDraft;
+      }
+      const displayText = options?.displayText ?? text;
+      if (popped && displayText === popped.displayText) {
+        content = popped.modelText;
+        text = popped.modelText;
+        options = {
+          ...options,
+          displayText: popped.displayText,
+          submittedPrompt: popped.submittedPrompt,
+          humanInput: popped.humanInput,
+          ...(popped.hasUnknownInput && popped.humanInput
+            ? { hasUnknownInput: true }
+            : {}),
+          ...(popped.pasteExpansions?.size
+            ? { pasteExpansions: popped.pasteExpansions }
+            : {}),
+        };
+      } else if (
+        popped?.pasteExpansions?.size &&
+        !options?.pasteExpansions?.size
+      ) {
+        content = expandPendingPastePlaceholders(text, popped.pasteExpansions);
+        text = typeof content === 'string' ? content : text;
+        options = { ...options, pasteExpansions: popped.pasteExpansions };
+      }
+      if (popped?.hasUnknownInput && displayText !== popped.displayText) {
+        options = { ...options, humanInput: undefined };
+      }
       if (streamingRef.current) {
         // The steering queue is text-only; say so instead of losing the
         // attachments without a trace. Per-turn options ride on the queued
@@ -360,7 +454,7 @@ export function useOpenTuiLiveTurn(
             text: 'Image attachments cannot be queued mid-turn and were dropped.',
           });
         }
-        if (text.trim()) pushQueue(text);
+        if (text.trim()) pushQueue(text, options);
         return;
       }
       const { parts, notices } = imagePathsToParts(imagePaths ?? []);
@@ -369,7 +463,20 @@ export function useOpenTuiLiveTurn(
         parts.length > 0 ? [{ text }, ...parts] : content;
       const promptId = nextLivePromptId(config);
       if (!options?.invocationEchoed) {
-        apply({ type: 'user', text, promptId, sentToModel: true });
+        apply({
+          type: 'user',
+          text: options?.displayText ?? text,
+          ...(options?.pasteExpansions?.size
+            ? {
+                recallText: expandPendingPastePlaceholders(
+                  options.displayText ?? text,
+                  options.pasteExpansions,
+                ),
+              }
+            : {}),
+          promptId,
+          sentToModel: true,
+        });
       }
       void runTurn(prompt, promptId, options);
     },
@@ -398,6 +505,8 @@ export function useOpenTuiLiveTurn(
       }
       abort?.abort();
       queueRef.current = [];
+      drainedSteeringRef.current = [];
+      poppedQueueRef.current = null;
       syncQueue();
       waitingCallsRef.current = [];
       setWaitingCalls([]);
@@ -413,14 +522,54 @@ export function useOpenTuiLiveTurn(
     setWaitingCalls((prev) => prev.filter((c) => c.callId !== callId));
   }, []);
 
-  const popQueue = useCallback((): string | null => {
-    if (queueRef.current.length === 0) return null;
-    // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
-    // blank line, not a single newline. ink's peer/slash queue filters have no
-    // counterpart here — this queue only ever holds plain composer text
-    // (slash commands defer in the shell instead of queueing).
-    return drainQueue().join('\n\n');
-  }, [drainQueue]);
+  const popQueue = useCallback(
+    (
+      pendingPastes?: ReadonlyMap<string, string>,
+      restoreDraft?: (draft: OpenTuiRestoredDraft, release: () => void) => void,
+    ): string | null => {
+      const entries = queueRef.current;
+      if (entries.length === 0) return null;
+      let pasteExpansions = new Map(pendingPastes);
+      const displayText = entries
+        .map(({ text, options }) => {
+          const display = options?.displayText ?? text;
+          if (!options?.pasteExpansions?.size) return display;
+          const restored = restorePasteDraft(
+            display,
+            options.pasteExpansions,
+            pasteExpansions,
+          );
+          pasteExpansions = restored.pasteExpansions;
+          return restored.text;
+        })
+        .join('\n\n');
+      const humanTexts = entries.flatMap(({ options }) =>
+        options?.humanInput ? [options.humanInput.text] : [],
+      );
+      const draft: OpenTuiRestoredDraft = {
+        displayText,
+        hasUnknownInput: entries.some(
+          ({ options }) => options?.hasUnknownInput || !options?.humanInput,
+        ),
+        ...(pasteExpansions.size > 0 ? { pasteExpansions } : {}),
+        modelText: entries.map(({ text }) => text).join('\n\n'),
+        submittedPrompt: entries
+          .map(({ text, options }) => options?.submittedPrompt ?? text)
+          .join('\n\n'),
+        ...(humanTexts.length > 0
+          ? { humanInput: { text: humanTexts.join('\n\n') } }
+          : {}),
+      };
+      poppedQueueRef.current = draft;
+      restoreDraft?.(draft, () => {
+        if (poppedQueueRef.current === draft) poppedQueueRef.current = null;
+      });
+      queueRef.current = [];
+      syncQueue();
+      return displayText;
+    },
+    [syncQueue],
+  );
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
