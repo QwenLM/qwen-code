@@ -6508,6 +6508,14 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('DW03: applies the constructor and live workflow keyword preference', () => {
+      const config = makeConfig({ workflowKeywordTriggerEnabled: false });
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(false);
+      config.setWorkflowKeywordTriggerEnabled(true);
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(true);
+      expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
