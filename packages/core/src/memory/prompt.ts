@@ -9,6 +9,7 @@ import { normalizeContent } from '../utils/textUtils.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 import {
   describeDroppedIndexEntries,
+  INDEX_SCAN_CAP_NOTICE_START,
   INDEX_TRUNCATION_NOTICE_START,
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
@@ -164,7 +165,10 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
 
 function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const trimmed = normalizeContent(indexContent).trim();
-  const noticeStart = trimmed.lastIndexOf(INDEX_TRUNCATION_NOTICE_START);
+  const noticeStart = Math.max(
+    trimmed.lastIndexOf(INDEX_TRUNCATION_NOTICE_START),
+    trimmed.lastIndexOf(INDEX_SCAN_CAP_NOTICE_START),
+  );
   // Exempt only bounded, single-paragraph writer metadata from entry budgets.
   const hasWriterNotice =
     noticeStart !== -1 &&
@@ -186,9 +190,9 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
 
   const entries = lines;
   const { content, dropped } = trimIndexToBudgetDetailed(entries);
-  const hasOverlongEntry = entries.some(
-    (line) => line.length > MAX_INDEX_LINE_CHARS,
-  );
+  const hasOverlongEntry = entries
+    .slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES)
+    .some((line) => line.length > MAX_INDEX_LINE_CHARS);
 
   const reason =
     wasCharTruncated && !wasLineTruncated
@@ -206,7 +210,7 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   // overflow is the entry COUNT, and no amount of rewording clears it.
   const lever = hasOverlongEntry
     ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
-    : ` No entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries.`;
+    : ` No candidate entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries.`;
 
   return `${content}${writerNotice}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedIndexEntries(
     dropped,

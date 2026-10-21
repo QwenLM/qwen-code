@@ -31,7 +31,9 @@ import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 import {
   describeDroppedIndexEntries,
+  INDEX_SCAN_CAP_NOTICE_START,
   INDEX_TRUNCATION_NOTICE_START,
+  MAX_NAMED_DROPPED_ENTRIES,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
   MAX_INDEX_LINES,
@@ -252,14 +254,21 @@ function assembleIndex(
     );
   }
   const reason = reasons.length > 0 ? ` ${reasons.join('; ')}.` : '';
-  const lever = hasOverlongEntry
-    ? ` Keep index entries to at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if still over budget.`
-    : ' Prune or merge entries to reduce the index.';
-  const total =
-    dropped.length > 0 && scanOmitted > 0
-      ? ` Dropped ${dropped.length + scanOmitted} in total across both limits.`
+  const budgetLever =
+    reasons.length === 0
+      ? ''
+      : hasOverlongEntry
+        ? ` Keep index entries to at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if still over budget.`
+        : ' Prune or merge entries to reduce the index.';
+  const scanLever =
+    scanOmitted > 0
+      ? ' Merge topic files or remove obsolete ones to reduce the file count.'
       : '';
-  return `${content}${INDEX_TRUNCATION_NOTICE_START}${reason}${describeDroppedIndexEntries(dropped, lines.length)}${scanNotice}${total}${lever}`;
+  const noticeStart =
+    reasons.length === 0 && scanOmitted > 0
+      ? INDEX_SCAN_CAP_NOTICE_START
+      : INDEX_TRUNCATION_NOTICE_START;
+  return `${content}${noticeStart}${reason}${describeDroppedIndexEntries(dropped, lines.length)}${scanNotice}${budgetLever}${scanLever}`;
 }
 
 function describeScanOmissions(
@@ -268,9 +277,10 @@ function describeScanOmissions(
 ): string {
   if (omitted.length === 0) return '';
   return `${describeDroppedIndexEntries(
-    omitted.map((doc) => docIndexLine(doc)),
+    omitted.slice(0, MAX_NAMED_DROPPED_ENTRIES).map((doc) => docIndexLine(doc)),
     docs.length + omitted.length,
     'topic files',
+    omitted.length,
   )} Scan limit: ${docs.length} files.`;
 }
 

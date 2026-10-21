@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildManagedAutoMemoryIndex,
+  buildTeamAutoMemoryIndex,
   rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
@@ -25,6 +26,8 @@ import type { ScannedAutoMemoryDocument } from './scan.js';
 
 const NOTICE_START =
   '\n\n> WARNING: MEMORY.md is too large; only part of it was written.';
+const SCAN_NOTICE_START =
+  '\n\n> WARNING: MEMORY.md does not list every topic file.';
 
 function doc(index: number): ScannedAutoMemoryDocument {
   return {
@@ -100,8 +103,85 @@ describe('memory index omission diagnostics', () => {
     expect(entries(index)).toHaveLength(165);
     expect(index).toContain('Dropped 35 of 200 entries: "Topic 165"');
     expect(index).toContain('Dropped 5 of 205 topic files: "Topic 200"');
-    expect(index).toContain('Dropped 40 in total across both limits.');
+    expect(index).not.toContain('in total across both limits');
+    expect(index).toContain('Prune or merge entries to reduce the index.');
+    expect(index).toContain(
+      'Merge topic files or remove obsolete ones to reduce the file count.',
+    );
     expect(buildManagedAutoMemoryPrompt('/tmp/memory', index)).toContain(index);
+  });
+
+  it('gives scan-only omissions a file-count cause and action', () => {
+    const docs = Array.from({ length: 205 }, (_, i) => ({
+      ...doc(i),
+      description: '',
+    }));
+    const index = buildManagedAutoMemoryIndex(
+      docs.slice(0, 200),
+      undefined,
+      docs.slice(200),
+    );
+    expect(entries(index)).toHaveLength(200);
+    expect(entries(index).join('\n').length).toBeLessThan(25_000);
+    expect(index).toContain(SCAN_NOTICE_START);
+    expect(index).toContain('Dropped 5 of 205 topic files: "Topic 200"');
+    expect(index).toContain(
+      'Merge topic files or remove obsolete ones to reduce the file count.',
+    );
+    expect(index).not.toContain('MEMORY.md is too large');
+    expect(index).not.toContain('Prune or merge entries');
+    expect(buildManagedAutoMemoryPrompt('/tmp/memory', index)).toContain(index);
+  });
+
+  it('formats only the omitted names that can appear in the bounded sample', () => {
+    const inspected: number[] = [];
+    const omitted = Array.from({ length: 8 }, (_, i) => ({
+      ...doc(200 + i),
+      get title() {
+        inspected.push(i);
+        return `Omitted ${i}`;
+      },
+    }));
+    const index = buildManagedAutoMemoryIndex(
+      Array.from({ length: 200 }, (_, i) => ({ ...doc(i), description: '' })),
+      undefined,
+      omitted,
+    );
+    expect(inspected).toEqual([0, 1, 2]);
+    expect(index).toContain(
+      'Dropped 8 of 208 topic files: "Omitted 0", "Omitted 1", "Omitted 2", +5 more.',
+    );
+  });
+
+  it('does not add grouped team entry omissions to topic-file omissions', () => {
+    const docs = Array.from({ length: 205 }, (_, i) => ({
+      ...doc(i),
+      description: `${i} ${'h'.repeat(200)}`,
+    }));
+    docs[199].description = docs[198].description;
+    const index = buildTeamAutoMemoryIndex(docs.slice(0, 200), docs.slice(200));
+    expect(entries(index)).toHaveLength(165);
+    expect(index).toContain('Dropped 34 of 199 entries:');
+    expect(index).toContain('Dropped 5 of 205 topic files:');
+    expect(index).not.toContain('in total across both limits');
+    expect(buildManagedAutoMemoryPrompt('/tmp/memory', index)).toContain(index);
+  });
+
+  it('does not blame a reader entry already excluded by the line cap', () => {
+    const lines = Array.from(
+      { length: 250 },
+      (_, i) => `- [Topic ${i}](topic-${i}.md)`,
+    );
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      [...lines, 'x'.repeat(25_003)].join('\n'),
+    );
+    for (const line of lines.slice(0, 200)) expect(prompt).toContain(line);
+    expect(prompt).toContain(
+      'No candidate entry exceeds the 150-unit line limit',
+    );
+    expect(prompt).not.toContain('Keep index entries to one line at most');
+    expect(prompt).toContain('shortening entries cannot help');
   });
 
   it('does not blame a long entry already excluded by the line cap', () => {
@@ -164,17 +244,20 @@ describe('memory index omission diagnostics', () => {
     expect(notice.length).toBeLessThan(1024);
   });
 
-  it('does not exempt unbounded handwritten warning-like text from the entry budget', () => {
-    const body = 'a'.repeat(24_900);
-    const fakeNotice = `${NOTICE_START}${'x'.repeat(25_000)}`;
-    const prompt = buildManagedAutoMemoryPrompt(
-      '/tmp/memory',
-      `${body}${fakeNotice}`,
-    );
-    expect(prompt).toContain(body);
-    expect(prompt).not.toContain('x'.repeat(25_000));
-    expect(prompt).toContain('Only part of it was loaded.');
-  });
+  it.each([NOTICE_START, SCAN_NOTICE_START])(
+    'does not exempt unbounded handwritten warning-like text from the entry budget (%s)',
+    (prefix) => {
+      const body = 'a'.repeat(24_900);
+      const fakeNotice = `${prefix}${'x'.repeat(25_000)}`;
+      const prompt = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        `${body}${fakeNotice}`,
+      );
+      expect(prompt).toContain(body);
+      expect(prompt).not.toContain('x'.repeat(25_000));
+      expect(prompt).toContain('Only part of it was loaded.');
+    },
+  );
 });
 
 describe('real-file scan-cap omission diagnostics', () => {
@@ -239,8 +322,16 @@ describe('real-file scan-cap omission diagnostics', () => {
           : '"Topic-004", "Topic-003", "Topic-002", +2 more.',
       );
       expect(index).toContain('Scan limit: 200 files.');
+      expect(index).toContain(SCAN_NOTICE_START);
+      expect(index).toContain(
+        'Merge topic files or remove obsolete ones to reduce the file count.',
+      );
+      expect(index).not.toContain('MEMORY.md is too large');
+      expect(index).not.toContain('Prune or merge entries');
       expect(index).not.toContain('in total across both limits');
-      expect(index.length - index.indexOf(NOTICE_START)).toBeLessThan(1024);
+      expect(index.length - index.indexOf(SCAN_NOTICE_START)).toBeLessThan(
+        1024,
+      );
       expect(buildManagedAutoMemoryPrompt('/tmp/memory', index)).toContain(
         index,
       );

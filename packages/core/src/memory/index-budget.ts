@@ -10,11 +10,12 @@ export const MAX_INDEX_LINES = 200;
 export const MAX_INDEX_CHARS = 25_000;
 export const INDEX_TRUNCATION_NOTICE_START =
   '\n\n> WARNING: MEMORY.md is too large; only part of it was written.';
-export const INDEX_TRUNCATION_WARNING =
-  '> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.';
+export const INDEX_SCAN_CAP_NOTICE_START =
+  '\n\n> WARNING: MEMORY.md does not list every topic file.';
+export const INDEX_TRUNCATION_WARNING = `${INDEX_TRUNCATION_NOTICE_START.trimStart()} Keep index entries concise and move detail into topic files.`;
 export const INDEX_TRUNCATION_NOTICE = `\n\n${INDEX_TRUNCATION_WARNING}`;
 
-const MAX_NAMED_DROPPED_ENTRIES = 3;
+export const MAX_NAMED_DROPPED_ENTRIES = 3;
 const MAX_DROPPED_ENTRY_NAME_CHARS = 60;
 const INDEX_ENTRY_TITLE = /^\s*-\s*\[([^\]]+)\]/;
 
@@ -33,10 +34,12 @@ function droppedEntryName(line: string): string {
   return `${head}…`;
 }
 
+/** `droppedCount` includes omissions beyond a caller's preformatted sample. */
 export function describeDroppedIndexEntries(
   dropped: readonly string[],
   total: number,
   unit: 'entries' | 'topic files' = 'entries',
+  droppedCount?: number,
 ): string {
   const removed = dropped.filter((line) => line.trim().length > 0);
   if (removed.length === 0) {
@@ -46,8 +49,9 @@ export function describeDroppedIndexEntries(
     .slice(0, MAX_NAMED_DROPPED_ENTRIES)
     .map((line) => `"${droppedEntryName(line)}"`)
     .join(', ');
-  const rest = removed.length - MAX_NAMED_DROPPED_ENTRIES;
-  return ` Dropped ${removed.length} of ${total} ${unit}: ${names}${
+  const count = droppedCount ?? removed.length;
+  const rest = count - Math.min(removed.length, MAX_NAMED_DROPPED_ENTRIES);
+  return ` Dropped ${count} of ${total} ${unit}: ${names}${
     rest > 0 ? `, +${rest} more` : ''
   }.`;
 }
