@@ -213,6 +213,10 @@ class ResidentWorkspacesTest {
         authority.authorize(store.requireSession("tenant", session));
         authority.claim(context, record);
         authority.assertHeld(context, record);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?",
+                "a".repeat(64), record.getRuntimeSessionId());
+        assertThatThrownBy(() -> authority.assertHeld(context, record)).isInstanceOf(RuntimeBrokerException.class);
+        jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL WHERE runtime_session_id = ?", record.getRuntimeSessionId());
         var second = active(original, session);
         assertThatThrownBy(() -> authority.claim(context, second)).isInstanceOf(RuntimeBrokerException.class);
         runtimeSessions.compareAndSet(second, second.withState(RuntimeSessionRecord.State.RELEASED, Instant.now()));

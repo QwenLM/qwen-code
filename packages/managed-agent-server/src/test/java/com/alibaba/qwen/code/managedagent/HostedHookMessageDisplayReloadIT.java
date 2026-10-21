@@ -44,6 +44,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -447,10 +448,6 @@ class HostedHookMessageDisplayReloadIT {
                                 + temporary, modelFailure.get());
                     }
                 }).untilAsserted(assertion::execute);
-    }
-
-    private static String quote(String text) {
-        return "'" + text.replace("'", "'\"'\"'") + "'";
     }
 
     @AfterEach
