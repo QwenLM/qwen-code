@@ -72,6 +72,10 @@ const TARGET_OPENTUI_PACKAGES = new Map([
 const DIST_REQUIRED_PATHS = [
   'mem0/main.js',
   'mem0/write-confirmation.js',
+  'generated-ui/main.js',
+  'generated-ui/app.html',
+  'generated-ui/skills/generated-ui/SKILL.md',
+  'generated-ui/THIRD_PARTY_NOTICES.txt',
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
@@ -86,6 +90,7 @@ const DIST_REQUIRED_PATHS = [
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'mem0',
+  'generated-ui',
   'cli.js',
   'execution-worker.js',
   // bin wrapper emitted by prepare-package.js. Standalone shims use it for

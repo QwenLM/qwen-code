@@ -54,7 +54,9 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 - `cancel-stops-only-the-target` 已交付：把 wake turn 扣在模型上时，公开 task
   cancel 让 task 与 run 在一秒内结算为 `cancelled`，schedule 保持 `live`；反之在
   收到 `202` 后立刻释放模型，turn 会先跑完——本格避开的正是这个顺序。
-- 同一 key 的重试复用原 operation 与 run，被扣住的 cancel 绝不重投。
+- 同一 key 的重试复用原 operation 与 run——已交付：第二次 `POST /runs` 返回它
+  已经创建的 run，不产生第二个 occurrence，也不起第二个 Turn。被扣住的 cancel
+  绝不重投仍未覆盖。
 
 #14526 已实现按 run 取消；第 2 片在它周围钉住 round 级矩阵。
 
