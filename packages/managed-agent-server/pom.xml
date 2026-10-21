@@ -584,12 +584,14 @@
                                  measured 4.5 s): healthy 10083 s, fork 10683 s,
                                  Verify 189 minutes. The FG13a result store
                                  ack-loss cell adds 150 s: healthy 10233 s, fork
-                                 10833 s, Verify 191 minutes. The FG11e stream
+                                 10833 s, Verify 191 minutes. The FG13a dispatch
+                                 ack-loss cell adds 150 s: healthy 10383 s, fork
+                                 10983 s, Verify 194 minutes. The FG11e stream
                                  cells add 39 s (2x their measured 13.8 s and
-                                 5.2 s): healthy 10272 s, fork 10872 s, Verify
-                                 192 minutes (11472 s of fork plus wrap no
-                                 longer fit 191). -->
-                            <forkedProcessTimeoutInSeconds>10872</forkedProcessTimeoutInSeconds>
+                                 5.2 s): healthy 10422 s, fork 11022 s, and the
+                                 194-minute step still wraps (11622 s of fork
+                                 plus wrap, 18 s of margin). -->
+                            <forkedProcessTimeoutInSeconds>11022</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

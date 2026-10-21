@@ -147,8 +147,8 @@ case's 600 s ceiling: a page that answers its own cursor pages forever.
 
 The cells measure 12.4–13.8 s and 4.8–5.2 s on JDK 21 with MySQL 8.4.6 on
 Linux x86_64, and are booked at 39 s (2x the slower samples). The healthy sum
-becomes 10272 s and the fork 10872 s, so the Verify step moves to 192 minutes
-and the job ceiling to 295. A cut stream stays open server-side until its
+becomes 10422 s and the fork 11022 s, which the 194-minute Verify step still
+wraps with 18 s of margin. A cut stream stays open server-side until its
 next write fails; the stream cell sets a 2 s heartbeat so Spring's graceful
 shutdown does not wait out its 30 s window, as FG9e does.
 

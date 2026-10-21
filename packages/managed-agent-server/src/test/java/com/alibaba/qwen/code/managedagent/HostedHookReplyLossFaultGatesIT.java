@@ -660,6 +660,43 @@ class HostedHookReplyLossFaultGatesIT {
 
     @Test
     @Timeout(300)
+    void fg13aHookDispatchStoreAckLossLeavesTheDurableDispatchOnMySql()
+            throws Exception {
+        boot("60000", "1000", "hook-solo");
+        StoreFaultGate.INSTANCE.clear();
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_DISPATCH_STARTED, null);
+        JsonNode definition = api("POST", "/v1/agents", definition(),
+                "definition", 202);
+        String session = createSession(definition.path("id").asText(),
+                "initial");
+        submit(session, "FG13_ACK_DISPATCH");
+        waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts())
+                .isGreaterThanOrEqualTo(1));
+        // The store client retries the rejected commit, and the retry replays
+        // the committed command instead of re-running the record store. The
+        // fault therefore fires exactly once; a rollback would make the retry
+        // commit the dispatch again and fire it a second time. The Hook then
+        // proceeds from that durable dispatch and settles.
+        waitFor(() -> {
+            JsonNode execution = hookExecution(session);
+            assertThat(execution.at("/run/state").asText())
+                    .isEqualTo("settled");
+            assertThat(execution.path("resultRef").isNull()).isFalse();
+        });
+        assertThat(StoreFaultGate.INSTANCE.attempts())
+                .as("the replay must not re-commit the dispatch")
+                .isEqualTo(1);
+        assertThat(events("hook.call")).as("physical calls").hasSize(1);
+        assertThat(events("hook.allow")).as("allow decisions").hasSize(1);
+        assertThat(hookResult(session).path("outcome").asText())
+                .isEqualTo("success");
+        assertThat(modelFailure.get()).isNull();
+        StoreFaultGate.INSTANCE.clear();
+    }
+
+    @Test
+    @Timeout(300)
     void fg13bHookPlanResultStoreRejectionRebuildsTheMarkerOnMySql() throws Exception {
         boot("60000", "1000", "hook-solo");
         StoreFaultGate.INSTANCE.clear();
@@ -793,6 +830,7 @@ class HostedHookReplyLossFaultGatesIT {
                             "FG13_DENY_LOSS", "FG13_FAILCLOSED_LOSS",
                             "FG13_STORE_INTENT", "FG13_STORE_DISPATCH",
                             "FG13_STORE_SETTLE", "FG13_ACK_SETTLE",
+                            "FG13_ACK_DISPATCH",
                             "FG13_STORE_PLAN_SETTLE").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");

@@ -528,9 +528,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (192 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (194 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 282, 295],
+    ['hosted-harness-mysql', 284, 297],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -770,13 +770,15 @@ describe('Hosted real-process gates', () => {
       // to 10674; the FG11d settled-outcome cell adds 9 s (2x its measured
       // 4.5 s), moving the fork to 10683; the FG13a result store ack-loss
       // cell adds 150 s, moving the fork to 10833 and the step to 191
-      // minutes; the FG11e stream cells add 39 s (2x their measured 13.8 s
-      // and 5.2 s), moving the fork to 10872 and the step to 192 minutes):
+      // minutes; the FG13a dispatch ack-loss cell adds 150 s, moving the fork
+      // to 10983 and the step to 194 minutes; the FG11e stream cells add 39 s
+      // (2x their measured 13.8 s and 5.2 s), moving the fork to 11022 and the
+      // step stays 194 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10872);
+        expect(forkSeconds).toBe(11022);
       }
     },
   );
@@ -864,14 +866,15 @@ describe('Hosted real-process gates', () => {
   // becomes 10050s; the FG12d Spring-restart owner-release cell adds 24s (2x
   // its measured 11.9s), so it becomes 10074s; the settled-outcome cell adds
   // 9s (2x its measured 4.5s), so it becomes 10083s; the FG13a result store
-  // ack-loss cell adds 150s, so it becomes 10233s; the FG11e stream cells
-  // add 39s (2x their measured 13.8s and 5.2s), so it becomes 10272s. The
+  // ack-loss cell adds 150s, so it becomes 10233s; the FG13a dispatch
+  // ack-loss cell adds 150s, so it becomes 10383s; the FG11e stream cells
+  // add 39s (2x their measured 13.8s and 5.2s), so it becomes 10422s. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10272;
+  const hostedForkHealthySeconds = 10422;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
