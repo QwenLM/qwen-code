@@ -260,14 +260,16 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  it('keeps real MySQL separate from the existing MariaDB slice and fails on missing tests', () => {
+  it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
-    expect(java.jobs['mysql-integration'].services.mariadb.image).toMatch(
-      /^mariadb:/,
-    );
+    expect(
+      java.jobs['mysql-integration'].steps.find(
+        (step) => step.name === 'Start MySQL without native AIO',
+      ).run,
+    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
@@ -313,22 +315,47 @@ describe('Hosted real-process gates', () => {
     const selection = /it\.test|includesFile|excludesFile|<test>/;
     expect(read('.github/workflows/sdk-java.yml')).not.toMatch(selection);
     expect(pom).not.toMatch(selection);
-    const [mariadb, hosted] = pom.split('<id>hosted-harness-mysql</id>');
-    expect(mariadb).toContain('<id>mysql-integration</id>');
-    expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
+    const [nonHosted, hosted] = pom.split('<id>hosted-harness-mysql</id>');
+    expect(nonHosted).toContain('<id>mysql-integration</id>');
+    expect(nonHosted).toContain('<exclude>**/Hosted*IT.java</exclude>');
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
     expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
-    // The MariaDB job must not narrow its selection either, or an IT outside
+    const isolationProfile = hosted.split('</profile>')[0];
+    // Scope the parameter assertions to the failsafe plugin itself: a
+    // <properties> block hoisted above the plugin would keep the profile
+    // slice matching while never reaching the fork.
+    const failsafeStart = isolationProfile.indexOf(
+      '<artifactId>maven-failsafe-plugin</artifactId>',
+    );
+    expect(failsafeStart).toBeGreaterThan(-1);
+    const failsafeEnd = isolationProfile.indexOf('</plugin>', failsafeStart);
+    expect(failsafeEnd).toBeGreaterThan(failsafeStart);
+    const failsafeBlock = isolationProfile.slice(failsafeStart, failsafeEnd);
+    expect(failsafeBlock).toContain('<forkCount>1</forkCount>');
+    expect(failsafeBlock).toContain(
+      'junit.jupiter.extensions.autodetection.enabled = true',
+    );
+    expect(failsafeBlock).toContain(
+      'junit.jupiter.execution.parallel.enabled = false',
+    );
+    expect(failsafeBlock).toContain('qwen.hosted.mysql.isolation = true');
+    expect(pom.match(/qwen\.hosted\.mysql\.isolation = true/g)).toHaveLength(1);
+    expect(
+      read(
+        'packages/managed-agent-server/src/test/resources/META-INF/services/org.junit.jupiter.api.extension.Extension',
+      ).trim(),
+    ).toBe('com.alibaba.qwen.code.managedagent.HostedMySqlIsolationExtension');
+    // The non-Hosted MySQL job must not narrow its selection either, or an IT outside
     // the Hosted family would silently run nowhere.
-    const mariadbRun = java.jobs['mysql-integration'].steps.find(
+    const mysqlRun = java.jobs['mysql-integration'].steps.find(
       (step) =>
         step.name ===
-        'Run Managed Agent tests, Checkstyle, and MySQL integration',
+        'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
     );
-    expect(mariadbRun.run).toContain('-Pmysql-integration');
-    expect(mariadbRun.run).not.toContain('-Dit.test');
-    // The H2 unit suite runs once, in the MariaDB job: the Hosted job's three
-    // Maven steps would each repeat it, and the MariaDB job must keep it.
+    expect(mysqlRun.run).toContain('-Pmysql-integration');
+    expect(mysqlRun.run).not.toContain('-Dit.test');
+    // The H2 unit suite runs once, in the non-Hosted MySQL job: the Hosted job's three
+    // Maven steps would each repeat it, and the non-Hosted MySQL job must keep it.
     const profile = (id) =>
       pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
     const skipsUnits =
@@ -341,14 +368,19 @@ describe('Hosted real-process gates', () => {
       expect(profile(id), id).toMatch(skipsUnits);
     }
     expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
-    expect(mariadbRun.run).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
+    // The step stages the SDK with -DskipTests before the MySQL run; only
+    // the integration command itself must keep its tests.
+    const mysqlVerify = mysqlRun.run.slice(
+      mysqlRun.run.indexOf('-Pmysql-integration'),
+    );
+    expect(mysqlVerify).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
     // Those checks read only the command lines, so each job also compares
     // the reports of its run with the source tree, right after its last
     // integration-test step.
     for (const [name, after, check] of [
       [
         'mysql-integration',
-        mariadbRun.name,
+        mysqlRun.name,
         'non-hosted packages/managed-agent-server',
       ],
       [
@@ -366,7 +398,7 @@ describe('Hosted real-process gates', () => {
       expect(steps[index]['continue-on-error'], name).toBeUndefined();
     }
     // Keep the existing integration tests in their families: a renamed Hosted
-    // test would move to MariaDB, a renamed MariaDB test to the Hosted job.
+    // test would move to non-Hosted MySQL, a renamed non-Hosted test to the Hosted job.
     const its = readdirSync(
       new URL(
         '../../packages/managed-agent-server/src/test/java/',
@@ -428,6 +460,15 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/managed-agent-server/target/fg12-cases/',
     );
+    // FG13e's Hook stream-gap evidence lives in target/fg13-cases/.
+    expect(upload.with.path).toContain(
+      'packages/managed-agent-server/target/fg13-cases/',
+    );
+    // The writer side of the same path: the Java literal must stay under
+    // the directory the step uploads, or the artifact is silently empty.
+    expect(read(hostedTestPath('HostedHookStreamGapIT'))).toContain(
+      '"target/fg13-cases"',
+    );
     // The runner writes the Step 3 gate evidence under .qwen/, a hidden
     // path that upload-artifact drops silently without the flag. The arms
     // that write it run in the failover job, so the upload lives there.
@@ -474,10 +515,24 @@ describe('Hosted real-process gates', () => {
     expect(delegate.run).toContain('/sys/fs/cgroup/fg8/smoke/cgroup.procs');
   });
 
+  it('sweeps every Hook cgroup subtree a Hosted IT allocates', () => {
+    const owners = hostedTestClasses().filter(({ file }) =>
+      read(file).includes('QWEN_MANAGED_HOOK_CGROUP_ROOT'),
+    );
+    expect(owners.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(['HostedExtensionsIT', 'HostedHookStreamGapIT']),
+    );
+    for (const { name, file } of owners) {
+      const source = javaCode(read(file));
+      expect(source, name).toContain('Files.walk(');
+      expect(source, name).toContain('hookRoot');
+    }
+  });
+
   it.each([
-    // Step ceilings today (179 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (197 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 269, 282],
+    ['hosted-harness-mysql', 287, 300],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -694,15 +749,41 @@ describe('Hosted real-process gates', () => {
       // FG13b Hook dispatch store-rejection cell adds 150 s, so the fork
       // moves to 9411 and the Verify step to 167 minutes; the FG11f publication
       // cell adds 82 s (2x its measured 41.1 s), so the fork moves to 9493 and
-      // the step to 169 minutes; the FG11d cancel cell adds 15 s (2x its
-      // measured 7.4 s), so the fork moves to 10080 and the step to 179
-      // minutes; the FG11d retire-at-intent cell adds 18 s (2x its measured
-      // 8.6 s), so the fork moves to 10098 and the step stays 179 minutes):
+      // the step to 169 minutes; FG12f result and catalog delivery add 30 s,
+      // and the FG11f refusing arms add 242 s, moving the fork to 9765 and
+      // the step to 173 minutes. Hook result and plan-result store rejection
+      // add 300 s, moving the fork to 10065 and the step to 178 minutes.
+      // The FG11d cancel cell adds 15 s, moving the fork to 10080 and
+      // the step to 179 minutes. The FG12f delivery allowance adds 20 s,
+      // moving the fork to 10100. The FG11d retire-at-intent cell adds 18 s,
+      // moving the fork to 10118. Cleanup adds 60 s, moving the fork to
+      // 10178 and the step to 180 minutes. The FG13e Hook stream-gap cell
+      // adds 150 s, moving the fork to 10328 and the step to 183 minutes;
+      // the FG11d close-queued cell adds 134 s (2x its measured 67.2 s),
+      // moving the fork to 10462 and the step to 185 minutes. The FG11d
+      // close-in-flight refusal cell adds 9 s (2x its measured 4.5 s), so the
+      // fork moves to 10471 and the step stays 185 minutes; the FG13f
+      // MessageDisplay reload cell adds 150 s, moving the fork to 10621 and
+      // the step to 188 minutes; the FG12d cancel-before-dispatch cell adds
+      // 18 s (2x its measured 9.1 s), so the fork moves to 10639; the FG11d
+      // retry-reuse cell adds 11 s (2x its measured 5.3 s), moving the fork to
+      // 10650 and the step stays 188 minutes; the FG12d Spring-restart
+      // owner-release cell adds 24 s (2x its measured 11.9 s), moving the fork
+      // to 10674; the FG11d settled-outcome cell adds 9 s (2x its measured
+      // 4.5 s), moving the fork to 10683; the FG13a result store ack-loss
+      // cell adds 150 s, moving the fork to 10833 and the step to 191
+      // minutes; the FG13a dispatch ack-loss cell adds 150 s, moving the fork
+      // to 10983 and the step to 194 minutes; the FG13a registration-settle
+      // ack-loss cell adds 150 s, moving the fork to 11133 and the step to
+      // 196 minutes; the FG11e stream cells add 42 s (2x their measured
+      // 14.1 s and 6.1 s), moving the fork to 11175; the FG11d cancel-retry cell adds 12 s (2x its
+      // measured 5.8 s), moving the fork to 11187 and leaving the step at 197
+      // minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10118);
+        expect(forkSeconds).toBe(11187);
       }
     },
   );
@@ -779,13 +860,28 @@ describe('Hosted real-process gates', () => {
   // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s; the
   // FG12f delivery entry moves from 30s to 50s at 2x (four cases, 24.16s
   // measured), so it becomes 9500s; the FG11d retire-at-intent cell adds 18s
-  // (2x its measured 8.6s), so it becomes 9518s. The
+  // (2x its measured 8.6s), so it becomes 9518s.
+  // Class-boundary cleanup adds 60s for 9578s; the FG13e Hook stream-gap
+  // cell adds 150s, so it becomes 9728s; the FG11d close-queued cell adds
+  // 134s (2x its measured 67.2s), so it becomes 9862s; the close-in-flight
+  // refusal cell adds 9s (2x its measured 4.5s), so it becomes 9871s; the
+  // FG13f MessageDisplay reload cell adds 150s, so it becomes 10021s; the
+  // FG12d cancel-before-dispatch cell adds 18s (2x its measured 9.1s), so it
+  // becomes 10039s; the retry-reuse cell adds 11s (2x its measured 5.3s), so it
+  // becomes 10050s; the FG12d Spring-restart owner-release cell adds 24s (2x
+  // its measured 11.9s), so it becomes 10074s; the settled-outcome cell adds
+  // 9s (2x its measured 4.5s), so it becomes 10083s; the FG13a result store
+  // ack-loss cell adds 150s, so it becomes 10233s; the FG13a dispatch
+  // ack-loss cell adds 150s, so it becomes 10383s; the FG13a registration-settle
+  // ack-loss cell adds 150s, so it becomes 10533s; the FG11e stream cells
+  // add 42s (2x their measured 14.1s and 6.1s), so it becomes 10575s; the cancel-retry cell adds 12s (2x its measured
+  // 5.8s), so it becomes 10587s. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9518;
+  const hostedForkHealthySeconds = 10587;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -856,13 +952,16 @@ describe('Hosted real-process gates', () => {
       'HostedHarnessMySqlIT',
       'HostedHookCancelFaultGatesIT',
       'HostedHookFaultGatesIT',
+      'HostedHookMessageDisplayReloadIT',
       'HostedHookReplyLossFaultGatesIT',
+      'HostedHookStreamGapIT',
       'HostedMcpReplyLossIT',
       'HostedMcpRestartFaultGatesIT',
       'HostedMcpResultDeliveryIT',
       'HostedMcpStoreFaultGatesIT',
       'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',
+      'HostedMySqlIsolationIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',
       'HostedSessionRelayFaultGatesIT',

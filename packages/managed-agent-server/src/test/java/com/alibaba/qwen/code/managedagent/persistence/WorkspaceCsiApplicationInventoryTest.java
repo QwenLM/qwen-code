@@ -770,7 +770,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(32);
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(738);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(740);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -827,7 +827,10 @@ class WorkspaceCsiApplicationInventoryTest {
                 .isInstanceOfSatisfying(org.springframework.dao.DataAccessException.class, error ->
                         assertThat(error.getMostSpecificCause()).isInstanceOfSatisfying(java.sql.SQLException.class, sql -> {
                             assertThat(sql.getMessage()).containsIgnoringCase("ck_ma_session_plan");
-                            assertThat(sql.getSQLState() + ":" + sql.getErrorCode()).isIn("23513:23513", "HY000:3819");
+                            // MySQL 8 raises CHECK violations as 23513/3819;
+                            // MariaDB reports the same constraint as 23000/4025.
+                            assertThat(sql.getSQLState() + ":" + sql.getErrorCode())
+                                    .isIn("23513:23513", "HY000:3819", "23000:4025");
                         }));
         jdbc.update("UPDATE ma_session SET plan_enabled = TRUE, selected_approval_mode = 'default', approval_revision = 1");
         var enabled = inspect();
@@ -1462,6 +1465,26 @@ class WorkspaceCsiApplicationInventoryTest {
                     .isInstanceOf(IllegalArgumentException.class);
             target.rollback();
         }
+    }
+
+    @Test
+    void historicalReaderAcceptsForeignSessionSkillSnapshotsAndStillRefusesInvalidFlags() throws Exception {
+        var expected = historicalKeys();
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        transactions.executeWithoutResult(status ->
+                ToolPublicationRetentionStore.lockSession(jdbc, "foreign", "foreign-session"));
+        var catalog = new java.util.ArrayList<Map<String, Object>>();
+        for (int i = 0; i < 42; i++) {
+            catalog.add(Map.of("name", "imported-" + i, "description", "Imported Skill",
+                    "body", i == 0 ? "x".repeat(404465) : "Instruction", "model_invocable", false));
+        }
+        var resources = new ManagedSessionStore(jdbc);
+        resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", catalog);
+        assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).isEmpty();
+        resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", List.of(
+                Map.of("name", "invalid", "description", "Invalid flag", "body", "Instruction", "model_invocable", "false")));
+        assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).anyMatch(blocker ->
+                blocker.table().equals("ma_resource") && blocker.code().equals("invalid_historical_payload"));
     }
 
     @Test

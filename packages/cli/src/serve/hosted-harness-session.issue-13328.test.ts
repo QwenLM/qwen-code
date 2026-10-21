@@ -96,6 +96,7 @@ vi.mock(
         toolResultResources: resourceStore,
         assertWritable: state.assertWritable,
         authorizeOrdinary: async () => undefined,
+        approvalSelection: async () => ({ mode: 'yolo', revision: 0 }),
         publication: {
           owner: async () => ({ writerId: BOOT_ID, writerGeneration: 1 }),
           request: (route: string, body: unknown, token?: string) =>

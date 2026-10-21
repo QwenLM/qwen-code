@@ -17,6 +17,7 @@ import type {
 } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
+import { getSlashCommandCompletionResult } from '../../completions/slashCompletion';
 import type { ComponentProps } from 'react';
 import {
   ToolDetailsContext,
@@ -284,6 +285,7 @@ describe('ManagedSessionsPage', () => {
     managedAgentProvider: ManagedAgentProvider | null = provider,
     navigationTarget?: HTMLElement | null,
     interactive = true,
+    extraProps: Partial<ComponentProps<typeof ManagedSessionsPage>> = {},
   ) {
     await act(async () => {
       root.render(
@@ -295,12 +297,177 @@ describe('ManagedSessionsPage', () => {
             managedAgentProvider={managedAgentProvider ?? undefined}
             navigationTarget={navigationTarget}
             interactive={interactive}
+            {...extraProps}
           />
         </I18nProvider>,
       );
       await flush();
     });
   }
+
+  it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
+    let resolve!: (value: { displayName: string }) => void;
+    const renameSession = vi.fn().mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    provider = { ...provider, renameSession };
+    const canRename = (title: string) =>
+      summary('s1', {
+        title,
+        capabilities: { canSend: true, canCancel: false, canRename: true },
+      });
+    mocks.client.getSession.mockResolvedValue(canRename('Original'));
+    let oldList!: (value: { sessions: ManagedAgentSessionSummary[] }) => void;
+    mocks.client.listSessions
+      .mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            oldList = done;
+          }),
+      )
+      .mockResolvedValue({ sessions: [canRename('Stored name')] });
+    await render('s1');
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Rename')!
+        .click();
+    });
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename"]',
+    )!;
+    expect(input.value).toBe('Original');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '  Requested name  ');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await flush();
+    });
+    expect(renameSession).toHaveBeenCalledWith(
+      's1',
+      'Requested name',
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(container.textContent).toContain('Original');
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    mocks.client.getSession.mockResolvedValue(canRename('Stored name'));
+    await act(async () => {
+      resolve({ displayName: 'Stored name' });
+      await flush();
+    });
+    await act(async () => {
+      oldList({ sessions: [canRename('Original')] });
+      await flush();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('nav')?.textContent).toContain(
+      'Stored name',
+    );
+    expect(container.textContent).not.toContain('Original');
+    expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('searches the confirmed session title while the catalog still has its previous title', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { title: 'Confirmed name' }),
+    );
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1', { title: 'Previous name' })],
+    });
+    await render('s1', 'en', provider, undefined, true, {
+      navigationSearch: 'Confirmed name',
+    });
+    expect(container.querySelector('nav')?.textContent).toContain(
+      'Confirmed name',
+    );
+  });
+
+  it('does not expose rename when permission or interactivity is missing', async () => {
+    provider = { ...provider, renameSession: vi.fn() };
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Rename',
+      ),
+    ).toBe(false);
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, canRename: true },
+      }),
+    );
+    await render('s1', 'en', provider, null, false);
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Rename',
+      ),
+    ).toBe(false);
+  });
+
+  it('opens shared workspace creation above an existing conversation and keeps its session when canceled', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      list: vi.fn().mockResolvedValue({
+        data: [],
+        supported: true,
+        canCreateWorkspace: true,
+      }),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createWorkspace: vi.fn(),
+    };
+    const onWorkspaceCreationOpenChange = vi.fn();
+    const extra = {
+      workspaceCreationOpen: true,
+      onWorkspaceCreationOpenChange,
+      onOpenLocalWorkspace: vi.fn(),
+    };
+    await render('s1', 'en', provider, undefined, false, extra);
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(container.textContent).toContain('Persisted answer');
+    const close = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((item) => item.textContent === 'Close');
+    expect(close).toBeDefined();
+    await act(async () => close!.click());
+    expect(onWorkspaceCreationOpenChange).toHaveBeenCalledWith(false);
+    await render('s1', 'en', provider, undefined, false, {
+      ...extra,
+      workspaceCreationOpen: false,
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.textContent).toContain('Persisted answer');
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(provider.workspaceBinding.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('reports a resolved legacy session as unbound without clearing a workspace draft', async () => {
+    const reportWorkspace = vi.fn();
+    await render(undefined, 'en', provider, undefined, true, {
+      onSessionWorkspaceChange: reportWorkspace,
+      workspaceId: 'draft-workspace',
+    });
+    expect(reportWorkspace).not.toHaveBeenCalled();
+    await render('legacy', 'en', provider, undefined, true, {
+      onSessionWorkspaceChange: reportWorkspace,
+    });
+    expect(reportWorkspace).toHaveBeenLastCalledWith(null);
+    reportWorkspace.mockClear();
+    mocks.client.getSession.mockRejectedValue(new Error('unavailable'));
+    await render('different', 'en', provider, undefined, true, {
+      onSessionWorkspaceChange: reportWorkspace,
+    });
+    expect(reportWorkspace).not.toHaveBeenCalled();
+  });
 
   it('binds tool detail reads to the selected Session and distinguishes recorded empty output from missing output', async () => {
     const get = vi.fn().mockResolvedValue({
@@ -385,9 +552,65 @@ describe('ManagedSessionsPage', () => {
     );
     expect(mocks.editorProps?.skills).toEqual(skills);
     expect(mocks.editorProps?.skillsLoaded).toBe(true);
+    const completion = getSlashCommandCompletionResult(
+      '/rev',
+      4,
+      mocks.editorProps?.commands ?? [],
+    );
+    expect(completion?.items).toMatchObject([
+      { label: '/review', apply: '/review ' },
+    ]);
+    expect(completion?.items[0]?.autoSubmit).not.toBe(true);
   });
 
-  it('keeps Workspace file references available alongside the pinned Skill catalog', async () => {
+  it('connects MCP independently of file attachments without enabling daemon features', async () => {
+    const list = vi.fn().mockResolvedValue({
+      object: 'agent.mcp_catalog',
+      session_id: 's1',
+      servers: [],
+    });
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    await expect(
+      mocks.editorProps!.fileReferenceActions!.loadMcpStatus!(),
+    ).resolves.toEqual({ servers: [] });
+    expect(list).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+  });
+
+  it('invalidates the composer MCP cache scope when the selected Session changes without file actions', async () => {
+    const list = vi.fn(async (sessionId: string) => ({
+      object: 'agent.mcp_catalog' as const,
+      session_id: sessionId,
+      servers: [],
+    }));
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    const first = mocks.editorProps!.fileReferenceActions!;
+    expect(first.scopeKey).toBeTruthy();
+    await first.loadMcpStatus!();
+
+    await render('s1');
+    expect(mocks.editorProps!.fileReferenceActions!.scopeKey).toBe(
+      first.scopeKey,
+    );
+
+    await render('s2');
+    const second = mocks.editorProps!.fileReferenceActions!;
+    expect(second.scopeKey).not.toBe(first.scopeKey);
+    await second.loadMcpStatus!();
+    expect(list.mock.calls.map(([sessionId]) => sessionId)).toEqual([
+      's1',
+      's2',
+    ]);
+  });
+
+  it('keeps Workspace file references available alongside MCP and the pinned Skill catalog', async () => {
     const skills = [{ name: 'review', description: 'Pinned review.' }];
     const list = vi.fn().mockResolvedValue({ skills });
     const query = vi.fn().mockResolvedValue({
@@ -399,6 +622,9 @@ describe('ManagedSessionsPage', () => {
     provider = {
       ...provider,
       skills: { list },
+      mcp: {
+        list: vi.fn().mockResolvedValue({ session_id: 's1', servers: [] }),
+      },
       workspaceFiles: { query, read: vi.fn() },
     };
     mocks.client.getSession.mockResolvedValue(
@@ -414,6 +640,9 @@ describe('ManagedSessionsPage', () => {
     );
     await render('s1');
     expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(
+      mocks.editorProps?.fileReferenceActions?.loadMcpStatus,
+    ).toBeDefined();
     expect(mocks.editorProps?.persistFileReferences).toBe(true);
     expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
     expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
@@ -623,6 +852,62 @@ describe('ManagedSessionsPage', () => {
       expect(mocks.commitAccepted).not.toHaveBeenCalled();
     },
   );
+
+  it('changes approval during a live Turn without enabling Plan or changing the draft', async () => {
+    let session = switchableSession({
+      approvalMode: 'default',
+      approvalRevision: 0,
+      phase: 'agent_running',
+      planModeSupported: true,
+      capabilities: {
+        canSend: true,
+        canCancel: true,
+        workspaceTurns: true,
+        approvalModeChange: true,
+      },
+    });
+    mocks.client.getSession.mockImplementation(async () => session);
+    provider.approvalChange = {
+      queryOptions: vi.fn(async () => ({
+        supported: true,
+        liveSupported: true,
+        approvalMode: session.approvalMode!,
+        approvalRevision: session.approvalRevision!,
+        availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        planModeSupported: true,
+      })),
+      submit: vi.fn(async () => {
+        session = { ...session, approvalMode: 'yolo', approvalRevision: 1 };
+        return {
+          sessionId: 's1',
+          approvalMode: 'yolo',
+          approvalRevision: 1,
+          replayed: false,
+        };
+      }),
+    };
+    await render('s1');
+    await input('Keep my next message');
+    expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
+    expect(mocks.editorProps?.planControlsDisabled).toBe(true);
+    await act(async () => {
+      mocks.editorProps!.onTogglePlan!();
+    });
+    expect(provider.approvalChange.submit).not.toHaveBeenCalled();
+    await act(async () => {
+      mocks.editorProps!.onSelectMode!('yolo');
+      await flush();
+    });
+    expect(provider.approvalChange.submit).toHaveBeenCalledOnce();
+    expect(mocks.editorProps?.currentMode).toBe('yolo');
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Keep my next message',
+    );
+    expect(container.textContent).toContain(
+      'subsequent tool calls in this turn',
+    );
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
 
   it.each(['agent_running', 'cancelling'] as const)(
     'refuses approval callbacks during a %s Turn',
@@ -1000,6 +1285,286 @@ describe('ManagedSessionsPage', () => {
       slot.remove();
     }
   });
+
+  it('shows shared workspace history while Local is active and keeps workspace and session pagination separate', async () => {
+    const first = summary('s1', {
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    const second = summary('s2', {
+      workspace: { workspaceId: 'ws-b', cwdRelative: '.' },
+    });
+    mocks.client.getSession.mockResolvedValue(first);
+    mocks.client.listSessions
+      .mockResolvedValueOnce({ sessions: [first], nextCursor: 'sessions-next' })
+      .mockResolvedValueOnce({ sessions: [second] });
+    const listWorkspaces = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: [
+          {
+            workspaceId: 'ws-a',
+            displayName: 'Project A',
+            state: 'active',
+            canCreateSession: true,
+          },
+        ],
+        nextCursor: 'workspaces-next',
+        supported: true,
+      })
+      .mockResolvedValue({
+        data: [
+          {
+            workspaceId: 'ws-b',
+            displayName: 'Project B',
+            state: 'active',
+            canCreateSession: true,
+          },
+        ],
+        supported: true,
+      });
+    provider.workspaceBinding = {
+      agentId: 'agent',
+      list: listWorkspaces,
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+    };
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    const selectWorkspace = vi.fn();
+    const reportWorkspace = vi.fn();
+    const openSession = vi.fn();
+    try {
+      await render('s1', 'en', provider, slot, false, {
+        navigationActive: false,
+        onSelectWorkspace: selectWorkspace,
+        onSessionWorkspaceChange: reportWorkspace,
+        onOpenSession: openSession,
+      });
+      expect(slot.querySelector('[aria-current]')).toBeNull();
+      expect(reportWorkspace).toHaveBeenCalledWith('ws-a');
+      expect(mocks.client.listSessions).toHaveBeenCalledOnce();
+      await act(async () =>
+        slot
+          .querySelector<HTMLButtonElement>(
+            '[aria-label="Load more Workspace"]',
+          )!
+          .click(),
+      );
+      expect(listWorkspaces).toHaveBeenLastCalledWith(
+        expect.objectContaining({ cursor: 'workspaces-next' }),
+      );
+      expect(mocks.client.listSessions).toHaveBeenCalledOnce();
+      await act(async () =>
+        slot
+          .querySelector<HTMLButtonElement>(
+            '[aria-label="New task: Project B"]',
+          )!
+          .click(),
+      );
+      expect(selectWorkspace).toHaveBeenCalledWith('ws-b');
+      await act(async () =>
+        slot
+          .querySelector<HTMLButtonElement>(
+            '[aria-label="Load more Managed sessions"]',
+          )!
+          .click(),
+      );
+      expect(mocks.client.listSessions).toHaveBeenLastCalledWith(
+        expect.objectContaining({ cursor: 'sessions-next' }),
+      );
+      await act(async () =>
+        [...slot.querySelectorAll('button')]
+          .find((item) => item.textContent === 'Task s2')!
+          .click(),
+      );
+      expect(openSession).toHaveBeenCalledWith('s2', 'ws-b');
+      expect(onSelect).not.toHaveBeenCalled();
+      await render('s1', 'en', provider, slot, false, {
+        navigationActive: false,
+        navigationSearch: 's2',
+      });
+      expect(slot.querySelector('[data-managed-workspace="ws-a"]')).toBeNull();
+      expect(
+        slot.querySelector('[data-managed-workspace="ws-b"]')?.textContent,
+      ).toContain('Task s2');
+      expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+    } finally {
+      slot.remove();
+    }
+  });
+
+  it.each([false, true])(
+    'keeps hidden flat navigation separate from results with a dedicated open callback (%s)',
+    async (dedicatedOpen) => {
+      const slot = document.createElement('aside');
+      document.body.appendChild(slot);
+      const openSession = vi.fn();
+      try {
+        await render('s1', 'en', provider, slot, false, {
+          navigationActive: false,
+          onOpenSession: dedicatedOpen ? openSession : undefined,
+        });
+        expect(slot.querySelector('[aria-current]')).toBeNull();
+        await act(async () =>
+          [...slot.querySelectorAll('button')]
+            .find((item) => item.textContent?.includes('Task s1'))!
+            .click(),
+        );
+        expect(
+          dedicatedOpen ? openSession : onSelect,
+        ).toHaveBeenCalledExactlyOnceWith('s1');
+        expect(dedicatedOpen ? onSelect : openSession).not.toHaveBeenCalled();
+        expect(mocks.client.listSessions).toHaveBeenCalledOnce();
+      } finally {
+        slot.remove();
+      }
+    },
+  );
+
+  it('refreshes shared workspace navigation after an empty workspace is created without creating a session', async () => {
+    const original = {
+      workspaceId: 'ws-a',
+      displayName: 'Project A',
+      state: 'active',
+      canCreateSession: true,
+    };
+    const created = {
+      ...original,
+      workspaceId: 'ws-new',
+      displayName: 'New project',
+    };
+    const workspaces = [original];
+    const listWorkspaces = vi.fn(async () => ({
+      data: [...workspaces],
+      defaultWorkspace: original,
+      supported: true,
+      canCreateWorkspace: true,
+    }));
+    const createWorkspace = vi.fn(async () => {
+      workspaces.push(created);
+      return created;
+    });
+    provider.workspaceBinding = {
+      agentId: 'agent',
+      list: listWorkspaces,
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createWorkspace,
+    };
+    mocks.client.listSessions.mockResolvedValue({ sessions: [] });
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    const selectWorkspace = vi.fn();
+    const reportWorkspace = vi.fn();
+    const openSession = vi.fn();
+    try {
+      await render(undefined, 'en', provider, slot, true, {
+        onSelectWorkspace: selectWorkspace,
+        onSessionWorkspaceChange: reportWorkspace,
+        onOpenSession: openSession,
+      });
+      expect(
+        slot.querySelector('[data-managed-workspace="ws-new"]'),
+      ).toBeNull();
+      await act(async () =>
+        [...container.querySelectorAll('button')]
+          .find((item) => item.textContent === 'New workspace')!
+          .click(),
+      );
+      await act(async () => {
+        const input = document.querySelector<HTMLInputElement>(
+          '#managed-new-workspace-name',
+        )!;
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, 'New project');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () =>
+        [...document.querySelectorAll('button')]
+          .find((item) => item.textContent === 'Create workspace')!
+          .click(),
+      );
+      expect(createWorkspace).toHaveBeenCalledOnce();
+      expect(
+        slot.querySelector('[data-managed-workspace="ws-new"]')?.textContent,
+      ).toContain('New project');
+      expect(provider.workspaceBinding.createEmpty).not.toHaveBeenCalled();
+      expect(mocks.client.createSession).not.toHaveBeenCalled();
+      expect(mocks.client.listSessions).toHaveBeenCalledOnce();
+      expect(reportWorkspace).toHaveBeenCalledWith('ws-new');
+      expect(selectWorkspace).not.toHaveBeenCalled();
+      expect(openSession).not.toHaveBeenCalled();
+      expect(onSelect).not.toHaveBeenCalled();
+    } finally {
+      slot.remove();
+    }
+  });
+
+  it.each(['create', 'submit', 'workspace-create'] as const)(
+    'records a background %s result without issuing a user navigation callback',
+    async (operation) => {
+      let complete!: (result: { sessionId: string; turnId: string }) => void;
+      const accepted = new Promise<{ sessionId: string; turnId: string }>(
+        (resolve) => {
+          complete = resolve;
+        },
+      );
+      const initialSession = operation === 'submit' ? 's1' : undefined;
+      const createdSession = initialSession ?? 'created';
+      const openSession = vi.fn();
+      if (operation === 'workspace-create') {
+        const workspace = {
+          workspaceId: 'ws-a',
+          displayName: 'A',
+          state: 'active',
+          canCreateSession: true,
+        };
+        provider.workspaceBinding = {
+          agentId: 'agent',
+          list: vi.fn().mockResolvedValue({
+            data: [workspace],
+            defaultWorkspace: workspace,
+            supported: true,
+          }),
+          get: vi.fn().mockResolvedValue(workspace),
+          createEmpty: vi.fn(),
+          createSession: vi.fn().mockReturnValue(accepted),
+        };
+        mocks.client.getSession.mockImplementation(async (id: string) =>
+          summary(id, {
+            agentId: 'agent',
+            workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+          }),
+        );
+      } else {
+        (operation === 'submit'
+          ? mocks.client.submitPrompt
+          : mocks.client.createSession
+        ).mockReturnValueOnce(accepted);
+      }
+      await render(initialSession, 'en', provider, undefined, true, {
+        onOpenSession: openSession,
+      });
+      await input('Complete in the background');
+      await click('Send');
+      await render(initialSession, 'en', provider, undefined, false, {
+        onOpenSession: openSession,
+      });
+      await act(async () => {
+        complete({ sessionId: createdSession, turnId: 'next-turn' });
+        await flush();
+      });
+      if (operation === 'workspace-create')
+        expect(onSelect).toHaveBeenCalledExactlyOnceWith(
+          createdSession,
+          'ws-a',
+        );
+      else expect(onSelect).toHaveBeenCalledExactlyOnceWith(createdSession);
+      expect(openSession).not.toHaveBeenCalled();
+    },
+  );
 
   it('uses the standard composer stop action with Managed cancel authority', async () => {
     mocks.client.getSession.mockImplementation(async () =>
@@ -2060,6 +2625,50 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('[data-managed-progress]')).toBeNull();
     expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain('Preparing environment');
+  });
+
+  it('compacts the bound Workspace row into one line in the home layout', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      }),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      await render('bound', 'en', provider, target);
+      const binding = container.querySelector(
+        '[data-managed-workspace-binding]',
+      );
+      expect(binding?.querySelector('summary')?.getAttribute('title')).toBe(
+        'ws-a',
+      );
+      expect(binding?.textContent).toContain('ws-a');
+      expect(binding?.textContent).toContain('services/api');
+      // The compact row repeats neither label: a regression that restores the
+      // standalone lines inside the details row is what this pins.
+      expect(binding?.textContent).not.toContain('Bound Workspace');
+      expect(binding?.textContent).not.toContain('Relative directory');
+    } finally {
+      target.remove();
+    }
+  });
+
+  it('keeps the labeled Workspace lines in the standalone layout', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      }),
+    );
+    await render('bound');
+    const binding = container.querySelector('[data-managed-workspace-binding]');
+    expect(binding?.textContent).toContain('Bound Workspace');
+    expect(binding?.textContent).toContain('Relative directory');
+    expect(binding?.textContent).toContain('ws-a');
+    expect(binding?.textContent).toContain('services/api');
+    // The compact summary belongs to the home layout only: rendering it here
+    // would repeat the row above the two labeled lines, inside a plain div.
+    expect(binding?.querySelector('summary')).toBeNull();
   });
 
   it('lets the creator send a later Turn to a bound Session', async () => {

@@ -57,6 +57,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -118,6 +119,63 @@ class HostedPublicWorkspaceIT {
         // approval answered by the non-owner OPERATOR — pin the handoff,
         // or the responder ternary can collapse to the owner unnoticed.
         assertThat(operatorAnswered).hasSize(2);
+    }
+
+    @Test
+    @Timeout(240)
+    void liveApprovalChangesReleaseOnlyThePermittedPendingToolsOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        shell = true;
+        approvals = true;
+        definitionApproval = true;
+        Path root = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        String session = request("POST", "/api/agent/web-shell/v1/sessions/create",
+                Map.of("agentId", "qwen-code", "idempotencyKey", "live-session", "input", List.of(),
+                        "approvalMode", "default",
+                        "workspace", Map.of("workspaceId", "workspace-0", "cwdRelative", "child")),
+                "live-session", "actor", 202).path("sessionId").asText();
+        assertThat(request("POST", "/api/agent/web-shell/v1/session-approval/query",
+                Map.of("sessionId", session), null, "actor", 200).path("liveSupported").asBoolean()).isTrue();
+        String marker = "G0_DEFINITION_APPROVAL_LIVE";
+        String turn = request("POST", "/api/agent/web-shell/v1/turns/submit",
+                Map.of("sessionId", session, "idempotencyKey", marker,
+                        "input", List.of(Map.of("type", "input_text", "text", marker))),
+                marker, "actor", 202).path("turnId").asText();
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            JsonNode actions = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", session), null, "actor", 200).path("data");
+            assertThat(actions.size()).isEqualTo(1);
+            assertThat(actions.get(0).path("toolName").asText()).isEqualTo("write_file");
+        });
+        assertThat(root.resolve(marker + ".write")).doesNotExist();
+        request("POST", "/api/agent/web-shell/v1/session-approval/change",
+                Map.of("sessionId", session, "idempotencyKey", "live-auto-edit",
+                        "approvalMode", "auto-edit", "expectedRevision", 0), null, "actor", 200);
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            JsonNode actions = request("POST", "/api/agent/web-shell/v1/actions/query",
+                    Map.of("sessionId", session), null, "actor", 200).path("data");
+            assertThat(actions.size()).isEqualTo(1);
+            assertThat(actions.get(0).path("toolName").asText()).isEqualTo("run_shell_command");
+        });
+        assertThat(Files.readString(root.resolve(marker + ".write"))).isEqualTo("BYTES_" + marker + "\n");
+        assertThat(root.resolve(marker + ".shell")).doesNotExist();
+        request("POST", "/api/agent/web-shell/v1/session-approval/change",
+                Map.of("sessionId", session, "idempotencyKey", "live-yolo",
+                        "approvalMode", "yolo", "expectedRevision", 1), null, "actor", 200);
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT status FROM ma_turn WHERE tenant_id=? AND session_id=? AND turn_id=?",
+                String.class, tenant, session, turn)).isEqualTo("COMPLETED"));
+        assertThat(Files.readString(root.resolve(marker + ".shell"))).isEqualTo("once\n");
+        assertThat(jdbc.queryForMap("SELECT approval_mode, approval_revision FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", tenant, session, turn))
+                .containsEntry("approval_mode", "default").containsEntry("approval_revision", 0L);
+        assertThat(jdbc.queryForList("SELECT state FROM ma_session_record WHERE tenant_id=? AND session_id=?"
+                + " AND record_kind='ACTION'", String.class, tenant, session)).containsExactly("decided", "decided");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id=?"
+                + " AND execution_state='SETTLED'", Integer.class, session)).isEqualTo(2);
+        assertThat(modelRequests).hasSize(3);
+        assertThat(modelFailure.get()).isNull();
     }
 
     @Test
@@ -552,8 +610,8 @@ class HostedPublicWorkspaceIT {
                     String.class, binding)).isEqualTo("RELEASED");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ?"
-                    + " AND holder_key IS NOT NULL", Integer.class, binding)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
+                    + " AND execution_storage_key IS NOT NULL", Integer.class, binding)).isZero();
             assertThat(jdbc.queryForList("SELECT resource_id, sha256 FROM ma_resource WHERE tenant_id = ?"
                     + " AND session_id = ? ORDER BY resource_id", tenant, session)).containsAll(retained);
             assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString())
@@ -1705,7 +1763,7 @@ class HostedPublicWorkspaceIT {
                     String producer = "const fs = require('fs'); fs.appendFileSync('proof.txt', 'x');"
                             + " process.stdout.write(Buffer.alloc(1024 * 1024, 0x61), () => {"
                             + " process.stdout.write('stdout-tail\\n'); process.stderr.write('stderr-tail\\n'); });";
-                    args = Map.of("command", shellQuote(node) + " -e " + shellQuote(producer), "timeout", 60000);
+                    args = Map.of("command", quote(node) + " -e " + quote(producer), "timeout", 60000);
                 }
                 delta.putArray("tool_calls").addObject().put("index", 0).put("id", "g0-tool-" + step)
                         .put("type", "function").putObject("function").put("name", name)
@@ -1780,10 +1838,6 @@ class HostedPublicWorkspaceIT {
                 receiptResponses.incrementAndGet();
             }
         }
-    }
-
-    private static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
     private HttpResponse<String> rawRequest(String method, String path, Object body, String key, String actor)

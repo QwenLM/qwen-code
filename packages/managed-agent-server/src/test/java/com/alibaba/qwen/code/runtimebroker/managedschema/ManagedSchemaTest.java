@@ -35,7 +35,7 @@ class ManagedSchemaTest {
                     + "'prompt','[]','digest','COMPLETED',1,1)");
         }
         ManagedSchema.initialize(source);
-        assertEquals(13, ManagedSchema.schemaVersion(source));
+        assertEquals(15, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_session")) {
                 assertTrue(row.next());
@@ -63,7 +63,7 @@ class ManagedSchemaTest {
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(13, ManagedSchema.schemaVersion(source));
+        assertEquals(15, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
@@ -87,7 +87,7 @@ class ManagedSchemaTest {
                         () -> receipt(connection, "unsupported", "WORKSPACE_CREATE"));
             }
             ManagedSchema.initialize(source);
-            assertEquals(13, ManagedSchema.schemaVersion(source));
+            assertEquals(15, ManagedSchema.schemaVersion(source));
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
                 receipt(connection, "new", "WORKSPACE_CREATE");

@@ -251,6 +251,11 @@ const state = vi.hoisted(() => ({
   setLifecycleAuthority: vi.fn(),
   authorizeLifecycle: vi.fn(async () => undefined),
   authorizeOrdinary: vi.fn(async (_kind?: 'legacy-close') => undefined),
+  approvalSelections: new Map<
+    string,
+    { mode: 'default' | 'auto-edit' | 'yolo'; revision: number }
+  >(),
+  approvalQueries: [] as string[],
   model: vi.fn(
     async (_input: {
       signal: AbortSignal;
@@ -322,6 +327,32 @@ vi.mock(
         runtimeBaseDir: state.root,
         sessionKey: options.sessionKey,
       });
+      resourceStore.publish = async (...args) => {
+        const published =
+          await LocalManagedSessionResourceStore.prototype.publish.apply(
+            resourceStore,
+            args,
+          );
+        const [kind, bytes] = args;
+        if (kind === 'managed-definition' || kind === 'managed-admission') {
+          const value = JSON.parse(bytes.toString()) as Record<string, unknown>;
+          const selection =
+            kind === 'managed-definition'
+              ? { mode: value['approvalMode'] ?? 'yolo', revision: 0 }
+              : (value['approvalSelection'] as
+                  | { mode: 'default' | 'auto-edit' | 'yolo'; revision: number }
+                  | undefined);
+          if (selection)
+            state.approvalSelections.set(
+              options.sessionKey.sessionId,
+              selection as {
+                mode: 'default' | 'auto-edit' | 'yolo';
+                revision: number;
+              },
+            );
+        }
+        return published;
+      };
       return {
         journalStore: new LocalJsonlManagedSessionJournalStore({
           runtimeBaseDir: state.root,
@@ -337,6 +368,10 @@ vi.mock(
         setLifecycleAuthority: state.setLifecycleAuthority,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
+        approvalSelection: async () => {
+          state.approvalQueries.push(options.sessionKey.sessionId);
+          return state.approvalSelections.get(options.sessionKey.sessionId);
+        },
         publication: {
           owner: async () => ({ writerId: BOOT_ID, writerGeneration: 1 }),
           request: (route: string, body: unknown, token?: string) =>
@@ -448,6 +483,8 @@ const listeners = new Set<Server>();
 
 beforeEach(() => {
   wakeDeps.runTurnGate = undefined;
+  state.approvalSelections.clear();
+  state.approvalQueries.length = 0;
   vi.spyOn(
     HostedWorkspaceBroker.prototype,
     'capabilityDigest',
@@ -3216,6 +3253,7 @@ describe('Hosted Harness no-tool session', () => {
     captureBytes?: number,
     cancel = false,
   ): Promise<string> {
+    state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -7012,14 +7050,17 @@ describe('Hosted Harness no-tool session', () => {
             payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
           })
           .expect(202);
-        await vi.waitFor(async () => {
-          const blocked = await status();
-          expect(blocked.body.hasActivePrompt).toBe(false);
-          expect(blocked.body.recoveryBlocked).toBe(true);
-          expect(blocked.body.recoveryReason).toBe(
-            'managed_session_store_unavailable',
-          );
-        });
+        await vi.waitFor(
+          async () => {
+            const blocked = await status();
+            expect(blocked.body.hasActivePrompt).toBe(false);
+            expect(blocked.body.recoveryBlocked).toBe(true);
+            expect(blocked.body.recoveryReason).toBe(
+              'managed_session_store_unavailable',
+            );
+          },
+          { timeout: SETTLE_TIMEOUT_MS },
+        );
         expect(settlementAttempts).toBe(1);
         storeUnavailable = false;
         const appended = append.mock.calls.length;
@@ -7037,14 +7078,17 @@ describe('Hosted Harness no-tool session', () => {
           .send({ managedSessionStore: store(), driveRuntimeRecovery: true });
         expect(redriven.status).toBe(409);
         expect(redriven.body.code).toBe('hosted_turn_recovery_required');
-        await vi.waitFor(async () => {
-          const blocked = await status();
-          expect(blocked.body.hasActivePrompt).toBe(false);
-          expect(blocked.body.recoveryBlocked).toBe(true);
-          expect(blocked.body.recoveryReason).toBe(
-            'managed_session_store_unavailable',
-          );
-        });
+        await vi.waitFor(
+          async () => {
+            const blocked = await status();
+            expect(blocked.body.hasActivePrompt).toBe(false);
+            expect(blocked.body.recoveryBlocked).toBe(true);
+            expect(blocked.body.recoveryReason).toBe(
+              'managed_session_store_unavailable',
+            );
+          },
+          { timeout: SETTLE_TIMEOUT_MS },
+        );
         expect(state.model).toHaveBeenCalledOnce();
         expect(append).toHaveBeenCalledTimes(appended);
         if (preparationFailure) {
@@ -17367,15 +17411,18 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: true,
-      });
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     const before = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
       { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
@@ -17515,65 +17562,77 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).post(`/session/${SESSION_ID}/cancel`),
     )
       .set('X-Qwen-Client-Id', created.body.clientId)
+      .timeout(SETTLE_TIMEOUT_MS)
       .then((response) => response);
-    await vi.waitFor(() => expect(cancelCommitted).toBe(true));
-    finishModel();
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: false,
-      });
-    });
-    let nextSignal: AbortSignal | undefined;
+    // A preceding assertion can fail before the request is awaited below.
+    void cancelResponse.catch(() => {});
     let finishNextModel!: () => void;
-    const nextModelGate = new Promise<void>((resolve) => {
-      finishNextModel = resolve;
-    });
-    state.model.mockImplementationOnce(async ({ signal }) => {
-      nextSignal = signal;
-      await nextModelGate;
-      return { text: 'next answer completed', model: 'test-model' };
-    });
-    const nextPrompt = [{ type: 'text', text: 'complete the next answer' }];
-    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-      .set('X-Qwen-Client-Id', created.body.clientId)
-      .send({
-        prompt: nextPrompt,
-        promptId: randomUUID(),
-        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
-      })
-      .expect(202);
-    await vi.waitFor(() => expect(nextSignal).toBeDefined());
-    releaseCancelAck();
-    const cancelled = await cancelResponse;
-    expect(cancelled.status).toBe(204);
-    expect(nextSignal!.aborted).toBe(false);
-    finishNextModel();
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: false,
+    try {
+      await vi.waitFor(() => expect(cancelCommitted).toBe(true), {
+        timeout: SETTLE_TIMEOUT_MS,
       });
-    });
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
-    expect(
-      journal.events.filter((event) => event.kind === 'cancel.requested'),
-    ).toHaveLength(1);
-    expect(
-      journal.events.filter((event) => event.kind === 'turn.settled'),
-    ).toHaveLength(2);
-    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
-      .set('X-Qwen-Client-Id', created.body.clientId)
-      .expect(204);
+      finishModel();
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      let nextSignal: AbortSignal | undefined;
+      const nextModelGate = new Promise<void>((resolve) => {
+        finishNextModel = resolve;
+      });
+      state.model.mockImplementationOnce(async ({ signal }) => {
+        nextSignal = signal;
+        await nextModelGate;
+        return { text: 'next answer completed', model: 'test-model' };
+      });
+      const nextPrompt = [{ type: 'text', text: 'complete the next answer' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .send({
+          prompt: nextPrompt,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(() => expect(nextSignal).toBeDefined());
+      releaseCancelAck();
+      const cancelled = await cancelResponse;
+      expect(cancelled.status).toBe(204);
+      expect(nextSignal!.aborted).toBe(false);
+      finishNextModel();
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(
+        journal.events.filter((event) => event.kind === 'cancel.requested'),
+      ).toHaveLength(1);
+      expect(
+        journal.events.filter((event) => event.kind === 'turn.settled'),
+      ).toHaveLength(2);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .expect(204);
+    } finally {
+      finishModel();
+      releaseCancelAck();
+      finishNextModel?.();
+      await cancelResponse.catch(() => {});
+    }
   });
 
   it.each(['expired', 'cancelled'])(
@@ -21193,6 +21252,229 @@ describe('Hosted Harness tool approvals', () => {
 
   const files = 'hosted-workspace-files/1';
 
+  it.each(['write_file', 'exit_plan_mode'] as const)(
+    'rechecks live approval after a cold restore while preserving %s approval semantics',
+    async (toolName) => {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'original-binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        },
+      );
+      const wait = vi
+        .spyOn(HostedApprovalWaiters.prototype, 'wait')
+        .mockRejectedValueOnce(
+          new HostedToolRecoveryRequiredError('writer lost during approval'),
+        );
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        const call = {
+          name: toolName,
+          callId: 'original-call',
+          args:
+            toolName === 'write_file'
+              ? { file_path: 'notes.txt', content: 'hello' }
+              : { plan: 'Write the notes after approval.' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        return { text: 'not reached', model: 'test-model' };
+      });
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: files,
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const prompt = [{ type: 'text', text: 'write notes' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          ...(toolName === 'exit_plan_mode'
+            ? {
+                approvalSelection: {
+                  mode: 'default',
+                  revision: 1,
+                  planMode: true,
+                },
+              }
+            : {}),
+        })
+        .expect(202);
+      await waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      });
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      const action = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!;
+      expect(action).toBeDefined();
+      const requestId = action.payload['requestId'] as string;
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .expect(204);
+      wait.mockRestore();
+      state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 2 });
+      state.model.mockResolvedValue({ text: 'done', model: 'test-model' });
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      if (toolName === 'exit_plan_mode') {
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+        await headers(
+          supertest(replacement).post(
+            `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+          .send({
+            optionId: 'deny',
+            inputRevision: 1,
+            policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+          })
+          .expect(200);
+      }
+      await waitFor(async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(
+        toolName === 'write_file' ? 1 : 0,
+      );
+      const restored = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(
+        restored.events.filter(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['requestId'] === requestId &&
+            event.payload['state'] === 'decided',
+        ),
+      ).toHaveLength(1);
+      await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/detach`),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .expect(204);
+    },
+  );
+
+  it.each([
+    ['hosted-workspace-files/1', true],
+    ['hosted-workspace-files/2', false],
+    ['hosted-workspace-shell/1', true],
+    ['hosted-workspace-shell/2', true],
+    ['hosted-workspace-read/1', false],
+  ] as const)(
+    'queries live policy only for eligible profile %s',
+    async (toolProfile, live) => {
+      state.model.mockImplementation(async ({ toolTurn, signal }) => {
+        const call = {
+          name: 'read_file',
+          callId: randomUUID(),
+          args: { file_path: 'notes.txt' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        await toolTurn!.consumeResults();
+        return { text: 'done', model: 'test-model' };
+      });
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile,
+          approvalMode: 'yolo',
+        })
+        .expect(200);
+      const prompt = [{ type: 'text', text: 'read notes' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      expect(state.approvalQueries.length > 0).toBe(live);
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .expect(204);
+    },
+  );
+
   async function definitions(): Promise<unknown[]> {
     const paths = (await readdir(state.root, { recursive: true })).filter(
       (entry) =>
@@ -24027,6 +24309,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
   async function parkAgentWaitResumeShape(
     shape: 'orphan' | 'carried',
   ): Promise<void> {
+    state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -35503,6 +35786,78 @@ describe('Hosted Harness stored definitions', () => {
     });
   });
 
+  it('pins creation-time Skills for the built-in agent across resident and cold loads', async () => {
+    const server = await app(true);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const sessionSkillsRef = await resources.publish(
+      'managed-agent-skills',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'added',
+            description: 'Added at creation',
+            body: 'SESSION_CREATION_BODY',
+            base_directory: 'docs',
+          },
+        ]),
+      ),
+    );
+    const request = {
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+      sessionSkillsRef,
+    };
+    await headers(supertest(server).post('/session')).send(request).expect(200);
+    const load = (
+      target: Awaited<ReturnType<typeof app>>,
+      ref?: typeof sessionSkillsRef,
+    ) =>
+      headers(supertest(target).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        sessionSkillsRef: ref,
+        driveRuntimeRecovery: true,
+      });
+    await load(server).expect(409);
+    await load(server, { ...sessionSkillsRef, digest: 'f'.repeat(64) }).expect(
+      409,
+    );
+    const resident = await load(server, sessionSkillsRef).expect(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', resident.body.clientId)
+      .expect(204);
+    const replacement = await app(true);
+    await load(replacement).expect(409);
+    const loaded = await load(replacement, sessionSkillsRef).expect(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(replacement).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalled());
+    const modelInput = state.model.mock.calls.at(-1)![0] as {
+      agentDefinition?: unknown;
+      skills?: import('./hosted-skill-catalog.js').HostedSkillCatalog;
+    };
+    expect(modelInput.agentDefinition).toBeUndefined();
+    expect(modelInput.skills?.response({ skill: 'added' })).toContain(
+      'SESSION_CREATION_BODY',
+    );
+    expect(modelInput.skills?.declaration()?.name).toBe('skill');
+  });
+
   it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
     const server = await app();
     const resources = LocalManagedSessionResourceStore.create({
@@ -35829,7 +36184,7 @@ describe('Hosted Harness stored definitions', () => {
     });
   });
 
-  it('recovers a pure Skill call whose assistant committed before its response', async () => {
+  it('recovers a large manual Skill call whose assistant committed before its response', async () => {
     const server = await app(true);
     const resources = LocalManagedSessionResourceStore.create({
       runtimeBaseDir: state.root,
@@ -35846,7 +36201,8 @@ describe('Hosted Harness stored definitions', () => {
           {
             name: 'published',
             description: 'Instructions',
-            body: 'RECOVERED_ORIGINAL_SKILL',
+            body: 'RECOVERED_ORIGINAL_SKILL' + 'x'.repeat(400 * 1024),
+            model_invocable: false,
           },
         ]),
       ),
@@ -35886,7 +36242,7 @@ describe('Hosted Harness stored definitions', () => {
         name: 'skill',
         callId: 'call-recover-skill',
         args: { skill: 'published' },
-        isClientInitiated: false,
+        isClientInitiated: true,
         prompt_id: PROMPT_ID,
       };
       await input.toolTurn!.execute(
@@ -35941,6 +36297,8 @@ describe('Hosted Harness stored definitions', () => {
       expect(JSON.stringify(recovered)).toContain('RECOVERED_ORIGINAL_SKILL'),
     );
     expect(JSON.stringify(recovered)).not.toContain('never ran');
+    expect(JSON.stringify(recovered)).toContain('Tool output truncated.');
+    expect(JSON.stringify(recovered).length).toBeLessThan(201000);
     await vi.waitFor(async () => {
       const status = await headers(
         supertest(replacement).get(`/session/${SESSION_ID}/status`),

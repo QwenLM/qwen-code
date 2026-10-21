@@ -35,9 +35,9 @@
 //! releases → B dereferences) with channels instead of relying on luck, so
 //! BEFORE deterministically trips and AFTER deterministically survives.
 
-use super::{CacheKey, CachedSnapshot, ElementCache, SnapshotKind};
+use super::{BoundElementCache, CacheKey, CachedSnapshot, ElementCache, SnapshotKind};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -139,7 +139,9 @@ fn snapshot_with(ptrs: Vec<usize>) -> CachedSnapshot {
 fn old_get_element_ptr(cache: &ElementCache, pid: u32, hwnd: u64, idx: usize) -> Option<usize> {
     cache
         .core
-        .with_snapshot(&CacheKey { pid, hwnd }, |s| s.elements.get(idx).copied())
+        .with_snapshot(&CacheKey { pid, hwnd }, |s| {
+            s.upgrade()?.elements.get(idx).copied()
+        })
         .flatten()
 }
 
@@ -153,7 +155,7 @@ unsafe fn touch_vtable(ptr: usize) {
     drop(dup); // Release — reads the vtable again
 }
 
-const PID: u32 = 4242;
+static NEXT_PID: AtomicU32 = AtomicU32::new(721_520);
 const HWND: u64 = 0x1234;
 
 /// Forced interleave: B looks up the element, THEN A replaces+releases the
@@ -163,15 +165,10 @@ const HWND: u64 = 0x1234;
 fn run_forced_interleave(use_retained: bool, poison_on_zero: bool) -> usize {
     let uaf_hits: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
     let cache = Arc::new(ElementCache::new());
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
 
     let ptr = make_fake(uaf_hits, poison_on_zero);
-    cache.core.insert(
-        CacheKey {
-            pid: PID,
-            hwnd: HWND,
-        },
-        snapshot_with(vec![ptr]),
-    );
+    let sid = cache.publish(pid, HWND, Arc::new(snapshot_with(vec![ptr])));
 
     let (b_looked_up_tx, b_looked_up_rx) = mpsc::channel::<()>();
     let (a_replaced_tx, a_replaced_rx) = mpsc::channel::<()>();
@@ -179,17 +176,27 @@ fn run_forced_interleave(use_retained: bool, poison_on_zero: bool) -> usize {
     let cache_b = cache.clone();
     let worker_b = thread::spawn(move || {
         if use_retained {
-            // FIXED path: AddRef under the lock; guard pins the object alive.
-            let guard = cache_b
-                .get_element_retained(PID, HWND, 0)
+            // FIXED path: bind the original snapshot, then retain its object.
+            let binding = cua_driver_core::element_token::global()
+                .resolve_bound(
+                    pid as i32,
+                    &cua_driver_core::element_token::token_for(sid, 0),
+                )
+                .unwrap()
+                .2
+                .unwrap();
+            let bound = BoundElementCache::from_binding(binding);
+            let guard = bound
+                .get_element_retained(pid, HWND, 0)
                 .expect("element present");
+            drop(bound);
             b_looked_up_tx.send(()).unwrap();
             a_replaced_rx.recv().unwrap(); // A has now replaced + released
             unsafe { touch_vtable(guard.as_ptr()) }; // safe: guard holds +1
             drop(guard);
         } else {
             // PRE-FIX path: bare pointer, no AddRef.
-            let raw = old_get_element_ptr(&cache_b, PID, HWND, 0).expect("element present");
+            let raw = old_get_element_ptr(&cache_b, pid, HWND, 0).expect("element present");
             b_looked_up_tx.send(()).unwrap();
             a_replaced_rx.recv().unwrap(); // A has now replaced + released → freed
             unsafe { touch_vtable(raw) }; // USE-AFTER-FREE
@@ -201,18 +208,13 @@ fn run_forced_interleave(use_retained: bool, poison_on_zero: bool) -> usize {
         b_looked_up_rx.recv().unwrap();
         // get_window_state on the same (pid, hwnd): replace the snapshot. The
         // old snapshot's Drop fires COM Release on `ptr`.
-        cache_a.core.insert(
-            CacheKey {
-                pid: PID,
-                hwnd: HWND,
-            },
-            snapshot_with(vec![]),
-        );
+        cache_a.publish(pid, HWND, Arc::new(snapshot_with(vec![])));
         a_replaced_tx.send(()).unwrap();
     });
 
     worker_a.join().unwrap();
     worker_b.join().unwrap();
+    cua_driver_core::element_token::global().clear_pid(pid as i32);
     uaf_hits.load(Ordering::SeqCst)
 }
 
@@ -244,16 +246,12 @@ fn prefix_path_commits_use_after_free() {
 fn fixed_path_stress_no_uaf() {
     let uaf_hits: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
     let cache = Arc::new(ElementCache::new());
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
 
     // Seed a snapshot of several elements.
     let seed: Vec<usize> = (0..8).map(|_| make_fake(uaf_hits, false)).collect();
-    cache.core.insert(
-        CacheKey {
-            pid: PID,
-            hwnd: HWND,
-        },
-        snapshot_with(seed),
-    );
+    let sid = cache.publish(pid, HWND, Arc::new(snapshot_with(seed)));
+    let latest = Arc::new(AtomicU32::new(sid));
 
     const ITERS: usize = 4000;
     let mut handles = Vec::new();
@@ -261,27 +259,32 @@ fn fixed_path_stress_no_uaf() {
     // Replacer threads: continuously run `update` (snapshot replace → Release).
     for _ in 0..3 {
         let cache_r = cache.clone();
+        let latest = latest.clone();
         handles.push(thread::spawn(move || {
             for _ in 0..ITERS {
                 let fresh: Vec<usize> = (0..8).map(|_| make_fake(uaf_hits, false)).collect();
-                cache_r.core.insert(
-                    CacheKey {
-                        pid: PID,
-                        hwnd: HWND,
-                    },
-                    snapshot_with(fresh),
-                );
+                let sid = cache_r.publish(pid, HWND, Arc::new(snapshot_with(fresh)));
+                latest.store(sid, Ordering::Release);
             }
         }));
     }
 
     // Actor threads: lookup-retain-deref-release, the click/type/set_value path.
     for _ in 0..3 {
-        let cache_c = cache.clone();
+        let latest = latest.clone();
         handles.push(thread::spawn(move || {
             for i in 0..ITERS {
-                if let Some(guard) = cache_c.get_element_retained(PID, HWND, i % 8) {
-                    unsafe { touch_vtable(guard.as_ptr()) };
+                let token = cua_driver_core::element_token::token_for(
+                    latest.load(Ordering::Acquire),
+                    i % 8,
+                );
+                if let Ok((_, _, Some(binding))) =
+                    cua_driver_core::element_token::global().resolve_bound(pid as i32, &token)
+                {
+                    let bound = BoundElementCache::from_binding(binding);
+                    if let Some(guard) = bound.get_element_retained(pid, HWND, i % 8) {
+                        unsafe { touch_vtable(guard.as_ptr()) };
+                    }
                 }
             }
         }));
@@ -290,6 +293,7 @@ fn fixed_path_stress_no_uaf() {
     for h in handles {
         h.join().unwrap();
     }
+    cua_driver_core::element_token::global().clear_pid(pid as i32);
     assert_eq!(
         uaf_hits.load(Ordering::SeqCst),
         0,
@@ -298,6 +302,98 @@ fn fixed_path_stress_no_uaf() {
 }
 
 // ---- Hard-crash demonstrations (run manually, never in the suite) -----------
+
+#[test]
+fn target_clear_revokes_token_without_releasing_an_in_flight_com_binding() {
+    let hits = Box::leak(Box::new(AtomicUsize::new(0)));
+    let ptr = make_fake(hits, false);
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let cache = ElementCache::new();
+    let sid = cache.publish(pid, HWND, Arc::new(snapshot_with(vec![ptr])));
+    let registry = cua_driver_core::element_token::global();
+    let token = cua_driver_core::element_token::token_for(sid, 0);
+    let binding = registry
+        .resolve_bound(pid as i32, &token)
+        .unwrap()
+        .2
+        .unwrap();
+    cache.clear_target(pid, HWND);
+    assert!(registry.resolve(pid as i32, &token).is_err());
+    assert_eq!(cache.element_count(pid, HWND), 0);
+    assert_eq!(
+        unsafe { (*(ptr as *const FakeObj)).refcount.load(Ordering::SeqCst) },
+        1
+    );
+    drop(binding);
+    assert_eq!(
+        unsafe { (*(ptr as *const FakeObj)).refcount.load(Ordering::SeqCst) },
+        0
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn resolved_snapshot_keeps_pointer_kind_geometry_and_actions_together() {
+    let hits = Box::leak(Box::new(AtomicUsize::new(0)));
+    let first = make_fake(hits, false);
+    let second = make_fake(hits, false);
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let cache = ElementCache::new();
+    let mut a = snapshot_with(vec![first]);
+    a.centers[0] = (10, 20);
+    a.rects[0] = Some((1, 2, 19, 38));
+    a.actions[0] = vec!["first-action".into()];
+    let sid = cache.publish(pid, HWND, Arc::new(a));
+    let registry = cua_driver_core::element_token::global();
+    let token = cua_driver_core::element_token::token_for(sid, 0);
+    let binding = registry
+        .resolve_bound(pid as i32, &token)
+        .unwrap()
+        .2
+        .unwrap();
+    let bound = BoundElementCache::from_binding(binding);
+    let mut b = snapshot_with(vec![second]);
+    b.kind = SnapshotKind::Msaa;
+    b.centers[0] = (90, 100);
+    b.msaa_roles[0] = Some(0x38);
+    b.actions[0] = vec!["replacement-action".into()];
+    cache.publish(pid, HWND, Arc::new(b));
+    assert!(registry.resolve(pid as i32, &token).is_err());
+    let retained = bound.get_element_retained(pid, HWND, 0).unwrap();
+    assert_eq!(retained.as_ptr(), first);
+    assert!(retained.is_uia());
+    assert_eq!(bound.get_element_center(pid, HWND, 0), Some((10, 20)));
+    assert_eq!(bound.get_element_rect(pid, HWND, 0), Some((1, 2, 19, 38)));
+    assert!(matches!(
+        bound.get_element_kind_and_role(pid, HWND, 0),
+        Some((SnapshotKind::Uia, None))
+    ));
+    assert_eq!(
+        bound.get_element_actions(pid, HWND, 0),
+        Some(vec!["first-action".into()])
+    );
+    assert!(bound.get_element_center(pid, HWND + 1, 0).is_none());
+    registry.clear_pid(pid as i32);
+    drop(retained);
+    assert_eq!(
+        unsafe { (*(first as *const FakeObj)).refcount.load(Ordering::SeqCst) },
+        1
+    );
+    drop(bound);
+    assert_eq!(
+        unsafe { (*(first as *const FakeObj)).refcount.load(Ordering::SeqCst) },
+        0
+    );
+    assert_eq!(
+        unsafe {
+            (*(second as *const FakeObj))
+                .refcount
+                .load(Ordering::SeqCst)
+        },
+        0
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
 
 /// BEFORE (real fault): the pre-fix path takes a genuine
 /// STATUS_ACCESS_VIOLATION. Poison-on-zero makes the otherwise heap-reuse-

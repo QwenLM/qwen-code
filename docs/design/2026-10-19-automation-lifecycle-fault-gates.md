@@ -2,9 +2,9 @@
 
 [English](2026-10-19-automation-lifecycle-fault-gates.md) | [简体中文](2026-10-19-automation-lifecycle-fault-gates.zh-CN.md)
 
-Status: `disable-span`, the per-run cancel cell and `retire-at-intent` are
-implemented and green; `close-queued-input` and the rest of the cancellation
-matrix are scoped but not implemented.
+Status: `disable-span`, the per-run cancel cell, `retire-at-intent`, the
+closed-Session skip cell and the close-in-flight refusal are implemented and
+green; the rest of the cancellation matrix is scoped but not implemented.
 
 Issue: #14446, the FG11 tracker. The `d` row records per-run task
 cancellation as implemented by #14526, and states that retire, disable,
@@ -41,17 +41,16 @@ a case arms.
 
 `disable-span` and `retire-at-intent` run on that stock fixture: parking
 `fire_run` in the relay holds the fire between the occurrence commit and the
-Harness admission, which is the window this cell needs. `close-*` still needs a
-Session close the fixture cannot accept, which Limits records instead of
-claiming it is ready.
+Harness admission, which is the window this cell needs. `close-*` runs on that
+same fixture once the case arms its Workspace lifecycle, which Limits records.
 
 ## Slice 1: retire, disable, close
 
-| Cell                 | Setup                                                                                                        | Expected                                                                                                                                                                                   |
-| -------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `retire-at-intent`   | Retire after the occurrence commits but before the Harness admits `fire_run` (the relay parks the operation) | The occurrence settles `skipped` for `definition_retired` with no attempt; no run commits and no model Turn starts, and the claim is never `unknown`.                                      |
-| `disable-span`       | Create the definition disabled, let two due slots pass, then enable it                                       | The disabled span records no `fired` occurrence and no run; the first slot after re-enabling fires once.                                                                                   |
-| `close-queued-input` | Close the Session while an automation input is queued behind a held turn                                     | The queued input settles without a model Turn; a live definition on the closed Session records `skipped(session_not_active)` for each slot, which is today's behaviour and is pinned here. |
+| Cell                 | Setup                                                                                                                     | Expected                                                                                                                                                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retire-at-intent`   | Retire after the occurrence commits but before the Harness admits `fire_run` (the relay parks the operation)              | The occurrence settles `skipped` for `definition_retired` with no attempt; no run commits and no model Turn starts, and the claim is never `unknown`.                                                                        |
+| `disable-span`       | Create the definition disabled, let two due slots pass, then enable it                                                    | The disabled span records no `fired` occurrence and no run; the first slot after re-enabling fires once.                                                                                                                     |
+| `close-queued-input` | Close a Session that carries a live definition, with the Workspace lifecycle armed (durable broker, 0700 state directory) | The close completes and the next slot records `skipped` for `session_not_active` with no model Turn. A close attempted while a turn is in flight is refused with `409 turn_active`, so no close ever reaches a queued input. |
 
 ## Slice 2: the cancellation matrix
 
@@ -61,10 +60,18 @@ asserts:
 - the cancelled run reaches `cancelled` from its committed proof, and its
   occurrence settles once;
 - the schedule, future slots, sibling runs and foreground work are untouched;
-- a queued input cancelled before any attempt settles with no model call, and
-  a run that completes naturally keeps its outcome;
-- a retry under the same key reuses the original operation and run, and a
-  parked cancel is never redelivered.
+- a queued input cancelled before any attempt settles with no model call; that
+  a run which completes on its own keeps its outcome — delivered: a cancel
+  arriving after settlement is refused with `409 task_action_unavailable`
+  (`The task does not accept a cancellation now.`), and the run stays
+  `completed` with its occurrence `fired`;
+- a cancel retried under the same key reuses its committed operation and changes
+  nothing — delivered: the second request answers the cancelled task, the run
+  stays `cancelled` and the occurrence settles once;
+- a retry under the same key reuses the original operation and run — delivered:
+  the second `POST /runs` answers the run it already made, records no second
+  occurrence and starts no second Turn. That a parked cancel is never
+  redelivered stays open.
 
 - `cancel-stops-only-the-target` is delivered. With the wake turn parked on the
   model, the public task cancel settles the task and the run `cancelled` in
@@ -90,18 +97,20 @@ around it.
   cancelled, never started" pins that path to `cancelled` with
   `not_started_proven`. This lane does not exercise that branch, so the gap
   stays open here rather than being read as closed by this cell.
-- `close-*` needs a workspace-backed Session: the automation API refuses a
-  Session without one (`session_not_found`), while closing a workspace
-  Session in this fixture answers `409 workspace_unavailable` with
-  `Hosted Workspace execution is not available.` The public close route takes
-  `SessionLifecycleService.admit`'s workspace arm into
-  `ManagedAgentStore.beginWorkspaceLifecycle`, and `beginLifecycle` throws
-  there. The message is shared by ten raise sites in five classes, so name the
-  route rather than a class: it is not the store-level authority FG11f faults.
-  That slice records two refusals — the non-durable broker's 409 from
-  `resolveScope`, and, under the durable broker, `WorkspaceExecutionStore`'s
-  `Workspace execution authority is unavailable.` — so neither is this
-  lifecycle throw.
+- `close-*` needs the Workspace lifecycle, not merely a workspace-backed
+  Session. Closing admits through `SessionLifecycleService.admit`, and the
+  action store refuses a bound Session whose execution registry facts are
+  missing: `ManagedActionStore` answers `409 workspace_unavailable` with
+  `Hosted Workspace execution is not available.`, which is neither
+  `WorkspaceExecutionStore`'s authority refusal nor `HarnessCoordinator`'s
+  workspace-files outage. Four armings make that check pass —
+  `durable-local-process`, an owner-private 0700 broker state directory,
+  `verified-workspace-recovery-enabled`, and the storage guard's registration,
+  which the third makes effective where the guard is not enabled by itself.
+  With those the close completes and the next slot records `skipped` for
+  `session_not_active`. A close attempted while a turn is in flight is refused
+  with `409 turn_active`, which is what bounds the queued-input arm: the queue
+  is decided by the turn, never by a close.
 - A task cancel needs the projection's task id, not the run record id:
   passing `arun_…` answers `task_not_found`, and the id from
   `GET /v1/agents/sessions/{id}/tasks` is accepted. With the wake turn kept

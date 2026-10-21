@@ -141,6 +141,10 @@ const EN: Messages = {
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
   'managed.executionMode': 'Execution mode',
+  'workspace.executionDaemon': 'Local (daemon)',
+  'workspace.executionManaged': 'Managed (Managed Agent)',
+  'workspace.executionHint':
+    'New tasks in this workspace use the selected service.',
   'managed.localMode': 'Local',
   'managed.managedMode': 'Managed',
   'managed.sessions': 'Managed sessions',
@@ -218,6 +222,15 @@ const EN: Messages = {
   'managed.result.close': 'Close output',
   'managed.result.refresh': 'Refresh output',
   'managed.phase.created': 'Created',
+  'managed.creationSkillsFromSettings':
+    'Enabled Skills on the Skills page are added to new Managed sessions. Existing sessions keep their original Skills.',
+  'managed.creationSkillsManage': 'Manage Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `${v?.count ?? 0} Skills are saved with this creation request.`,
+  'managed.creationSkillsSourceChanged':
+    'The Skills source changed. Retry with the selected source.',
+  'managed.creationSkillsUnavailable':
+    'Enabled Skills could not be loaded for this Managed session.',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
   'managed.modelPreset': 'Model / Agent preset',
@@ -226,6 +239,9 @@ const EN: Messages = {
     'Choose the initial model and Agent preset. Supported conversations can change model while idle.',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
+  'managed.workspaceWorkingDirectory': 'Working directory',
+  'managed.workspaceWorkingDirectoryDescription':
+    'Choose where this session starts within the Workspace. Use . for the Workspace root.',
   'managed.cwd.change': 'Change directory',
   'managed.cwd.path': 'Directory relative to Workspace root',
   'managed.cwd.description':
@@ -268,6 +284,8 @@ const EN: Messages = {
   'managed.approvalChange.reload': 'Reload policies',
   'managed.approvalChange.nextTurn':
     'Approval policy changes apply to the next turn.',
+  'managed.approvalChange.live':
+    'Approval policy changes apply to subsequent tool calls in this turn.',
   'managed.approvalChange.changing': 'Changing approval policy…',
   'managed.approvalChange.unconfirmed':
     'Approval change is not confirmed. Continue confirming the original request.',
@@ -305,9 +323,11 @@ const EN: Messages = {
     'This session does not support changing its approval policy.',
   'managed.newWorkspaceDescription':
     'Choose an existing project directory, or name a new empty workspace.',
-  'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
+  'managed.workspaceDirectoryRoot': 'Authorized directories',
+  'managed.localDirectoryHint':
+    'Choose an existing project on this computer. Workspace setup is automatic.',
   'managed.workspaceDirectoryHint':
-    'Choose an existing project on the Linux execution host within this authorized root.',
+    'Choose an existing project on the execution host within this authorized root.',
   'managed.workspaceChooseDirectory': 'Choose existing directory',
   'managed.workspaceDirectoryScope':
     'Choose a directory inside the selected root.',
@@ -1022,6 +1042,12 @@ const EN: Messages = {
   'composerAdd.extensions.empty': 'No extensions are enabled',
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': 'No MCP servers are available',
+  'managed.mcp.catalog': (v) =>
+    `Catalog snapshot: ${plural(v?.tools, 'tool')} (${v?.toolsState}); ${plural(v?.resources, 'resource')} (${v?.resourcesState}); ${plural(v?.prompts, 'prompt')} (${v?.promptsState})`,
+  'managed.mcp.discovery.complete': 'complete',
+  'managed.mcp.discovery.partial': 'partial',
+  'managed.mcp.discovery.failed': 'failed',
+  'managed.mcp.discovery.stale': 'stale',
   'composerAdd.skills.label': 'Skills',
   'composerAdd.plan.label': 'Plan mode',
   'composerAdd.plan.description': 'Plan first, run after you approve',
@@ -3435,8 +3461,6 @@ const EN: Messages = {
   'trajectory.empty': 'No records in this session yet.',
   'trajectory.noTiming':
     'No request or tool durations are recorded for these records.',
-  'trajectory.truncated':
-    'Showing the most recent records; earlier history is not loaded.',
   'trajectory.loadingPages': (v) =>
     `Loading records… (${v?.pages ?? 0} ${Number(v?.pages) === 1 ? 'page' : 'pages'} so far)`,
   'trajectory.olderFailed': (v) =>
@@ -3447,8 +3471,6 @@ const EN: Messages = {
     `Could not read the transcript: ${v?.message ?? ''}`,
   'trajectory.partial':
     'Part of this transcript could not be read, so some records are missing.',
-  'trajectory.totals': (v) =>
-    `Loaded window · ${plural(v?.turns, 'turn')} · ${plural(v?.requests, 'request')} · ${plural(v?.tools, 'tool')}`,
   'trajectory.turn': (v) => `Turn ${v?.index ?? 0}`,
   'trajectory.turnPartial': (v) => `Turn ${v?.index ?? 0} (continued)`,
   'trajectory.turnSummary': (v) =>
@@ -3501,12 +3523,6 @@ const EN: Messages = {
     `Showing ${v?.from ?? ''}–${v?.to ?? ''} of ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) =>
     `, ${v?.from ?? ''} to ${v?.to ?? ''} selected`,
-  'trajectory.metric.elapsed': 'Elapsed span',
-  'trajectory.metric.active': 'Active coverage',
-  'trajectory.metric.main': 'Main model total',
-  'trajectory.metric.help': 'Metric definitions',
-  'trajectory.metric.scope':
-    'Counts cover projected rows in the loaded window, including loaded subagent records. Selection and zoom do not change them.',
   'trajectory.metric.elapsed.help':
     'Elapsed span: earliest recorded start to latest end, including gaps; plotted records only.',
   'trajectory.metric.active.help':
@@ -3515,14 +3531,8 @@ const EN: Messages = {
     'Main model total: sum of main-session model request durations, excluding subagent requests and tools. Failed attempts may count.',
   'trajectory.metric.missing.help':
     'Unplotted requests and tools remain in the list. An em dash means unrecorded; zero is a measured zero.',
-  'trajectory.failures': (v) =>
-    `Failed requests ${v?.requests ?? 0} · failed tools ${v?.tools ?? 0}`,
-  'trajectory.unrecorded': 'unrecorded',
   'trajectory.unplotted': (v) =>
     `Unplotted: ${v?.starts ?? 0} without start · ${v?.timing ?? 0} without duration`,
-  'trajectory.missingStart': (v) =>
-    `${v?.count ?? 0} timed records have no start`,
-  'trajectory.missingTiming': (v) => `${v?.count ?? 0} tools have no duration`,
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
@@ -3530,24 +3540,13 @@ const EN: Messages = {
     'History may have changed while disconnected. Refresh the latest window to update.',
   'trajectory.lifecycleIncomplete':
     'Lifecycle details may be incomplete or outside the retained limit.',
-  'trajectory.selected.label': 'Selected',
-  'trajectory.selected.none': 'Choose a record',
-  'trajectory.selected.noTiming': 'no request or tool timing',
   'trajectory.inspector.title': 'Record details',
-  'trajectory.inspector.open': 'View details',
   'trajectory.inspector.close': 'Close details',
   'trajectory.inspector.selectRecord': 'Select a record to inspect.',
-  'trajectory.inspector.selectRowInTurn':
-    'Turn selected. Select a record to inspect.',
   'trajectory.inspector.stale':
     'The record window changed. Select a record again.',
   'trajectory.inspector.hiddenByRange':
     'This record is outside the selected time.',
-  'trajectory.inspector.tab.summary': 'Summary',
-  'trajectory.inspector.tab.input': 'Input',
-  'trajectory.inspector.tab.output': 'Output',
-  'trajectory.inspector.tab.metrics': 'Metrics',
-  'trajectory.inspector.tab.body': 'Body',
   'trajectory.inspector.model': 'Model',
   'trajectory.inspector.status': 'Status',
   'trajectory.inspector.permissionTitle': 'Title',
@@ -3561,22 +3560,10 @@ const EN: Messages = {
   'trajectory.inspector.start': 'Recorded start',
   'trajectory.inspector.end': 'Calculated end',
   'trajectory.inspector.ttft': 'First token',
-  'trajectory.inspector.afterFirst': 'After first token',
   'trajectory.inspector.invalidTtft':
     'Recorded first-token timing is inconsistent',
-  'trajectory.inspector.inputTokens': 'Input tokens',
-  'trajectory.inspector.outputTokens': 'Output tokens',
-  'trajectory.inspector.cachedTokens':
-    'Cached input tokens (included in input)',
   'trajectory.inspector.tool': 'Tool',
   'trajectory.inspector.callId': 'Call ID',
-  'trajectory.inspector.details': 'Recorded details',
-  'trajectory.inspector.preview': 'Recorded preview',
-  'trajectory.inspector.input': 'Recorded input',
-  'trajectory.inspector.output': 'Recorded output',
-  'trajectory.inspector.contentFallback':
-    'Tool content (no separate raw output)',
-  'trajectory.inspector.body': 'Recorded text',
   'trajectory.inspector.kind': 'Kind',
   'trajectory.inspector.images': 'Image types',
   'trajectory.inspector.files': 'Files',
@@ -3586,8 +3573,7 @@ const EN: Messages = {
   'trajectory.inspector.truncated': 'Content truncated',
   'trajectory.inspector.formatFailed': 'Could not format recorded field',
   'trajectory.inspector.expand': 'Show more',
-  'trajectory.inspector.copy': 'Copy displayed content',
-  'trajectory.inspector.copied': 'Copied displayed content',
+  'trajectory.inspector.copied': 'Copied',
   'trajectory.inspector.copyFailed': 'Could not copy content',
   'trajectory.mode.group': 'Time scale',
   'trajectory.mode.active': 'Active time, idle removed',
@@ -4571,6 +4557,9 @@ const ZH: Messages = {
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
   'managed.executionMode': '执行方式',
+  'workspace.executionDaemon': '本地（daemon）',
+  'workspace.executionManaged': '托管（Managed Agent）',
+  'workspace.executionHint': '此工作区中新建的任务将使用所选服务。',
   'managed.localMode': '本地',
   'managed.managedMode': '托管',
   'managed.sessions': '托管会话',
@@ -4641,6 +4630,15 @@ const ZH: Messages = {
   'managed.result.close': '关闭输出',
   'managed.result.refresh': '刷新输出',
   'managed.phase.created': '已创建',
+  'managed.creationSkillsFromSettings':
+    '技能页面中已启用的 Skills 会用于新建 Managed 会话。已有会话保留创建时的 Skills。',
+  'managed.creationSkillsManage': '管理 Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `本次创建请求已保存 ${v?.count ?? 0} 个 Skills。`,
+  'managed.creationSkillsSourceChanged':
+    'Skills 来源已变化，请按当前选择重试。',
+  'managed.creationSkillsUnavailable':
+    '无法为此 Managed 会话加载已启用的 Skills。',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',
   'managed.modelPreset': '模型 / Agent 预设',
@@ -4649,6 +4647,9 @@ const ZH: Messages = {
     '选择初始模型和 Agent 预设；支持的会话可在空闲时切换模型。',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
+  'managed.workspaceWorkingDirectory': '工作目录',
+  'managed.workspaceWorkingDirectoryDescription':
+    '选择此会话在工作区内的起始目录，使用 . 表示工作区根目录。',
   'managed.cwd.change': '切换目录',
   'managed.cwd.path': '相对于 Workspace 根目录的路径',
   'managed.cwd.description':
@@ -4682,6 +4683,7 @@ const ZH: Messages = {
   'managed.approvalChange.optionsError': '加载审批策略失败。',
   'managed.approvalChange.reload': '重新加载策略',
   'managed.approvalChange.nextTurn': '审批策略变更从下一轮生效。',
+  'managed.approvalChange.live': '审批策略变更对当前轮后续工具调用生效。',
   'managed.approvalChange.changing': '正在切换审批策略…',
   'managed.approvalChange.unconfirmed':
     '审批策略切换尚未确认，请继续确认原请求。',
@@ -4711,9 +4713,11 @@ const ZH: Messages = {
   'managed.approvalFixed': '当前会话不支持更改审批策略。',
   'managed.newWorkspaceDescription':
     '选择已有项目目录，或输入名称创建空工作区。',
-  'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',
+  'managed.workspaceDirectoryRoot': '已授权的目录',
+  'managed.localDirectoryHint':
+    '选择这台电脑上已有的项目目录，工作区登记和授权会自动完成。',
   'managed.workspaceDirectoryHint':
-    '选择此授权根目录内、位于 Linux 执行机器上的已有项目。',
+    '选择此授权根目录内、位于执行机器上的已有项目。',
   'managed.workspaceChooseDirectory': '选择已有目录',
   'managed.workspaceDirectoryScope': '请选择已选根目录中的目录。',
   'managed.newWorkspaceName': '工作区名称',
@@ -5470,6 +5474,12 @@ const ZH: Messages = {
   'composerAdd.extensions.empty': '没有已启用的扩展',
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': '没有可用的 MCP 服务',
+  'managed.mcp.catalog': (v) =>
+    `目录快照：${v?.tools} 个工具（${v?.toolsState}）；${v?.resources} 个资源（${v?.resourcesState}）；${v?.prompts} 个提示（${v?.promptsState}）`,
+  'managed.mcp.discovery.complete': '已完成',
+  'managed.mcp.discovery.partial': '部分完成',
+  'managed.mcp.discovery.failed': '失败',
+  'managed.mcp.discovery.stale': '已过期',
   'composerAdd.skills.label': '技能',
   'composerAdd.plan.label': '计划模式',
   'composerAdd.plan.description': '先出计划，批准后再执行',
@@ -7687,14 +7697,11 @@ const ZH: Messages = {
   'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',
   'trajectory.noTiming': '这些记录没有请求或工具的耗时数据。',
-  'trajectory.truncated': '只显示最近的记录，更早的历史没有加载。',
   'trajectory.loadingPages': (v) => `正在读取记录…（已 ${v?.pages ?? 0} 页）`,
   'trajectory.olderFailed': (v) => `更早的记录没有读到：${v?.message ?? ''}`,
   'trajectory.olderPartial': '更早的记录只读到一部分，所以没有显示。',
   'trajectory.loadFailed': (v) => `读取会话记录失败：${v?.message ?? ''}`,
   'trajectory.partial': '这份会话记录有一部分读不出来，缺少了一些记录。',
-  'trajectory.totals': (v) =>
-    `已加载窗口 · ${v?.turns ?? 0} 轮 · ${v?.requests ?? 0} 请求 · ${v?.tools ?? 0} 工具`,
   'trajectory.turn': (v) => `第 ${v?.index ?? 0} 轮`,
   'trajectory.turnPartial': (v) => `第 ${v?.index ?? 0} 轮（接上文）`,
   'trajectory.turnSummary': (v) =>
@@ -7745,12 +7752,6 @@ const ZH: Messages = {
   'trajectory.zoom.status': (v) =>
     `显示 ${v?.from ?? ''}–${v?.to ?? ''}，共 ${v?.busy ?? ''}`,
   'trajectory.range.aria': (v) => `，已选 ${v?.from ?? ''} 到 ${v?.to ?? ''}`,
-  'trajectory.metric.elapsed': '执行跨度',
-  'trajectory.metric.active': '活跃覆盖',
-  'trajectory.metric.main': '主模型请求累计',
-  'trajectory.metric.help': '指标说明',
-  'trajectory.metric.scope':
-    '计数针对已加载窗口内投影后的记录，包含已加载的子代理记录；时间框选和缩放不改变总计。',
   'trajectory.metric.elapsed.help':
     '执行跨度：已记录开始到结束的跨度，含间隔；仅覆盖可绘制记录。',
   'trajectory.metric.active.help':
@@ -7759,32 +7760,17 @@ const ZH: Messages = {
     '主模型请求累计：主会话模型请求耗时之和，不含子代理请求和工具；可能包含失败尝试。',
   'trajectory.metric.missing.help':
     '未绘制的请求和工具仍保留在列表。破折号表示未记录，零表示真实零值。',
-  'trajectory.failures': (v) =>
-    `失败请求 ${v?.requests ?? 0} · 失败工具 ${v?.tools ?? 0}`,
-  'trajectory.unrecorded': '未记录',
   'trajectory.unplotted': (v) =>
     `未绘制：有耗时无起点 ${v?.starts ?? 0} 条 · 无耗时 ${v?.timing ?? 0} 条`,
-  'trajectory.missingStart': (v) => `${v?.count ?? 0} 条有耗时记录缺少起点`,
-  'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
   'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
   'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
-  'trajectory.selected.label': '所选',
-  'trajectory.selected.none': '请选择一条记录',
-  'trajectory.selected.noTiming': '无请求或工具计时',
   'trajectory.inspector.title': '记录详情',
-  'trajectory.inspector.open': '查看详情',
   'trajectory.inspector.close': '关闭详情',
   'trajectory.inspector.selectRecord': '请选择一条记录查看。',
-  'trajectory.inspector.selectRowInTurn': '已选择轮次，请选择一条记录查看。',
   'trajectory.inspector.stale': '记录窗口已更新，请重新选择记录。',
   'trajectory.inspector.hiddenByRange': '此记录不在所选时间内。',
-  'trajectory.inspector.tab.summary': '摘要',
-  'trajectory.inspector.tab.input': '输入',
-  'trajectory.inspector.tab.output': '输出',
-  'trajectory.inspector.tab.metrics': '指标',
-  'trajectory.inspector.tab.body': '正文',
   'trajectory.inspector.model': '模型',
   'trajectory.inspector.status': '状态',
   'trajectory.inspector.permissionTitle': '标题',
@@ -7798,19 +7784,9 @@ const ZH: Messages = {
   'trajectory.inspector.start': '记录起点',
   'trajectory.inspector.end': '推算结束',
   'trajectory.inspector.ttft': '首 token',
-  'trajectory.inspector.afterFirst': '首 token 后耗时',
   'trajectory.inspector.invalidTtft': '记录的首 token 时间与总耗时不一致',
-  'trajectory.inspector.inputTokens': '输入 token',
-  'trajectory.inspector.outputTokens': '输出 token',
-  'trajectory.inspector.cachedTokens': '缓存输入 token（包含在输入中）',
   'trajectory.inspector.tool': '工具',
   'trajectory.inspector.callId': '调用 ID',
-  'trajectory.inspector.details': '记录详情',
-  'trajectory.inspector.preview': '记录预览',
-  'trajectory.inspector.input': '记录输入',
-  'trajectory.inspector.output': '记录输出',
-  'trajectory.inspector.contentFallback': '工具内容（无独立原始输出）',
-  'trajectory.inspector.body': '记录正文',
   'trajectory.inspector.kind': '类型',
   'trajectory.inspector.images': '图片类型',
   'trajectory.inspector.files': '文件',
@@ -7820,8 +7796,7 @@ const ZH: Messages = {
   'trajectory.inspector.truncated': '内容已截断',
   'trajectory.inspector.formatFailed': '无法格式化这项记录',
   'trajectory.inspector.expand': '展开更多',
-  'trajectory.inspector.copy': '复制显示内容',
-  'trajectory.inspector.copied': '已复制显示内容',
+  'trajectory.inspector.copied': '已复制',
   'trajectory.inspector.copyFailed': '无法复制内容',
   'trajectory.mode.group': '时间模式',
   'trajectory.mode.active': '活跃时间，去除间隔',
