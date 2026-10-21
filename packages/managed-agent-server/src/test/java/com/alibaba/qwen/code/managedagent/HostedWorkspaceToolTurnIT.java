@@ -178,6 +178,9 @@ class HostedWorkspaceToolTurnIT {
         assertThat(cli).isRegularFile();
         String node = System.getProperty("node.executable");
         assertThat(node).as("Pass -Dnode.executable with an absolute Node.js 22+ path").isNotBlank();
+        // Every Hosted*IT class shares this fork, so whatever already runs
+        // under it is no producer of this run's Broker.
+        var inherited = new HashSet<>(ProcessHandle.current().descendants().toList());
         temporary = temporary.toRealPath();
         Files.createDirectory(temporary.resolve("runtime"));
         if (operatorRecovery) {
@@ -430,12 +433,12 @@ class HostedWorkspaceToolTurnIT {
                     }
                 }
                 if (!faults && !latency && !operatorRecovery) {
-                    List<ProcessHandle> producers = ProcessHandle.current().descendants().toList();
+                    List<ProcessHandle> producers = ProcessHandle.current().descendants()
+                            .filter(process -> !inherited.contains(process)).toList();
                     assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
                     broker.close();
                     for (ProcessHandle producer : producers) {
-                        producer.onExit().get(10, TimeUnit.SECONDS);
-                        assertThat(producer.isAlive()).as("Producer %s before retained read", producer.pid()).isFalse();
+                        awaitStopped(producer);
                     }
                     System.out.println("HOSTED_SHELL_PRODUCERS_EXITED: " + producers.size());
                     Path readerLog = temporary.resolve("reader.log");
@@ -482,6 +485,42 @@ class HostedWorkspaceToolTurnIT {
                 }
             }
         }
+    }
+
+    /**
+     * Polls instead of {@code onExit()}: that future completes on the common
+     * ForkJoinPool, so in a fork shared with every Hosted*IT class a busy pool
+     * can time it out for a producer that is already gone (#15049). A zombie
+     * no longer writes, and a container runner's PID 1 may never reap it.
+     */
+    private static void awaitStopped(ProcessHandle producer) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (running(producer)) {
+            assertThat(System.nanoTime()).as(() -> "Producer before retained read: " + describe(producer))
+                    .isLessThan(deadline);
+            Thread.sleep(20);
+        }
+    }
+
+    private static boolean running(ProcessHandle process) {
+        return process.isAlive() && !"Z".equals(state(process));
+    }
+
+    /** The /proc state letter, or null where there is no /proc entry to read. */
+    private static String state(ProcessHandle process) {
+        try {
+            String stat = Files.readString(Path.of("/proc", Long.toString(process.pid()), "stat"));
+            int name = stat.lastIndexOf(')');
+            return stat.substring(name + 2, name + 3);
+        } catch (java.io.IOException unavailable) {
+            return null;
+        }
+    }
+
+    private static String describe(ProcessHandle process) {
+        String state = state(process);
+        return process.pid() + " (parent " + process.parent().map(parent -> Long.toString(parent.pid())).orElse("?")
+                + ", state " + (state == null ? "?" : state) + "): " + process.info().commandLine().orElse("?");
     }
 
     private void assertFaultLedger(JdbcTemplate jdbc, String tenant, Map<String, Object> session, int index,
