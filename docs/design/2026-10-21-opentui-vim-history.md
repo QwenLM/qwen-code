@@ -5,15 +5,21 @@
 ## Status and baseline
 
 This is the input half of one interaction and live-output successor based on
-unified UI commit `70794177c203dfbb9e39e2ad797cf28382fae991` by normal merge,
-preserving B commit `e5143ba8e4cb431ef48f390f59922216544849fd`. It integrates the
-frozen B v3 and [dual-output v6](2026-10-21-opentui-dual-output.md) drafts;
-they are not separate deliveries. The earlier A-based designs and evidence are
-preserved as provenance. Input admission, attachments, cancellation and native
-undo keep their existing owners. The complete combined candidate remains
-**NOT_RUN** for install, build, typecheck and runtime validation; no earlier
-candidate result certifies this tree. The merged package and lock inputs require a
-new frozen setup before validation. OpenTUI stays `0.5.10`, Bun `1.3.14`.
+unified UI commit `4cabbc7f5af1b344d4648d7e316b8c2b574de74a` by normal merge,
+preserving B history from `e5143ba8e4cb431ef48f390f59922216544849fd` through
+`12039c2cb4fe4065fe73c57d392219c8a767cf08`. It integrates the frozen B v3 and
+[dual-output v6](2026-10-21-opentui-dual-output.md) drafts; they are not separate
+deliveries. The earlier A-based designs and evidence remain provenance. Input
+admission, attachments, cancellation and native undo retain their existing owners.
+
+The actual frozen setup on ba04 passed. Its unchanged dependency/lock inputs
+and eight installed tool/hook identities permit reuse; no reinstall is required.
+The ba04 build failed on two test/type declarations, and the f93 source reproduced
+five failing regression cases with six positive controls. Those original failures
+remain preserved. The declaration corrections and two production fixes are now
+committed, but fresh full build, typecheck, focused, native and product validation
+for the final combined source remain **NOT_RUN**. Earlier results do not certify
+this tree. OpenTUI remains `0.5.10`, Bun `1.3.14`.
 
 The parent reset discard outcome releases only the cancellation latch, without
 popping queues or restoring old drafts. This batch retains that contract and
@@ -126,4 +132,5 @@ resize. Include A's input/attachment/cancel regressions. Unit callbacks do not
 prove decoder, clipboard, native ownership or HTTP behavior. Freeze complete
 source/dist/fixture/runtime identities; retain first failures and verify owned
 cleanup. Build/typecheck, affected gates and two clean full-diff audits precede
-independent acceptance. All combined candidate execution is currently **NOT_RUN**.
+independent acceptance. Fresh validation of the final combined source remains
+**NOT_RUN**; the accepted installation reuse is recorded above.

@@ -4,7 +4,7 @@
 
 ## 状态与依赖
 
-**整合源码草案 / 候选验证尚未执行。** 本文与 [Vim/history](2026-10-21-opentui-vim-history.zh-CN.md) 是同一后继批次的输出部分，通过 normal merge 合入统一 UI 提交 `70794177c203dfbb9e39e2ad797cf28382fae991`，保留 B 提交 `e5143ba8e4cb431ef48f390f59922216544849fd`。新组合的全部执行均为 NOT_RUN；e514 及更早证据仍只对应原源码。原 A 基底 v6 快照与失败保持不变，其测试未在整合树重跑。父提交包含结构化接纳、SteerInput、取消所有权及共享 status-line 状态。不复制 R3 signal 改动；真实安装产物整合仍须重新验证。 reset 先捕获取消回调并收尾已接纳的输出，再失效旧 generation、清理状态并发布 discard；该结果只释放 composer 取消锁，不取队列、恢复旧草稿或重复发出桥事件。
+**整合源码草案 / 最终候选验证尚未执行。** 本文与 [Vim/history](2026-10-21-opentui-vim-history.zh-CN.md) 是同一后继批次的输出部分，通过 normal merge 合入统一 UI 提交 `4cabbc7f5af1b344d4648d7e316b8c2b574de74a`，保留 B 从 `e5143ba8e4cb431ef48f390f59922216544849fd` 到 `12039c2cb4fe4065fe73c57d392219c8a767cf08` 的历史。ba04 的实际 frozen setup 已通过，依赖/lock 输入与八项已安装工具/hook 身份未变，直接复用，无需重新安装。保留 ba04 两处测试/类型声明导致的构建失败，以及 f93 五个失败案例与六个正控通过的独立复现。声明修正和两处生产修复已提交；最终整合源码的新全量构建、typecheck、focused、native 与产品验证仍为 NOT_RUN。此前证据只对应原源码。原 A 基底 v6 快照与失败保持不变。父提交包含结构化接纳、SteerInput、取消所有权及共享 status-line 状态。不复制 R3 signal 改动；真实安装产物整合仍须重新验证。 reset 先捕获取消回调并收尾已接纳的输出，再失效旧 generation、清理状态并发布 discard；该结果只释放 composer 取消锁，不取队列、恢复旧草稿或重复发出桥事件。
 
 已验收 A bundle（`8473becd7f80960bc28d9fbb7b0690332609bc28c94f894bb1afaab017bfaf46`）使用 Node 24.19.0 和 Bun 1.3.14 完成基线：Node/Ink 五案通过、一案明确权限缺口；strict OpenTUI 首个 text/thought 案显示回答，却只写 session_start/session_end。后续独立守卫下的 Bun/Ink 参考确认同样的 Esc 全拒绝缺口（request 1 / response 0，原测试 FAIL 保留），active-exit 为 0，双 CtrlC 实测间隔 302.45ms。因此两种 Ink runtime 都使用这个精确拒绝 characterization；strict OpenTUI 仍须返回一次拒绝 response。全部原始失败与冻结夹具版本保留在 R3 的 U4 基线记录中。
 

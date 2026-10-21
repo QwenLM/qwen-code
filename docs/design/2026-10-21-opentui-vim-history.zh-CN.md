@@ -5,13 +5,17 @@
 ## 状态与基线
 
 本文是同一交互与实时输出后继批次的输入部分，通过 normal merge 合入统一 UI 提交
-`70794177c203dfbb9e39e2ad797cf28382fae991`，保留 B 提交
-`e5143ba8e4cb431ef48f390f59922216544849fd`。本批整合冻结 B v3 和
+`4cabbc7f5af1b344d4648d7e316b8c2b574de74a`，保留 B 从
+`e5143ba8e4cb431ef48f390f59922216544849fd` 到
+`12039c2cb4fe4065fe73c57d392219c8a767cf08` 的历史。本批整合冻结 B v3 和
 [dual-output v6](2026-10-21-opentui-dual-output.zh-CN.md) 草案，不分别交付。
-原 A 基底设计与证据保留作来源。输入接纳、附件、取消与 native undo 沿用既有
-所有者。完整整合候选的安装、构建、typecheck 和动态验证均为 **NOT_RUN**；旧候选
-结果不能证明本树。合入的 package 与 lock 输入要求验证前重新执行 frozen setup。
-OpenTUI 保持 `0.5.10`，Bun 保持 `1.3.14`。
+原 A 基底设计与证据保留作来源。输入接纳、附件、取消与 native undo 沿用既有所有者。
+
+ba04 的实际 frozen setup 已通过；依赖/lock 输入和八项已安装工具/hook 身份未变，
+允许复用，无需重新安装。ba04 构建因两处测试/类型声明失败；f93 源码独立复现了
+五个失败回归案例，六个正控通过，原始失败均保留。声明修正和两处生产修复现已提交，
+但最终整合源码的全量构建、typecheck、focused、native 和产品验证仍为 **NOT_RUN**。
+此前结果不能证明本树。OpenTUI 保持 `0.5.10`，Bun 保持 `1.3.14`。
 
 父提交的 reset discard 结果只释放取消锁，不取回队列或恢复旧草稿；本批保留此
 合同，以及旧 generation 不得触碰后继输入的保护。
@@ -100,4 +104,5 @@ bridge 接线一起交付。原 B v3 草案为 3137 变更行，U4 v6 为 1869�
 shell 历史和 resize；同时覆盖 A 的输入/附件/取消回归。unit callback 不能证明
 decoder、剪贴板、native 所有权或 HTTP 行为。冻结完整 source/dist/fixture/runtime
 身份，保留首败并核实 owned cleanup。构建/typecheck、受影响门禁及两次全 diff
-干净自审完成后再独立验收。目前整合候选全部动态执行仍为 **NOT_RUN**。
+干净自审完成后再独立验收。最终整合源码的新验证仍为 **NOT_RUN**；已接受的安装复用
+见上文。
