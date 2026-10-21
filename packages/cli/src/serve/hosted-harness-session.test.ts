@@ -586,7 +586,11 @@ async function parkBlockedTextTurn(profile: boolean) {
   await headers(supertest(server).delete(`/session/${SESSION_ID}`));
 }
 
-async function mcpApp(unknownConfigure = false, serverIds = ['demo']) {
+async function mcpApp(
+  unknownConfigure = false,
+  serverIds = ['demo'],
+  toolProfile = 'hosted-workspace-mcp/1',
+) {
   const requests: ManagedMcpControl[] = [];
   const replies = new Map<string, ManagedMcpOperationView>();
   const brokerOwners = new Set<string>();
@@ -658,7 +662,7 @@ async function mcpApp(unknownConfigure = false, serverIds = ['demo']) {
     sessionId: SESSION_ID,
     sessionScope: 'thread',
     managedSessionStore: store(),
-    toolProfile: 'hosted-workspace-mcp/1',
+    toolProfile,
     mcpServers: serverIds.map((serverId) => ({
       serverId,
       serverRevision: 1,
@@ -14610,6 +14614,126 @@ describe('Hosted Harness no-tool session', () => {
       204,
     );
   });
+
+  it('admits ordinary Shell with MCP, keeps file history available and refuses Plan before MCP starts', async () => {
+    const { server, authorize, requests } = await mcpApp(
+      false,
+      ['demo'],
+      'hosted-workspace-shell/1',
+    );
+    const history = await authorize(
+      supertest(server).get(`/session/${SESSION_ID}/files/history`),
+    );
+    expect(history.status).toBe(200);
+    expect(history.body.history).toBeNull();
+    const prompt = [{ type: 'text', text: 'plan without running tools' }];
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    ).send({
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      approvalSelection: { mode: 'default', revision: 1, planMode: true },
+    });
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe('invalid_hosted_approval_selection');
+    expect(requests).toEqual([]);
+    const close = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(close.status).toBe(409);
+    expect(close.body.code).toBe('hosted_lifecycle_required');
+  });
+
+  it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
+    'refuses MCP configuration records without definition pins on %s',
+    async (toolProfile) => {
+      const sessionKey = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
+      const resources = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey,
+      });
+      const managed = await openManagedSession({
+        runtimeBaseDir: state.root,
+        transcriptPath: '',
+        sessionId: SESSION_ID,
+        sessionKey,
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        workerId: BOOT_ID,
+        activationLeaseDurationMs: 60_000,
+        journalStore: new LocalJsonlManagedSessionJournalStore({
+          runtimeBaseDir: state.root,
+          sessionId: SESSION_ID,
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        }),
+        resourceStore: resources,
+        create: {
+          definitionRef: await resources.publish(
+            'managed-definition',
+            Buffer.from(
+              JSON.stringify({
+                engine: 'managed',
+                sessionId: SESSION_ID,
+                toolProfile,
+              }),
+            ),
+          ),
+          rootSnapshotRef: await resources.publish(
+            'managed-root',
+            Buffer.from(JSON.stringify({ cwd: state.root })),
+          ),
+          createdBy: 'hosted-harness',
+        },
+      });
+      try {
+        const fixture = JSON.parse(
+          await readFile(
+            path.resolve(
+              '../core/src/managed-runtime/contracts/managed-mcp-record-v1.fixtures.json',
+            ),
+            'utf8',
+          ),
+        ) as {
+          templates: {
+            mcp_configuration: import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionJsonValue;
+          };
+        };
+        await managed.authority.commitExtensionRecord(
+          {
+            operation: 'commitExtensionRecord',
+            commandId: 'configure-1',
+            sessionKey,
+            contentDigest: 'd'.repeat(64),
+          },
+          {
+            domain: 'mcp_configuration',
+            record: fixture.templates.mcp_configuration,
+          },
+          { class: 'trusted_entry' },
+        );
+      } finally {
+        await managed.close();
+      }
+      const server = await app(true);
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store(), toolProfile });
+      expect(loaded.status).toBe(409);
+      expect(loaded.body.reason).toBe('restore_verification_failed');
+      expect(log.mock.calls.map(([line]) => line)).toContain(
+        `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_verify): Error: Hosted MCP configuration is not pinned.`,
+      );
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([false, true])(
     'unblocks MCP resource requests after the original unknown operation settles (Broker restarted: %s)',

@@ -438,7 +438,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
         boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
         if (planMode && (!planModeSupported || !approvalSelectionSupported
-                || pin.hooks() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
+                || pin.hooks() || pin.mcp() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
                 || WorkspaceToolProfiles.isPublicShell(pin.toolProfile())))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Plan mode is unavailable");
         }
@@ -453,6 +453,9 @@ public class ManagedAgentStore implements AgentStateStore {
         boolean sshWorkspace = isSshWorkspace(workspace.binding());
         if (sshWorkspace) {
             requireSshToolProfile(pin.toolProfile());
+            if (pin.mcp()) {
+                throw workspaceExecutionUnavailable();
+            }
         }
         boolean resident = residentWorkspaces.find(workspace.binding()) != null;
         if (resident) {
@@ -515,7 +518,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
                 "qwen-code", title, List.of(), null, workspace, actorId,
-                new AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD, false));
+                new AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD, false, false));
     }
 
     @Override
@@ -986,7 +989,7 @@ public class ManagedAgentStore implements AgentStateStore {
      * its digest and the approval mode and tool profile compiled from its content (D8c-1).
      */
     private record AgentPin(String revision, String digest,
-            String approvalMode, String toolProfile, boolean hooks) {
+            String approvalMode, String toolProfile, boolean hooks, boolean mcp) {
     }
 
     private boolean isSshWorkspace(ContextBinding binding) {
@@ -1007,7 +1010,7 @@ public class ManagedAgentStore implements AgentStateStore {
         AgentPin pin = resolveAgentPin(tenantId, agentId, null, true);
         return new WebShellSessionOptions(
                 pin.approvalMode(), availableApprovalModes(pin),
-                !pin.hooks() && (WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
+                !pin.hooks() && !pin.mcp() && (WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
                         || WorkspaceToolProfiles.isPublicShell(pin.toolProfile())), false);
     }
 
@@ -1022,6 +1025,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean supportsPlanMode(SessionRecord session) {
         return WorkspaceToolProfiles.supportsApprovalSelection(session)
                 && findChildLineage(session.tenantId(), session.sessionId()) == null
+                && !hasMcpServers(session)
                 && (session.agentDefinitionDigest() == null
                 || !definitions.pinnedContent(session).containsKey("hook_catalog"));
     }
@@ -1036,7 +1040,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_approval_mode",
                     "The selected approval mode is not available for this Agent.");
         }
-        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks());
+        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks(), pin.mcp());
     }
 
     // Called only for a new admission; a retry has already replayed and
@@ -1053,7 +1057,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     ? (workspaceShellEnabled ? WorkspaceToolProfiles.SHELL
                             : WorkspaceToolProfiles.FILES)
                     : null;
-            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false);
+            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false, false);
         }
         if (definitions == null) {
             throw ManagedAgentDefinitionStore.notFound();
@@ -1064,9 +1068,18 @@ public class ManagedAgentStore implements AgentStateStore {
                 AgentDefinitionCompiler.compile(revision.definitionJson(),
                         workspaceBound, approvalMode, definitionToolProfiles,
                         definitionModels);
+        Map<String, Object> content = readMap(revision.definitionJson());
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
-                compiled.toolProfile(), readMap(revision.definitionJson()).containsKey("hook_catalog"));
+                compiled.toolProfile(), content.containsKey("hook_catalog"),
+                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty());
+    }
+
+    @Override
+    public boolean hasMcpServers(SessionRecord session) {
+        return session.agentDefinitionDigest() != null && !WorkspaceToolProfiles.READ.equals(session.toolProfile())
+                && !AgentDefinitionExtensions.mcpServers(
+                        definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile()).isEmpty();
     }
 
     private ManagedAgentDefinitionStore.DefinitionRevision resolveDefinitionRevision(
@@ -1239,6 +1252,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (session.workspace() != null) {
             if (isSshWorkspace(session.workspace())) {
                 requireSshToolProfile(session.toolProfile());
+                if (hasMcpServers(session)) {
+                    throw workspaceExecutionUnavailable();
+                }
             }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }

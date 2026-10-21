@@ -82,6 +82,7 @@ export function createHostedHarnessContract(
       'input-attachments/1',
       'session-skills/1',
       'session-skills/2',
+      'workspace-shell-mcp/1',
       // GET /session/:id/events writes keepalive comments while no event
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',

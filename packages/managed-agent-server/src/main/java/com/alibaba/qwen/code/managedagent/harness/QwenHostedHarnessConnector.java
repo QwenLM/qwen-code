@@ -1537,11 +1537,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private List<Map<String, Object>> mcpServers(SessionRecord session) {
-        if (session.agentDefinitionDigest() == null || definitions == null) {
+        if (session.agentDefinitionDigest() == null || definitions == null
+                || WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
             return null;
         }
         List<Map<String, Object>> pins = AgentDefinitionExtensions.mcpServers(
                 definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile());
+        if (!pins.isEmpty() && WorkspaceToolProfiles.SHELL.equals(session.toolProfile())
+                && (!client().capabilities().getFeatures().contains("workspace-shell-mcp/1")
+                        || !client().capabilities().getLifecycleV2Profiles().contains(WorkspaceToolProfiles.SHELL))) {
+            throw new IllegalStateException("Hosted Workspace Shell with MCP is unavailable");
+        }
         return pins.isEmpty() ? null : pins;
     }
 

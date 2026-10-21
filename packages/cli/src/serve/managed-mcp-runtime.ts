@@ -336,6 +336,7 @@ export class ManagedMcpRuntime {
   private readonly connections = new Map<string, Connection>();
   private readonly operations = new Map<string, Operation>();
   private readonly gates = new ManagedOperationGrantGate();
+  private readonly fileHistorySessions = new Set<string>();
   private generation = 0;
   private closing = false;
   private admissionSealed = false;
@@ -423,6 +424,8 @@ export class ManagedMcpRuntime {
         throw new ManagedMcpError('managed_mcp_operation_conflict');
       return structuredClone(existing.view);
     }
+    if (this.fileHistorySessions.has(runtimeSessionId))
+      throw new ManagedMcpError('managed_mcp_file_history_active');
     if (this.closing) throw new ManagedMcpError('managed_mcp_closed');
     this.assertAdmission(control);
     const phase = control.kind.slice(4);
@@ -533,6 +536,27 @@ export class ManagedMcpRuntime {
         entry.runtimeSessionId === runtimeSessionId &&
         (!entry.closed || entry.pending.size > 0),
     );
+  }
+
+  hasPendingWork(runtimeSessionId: string): boolean {
+    return (
+      this.pendingStarts > 0 ||
+      [...this.operations.values()].some(
+        (operation) =>
+          operation.runtimeSessionId === runtimeSessionId &&
+          operation.view.state !== 'settled',
+      ) ||
+      [...this.connections.values()].some(
+        (connection) =>
+          connection.runtimeSessionId === runtimeSessionId &&
+          connection.pending.size > 0,
+      )
+    );
+  }
+
+  setFileHistoryActive(runtimeSessionId: string, active: boolean): void {
+    if (active) this.fileHistorySessions.add(runtimeSessionId);
+    else this.fileHistorySessions.delete(runtimeSessionId);
   }
 
   toolStatus(

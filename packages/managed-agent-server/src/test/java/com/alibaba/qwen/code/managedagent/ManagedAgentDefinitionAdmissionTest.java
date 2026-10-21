@@ -79,6 +79,40 @@ class ManagedAgentDefinitionAdmissionTest {
     @Autowired
     private PlatformTransactionManager transactionManager;
 
+    @Test
+    void ordinaryShellPinsMcpWithoutAdvertisingOrAcceptingPlan() throws Exception {
+        String tenant = tenant();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor", true);
+        String content = FILES_DEFINITION.replace("hosted-workspace-files/1", "hosted-workspace-shell/1")
+                .replace("\"permission_policy\"", "\"mcp_servers\":[{\"server_id\":\"docs\",\"server_revision\":1,"
+                        + "\"definition_digest\":\"" + "a".repeat(64) + "\"}],\"permission_policy\"");
+        JsonNode definition = define(tenant, "definition", content);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getHarness().setApprovalMode("default");
+        properties.setDefinitionToolProfiles(List.of("hosted-workspace-shell/1"));
+        var selected = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
+        selected.setManagedAgentDefinitionStore(definitions);
+        String agent = definition.get("id").asText();
+        assertThat(selected.workspaceSessionOptions(tenant, agent).planModeSupported()).isFalse();
+        var transactions = new TransactionTemplate(transactionManager);
+        var workspace = new WorkspaceSelection("ws-a", ".");
+        assertThatThrownBy(() -> transactions.execute(status -> selected.insertWorkspaceSessionCommand(
+                tenant, "actor", "plan", "plan-digest", agent, null, null, List.of(), null, workspace,
+                null, true, true, true, List.of())))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("unsupported_feature"));
+        String id = transactions.execute(status -> selected.insertWorkspaceSessionCommand(
+                tenant, "actor", "ordinary", "ordinary-digest", agent, null, null, List.of(), null, workspace).sessionId());
+        var session = selected.requireSession(tenant, id);
+        assertThat(session.toolProfile()).isEqualTo("hosted-workspace-shell/1");
+        assertThat(session.agentDefinitionDigest()).isEqualTo(definition.get("digest").asText());
+        assertThat(selected.hasMcpServers(session)).isTrue();
+        assertThat(selected.supportsPlanMode(session)).isFalse();
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({
             "false, default", "false, yolo", "true, default", "true, yolo"

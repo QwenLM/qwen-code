@@ -120,6 +120,7 @@ import {
   parseChildRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { parseMcpConfiguration } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-record.js';
 import {
   ResourceToolResultSegmentStore,
   type DurableToolResultResourceStore,
@@ -2460,6 +2461,15 @@ async function verifyWorkspaceRestore(
     }
   }
   const header = authority.sessionHeader;
+  for (const entry of authority.extensionRecordsInDomain('mcp_configuration')) {
+    const configuration = parseMcpConfiguration(entry.record);
+    if (
+      !session.mcp?.servers.some(
+        (server) => server.serverId === configuration.serverId,
+      )
+    )
+      throw new Error('Hosted MCP configuration is not pinned.');
+  }
   const events = authority.eventsInSequenceRange(1, throughSequence);
   for (const event of events) {
     if (
@@ -2469,6 +2479,7 @@ async function verifyWorkspaceRestore(
         'hook_registration',
         'hook_execution',
         'file_history',
+        ...(session.mcp ? ['mcp_configuration', 'mcp_operation'] : []),
         // H3 families: an admitted child_run or monitor_run journal is
         // exactly what a workspace-profile load must restore, driven by
         // their own record parsers up front.
@@ -3891,8 +3902,14 @@ export function registerHostedHarnessSessionRoutes(
           body?.['mcpServers'] !== undefined)
       )
         mcpServers = parseHostedMcpServers(body?.['mcpServers']);
-      else if (body?.['mcpServers'] !== undefined)
-        throw new Error('MCP requires its explicit profile.');
+      else if (body?.['mcpServers'] !== undefined) {
+        if (
+          toolProfile !== 'hosted-workspace-shell/1' ||
+          !contract.lifecycleV2Profiles?.includes(toolProfile)
+        )
+          throw new Error('MCP requires a supported Workspace profile.');
+        mcpServers = parseHostedMcpServers(body['mcpServers']);
+      }
       if (
         create &&
         mcpServers &&
@@ -4755,7 +4772,9 @@ export function registerHostedHarnessSessionRoutes(
       if (
         !create &&
         lifecycle &&
-        toolProfile === HOSTED_MCP_PROFILE &&
+        (toolProfile === HOSTED_MCP_PROFILE ||
+          (toolProfile === 'hosted-workspace-shell/1' &&
+            definition?.['mcpServers'] !== undefined)) &&
         mcpServers === undefined
       ) {
         mcpServers = parseHostedMcpServers(definition?.['mcpServers']);
@@ -10267,6 +10286,7 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'hosted_file_history_capacity_exceeded');
       }
       const broker =
+        session.mcp?.broker ??
         session.hooks?.broker ??
         new HostedWorkspaceBroker(
           brokerOptions,
@@ -10296,7 +10316,7 @@ export function registerHostedHarnessSessionRoutes(
         });
       } catch (cause) {
         if (!isHostedFileHistoryRefusal(cause)) throw cause;
-        if (!session.hooks) await broker.release();
+        if (!session.hooks && !session.mcp) await broker.release();
         return error(res, 409, 'hosted_file_history_refused');
       }
       await commitHostedFileHistory(session.managed, pending);
@@ -10324,7 +10344,7 @@ export function registerHostedHarnessSessionRoutes(
         pendingUndo: { requestId, promptId },
         undoReceipts: [...(saved.undoReceipts ?? []), undo],
       });
-      if (!session.hooks) await broker.release();
+      if (!session.hooks && !session.mcp) await broker.release();
       await commitHostedFileHistory(session.managed, {
         schemaVersion: 1,
         state: result.state,
@@ -10433,6 +10453,12 @@ export function registerHostedHarnessSessionRoutes(
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (compressionBusy(session))
       return error(res, 409, 'session_context_busy');
+    if (
+      session.mcp &&
+      session.toolProfile === 'hosted-workspace-shell/1' &&
+      session.lifecycleProtocolVersion !== 2
+    )
+      return error(res, 409, 'hosted_lifecycle_required');
     if (
       session.active ||
       session.mcpBusy ||

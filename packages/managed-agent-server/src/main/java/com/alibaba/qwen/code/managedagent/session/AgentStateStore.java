@@ -676,6 +676,8 @@ public interface AgentStateStore {
 
     default boolean supportsPlanMode(SessionRecord session) { return false; }
 
+    default boolean hasMcpServers(SessionRecord session) { return false; }
+
     default Set<String> findApprovalOwners(String tenantId, String actorId,
             List<String> sessionIds) { return Set.of(); }
 
