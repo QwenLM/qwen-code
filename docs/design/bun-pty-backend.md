@@ -168,8 +168,10 @@ leader, its process group, its descendants, and every process in its session
 while the leader is still unreaped. That list covers the foreground jobs an
 interactive shell runs in their own process groups. SIGTERM goes first; after
 a 500 ms grace, SIGKILL goes to a fresh listing, which keeps earlier members
-only while they are still the same process (same start time), so a recycled
-pid is never signalled. The backend then closes the master fd and ends every
+only while they are still the same process (same start time). Once the native
+exit callback marks the leader reaped, signals skip its numeric process-group
+ID and leader PID; identity-checked descendants still receive the cleanup
+signals. The backend then closes the master fd and ends every
 drain path (retry timer, pending exit, hold, write queue). After the failure, `write` and `resize` are no-ops (matching the
 registry guards above them), held bytes still in flight from an in-flight
 read are neither delivered nor re-charged, and a `resume()` replay stops at
