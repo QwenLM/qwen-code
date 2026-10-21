@@ -27,6 +27,16 @@ function npmrcValue(raw: string): string {
     .trim();
 }
 
+function expandEnv(value: string): string {
+  return value.replace(
+    /(\\*)\$\{([^}]+)\}/g,
+    (match, escapes: string, name: string) => {
+      if (escapes.length % 2) return match.slice(1);
+      return escapes + (process.env[name] ?? `\${${name}}`);
+    },
+  );
+}
+
 function readNpmrc(filename: string): Map<string, string> {
   let content: string;
   try {
@@ -42,15 +52,10 @@ function readNpmrc(filename: string): Map<string, string> {
     if (inSection || /^\s*[;#]/.test(line)) continue;
     const match = line.match(/^\s*([^=]+?)\s*=(.*)$/);
     if (!match) continue;
-    const key = npmrcValue(match[1]);
-    const value = npmrcValue(match[2]).replace(
-      /(\\*)\$\{([^}]+)\}/g,
-      (match, escapes: string, name: string) => {
-        if (escapes.length % 2) return match.slice(1);
-        return escapes + (process.env[name] ?? `\${${name}}`);
-      },
+    config.set(
+      expandEnv(npmrcValue(match[1])),
+      expandEnv(npmrcValue(match[2])),
     );
-    config.set(key, value);
   }
   return config;
 }
@@ -66,7 +71,7 @@ export function getGlobalNpmRegistryConfig(packageName: string): {
     const name = suffix.startsWith('//')
       ? suffix
       : suffix.toLowerCase().replace(/(?!^)_/g, '-');
-    env.set(name, value);
+    env.set(expandEnv(name), expandEnv(value.trim()));
   }
   const home = os.homedir();
   const configPath = (value: string) => {
@@ -164,10 +169,8 @@ export function getGlobalNpmRegistryConfig(packageName: string): {
       }
       return { registry, authorization };
     }
-    if (authPath === '/') break;
-    authPath = authPath
-      .slice(0, -1)
-      .slice(0, authPath.slice(0, -1).lastIndexOf('/') + 1);
+    if (authPath === '') break;
+    authPath = authPath.replace(/([^/]+|\/)$/, '');
   }
   return { registry };
 }

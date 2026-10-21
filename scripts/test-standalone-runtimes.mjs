@@ -698,75 +698,73 @@ async function worker(root, node, bun, expectedHost) {
           );
         }
       }
-      if (runtime === 'bun') {
-        for (const mode of ['direct', 'prepared']) {
-          for (const state of ['missing', 'syntax-error', 'launcher-error']) {
-            phase = `${runtime}/${mode}/${state}`;
-            fs.writeFileSync(launcher, wrapper);
-            fs.writeFileSync(
-              path.join(payload, 'lib/package.json'),
-              JSON.stringify({ type: 'module', version: '1.2.3' }),
-            );
-            pack(
-              state === 'launcher-error'
-                ? 'console.log("1.2.3");'
-                : 'export const invalid = ;',
-            );
-            if (state === 'launcher-error') {
-              fs.writeFileSync(launcher, 'export const invalid = ;');
-            }
-            if (state === 'missing') {
-              fs.rmSync(cli);
-            }
-            if (state !== 'syntax-error') {
-              run('tar', [
-                '-czf',
-                archive,
-                '-C',
-                path.dirname(payload),
-                'qwen-code',
-              ]);
-              sums = `${sha(archive)}  ${filename}\n`;
-            }
-            if (state !== 'launcher-error')
-              assert.equal(
-                run(bun, [launcher, '--version']),
-                '1.2.3',
-                'metadata-only positive control',
-              );
-            const dir = path.join(root, `${runtime}-${mode}-cli-${state}`);
-            const live = installFixture(dir, { runtime, target });
-            const before = snapshot(dir);
-            const pending =
-              mode === 'prepared'
-                ? await prepareStandaloneUpdate(live, '1.2.3')
-                : undefined;
-            try {
-              await assert.rejects(
-                pending
-                  ? pending.activate()
-                  : performStandaloneUpdate(live, '1.2.3'),
-                state === 'missing'
-                  ? /Smoke test failed: CLI entry not found at /
-                  : state === 'launcher-error'
-                    ? /Smoke test failed: Bun launcher could not load CLI/
-                    : /Smoke test failed: new binary exited with code 1/,
-              );
-            } finally {
-              pending?.cleanup();
-            }
-            assert.deepEqual(snapshot(dir), before);
-            clean(dir);
-            console.log(
-              JSON.stringify({
-                host,
-                runtime,
-                mode,
-                scenario: `cli-${state}`,
-                rejected: true,
-              }),
-            );
+      for (const mode of ['direct', 'prepared']) {
+        for (const state of ['missing', 'syntax-error', 'launcher-error']) {
+          phase = `${runtime}/${mode}/${state}`;
+          fs.writeFileSync(launcher, wrapper);
+          fs.writeFileSync(
+            path.join(payload, 'lib/package.json'),
+            JSON.stringify({ type: 'module', version: '1.2.3' }),
+          );
+          pack(
+            state === 'launcher-error'
+              ? 'console.log("1.2.3");'
+              : 'export const invalid = ;',
+          );
+          if (state === 'launcher-error') {
+            fs.writeFileSync(launcher, 'export const invalid = ;');
           }
+          if (state === 'missing') {
+            fs.rmSync(cli);
+          }
+          if (state !== 'syntax-error') {
+            run('tar', [
+              '-czf',
+              archive,
+              '-C',
+              path.dirname(payload),
+              'qwen-code',
+            ]);
+            sums = `${sha(archive)}  ${filename}\n`;
+          }
+          if (state !== 'launcher-error')
+            assert.equal(
+              run(binaries[runtime], [launcher, '--version']),
+              '1.2.3',
+              'metadata-only positive control',
+            );
+          const dir = path.join(root, `${runtime}-${mode}-cli-${state}`);
+          const live = installFixture(dir, { runtime, target });
+          const before = snapshot(dir);
+          const pending =
+            mode === 'prepared'
+              ? await prepareStandaloneUpdate(live, '1.2.3')
+              : undefined;
+          try {
+            await assert.rejects(
+              pending
+                ? pending.activate()
+                : performStandaloneUpdate(live, '1.2.3'),
+              state === 'missing'
+                ? /Smoke test failed: CLI entry not found at /
+                : state === 'launcher-error'
+                  ? /Smoke test failed: launcher could not load CLI/
+                  : /Smoke test failed: new binary exited with code 1/,
+            );
+          } finally {
+            pending?.cleanup();
+          }
+          assert.deepEqual(snapshot(dir), before);
+          clean(dir);
+          console.log(
+            JSON.stringify({
+              host,
+              runtime,
+              mode,
+              scenario: `cli-${state}`,
+              rejected: true,
+            }),
+          );
         }
       }
       fs.rmSync(path.join(payload, 'lib/package.json'));

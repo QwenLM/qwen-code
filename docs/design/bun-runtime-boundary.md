@@ -268,6 +268,15 @@ an absolute home. Authorization is removed across registry redirect origins.
 Native fetch does not implement every npm transport option; Node continues to use
 npm for those options, and Bun corporate proxy/CA acceptance remains separate.
 
+Registry and authentication keys as well as values expand environment variables.
+Environment fields are trimmed before expansion; a whitespace-only credential
+overrides the same lower-priority key without restoring its token. Authentication
+walks both slash-terminated and slashless paths, then the bare host, preferring
+the longest match and never crossing to a sibling path or different host.
+Unreadable configuration other than a missing file deliberately fails closed;
+unlike npm, a directory-valued config path is not silently ignored. An explicit
+empty prefix keeps npm's cwd-relative meaning; it does not select a new fallback.
+
 Installed manifests select the archive flavor: Node or the Bun OpenTUI preview.
 Missing runtime in an existing object retains the legacy Node interpretation;
 unknown runtimes and malformed manifest shapes fail before network or allocation.
@@ -283,8 +292,8 @@ identity and CLI version before replacement. Prepared activation rechecks the
 installed identity; an intervening newer installation is preserved. Activation
 uses the existing atomic replacement and rollback mechanisms.
 
-Smoke probes load the actual bundled `cli.js` with `--version`; Bun additionally
-runs the production launcher with `--help` to bypass its metadata-only version
+Smoke probes load the actual bundled `cli.js` with `--version`; both runtimes
+also run the production launcher with `--help` to bypass its metadata-only version
 fast path. All probes share a private empty working directory, preventing project
 or archive Bun preloads. Their copied environment removes Node/Bun startup options,
 ambient CLI version and relaunch overrides, preserving the parent environment
@@ -301,7 +310,10 @@ select Node 24.19.0 and Bun 1.3.14; both hosts exercise both payload interpreter
 with verified local HTTPS. A shipped-layout fixture uses the real installation
 detector and query entry point: Bun reaches the HTTPS registry, while Node
 delegates to the npm executor. Missing or invalid bundled CLI files are rejected
-even when launcher metadata reports the requested version. Unit fixtures own
+even when launcher metadata reports the requested version. A broken launcher is
+also rejected before replacing either the live install or its rollback backup.
+These probes do not exercise the launcher's ordinary-command child-spawn path.
+Unit fixtures own
 their home and generated wrapper directories. The CI mode provisions these pinned tools, verifies
 published checksums/integrity and runs before the existing script tests.
 

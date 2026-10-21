@@ -485,7 +485,7 @@ function spawnAndCapture(
 }
 
 /**
- * Verifies the bundled CLI runs and the Bun launcher can load it.
+ * Verifies the bundled CLI runs and its launcher can load it.
  * Prevents replacing a working install with a broken binary.
  */
 async function smokeTest(
@@ -570,17 +570,15 @@ async function smokeTest(
         'Smoke test failed: CLI version does not match the expected version',
       );
     }
-    if (runtime === 'bun') {
-      // The launcher's --version fast path only reads package metadata.
-      const launcher = await spawnAndCapture(
-        interpreter,
-        [path.join(resolvedInstallDir, 'lib', 'cli-entry.js'), '--help'],
-        10_000,
-        cwd,
-      );
-      if (launcher.exitCode !== 0) {
-        throw new Error('Smoke test failed: Bun launcher could not load CLI');
-      }
+    // The launcher's --version fast path only reads package metadata.
+    const launcher = await spawnAndCapture(
+      interpreter,
+      [path.join(resolvedInstallDir, 'lib', 'cli-entry.js'), '--help'],
+      10_000,
+      cwd,
+    );
+    if (launcher.exitCode !== 0) {
+      throw new Error('Smoke test failed: launcher could not load CLI');
     }
     debugLogger.info(`Smoke test passed: ${version}`);
   } finally {

@@ -516,12 +516,10 @@ describe('standalone-update', () => {
           { mode: 0o755 },
         );
         fs.writeFileSync(path.join(fixture, 'qwen-code', 'lib', 'cli.js'), '');
-        if (options.runtime === 'bun') {
-          fs.writeFileSync(
-            path.join(fixture, 'qwen-code', 'lib', 'cli-entry.js'),
-            'import "./cli.js";',
-          );
-        }
+        fs.writeFileSync(
+          path.join(fixture, 'qwen-code', 'lib', 'cli-entry.js'),
+          'import "./cli.js";',
+        );
       }
       if (options.interpreterPath) {
         const runtime = options.runtime ?? 'node';
