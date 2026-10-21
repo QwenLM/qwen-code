@@ -916,16 +916,36 @@ class ManagedActionsTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
-        properties.getDispatch().setLeaseDuration(Duration.ofSeconds(3));
+        Duration lease = Duration.ofSeconds(3);
+        properties.getDispatch().setLeaseDuration(lease);
         // 4s > leaseDuration/3, so the coordinator's clamp (min → 1s) is
-        // what picks the period. Inverting the clamp (max → 4s) lets the 3s
-        // lease expire before the competing claim. The longer lease leaves
-        // room for a loaded runner to delay a renewal without expiring it.
+        // what picks the period. renewInterval > leaseDuration is deliberate
+        // (asserted below): only then does inverting the clamp (max → 4s)
+        // starve the lease — the first renewal comes after the lease has
+        // lapsed and can no longer be extended, so the competing replica must
+        // win it. HarnessCoordinator rejects this range (renew must be
+        // <= lease/2); ActionResponseCoordinator clamps instead, and this
+        // test pins the clamp. Two seconds of renewal slack per period —
+        // matching current `main` — keep scheduler jitter on a loaded CI
+        // runner from lapsing the lease mid-hold (#14476).
         properties.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(4));
+        // Deriving the hold as lease + 6 clamped renewal periods keeps "hold
+        // outlasts the lease" structural under rescale and leaves six renewal
+        // ticks past the lease deadline, so a renewal loop that stops after
+        // <= 5 successful renewals still loses the claim; at 3 periods only
+        // <= 3 was caught, against 7 for the literal hold this replaced.
+        // The release latch and the hold await scale with the hold, so
+        // widening the lease cannot strand them on a stale literal ceiling.
+        long period = Math.max(1, Math.min(
+                properties.getDispatch().getLeaseRenewInterval().toMillis(),
+                lease.toMillis() / 3));
+        long holdMillis = lease.toMillis() + 6 * period;
+        long holdBudgetMillis = holdMillis + 5_000;
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;
         try {
+            assertThat(properties.getDispatch().getLeaseRenewInterval()).isGreaterThan(lease);
             String tenant = tenant();
             String session = session(tenant);
             ActionJournal journal = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
@@ -946,7 +966,7 @@ class ManagedActionsTest {
                     }
                     calls.incrementAndGet();
                     entered.countDown();
-                    if (!release.await(5, TimeUnit.SECONDS)) {
+                    if (!release.await(holdBudgetMillis, TimeUnit.MILLISECONDS)) {
                         throw new IllegalStateException("held approval was not released");
                     }
                     journal.change("decided", call.getArgument(3));
@@ -956,10 +976,14 @@ class ManagedActionsTest {
             });
             first = new ActionResponseCoordinator(sessions, actions, available, executor, Clock.systemUTC(), properties);
             sibling = new ActionResponseCoordinator(sessions, actions, available, executor, Clock.systemUTC(), properties);
-            long started = System.currentTimeMillis();
             first.dispatch(tenant, session, operation);
-            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
-            await().atMost(Duration.ofSeconds(10)).until(() -> System.currentTimeMillis() - started >= 3500);
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            // The claim precedes resolveAction's entry, so anchoring the hold
+            // to `entered` guarantees the delivery is held past the lease
+            // deadline however long dispatch and claiming took.
+            long heldSince = System.currentTimeMillis();
+            await().atMost(Duration.ofMillis(holdBudgetMillis))
+                    .until(() -> System.currentTimeMillis() - heldSince >= holdMillis);
             var claimed = sessions.findOperation(tenant, session, operation).orElseThrow();
             assertThat(claimed.claimGeneration()).isEqualTo(1);
             assertThat(sessions.claimOperation(tenant, session, operation, "competing-replica", Duration.ofSeconds(1)))
