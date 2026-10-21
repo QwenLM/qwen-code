@@ -62,6 +62,7 @@ import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
 import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
+import type { OpenTuiSubmitOptions } from './live-turn.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
@@ -314,13 +315,25 @@ async function settle() {
 }
 
 /** Run one composer submission and flush the async dispatch. */
-async function submit(text: string, imagePaths?: string[]): Promise<void> {
+async function submit(
+  text: string,
+  imagePaths?: string[],
+  metadata?: Pick<
+    OpenTuiSubmitOptions,
+    'displayText' | 'humanInput' | 'pasteExpansions' | 'restoredDraft'
+  >,
+): Promise<void> {
   const onSubmit = mocks.state.inputProps?.['onSubmit'] as (
     t: string,
     i?: string[],
+    metadata?: OpenTuiSubmitOptions,
   ) => void;
   await act(async () => {
-    onSubmit(text, imagePaths);
+    onSubmit(
+      text,
+      imagePaths,
+      metadata ?? { displayText: text, humanInput: { text } },
+    );
     await Promise.resolve();
   });
 }
@@ -683,6 +696,35 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onQuit).toHaveBeenCalledWith(messages);
   });
 
+  it('applies live workflow opt-out changes to the selected Config', async () => {
+    const apply = vi.fn();
+    const config = {
+      ...CONFIG,
+      setWorkflowKeywordTriggerEnabled: apply,
+    } as unknown as Config;
+    const settings = {
+      merged: { ui: { disableWorkflowKeywordTrigger: true } },
+    } as LoadedSettings;
+    const view = renderApp({ config, settings });
+    await settle();
+    expect(apply).toHaveBeenLastCalledWith(false);
+    view.rerender(
+      <OpenTuiApp
+        config={config}
+        settings={
+          {
+            merged: { ui: { disableWorkflowKeywordTrigger: false } },
+          } as LoadedSettings
+        }
+        logger={null}
+        commands={[]}
+        getSessionStats={getSessionStats}
+      />,
+    );
+    await settle();
+    expect(apply).toHaveBeenLastCalledWith(true);
+  });
+
   it('routes a settings restart through the existing quit cleanup flow', async () => {
     const onQuit = vi.fn();
     const onInterrupt = vi.fn();
@@ -719,8 +761,67 @@ describe('OpenTuiApp shell wiring', () => {
       undefined,
       {
         submittedPrompt: 'summarize the diff',
+        displayText: 'summarize the diff',
+        humanInput: { text: 'summarize the diff' },
       },
     );
+  });
+
+  it('forwards a composer paste snapshot with the display projection into the live queue seam', async () => {
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onSubmitPrompt = vi.fn();
+    renderApp({ onSubmitPrompt });
+    await settle();
+    const displayText = '[Pasted Content 1200 chars]';
+    const body = 'workflow payload'.padEnd(1200, 'x');
+    const pasteExpansions = new Map([[displayText, body]]);
+    const restoredDraft = {
+      modelText: body,
+      displayText,
+      submittedPrompt: displayText,
+      humanInput: { text: displayText },
+      hasUnknownInput: false,
+      pasteExpansions,
+    };
+    await submit(body, undefined, {
+      displayText,
+      humanInput: { text: displayText },
+      pasteExpansions,
+      restoredDraft,
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledWith(body, undefined, {
+      submittedPrompt: body,
+      displayText,
+      humanInput: { text: displayText },
+      pasteExpansions,
+      restoredDraft,
+    });
+  });
+
+  it('does not forward restored composer metadata into a generated slash prompt', async () => {
+    const onSubmitPrompt = vi.fn();
+    renderApp({ onSubmitPrompt });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'submit_prompt',
+      content: 'generated prompt',
+    };
+    await submit('/generate', undefined, {
+      displayText: '/generate',
+      humanInput: { text: '/generate' },
+      restoredDraft: {
+        modelText: '/generate',
+        displayText: '/generate',
+        submittedPrompt: '/generate',
+        humanInput: { text: '/generate' },
+        hasUnknownInput: false,
+      },
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledOnce();
+    const options = onSubmitPrompt.mock.calls[0]?.[2];
+    expect(options).not.toHaveProperty('restoredDraft');
+    expect(options).not.toHaveProperty('humanInput');
+    expect(options).not.toHaveProperty('hasUnknownInput');
   });
 
   it('passes pasted image paths through structured, not folded into the text', async () => {
@@ -735,7 +836,11 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'what is in these',
       ['a.png', 'b.png'],
-      { submittedPrompt: 'what is in these' },
+      {
+        submittedPrompt: 'what is in these',
+        displayText: 'what is in these',
+        humanInput: { text: 'what is in these' },
+      },
     );
   });
 
@@ -751,7 +856,11 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'summarize @src/a.ts',
       undefined,
-      { submittedPrompt: 'summarize @src/a.ts' },
+      {
+        submittedPrompt: 'summarize @src/a.ts',
+        displayText: 'summarize @src/a.ts',
+        humanInput: { text: 'summarize @src/a.ts' },
+      },
     );
   });
 
@@ -830,6 +939,31 @@ describe('OpenTuiApp shell wiring', () => {
     });
     const userMessages = mocks.state.inputProps?.['userMessages'] as string[];
     expect(userMessages).toContain('earlier question');
+  });
+
+  it('uses the live display projection for recall and clears it on a new session', async () => {
+    const raw = '<system-reminder>literal</system-reminder> workflow';
+    const view = renderApp({ userMessages: [raw] });
+    await settle();
+    const host = mocks.state.host as {
+      addItem: (item: unknown, ts: number) => void;
+    };
+    await act(async () => {
+      host.addItem({ type: 'user', text: 'old host history' }, 1000);
+    });
+    expect(mocks.state.inputProps?.['userMessages']).toEqual([raw]);
+    view.rerender(
+      <OpenTuiApp
+        config={CONFIG}
+        settings={SETTINGS}
+        logger={null}
+        commands={[]}
+        getSessionStats={getSessionStats}
+        userMessages={[]}
+      />,
+    );
+    await settle();
+    expect(mocks.state.inputProps?.['userMessages']).toEqual([]);
   });
 
   it('routes a host history write to the live transcript (U-28)', async () => {
@@ -1241,7 +1375,11 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'hello',
       undefined,
-      expect.objectContaining({ submittedPrompt: 'hello' }),
+      expect.objectContaining({
+        submittedPrompt: 'hello',
+        displayText: 'hello',
+        humanInput: { text: 'hello' },
+      }),
     );
   });
 
@@ -1264,7 +1402,18 @@ describe('OpenTuiApp shell wiring', () => {
     await act(async () => {
       (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
     });
-    await submit('explain this', ['/tmp/screenshot.png']);
+    const restoredDraft = {
+      modelText: 'original expanded model copy',
+      displayText: 'explain this',
+      submittedPrompt: 'explain this',
+      humanInput: { text: 'explain this' },
+      hasUnknownInput: false,
+    };
+    await submit('explain this', ['/tmp/screenshot.png'], {
+      displayText: 'explain this',
+      humanInput: { text: 'explain this' },
+      restoredDraft,
+    });
     expect(screen.getByText(/Queued explain this/)).toBeTruthy();
     expect(onSubmitPrompt).not.toHaveBeenCalled();
 
@@ -1275,7 +1424,12 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'explain this',
       ['/tmp/screenshot.png'],
-      expect.objectContaining({ submittedPrompt: 'explain this' }),
+      expect.objectContaining({
+        submittedPrompt: 'explain this',
+        displayText: 'explain this',
+        humanInput: { text: 'explain this' },
+        restoredDraft,
+      }),
     );
   });
 

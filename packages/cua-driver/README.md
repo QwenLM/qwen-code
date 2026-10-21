@@ -44,8 +44,10 @@ $driver = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin\qwen-cu
 & $driver --version
 ```
 
-Expected: `qwen-cua-driver 0.26.0`. If you chose a custom install directory,
-use its absolute executable path in the client commands below.
+Expected: qwen-cua-driver 0.26.0.
+
+If you chose a custom install directory, use its absolute executable path in
+the client commands below.
 
 The released product uses Qwen-owned identities throughout:
 

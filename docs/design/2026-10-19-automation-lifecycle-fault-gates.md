@@ -60,8 +60,11 @@ asserts:
 - the cancelled run reaches `cancelled` from its committed proof, and its
   occurrence settles once;
 - the schedule, future slots, sibling runs and foreground work are untouched;
-- a queued input cancelled before any attempt settles with no model call, and
-  a run that completes naturally keeps its outcome;
+- a queued input cancelled before any attempt settles with no model call. That
+  a run which completes on its own keeps its outcome is delivered: a cancel
+  arriving after settlement is refused with `409 task_action_unavailable`
+  (`The task does not accept a cancellation now.`), and the run stays
+  `completed` with its occurrence `fired`;
 - a retry under the same key reuses the original operation and run — delivered:
   the second `POST /runs` answers the run it already made, records no second
   occurrence and starts no second Turn. That a parked cancel is never
