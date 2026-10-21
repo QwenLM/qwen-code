@@ -245,27 +245,36 @@ public class WorkspaceStorageGuard {
     }
 
     void registerCreated(String tenantId, String storageId, String operationId) {
-        Path path = createdRoots.resolve(tenantId, storageId, true);
-        if (path == null) {
+        var root = createdRoots.registration(tenantId, storageId, true);
+        if (root == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        register(tenantId, storageId, operationId, path);
+        register(tenantId, storageId, operationId, root.path(), root.expectedIdentity());
     }
 
     public void register(String tenantId, String storageId, String operationId) {
-        register(tenantId, storageId, operationId, root(tenantId, storageId));
+        register(tenantId, storageId, operationId, root(tenantId, storageId), null);
     }
 
-    private void register(String tenantId, String storageId, String operationId, Path root) {
+    private void register(String tenantId, String storageId, String operationId, Path root, Identity expectedIdentity) {
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
         Identity identity = identity(root);
+        if (expectedIdentity != null && !expectedIdentity.equals(identity)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
         String key = LocalStorageOwners.physicalKey(identity);
         Registration prepared = transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             requireNonOverlapping(identity);
+            if (expectedIdentity != null) {
+                Registration existing = row(key, true);
+                if (existing != null && (!tenantId.equals(existing.tenantId()) || !storageId.equals(existing.storageId()))) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            }
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             jdbc.update("INSERT INTO ma_storage_owner"
@@ -780,7 +789,7 @@ public class WorkspaceStorageGuard {
         }
     }
 
-    private Path configuredRoot(String tenantId, String storageId) {
+    Path configuredRoot(String tenantId, String storageId) {
         Path root = roots.get(new Storage(tenantId, storageId));
         return root == null ? createdStorageRoot(tenantId, storageId) : root;
     }
@@ -793,7 +802,7 @@ public class WorkspaceStorageGuard {
         return root;
     }
 
-    private Identity identity(Path root) {
+    Identity identity(Path root) {
         try {
             return identities.read(root);
         } catch (IOException | RuntimeException error) {

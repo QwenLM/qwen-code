@@ -1,10 +1,12 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.apache.commons.lang3.StringUtils;
@@ -26,10 +28,12 @@ final class WorkspaceCreationRoots {
     private final JdbcTemplate jdbc;
     private final Path base;
     private final Object baseKey;
+    private final WorkspaceLocalDirectories localDirectories;
     private static final ObjectMapper JSON = JsonMapper.builder().build();
 
     WorkspaceCreationRoots(JdbcTemplate jdbc, ManagedAgentProperties properties) {
         this.jdbc = jdbc;
+        localDirectories = new WorkspaceLocalDirectories(properties);
         var broker = properties.getRuntimeBroker();
         String configured = broker.getWorkspaceCreationRoot();
         if (StringUtils.isBlank(configured)) {
@@ -61,7 +65,12 @@ final class WorkspaceCreationRoots {
     }
 
     Path resolve(String tenant, String storage, boolean pending) {
-        if (!enabled() || storage == null || !storage.matches("created-[a-f0-9]{64}")) {
+        Root root = registration(tenant, storage, pending);
+        return root == null ? null : root.path();
+    }
+
+    Root registration(String tenant, String storage, boolean pending) {
+        if (storage == null || !storage.matches("created-[a-f0-9]{64}")) {
             return null;
         }
         String key = storage.substring("created-".length());
@@ -93,6 +102,15 @@ final class WorkspaceCreationRoots {
             throw WorkspaceExecutionStore.unavailable();
         }
         try {
+            if (details.localRoot() != null) {
+                Path root = Path.of(details.localRoot().root());
+                localDirectories.requireStorageRoot(root);
+                directoryKey(root);
+                return new Root(root, details.localRoot());
+            }
+            if (!enabled()) {
+                return null;
+            }
             if (!Objects.equals(baseKey, directoryKey(base))) {
                 throw WorkspaceExecutionStore.unavailable();
             }
@@ -100,8 +118,8 @@ final class WorkspaceCreationRoots {
             Path root = tenantRoot.resolve(key);
             directoryKey(tenantRoot);
             directoryKey(root);
-            return root;
-        } catch (IOException error) {
+            return new Root(root, null);
+        } catch (IOException | ManagedAgentException error) {
             throw WorkspaceExecutionStore.unavailable(error);
         }
     }
@@ -137,13 +155,25 @@ final class WorkspaceCreationRoots {
                     || value.displayName().codePoints().anyMatch(Character::isISOControl)
                     || !("workspace-" + receiptKey).equals(value.workspaceId())
                     || value.sourceWorkspaceId() == null && (!("created-" + receiptKey).equals(value.storageId())
-                        || value.sourceGeneration() != null || value.cwdRelative() != null)
+                        || value.sourceGeneration() != null
+                        || value.localRoot() == null && value.cwdRelative() != null
+                        || value.localRoot() != null && (value.cwdRelative() == null
+                            || !value.cwdRelative().equals(com.alibaba.qwen.code.runtimebroker.managedworkspace
+                                .WorkspaceRelativePath.normalize(value.cwdRelative()))))
                     || value.sourceWorkspaceId() != null && (StringUtils.isBlank(value.sourceWorkspaceId())
                         || value.sourceGeneration() == null || value.sourceGeneration() < 1
-                        || StringUtils.isBlank(value.storageId()) || value.cwdRelative() == null
+                        || value.localRoot() != null || StringUtils.isBlank(value.storageId()) || value.cwdRelative() == null
                         || !value.cwdRelative().equals(com.alibaba.qwen.code.runtimebroker.managedworkspace
                             .WorkspaceRelativePath.normalize(value.cwdRelative())))) {
                 throw new IllegalArgumentException();
+            }
+            if (value.localRoot() != null) {
+                var identity = value.localRoot();
+                Path root = Path.of(identity.root());
+                if (!root.isAbsolute() || root.getParent() == null || !root.equals(root.normalize())
+                        || StringUtils.isAnyBlank(identity.hostId(), identity.device(), identity.inode(), identity.birthTime())) {
+                    throw new IllegalArgumentException();
+                }
             }
             return value;
         } catch (IOException | RuntimeException error) {
@@ -176,10 +206,18 @@ final class WorkspaceCreationRoots {
         }
     }
 
+    record Root(Path path, WorkspaceStorageGuard.Identity expectedIdentity) {}
+
     record Details(String workspaceId, String storageId, String displayName, String registrationId,
-            String sourceWorkspaceId, Long sourceGeneration, String cwdRelative) {
+            String sourceWorkspaceId, Long sourceGeneration, String cwdRelative,
+            @JsonInclude(JsonInclude.Include.NON_NULL) WorkspaceStorageGuard.Identity localRoot) {
         Details(String workspaceId, String storageId, String displayName, String registrationId) {
-            this(workspaceId, storageId, displayName, registrationId, null, null, null);
+            this(workspaceId, storageId, displayName, registrationId, null, null, null, null);
+        }
+
+        Details(String workspaceId, String storageId, String displayName, String registrationId,
+                String sourceWorkspaceId, Long sourceGeneration, String cwdRelative) {
+            this(workspaceId, storageId, displayName, registrationId, sourceWorkspaceId, sourceGeneration, cwdRelative, null);
         }
     }
 }

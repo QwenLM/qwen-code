@@ -108,6 +108,7 @@ import {
   workspaceRegistrationId,
   WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
+import { readDaemonDiscoveries } from './daemon-discovery.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import {
   ENSURE_KEEP_ALIVE_MS,
@@ -9953,6 +9954,22 @@ describe('runQwenServe runtime startup failures', () => {
         'Restored workspace',
       ]);
       expect(restoredRemovable).toEqual([false, false, true]);
+      // `qwen daemon restart` replays only the explicit startup workspaces;
+      // the restored registration stays a removable registration.
+      expect(
+        readDaemonDiscoveries().entries.find(
+          (entry) => entry.record.primaryWorkspace === canonicalPrimary,
+        )?.record,
+      ).toMatchObject({
+        workspaces: [
+          canonicalPrimary,
+          canonicalExplicitSecondary,
+          canonicalRestoredSecondary,
+        ],
+        startupWorkspaces: [canonicalPrimary, canonicalExplicitSecondary],
+        web: false,
+        requireAuth: false,
+      });
       expect(restoredRegistrationIds).toEqual([
         [],
         [workspaceRegistrationId(canonicalExplicitSecondary)],
