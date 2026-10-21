@@ -46,6 +46,10 @@ Then enter:
 3. If Qwen Code was already running before you added the server, restart it in
    the same project. Then ask the model to use tools from that server.
 
+In OpenTUI, **Reconnect** reports whether discovery reached a connected server.
+If it did not, the result includes the current connection status and the most
+recently recorded connection error, when available.
+
 ## Where configuration is stored (scopes)
 
 Most users only need these two scopes:
@@ -392,10 +396,6 @@ OAuth tokens are automatically:
 
 Use the `/mcp` dialog within Qwen Code to inspect MCP servers and manage
 authentication interactively.
-
-In OpenTUI, **Reconnect** reports whether discovery reached a connected server.
-If it did not, the result includes the current connection status and the most
-recently recorded connection error, when available.
 
 ### Tool filtering (allow/deny tools per server)
 
