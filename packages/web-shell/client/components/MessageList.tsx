@@ -4243,8 +4243,8 @@ export const MessageList = memo(
     //   5. Session restore / reconnect — during history replay
     //      (`catchingUp === true`), all auto-scrolling is suppressed to
     //      avoid fighting the rapidly replaying transcript. Once replay
-    //      finishes (`catchingUp` flips to falsy), a single scroll-to-
-    //      bottom fires so the user lands at the latest content.
+    //      finishes (`catchingUp` flips to falsy), scroll to the bottom
+    //      unless the user paused follow to read earlier content.
     //
     //   6. Short content — if the content doesn't overflow the container
     //      (no scrollbar), scrollToBottom is a no-op. This avoids a
@@ -5669,11 +5669,13 @@ export const MessageList = memo(
     }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
-    // replay just finished. Scroll to bottom once so the user sees the
-    // latest content without the viewport fighting the replay.
+    // replay just finished. Preserve a reading pause across reconnects.
     useLayoutEffect(() => {
-      if (prevCatchingUp.current && !catchingUp) {
-        followPausedByUserRef.current = false;
+      if (
+        prevCatchingUp.current &&
+        !catchingUp &&
+        !followPausedByUserRef.current
+      ) {
         setShouldFollow(true);
         scrollToBottom('auto');
       }
