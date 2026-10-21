@@ -450,7 +450,9 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
       currentLive = live;
       return (
         <OpenTuiInputPrompt
-          onSubmit={(text, images, metadata) => live.submit(text, images, metadata)}
+          onSubmit={(text, images, metadata) =>
+            live.submit(text, images, metadata)
+          }
           userMessages={live.items.flatMap((item) =>
             item.kind === 'user' ? [item.recallText ?? item.text] : [],
           )}
@@ -522,7 +524,9 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
         if (!visible) return null;
         return (
           <OpenTuiInputPrompt
-            onSubmit={(text, images, metadata) => live.submit(text, images, metadata)}
+            onSubmit={(text, images, metadata) =>
+              live.submit(text, images, metadata)
+            }
             userMessages={[action === 'recall' ? known : unknown]}
             streaming={live.streaming}
             queueLength={live.messageQueue.length}
