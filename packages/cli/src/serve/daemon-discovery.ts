@@ -90,6 +90,64 @@ export function daemonDiscoveryFilePath(
   return path.join(dir, `${RECORD_PREFIX}${port}${RECORD_SUFFIX}`);
 }
 
+export function daemonTokenFilePath(
+  port: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): string {
+  return path.join(dir, `${RECORD_PREFIX}${port}.token`);
+}
+
+/**
+ * Opt-in token persistence. The file sits beside the 0600 discovery record,
+ * is readable only by its owner, and is never referenced by the record or
+ * written to the daemon log.
+ */
+export function writeDaemonToken(
+  port: number,
+  token: string,
+  dir: string = resolveDaemonDiscoveryDir(),
+): string {
+  if (token.length === 0) {
+    throw new TypeError('A daemon token cannot be empty.');
+  }
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const target = daemonTokenFilePath(port, dir);
+  fs.writeFileSync(target, `${token}\n`, { mode: 0o600 });
+  if (process.platform !== 'win32') {
+    try {
+      fs.chmodSync(target, 0o600);
+    } catch {
+      // Filesystems without POSIX modes cannot enforce this.
+    }
+  }
+  return target;
+}
+
+export function readDaemonToken(
+  port: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): string | undefined {
+  try {
+    return fs.readFileSync(daemonTokenFilePath(port, dir), 'utf8').trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+export function removeDaemonToken(
+  port: number,
+  dir: string = resolveDaemonDiscoveryDir(),
+): boolean {
+  try {
+    fs.unlinkSync(daemonTokenFilePath(port, dir));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 /**
  * The URL a local client can dial. A wildcard bind (`0.0.0.0` / `[::]`) is
  * reachable, but not addressable as written; probe it through loopback the

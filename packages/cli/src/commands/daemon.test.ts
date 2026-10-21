@@ -88,7 +88,7 @@ describe('qwen daemon command', () => {
     expect(typeof daemonCommand.handler).toBe('function');
   });
 
-  it('registers start, status, logs, stop and restart subcommands', () => {
+  it('registers start, status, logs, stop, restart and token subcommands', () => {
     const mockYargs = {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
@@ -101,7 +101,7 @@ describe('qwen daemon command', () => {
     builder(mockYargs as unknown as Argv);
 
     expect(mockYargs.command.mock.calls.map((call) => call[0].command)).toEqual(
-      ['start', 'status', 'logs', 'stop', 'restart'],
+      ['start', 'status', 'logs', 'stop', 'restart', 'token'],
     );
   });
 
