@@ -704,6 +704,30 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onQuit).toHaveBeenCalledWith(messages);
   });
 
+  it('routes a settings restart through the existing quit cleanup flow', async () => {
+    const onQuit = vi.fn();
+    const onInterrupt = vi.fn();
+    const onPopQueue = vi.fn();
+    renderApp({ onQuit, onInterrupt, onPopQueue });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'settings' },
+    } satisfies OpenTuiDispatchOutcome;
+
+    await submit('/settings');
+    const restart = mocks.state.dialogProps?.['onRestartRequest'];
+    expect(restart).toBeTypeOf('function');
+    act(() => (restart as () => void)());
+
+    expect(onPopQueue).toHaveBeenCalledOnce();
+    expect(onInterrupt).toHaveBeenCalledOnce();
+    expect(onQuit).toHaveBeenCalledWith([]);
+    expect(onInterrupt.mock.invocationCallOrder[0]).toBeLessThan(
+      onQuit.mock.invocationCallOrder[0],
+    );
+  });
+
   it('sends a non-slash input (dispatcher returns false) as a plain prompt', async () => {
     const onSubmitPrompt = vi.fn();
     renderApp({ onSubmitPrompt });

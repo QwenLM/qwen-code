@@ -1077,6 +1077,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 notify={notify}
                 fillInput={fillComposer}
                 onSelectSetting={handleSelectSetting}
+                onRestartRequest={() =>
+                  applyOutcome({ kind: 'quit', messages: [] })
+                }
                 onApprovalModeChanged={adoptApprovalMode}
                 availableTerminalHeight={dialogRegionHeight}
               />

@@ -157,6 +157,10 @@ export function createJavaManagedAgentProvider(
       list: (sessionId, request) =>
         client.getSessionSkills(sessionId, request.signal),
     },
+    mcp: {
+      list: (sessionId, request) =>
+        client.getSessionMcp(sessionId, request.signal),
+    },
     tasks: {
       list: (sessionId, request) =>
         client.listTasks(
@@ -235,6 +239,9 @@ export function createJavaManagedAgentProvider(
                 approvalRevision: result.approvalRevision,
                 availableApprovalModes: result.availableApprovalModes,
                 supported: result.supported,
+                ...(result.liveSupported === true
+                  ? { liveSupported: true }
+                  : {}),
                 ...(typeof result.planMode === 'boolean'
                   ? { planMode: result.planMode }
                   : {}),
@@ -494,6 +501,8 @@ export function createJavaManagedAgentProvider(
                   page.capabilities?.workspaceCreation === true,
                 canSelectDirectory:
                   page.capabilities?.workspaceDirectorySelection === true,
+                canImportLocalDirectory:
+                  page.capabilities?.localDirectoryImport === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };

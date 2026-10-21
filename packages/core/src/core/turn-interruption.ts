@@ -5,7 +5,10 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { isSystemReminderContent } from './environmentContext.js';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+} from './environmentContext.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 
 /**
@@ -46,8 +49,8 @@ export type TurnInterruption =
     };
 
 // Continue detection only walks the final run of trailing user/model entries.
-// A bounded tail avoids deep-cloning long daemon histories for each probe while
-// still leaving ample room for repeated failed sends and tool-result retries.
+// Limit meaningful recovery history copied per probe; trailing notifications
+// and agent envelopes are retained separately so retry cannot discard them.
 export const TURN_INTERRUPTION_HISTORY_TAIL_COUNT = 50;
 
 export function completedToolCallBoundary(
@@ -68,6 +71,16 @@ export function completedToolCallBoundary(
     }
   }
   return Math.max(0, ...boundaries.values());
+}
+
+export function recoveryHistoryBoundary(
+  history: Content[],
+  toolCallIds?: readonly string[],
+): number {
+  let prefix = getStartupContextLength(history, { includeCompressed: true });
+  // A pending call is structural for rewind, but still needs recovery.
+  if (history[prefix - 1]?.parts?.some((part) => part.functionCall)) prefix--;
+  return Math.max(prefix, completedToolCallBoundary(history, toolCallIds));
 }
 
 // Envelope the background registries wrap a notification's `modelText` in.
@@ -286,7 +299,7 @@ export function detectTurnInterruption(
   completedToolCallIds?: readonly string[],
   trailingSystemNotifications?: number,
 ): TurnInterruption {
-  const boundary = completedToolCallBoundary(history, completedToolCallIds);
+  const boundary = recoveryHistoryBoundary(history, completedToolCallIds);
   // Trailing background notifications are not an unfinished turn: the daemon
   // persists each one before its automatic turn runs, so a notification whose
   // turn never ran leaves a `user` tail that nothing will ever answer. Left in

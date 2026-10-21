@@ -29,9 +29,12 @@ export const TRAJECTORY_FILTER_MESSAGES_EN: Record<string, FilterMessage> = {
   'trajectory.filter.status.running': 'In progress',
   'trajectory.filter.status.unknown': 'Unknown',
   'trajectory.filter.count': (v) =>
-    `${v?.count ?? 0} matching ${recordNoun(v?.count)}`,
+    `${v?.count ?? 0} ${Number(v?.count ?? 0) === 1 ? 'match' : 'matches'}`,
   'trajectory.filter.position': (v) =>
-    `Result ${v?.position ?? 0} / ${v?.count ?? 0}`,
+    `${v?.position ?? 0} of ${v?.count ?? 0}`,
+  'trajectory.filter.button': 'Filter',
+  'trajectory.filter.active': (v) => `${v?.count ?? 0} active`,
+  'trajectory.filter.clearSearch': 'Clear search',
   'trajectory.filter.previous': 'Previous',
   'trajectory.filter.next': 'Next',
   'trajectory.filter.clear': 'Clear filters',
@@ -58,8 +61,10 @@ export const TRAJECTORY_FILTER_MESSAGES_ZH: Record<string, FilterMessage> = {
   'trajectory.filter.status.running': '进行中',
   'trajectory.filter.status.unknown': '未知',
   'trajectory.filter.count': (v) => `匹配 ${v?.count ?? 0} 条`,
-  'trajectory.filter.position': (v) =>
-    `第 ${v?.position ?? 0} / ${v?.count ?? 0} 条`,
+  'trajectory.filter.position': (v) => `${v?.position ?? 0} / ${v?.count ?? 0}`,
+  'trajectory.filter.button': '筛选',
+  'trajectory.filter.active': (v) => `${v?.count ?? 0} 项生效`,
+  'trajectory.filter.clearSearch': '清除搜索',
   'trajectory.filter.previous': '上一条',
   'trajectory.filter.next': '下一条',
   'trajectory.filter.clear': '清除筛选',
