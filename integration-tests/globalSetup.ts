@@ -93,9 +93,9 @@ let originalMemoryContent: string | null = null;
  * the files without gambling on where CI's auth comes from.
  */
 async function carryOverHostConfig() {
-  // CI supplies auth through the environment. A pool host's live settings can
-  // select an auth type that conflicts with the tests' credentials, failing
-  // every spawned CLI; keep CI runs independent of that state.
+  // CI supplies auth through the environment. A pool host's live settings are
+  // not a fixture: a corrupt settings.json makes every spawned CLI fail at
+  // startup; keep CI runs independent of that state.
   if (process.env['CI']) return;
   for (const fileName of ['settings.json', 'oauth_creds.json']) {
     await copyFile(
