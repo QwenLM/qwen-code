@@ -14,6 +14,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
+import { buildPermissionCheckContext } from '../core/permission-helpers.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { parseCron, nextFireTime } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
@@ -151,12 +152,16 @@ class CronCreateInvocation extends BaseToolInvocation<
     const pm = this.config.getPermissionManager?.();
     const cwd = this.config.getTargetDir();
     if (mode === ApprovalMode.AUTO) {
-      // A tool-only evaluation matches only rules without a specifier: the
-      // bare rule that skips the classifier.
-      const toolDecision = await pm?.evaluate({
-        toolName: ToolNames.CRON_CREATE,
-        cwd,
-      });
+      // The same context the permission flow evaluated for this call, so a
+      // rule that took the allow fast path there — bare, or scoped to these
+      // parameters (`cron_create(prompt:…)`) — is seen here too.
+      const toolDecision = await pm?.evaluate(
+        buildPermissionCheckContext(
+          ToolNames.CRON_CREATE,
+          this.params as unknown as Record<string, unknown>,
+          cwd,
+        ),
+      );
       if (toolDecision !== 'allow') return;
     }
     const decision = await pm?.evaluate({

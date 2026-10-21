@@ -20,6 +20,8 @@ import { Storage } from '../config/storage.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from '../permissions/types.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
+import { buildPermissionCheckContext } from '../core/permission-helpers.js';
 
 let tmpDir: string;
 
@@ -168,10 +170,12 @@ describe('CronCreateTool gate', () => {
       const result = await tool.build(params).execute(signal());
       expect(result.error).toBeUndefined();
       expect(config._scheduler.list()[0]?.gateApproved).toBe(true);
-      expect(evaluate).toHaveBeenCalledWith({
-        toolName: 'cron_create',
-        cwd: tmpDir,
-      });
+      expect(evaluate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolName: 'cron_create',
+          toolParams: expect.objectContaining({ gate: './probe.sh' }),
+        }),
+      );
       expect(evaluate).not.toHaveBeenCalledWith(
         expect.objectContaining({ toolName: 'monitor' }),
       );
@@ -179,6 +183,42 @@ describe('CronCreateTool gate', () => {
 
     it('refuses a gate that a bare cron_create allow rule let through unseen', async () => {
       withRules(rules('allow', 'ask'));
+      const result = await tool.build(params).execute(signal());
+      expect(result.error?.message).toContain(
+        'The gate command was not confirmed',
+      );
+      expect(config._scheduler.list()).toHaveLength(0);
+    });
+
+    it('sees a parameter-scoped rule the way the permission flow did', async () => {
+      // A real permission manager: `cron_create(prompt:…)` grants this very
+      // call, so the flow took the allow fast path and no classifier ran. A
+      // name-only lookup would miss it; the gate must still pass on its own.
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [
+          'cron_create(prompt:Handle the events below.)',
+        ],
+        getPermissionsAsk: () => undefined,
+        getPermissionsDeny: () => undefined,
+        getProjectRoot: () => tmpDir,
+        getCwd: () => tmpDir,
+        getApprovalMode: () => 'auto',
+      });
+      pm.initialize();
+      expect(
+        await pm.evaluate(
+          buildPermissionCheckContext('cron_create', params, tmpDir),
+        ),
+      ).toBe('allow');
+      expect(await pm.evaluate({ toolName: 'cron_create', cwd: tmpDir })).toBe(
+        'default',
+      );
+      config._scheduler.destroy();
+      config = makeConfig({
+        mode: ApprovalMode.AUTO,
+        evaluate: (ctx) => pm.evaluate(ctx),
+      });
+      tool = new CronCreateTool(config);
       const result = await tool.build(params).execute(signal());
       expect(result.error?.message).toContain(
         'The gate command was not confirmed',

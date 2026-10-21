@@ -181,8 +181,11 @@ in the existing `buildScheduledTaskRunPrompt` header.
   (`quiet ×41 · last delivered 13:05 · 0 failures`).
 - "Run now" on a gated task sends a manual-run prompt that asks the model to
   run the gate as an ordinary shell command and then follow the task prompt
-  with the output as data, or to say that the gate printed nothing. The usual
-  tool approval applies; the scheduler is not involved, as today.
+  with the output as data only when the command exited 0 and printed
+  something; to say that the gate printed nothing when it exited 0 silently;
+  and to report the failure and stop on a non-zero exit, a timeout or a
+  cancellation — the runner's three outcomes. The usual tool approval
+  applies; the scheduler is not involved, as today.
 
 ## 5. Design
 
