@@ -857,10 +857,10 @@ export function WorkspaceSection({
               >
                 {workspaceLabel(workspace)}
               </span>
+              {executionLabel && (
+                <span className={styles.badge}>{executionLabel}</span>
+              )}
             </span>
-            {executionLabel && (
-              <span className={styles.badge}>{executionLabel}</span>
-            )}
             {!workspace.trusted && (
               <span className={styles.badge}>{untrustedLabel}</span>
             )}
