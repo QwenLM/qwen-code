@@ -358,6 +358,7 @@ export interface ManagedAgentProvider {
       supported: boolean;
       canCreateWorkspace?: boolean;
       canSelectDirectory?: boolean;
+      canImportLocalDirectory?: boolean;
       supportsApprovalModeSelection?: boolean;
     }>;
     get(
@@ -369,11 +370,14 @@ export interface ManagedAgentProvider {
         displayName: string;
         sourceWorkspaceId?: string;
         cwdRelative?: string;
+        localPath?: string;
       },
       options: ManagedAgentCommandOptions,
     ): Promise<ManagedAgentWorkspace>;
     directories?(
-      request: { workspaceId: string; cwdRelative: string },
+      request:
+        | { workspaceId: string; cwdRelative: string; localPath?: never }
+        | { localPath: string; workspaceId?: never; cwdRelative?: never },
       options: ManagedAgentRequestOptions,
     ): Promise<components['schemas']['WebShellWorkspaceDirectoryPage']>;
     getSessionOptions?(

@@ -647,9 +647,9 @@ Harness or Runtime Broker credentials.
 
 ### Native macOS Workspace development
 
-The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable same-boot worker adoption. Set `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`; whole-host reboot recovery remains Linux-only. Keep durable local mode and verified Workspace recovery enabled, register the storage offline using the maintenance command below, and configure the same mount in the Java service. A missing registration still refuses tool execution.
+The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable same-boot worker adoption. Set `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`; whole-host reboot recovery remains Linux-only. Keep durable local mode and verified Workspace recovery enabled. Use the local directory import below for automatic registration, or register storage offline using the maintenance command and configure the same mount in the Java service. A missing registration still refuses tool execution.
 
-For the Vite entry, set `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true` and `VITE_MANAGED_AGENT_ACTOR_ID` to your development actor. On the loopback Java service, set `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id` and grant that actor access to the registered Workspace. Configure `VITE_MANAGED_AGENT_MODEL_PRESETS` with published AgentDefinition IDs for new-task model choices; the server's `model-catalog` supplies model choices within bound Sessions. These settings supplement the Broker and Hosted Harness wiring below; enabling selectors alone does not enable tools.
+For the Vite entry, set `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true` and `VITE_MANAGED_AGENT_ACTOR_ID` to your development actor. On the loopback Java service, set `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`; local directory import grants the importing actor automatically, while offline registration requires a separate Workspace grant. Configure `VITE_MANAGED_AGENT_MODEL_PRESETS` with published AgentDefinition IDs for new-task model choices; the server's `model-catalog` supplies model choices within bound Sessions. These settings supplement the Broker and Hosted Harness wiring below; enabling selectors alone does not enable tools.
 
 macOS storage identity combines `IOPlatformUUID` with the original device, inode and nanosecond birth time from native `stat`, cross-checked against the JDK directory identity. Worker identity also checks `kern.bootsessionuuid` and the exact process start instant before re-attestation. Preserve the SQL database, private Runtime state directory and credential key across Broker restarts. macOS handles use explicit `macos` namespace labels; older Java readers refuse them. A different boot is refused even for operator stop attestation. Background Shell, Monitor, command Hooks and Linux CSI retain their existing platform restrictions. The published reference distribution's Linux qualification is unchanged.
 
@@ -719,6 +719,28 @@ An uncertain response must be retried with the same key and name. The page prese
 
 ### Select an existing local project directory
 
+For a trusted single-user deployment bound to loopback, enable
+`QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED=true` alongside Workspace files,
+durable local-process execution, verified recovery, and the trusted actor header.
+Then **Workspace → Choose existing directory** browses this computer directly,
+without a pre-registered parent or grant. Import keeps the project in place,
+automatically registers its projects parent outside Git worktrees, grants the
+current actor OWNER access, and sets the project as the initial working directory.
+The parent shares file access and its physical-owner lease across projects; this
+is not a filesystem sandbox. Existing owned roots are reused while sessions run.
+Private Runtime state and creation roots must stay outside imported parents.
+Remote listeners and signed/shared deployments cannot enable this local feature.
+
+The actor-authenticated directory query accepts `localPath` (empty starts at the
+host home directory), and create accepts an absolute `localPath` with the name
+and idempotency key. These fields are exclusive with Workspace-relative source
+fields. `localDirectoryImport` advertises the capability independently; pending
+receipts pin native root identity and completed receipts resolve imported roots
+after restart or disabling further imports. Neither retry nor restart repairs a
+missing/foreign marker or restores revoked access. See the
+[local import design](../../docs/design/2026-10-21-managed-local-directory-import.md).
+
+For other deployments, the existing authorized-root flow remains available.
 With verified LOCAL storage enabled, **New workspace → Choose existing directory** browses the Linux or macOS execution host through Java. Select an ACTIVE ROOT Workspace you own, then choose an existing project beneath its authorized root. Administrators can register and grant a projects parent directory once; the root must remain outside all Git worktrees. The selected project stays in place and becomes the new Workspace's persistent default working directory. Other Workspaces on that storage retain the same shared file-access scope and physical-owner lease; selecting a subdirectory does not create filesystem isolation.
 
 `POST /api/agent/web-shell/v1/workspaces/directories/query` accepts `workspaceId` and `cwdRelative`, rechecks OWNER access and native storage, and returns at most 100 real immediate child directories (scanning at most 1024 entries). Only this authorized route discloses its execution-host root path. The existing create route accepts `sourceWorkspaceId` and `cwdRelative` together to bind a new logical Workspace to the verified source storage, configuration, and policy. It does not create directories or re-register storage. The creation receipt pins source generation and directory; pending retries refuse source changes or revoked ownership. Completed replay checks the new Workspace's current access. WebShell summaries expose `defaultCwdRelative` and `canSelectDirectory`; missing values mean `.` and unsupported, respectively. The page advertises `workspaceDirectorySelection` separately from empty creation and preserves the selected directory across retries, refresh, and reselect. See the [bilingual design](../../docs/design/2026-10-16-managed-workspace-directory-selection.md).
