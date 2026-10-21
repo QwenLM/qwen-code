@@ -85,6 +85,7 @@ public final class ManagedAgentPreflight {
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
         checks.add(harnessCheck(properties));
+        checks.add(credentialsFileCheck(properties));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
@@ -340,19 +341,48 @@ public final class ManagedAgentPreflight {
                 null);
     }
 
+    static Check credentialsFileCheck(ManagedAgentProperties properties) {
+        String file = properties.getHarness().getCredentialsFile();
+        if (StringUtils.isBlank(file)) {
+            return new Check("credentials", Status.SKIP,
+                    "Harness credentials configured directly", null);
+        }
+        try {
+            Set<PosixFilePermission> permissions =
+                    Files.getPosixFilePermissions(Path.of(file));
+            if (permissions.contains(PosixFilePermission.GROUP_READ)
+                    || permissions.contains(PosixFilePermission.OTHERS_READ)) {
+                return new Check("credentials", Status.WARN,
+                        file + " is group- or world-readable",
+                        "chmod 600 " + file);
+            }
+        } catch (IOException | UnsupportedOperationException error) {
+            return new Check("credentials", Status.WARN,
+                    file + ": cannot inspect permissions", null);
+        }
+        return new Check("credentials", Status.PASS, file, null);
+    }
+
     static Check harnessCheck(ManagedAgentProperties properties) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
         if (!harness.isEnabled()) {
             return new Check("harness", Status.SKIP, "disabled", null);
         }
+        String file = harness.getCredentialsFile();
+        String tokenSetting = StringUtils.isBlank(file)
+                ? "QWEN_MANAGED_AGENT_HARNESS_TOKEN"
+                : "QWEN_SERVER_TOKEN in " + file;
         if (StringUtils.isBlank(harness.getToken())) {
             return new Check("harness", Status.FAIL, "token is empty",
-                    "set QWEN_MANAGED_AGENT_HARNESS_TOKEN");
+                    "set " + tokenSetting);
         }
         if (!isDigest(harness.getCapabilityDigest())) {
             return new Check("harness", Status.FAIL,
                     "capability digest is not sha256:<64 lowercase hex>",
-                    "set QWEN_MANAGED_AGENT_CAPABILITY_DIGEST");
+                    "set " + (StringUtils.isBlank(file)
+                            ? "QWEN_MANAGED_AGENT_CAPABILITY_DIGEST"
+                            : "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in "
+                                    + file));
         }
         String baseUrl = harness.getBaseUrl();
         if (StringUtils.isBlank(baseUrl)) {
@@ -376,7 +406,7 @@ public final class ManagedAgentPreflight {
                 return new Check("harness", Status.FAIL,
                         url + " rejected the configured token ("
                                 + response.statusCode() + ")",
-                        "set QWEN_MANAGED_AGENT_HARNESS_TOKEN to the token the"
+                        "set " + tokenSetting + " to the token the"
                                 + " Harness accepts");
             }
             if (response.statusCode() != 200) {

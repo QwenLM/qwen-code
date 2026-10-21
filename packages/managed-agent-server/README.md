@@ -245,6 +245,12 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 mvn spring-boot:run
 ```
 
+Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
+can name the Harness's own environment file. The server then reads
+`QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it into its
+configuration, never into its process environment, and refuses to start when
+either direct value is also set.
+
 Create a Session:
 
 ```bash

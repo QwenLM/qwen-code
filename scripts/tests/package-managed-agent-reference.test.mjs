@@ -306,9 +306,12 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   assert.match(secrets.digest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(Buffer.from(secrets.credentialKey, 'base64').length, 32);
   assert.ok(renderHarnessEnv(secrets).includes(secrets.token));
-  const server = renderServerEnv(secrets, '/tmp/application.yml');
-  assert.ok(server.includes(secrets.token));
-  assert.ok(server.includes(secrets.digest));
+  const server = renderServerEnv(
+    secrets,
+    '/tmp/application.yml',
+    '/tmp/harness.env',
+  );
+  assertReadsHarnessCredentials(server, secrets, '/tmp/harness.env');
   assertDerivesSessionStoreWiring(server);
   assert.match(
     renderApplicationYml(secrets),
@@ -339,7 +342,14 @@ test('bootstrap writes private files without printing secrets', async () => {
       'utf8',
     );
     const token = harness.match(/^QWEN_SERVER_TOKEN=([0-9a-f]{64})$/m)[1];
-    assert.ok(server.includes(`QWEN_MANAGED_AGENT_HARNESS_TOKEN=${token}`));
+    const digest = harness.match(
+      /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=(sha256:[0-9a-f]{64})$/m,
+    )[1];
+    assertReadsHarnessCredentials(
+      server,
+      { token, digest },
+      path.join(directory, 'harness.env'),
+    );
     assert.match(application, /credential-key: '[A-Za-z0-9+/=]{44}'/);
     for (const name of ['harness.env', 'server.env', 'application.yml']) {
       assert.equal(
@@ -514,10 +524,33 @@ test('leaves the Session Store wiring to the server defaults in the env template
   );
   assert.match(template, /^QWEN_MANAGED_AGENT_HARNESS_ENABLED=true$/m);
   assertDerivesSessionStoreWiring(template);
+  assert.doesNotMatch(
+    template,
+    /^QWEN_MANAGED_AGENT_(HARNESS_TOKEN|CAPABILITY_DIGEST)=/m,
+  );
+  assert.match(
+    template,
+    /^QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE=\/etc\/qwen-managed-agent\/harness\.env$/m,
+  );
 });
 
 // The server derives the store switch, URL and workspace ID; an explicit
 // workspace ID would conflict with the local-process Broker's derived one.
+// harness.env is the one copy of the shared credentials; server.env names it.
+function assertReadsHarnessCredentials(server, { token, digest }, harnessEnv) {
+  assert.ok(!server.includes(token));
+  assert.ok(!server.includes(digest));
+  assert.doesNotMatch(
+    server,
+    /^QWEN_MANAGED_AGENT_(HARNESS_TOKEN|CAPABILITY_DIGEST)=/m,
+  );
+  assert.ok(
+    server
+      .split('\n')
+      .includes(`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE='${harnessEnv}'`),
+  );
+}
+
 function assertDerivesSessionStoreWiring(env) {
   assert.doesNotMatch(env, /^QWEN_MANAGED_AGENT_SESSION_STORE_/m);
   assert.doesNotMatch(env, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=/m);

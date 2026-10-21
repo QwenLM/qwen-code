@@ -14,10 +14,14 @@ import org.springframework.boot.web.server.Ssl;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.env.Environment;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
@@ -167,6 +171,48 @@ public class ManagedAgentProperties implements EnvironmentAware {
         validateWorkspaceFiles();
     }
 
+    // The Harness's own environment file is the one copy of the shared
+    // credentials. Its values reach this configuration only, never this
+    // process's environment, which Runtime workers would inherit.
+    private void applyHarnessCredentialsFile() {
+        String file = harness.getCredentialsFile();
+        if (StringUtils.isBlank(file)) {
+            return;
+        }
+        if (StringUtils.isNotBlank(harness.getToken()) || StringUtils.isNotBlank(harness.getCapabilityDigest())) {
+            throw new IllegalStateException("Configure the Hosted Harness token and capability digest either in"
+                    + " harness.credentials-file or directly, not both");
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        try {
+            for (String raw : Files.readAllLines(Path.of(file), StandardCharsets.UTF_8)) {
+                String line = raw.strip();
+                int separator = line.indexOf('=');
+                if (separator < 0) {
+                    continue;
+                }
+                String value = line.substring(separator + 1).strip();
+                if (value.length() >= 2 && (value.charAt(0) == '"' || value.charAt(0) == '\'')
+                        && value.charAt(value.length() - 1) == value.charAt(0)) {
+                    value = value.substring(1, value.length() - 1);
+                }
+                values.put(line.substring(0, separator).strip(), value);
+            }
+        } catch (IOException | RuntimeException error) {
+            throw new IllegalStateException("Hosted Harness credentials file " + file + " cannot be read", error);
+        }
+        harness.setToken(credential(values, "QWEN_SERVER_TOKEN", file));
+        harness.setCapabilityDigest(credential(values, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", file));
+    }
+
+    private static String credential(Map<String, String> values, String key, String file) {
+        String value = values.get(key);
+        if (StringUtils.isBlank(value)) {
+            throw new IllegalStateException("Hosted Harness credentials file " + file + " does not set " + key);
+        }
+        return value;
+    }
+
     // On a single host the Harness reaches the store routes on this
     // server's loopback listener, and the store scope is the Runtime
     // Broker's workspace identity, so neither needs its own setting.
@@ -212,6 +258,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     @PostConstruct
     void validateWorkspaceFiles() {
         applySessionStoreDefaults();
+        applyHarnessCredentialsFile();
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.
@@ -491,6 +538,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
+        private String credentialsFile = "";
         private String approvalMode = "yolo";
         // Unit-less operator overrides must bind in the annotated unit; an
         // un-annotated Duration silently binds milliseconds.
@@ -568,6 +616,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setCapabilityDigest(String capabilityDigest) {
             this.capabilityDigest = capabilityDigest;
+        }
+
+        public String getCredentialsFile() {
+            return credentialsFile;
+        }
+
+        public void setCredentialsFile(String credentialsFile) {
+            this.credentialsFile = credentialsFile;
         }
 
         public String getApprovalMode() {

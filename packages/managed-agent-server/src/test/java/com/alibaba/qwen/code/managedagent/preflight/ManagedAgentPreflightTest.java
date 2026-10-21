@@ -317,6 +317,43 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
+    void warnsWhenTheHarnessCredentialsFileIsShared(@TempDir Path directory)
+            throws IOException {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        assertEquals(ManagedAgentPreflight.Status.SKIP,
+                ManagedAgentPreflight.credentialsFileCheck(properties).status());
+        Path file = Files.writeString(directory.resolve("harness.env"), "");
+        properties.getHarness().setCredentialsFile(file.toString());
+        Files.setPosixFilePermissions(file,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.credentialsFileCheck(properties).status());
+        Files.setPosixFilePermissions(file,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rw-r-----"));
+        ManagedAgentPreflight.Check shared =
+                ManagedAgentPreflight.credentialsFileCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.WARN, shared.status());
+        assertEquals("chmod 600 " + file, shared.fix());
+    }
+
+    @Test
+    void pointsHarnessCredentialFixesAtTheCredentialsFile() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        assertEquals("set QWEN_MANAGED_AGENT_HARNESS_TOKEN",
+                ManagedAgentPreflight.harnessCheck(properties).fix());
+        properties.getHarness().setCredentialsFile("/etc/harness.env");
+        assertEquals("set QWEN_SERVER_TOKEN in /etc/harness.env",
+                ManagedAgentPreflight.harnessCheck(properties).fix());
+        properties.getHarness().setToken("token");
+        assertEquals("set QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST in /etc/harness.env",
+                ManagedAgentPreflight.harnessCheck(properties).fix());
+        properties.getHarness().setCredentialsFile("");
+        assertEquals("set QWEN_MANAGED_AGENT_CAPABILITY_DIGEST",
+                ManagedAgentPreflight.harnessCheck(properties).fix());
+    }
+
+    @Test
     void requiresTheSessionStoreForWorkspaceFiles() {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setEnabled(true);

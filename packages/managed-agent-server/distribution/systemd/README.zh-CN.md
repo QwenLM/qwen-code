@@ -19,7 +19,7 @@ install -d -m 0750 -o root -g qwen-managed-agent /etc/qwen-managed-agent
 3. 安装环境文件与密钥环，并编辑这三个文件。以下命令在本 `systemd/` 目录中执行：
 
 ```bash
-install -m 0640 -o root -g qwen-managed-agent \
+install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
   harness.env.example /etc/qwen-managed-agent/harness.env
 install -m 0640 -o root -g qwen-managed-agent \
   server.env.example /etc/qwen-managed-agent/server.env
@@ -27,9 +27,9 @@ install -m 0600 -o qwen-managed-agent -g qwen-managed-agent \
   ../config/application.example.yml /etc/qwen-managed-agent/application.yml
 ```
 
-控制面以 `qwen-managed-agent` 身份读取 `application.yml`，因此该文件由服务账号拥有、权限 `0600`。预检会拒绝 group 或 others 可读的含 secret 文件；而 `root` 拥有的 `0600` 文件服务同样读不到。`systemd` 以 root 读取两个环境文件，因此它们保持 `0640 root:qwen-managed-agent` 即可。
+控制面以 `qwen-managed-agent` 身份读取 `application.yml` 和 `harness.env`，因此这两个文件由服务账号拥有、权限 `0600`。预检会拒绝 group 或 others 可读的含 secret 文件；而 `root` 拥有的 `0600` 文件服务同样读不到。`systemd` 以 root 读取环境文件，因此 `server.env` 保持 `0640 root:qwen-managed-agent` 即可。
 
-`harness.env` 与 `server.env` 中的 Harness token 和 capability digest 必须一致。若 `qwen serve` 因 4170 被占用而报告了其他端口，请在启动控制面前把 `server.env` 中的 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 改为实际端口。Session Store 无需单独配置：控制面从自己的监听推导其 URL（不随 Harness 端口变化），并从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD`（即上文创建的目录）推导其 workspace ID。
+Harness token 和 capability digest 只保存在 `harness.env` 中：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向它；若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，控制面会拒绝启动。若 `qwen serve` 因 4170 被占用而报告了其他端口，请在启动控制面前把 `server.env` 中的 `QWEN_MANAGED_AGENT_HARNESS_BASE_URL` 改为实际端口。Session Store 无需单独配置：控制面从自己的监听推导其 URL（不随 Harness 端口变化），并从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD`（即上文创建的目录）推导其 workspace ID。
 
 也可以运行 `../bin/qwen-managed-agent-bootstrap --directory /etc/qwen-managed-agent` 生成这三个文件，随后调整属主与权限。
 
