@@ -66,9 +66,11 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
   `::error::sdk-java host lock not acquired within N minutes as queue ticket S; head of queue is H`
   naming the ticket that blocked it when it was not the head, and returns 1,
   keeping the existing error-message contract.
-- Wait observability: the helper prints its ticket number and the remaining
-  budget on the first wait and at most once a minute after, which makes a
-  hang attributable from the log instead of silent.
+- Wait observability: a non-blocking probe runs first, and only a waiter
+  that actually has to wait prints its ticket number and the remaining
+  budget — before it blocks, and at most once a minute after. A blocked head
+  cannot print while it is blocked, but the line it printed before blocking
+  names it, so a hang is attributable from the step's first lines.
 - Failing closed is worse than falling back here: `release-sdk-java.yml`
   resumes an existing tag by checking out that immutable commit, which may
   predate the helper. Both sites therefore fall back to the bare

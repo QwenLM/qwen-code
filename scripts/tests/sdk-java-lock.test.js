@@ -53,38 +53,59 @@ case "$*" in
 esac
 `;
 
-const acquire = (home, wait, stubDir, extra = '', label = '', env = {}) =>
-  new Promise((resolve) => {
-    const child = spawn(
-      'bash',
+// A held lock behaves like a real sibling hold: the non-blocking probe fails
+// at once, the blocking wait stays parked until the test kills the child.
+const blockingFlock = `#!/bin/sh
+case "$*" in
+  *"--wait"*) sleep 5; exit 1 ;;
+  *" 9") exit 1 ;;
+  *) exit 0 ;;
+esac
+`;
+
+const startAcquire = (
+  home,
+  wait,
+  stubDir,
+  extra = '',
+  label = '',
+  env = {},
+) => {
+  const child = spawn(
+    'bash',
+    [
+      '--noprofile',
+      '--norc',
+      '-eo',
+      'pipefail',
+      '-c',
       [
-        '--noprofile',
-        '--norc',
-        '-eo',
-        'pipefail',
-        '-c',
-        [
-          `source "${script}"`,
-          `sdk_java_lock_acquire ${wait}`,
-          'echo "acquired"',
-          ...(extra ? [extra] : []),
-        ].join('\n'),
-      ],
-      {
-        env: {
-          ...process.env,
-          HOME: home,
-          PATH: `${stubDir}:${process.env.PATH}`,
-          LOCK_LABEL: label,
-          ...env,
-        },
+        `source "${script}"`,
+        `sdk_java_lock_acquire ${wait}`,
+        'echo "acquired"',
+        ...(extra ? [extra] : []),
+      ].join('\n'),
+    ],
+    {
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${stubDir}:${process.env.PATH}`,
+        LOCK_LABEL: label,
+        ...env,
       },
-    );
-    let out = '';
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (out += d));
-    child.on('close', (code) => resolve({ code, out }));
-  });
+    },
+  );
+  const state = { out: '' };
+  child.stdout.on('data', (d) => (state.out += d));
+  child.stderr.on('data', (d) => (state.out += d));
+  const done = new Promise((resolve) =>
+    child.on('close', (code) => resolve({ code, out: state.out })),
+  );
+  return { child, state, done };
+};
+
+const acquire = (...args) => startAcquire(...args).done;
 
 describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
   it(
@@ -126,6 +147,26 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
         'A',
         'B',
       ]);
+    },
+  );
+
+  it(
+    'names its ticket before it blocks on a held lock',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-announce-'));
+      // The wait line used to be emitted only after `flock` returned, so a
+      // head parked behind a sibling hold printed nothing for the whole
+      // budget — the exact state the cancelled pool run left in its log.
+      const stub = flockStub(blockingFlock);
+      const { child, state, done } = startAcquire(home, 60, stub);
+      await new Promise((r) => setTimeout(r, 1500));
+      const announced = state.out.includes(
+        'Waiting for the sdk-java host lock as queue ticket 1',
+      );
+      child.kill('SIGKILL');
+      await done;
+      expect(announced).toBe(true);
     },
   );
 

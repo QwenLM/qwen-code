@@ -35,7 +35,7 @@ sdk_java_lock_acquire() {
   : >"${ticket}"
   exec 8>&-
 
-  local start=${SECONDS} head name pid mtime age remaining last_log=-60
+  local start=${SECONDS} head name pid mtime age remaining last_log=-60 blocking
   while true; do
     # Drop tickets whose owner is gone. A waiter waiting its turn re-touches
     # every loop; the head cannot while it is blocked in `flock`, so the mtime
@@ -63,16 +63,28 @@ sdk_java_lock_acquire() {
     # Head of line: one blocking wait, so this ticket enters the kernel's
     # wait queue once and keeps its arrival position. Re-entering every few
     # seconds would put it behind every waiter that stayed blocked.
-    if [[ ${head} == "${ticket}" && ${remaining} -gt 0 ]] \
-      && flock --wait "${remaining}" 9; then
-      # Leave the queue at acquisition: a holder needs no place in line once
-      # the kernel holds the lock, and a trap cannot see this `local` anyway.
-      rm -f "${ticket}"
-      return 0
+    blocking=0
+    if [[ ${head} == "${ticket}" && ${remaining} -gt 0 ]]; then
+      # Probe first, so the wait line is printed before blocking: a head
+      # parked behind a sibling hold used to emit nothing for the whole
+      # budget (run 39528681869's step sat in flock for 40 minutes silently).
+      if flock --nonblock 9; then
+        rm -f "${ticket}"
+        return 0
+      fi
+      blocking=1
     fi
     if ((SECONDS - start - last_log >= 60)); then
       last_log=$((SECONDS - start))
       echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${remaining}s left in a ${wait_seconds}s budget)"
+    fi
+    if ((blocking)); then
+      if flock --wait "${remaining}" 9; then
+        # Leave the queue at acquisition: a holder needs no place in line once
+        # the kernel holds the lock, and a trap cannot see this `local` anyway.
+        rm -f "${ticket}"
+        return 0
+      fi
     fi
     if ((SECONDS - start >= wait_seconds)); then
       rm -f "${ticket}"
