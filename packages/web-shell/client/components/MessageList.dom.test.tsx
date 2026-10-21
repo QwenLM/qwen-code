@@ -6435,15 +6435,26 @@ describe('MessageList — turn collapse (DOM)', () => {
         scrollTop = Math.max(0, Math.min(value, 600));
       },
     });
-    const c = mount([userMsg('u1'), asstMsg('a1')], undefined, {
-      sessionKey: 'session-a',
-    });
+    const transcriptA = [userMsg('u1'), asstMsg('a1')];
+    const c = mount(transcriptA, undefined, { sessionKey: 'session-a' });
     const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
     act(() => {
       list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300 }));
       list.scrollTop = 300;
       list.dispatchEvent(new Event('scroll'));
     });
+    // A same-session catch-up cycle must keep the pause; this pins that the
+    // gesture above actually paused following.
+    rerenderMessages(c, transcriptA, {
+      sessionKey: 'session-a',
+      catchingUp: true,
+    });
+    rerenderMessages(c, transcriptA, {
+      sessionKey: 'session-a',
+      catchingUp: false,
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(300);
 
     const sessionB = [userMsg('u2'), asstMsg('a2')];
     rerenderMessages(c, sessionB, {
@@ -6454,6 +6465,50 @@ describe('MessageList — turn collapse (DOM)', () => {
       sessionKey: 'session-b',
       catchingUp: false,
     });
+    await nextFrame();
+    expect(scrollTop).toBe(600);
+  });
+
+  it('resumes follow after switching sessions without a replay', async () => {
+    let scrollTop = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, 600));
+      },
+    });
+    const transcriptA = [userMsg('u1'), asstMsg('a1')];
+    const c = mount(transcriptA, undefined, { sessionKey: 'session-a' });
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300 }));
+      list.scrollTop = 300;
+      list.dispatchEvent(new Event('scroll'));
+    });
+    // A same-session catch-up cycle must keep the pause; this pins that the
+    // gesture above actually paused following.
+    rerenderMessages(c, transcriptA, {
+      sessionKey: 'session-a',
+      catchingUp: true,
+    });
+    rerenderMessages(c, transcriptA, {
+      sessionKey: 'session-a',
+      catchingUp: false,
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(300);
+
+    const sessionB = [userMsg('u2'), asstMsg('a2')];
+    rerenderMessages(c, sessionB, { sessionKey: 'session-b' });
     await nextFrame();
     expect(scrollTop).toBe(600);
   });

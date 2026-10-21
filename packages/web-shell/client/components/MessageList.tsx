@@ -3945,6 +3945,16 @@ export const MessageList = memo(
       setSuppressOlderHistoryLoadingStatus,
     ] = useState(false);
 
+    // The render-phase session switch below and the /clear effect drop the
+    // same per-session view state; keep the shared subset in one place so the
+    // two lists cannot drift apart again.
+    const resetSessionScopedViewState = useCallback(() => {
+      followPausedByUserRef.current = false;
+      pendingPaginationTurnCompares.current.clear();
+      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
+    }, []);
+
     // A direct session switch never renders empty messages (the provider
     // batches the store reset and the replay into one notification), so the
     // /clear reset never runs for it. Block ids are per-session ordinals, so
@@ -3955,14 +3965,11 @@ export const MessageList = memo(
     const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
     if (trackedSessionKey !== sessionKey) {
       setTrackedSessionKey(sessionKey);
-      followPausedByUserRef.current = false;
-      pendingPaginationTurnCompares.current.clear();
+      resetSessionScopedViewState();
       olderHistoryLoadGeneration.current += 1;
       olderHistoryLoadInFlight.current = false;
       olderHistoryRetryBlocked.current = false;
       setOlderHistoryAnchor(null);
-      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
-      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
     }
 
     useEffect(() => {
@@ -5597,20 +5604,17 @@ export const MessageList = memo(
     // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
-        followPausedByUserRef.current = false;
-        pendingBottomFollowAfterCooldown.current = false;
-        setShouldFollow(true);
-        pendingScrollRef.current = null;
         // Drop the in-flight pagination snapshots too: without this a stale
         // pre-clear snapshot survives into the next session and can mislabel
         // a complete turn as keep-open (block ids are per-session ordinals).
-        pendingPaginationTurnCompares.current.clear();
+        resetSessionScopedViewState();
+        pendingBottomFollowAfterCooldown.current = false;
+        setShouldFollow(true);
+        pendingScrollRef.current = null;
         settledStaleMessagesRef.current = undefined;
         pendingSettledMessagesRef.current = undefined;
-        setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
-        setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
       }
-    }, [messages.length, setShouldFollow]);
+    }, [messages.length, resetSessionScopedViewState, setShouldFollow]);
 
     // Container-resize guard: when floating panels (e.g. TodoPanel)
     // appear or disappear the scroll container's clientHeight changes.
