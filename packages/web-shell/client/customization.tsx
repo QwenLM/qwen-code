@@ -20,7 +20,10 @@ import type {
   SessionSource,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
+import type {
+  DaemonSessionActions,
+  DaemonStreamingState,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
@@ -706,6 +709,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  onRefreshModels?: Parameters<DaemonSessionActions['refreshModels']>[0];
   allowedApprovalModes?: readonly WebShellApprovalMode[];
   filterArtifact?: ArtifactFilter;
   artifact?: WebShellArtifactCustomization;

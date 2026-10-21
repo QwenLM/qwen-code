@@ -925,6 +925,43 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('does not hand off a settled binding after its gate entry was evicted', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const first = await runtimeCommit(session);
+    const second = {
+      ...first,
+      functionCallId: 'fc-2',
+      executionCallId: 'ex-2',
+      invocationBindingId: 'bind-2',
+      modelMessageId: 'msg-2',
+      ordinal: 1,
+      inputDigest: '8'.repeat(64),
+    };
+    await handle.commitAwaitRuntimeBatch([first, second], {
+      turnId: 'current-turn',
+      promptId: 'current-prompt',
+    });
+    const firstRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from('{"executionCallId":"ex-1"}', 'utf8'),
+    );
+    await handle.resolveAwaitRuntime('ex-1', firstRef);
+
+    const gate = managedRuntimeDispatchGate(sessionKey);
+    expect(gate.state('ex-1')).toBe('settled');
+    for (let index = 0; index < 1025; index++) {
+      gate.settle(`evict-${index}`);
+    }
+    expect(gate.state('ex-1')).toBeUndefined();
+
+    await handle.detach();
+    expect(gate.state('ex-1')).toBeUndefined();
+    expect(gate.isHandedOff('ex-2')).toBe(true);
+    await session.close();
+  });
+
   it('binds a Hosted Runtime wait to its original turn', async () => {
     const session = await open(await createWorkspace());
     const handle = createManagedHarnessHandle(session);
