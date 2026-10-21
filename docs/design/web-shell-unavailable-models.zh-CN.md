@@ -72,7 +72,13 @@ export type WebShellUnavailableModelTooltipMount = (
 
 ## 验证
 
-单测覆盖合并规则、禁用渲染、点击行不选择、搜索、纯文本回退、mount/update/dispose、decline 回退，以及提示层按钮既不切换模型也不关闭父选择器。输入框、分屏和侧任务的透传在各自 prop 链路覆盖。浏览器证据使用已有 ChatEditor DOM 测试。
+单测覆盖合并规则、禁用渲染、点击行不选择、搜索、纯文本回退、mount/update/dispose、decline 回退，以及提示层按钮既不切换模型也不关闭父选择器。输入框、分屏和侧任务的透传在各自 prop 链路覆盖。浏览器证据使用已有 ChatEditor DOM 测试和 settings harness 选择器。
+
+![可用模型之后的禁用目录模型](assets/web-shell-unavailable-models-picker.png)
+
+![禁用模型上的宿主纯文本提示](assets/web-shell-unavailable-models-tooltip.png)
+
+![提示层中宿主挂载的授权操作](assets/web-shell-unavailable-models-authorize.png)
 
 ## 验收
 

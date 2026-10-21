@@ -112,7 +112,14 @@ Unit tests cover merge rules, disabled rendering, no selection on the row,
 search, string fallback, mount/update/dispose, decline fallback, and a
 button in the hint that neither selects the model nor closes the parent
 picker. Composer, split, and side-task forwarding are covered at the
-prop-thread sites. Browser evidence uses the existing ChatEditor DOM tests.
+prop-thread sites. Browser evidence uses the existing ChatEditor DOM tests
+and the settings harness picker.
+
+![Disabled catalog models after available ones](assets/web-shell-unavailable-models-picker.png)
+
+![Host string tooltip on a disabled model](assets/web-shell-unavailable-models-tooltip.png)
+
+![Host-mounted authorize action in the hint](assets/web-shell-unavailable-models-authorize.png)
 
 ## Acceptance
 
