@@ -60,7 +60,7 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 const cliOnly = process.argv.includes('--cli-only');
 // Mobile MCP has an independent build and was never part of the root build.
 const filter = cliOnly
-  ? '--filter "{./packages/cli}..." --filter @qwen-code/node-repl-mcp --filter @qwen-code/channel-plugin-example'
+  ? '--filter "{./packages/cli}..." --filter @qwen-code/node-repl-mcp --filter @qwen-code/channel-plugin-example --filter @qwen-code/generated-ui'
   : '--filter "!@qwen-code/mobile-mcp"';
 execSync(`corepack pnpm -r ${filter} run build`, {
   stdio: 'inherit',

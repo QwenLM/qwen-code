@@ -26,6 +26,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsInputAttachments() { return false; }
 
+    default boolean supportsSessionSkills() { return false; }
+
     default boolean isWorkspaceFilesAvailable() {
         return false;
     }
