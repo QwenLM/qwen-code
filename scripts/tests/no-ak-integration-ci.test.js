@@ -365,6 +365,9 @@ describe('no-AK integration CI wiring', () => {
       'sdk-typescript/session-id.test.ts': 'Real model required',
       'sdk-typescript/single-turn.test.ts': 'Real model required',
     };
+    for (const [file, reason] of Object.entries(exemptions)) {
+      expect(reason, `${file}: exemption reason`).toMatch(/\S/);
+    }
     expect(
       candidates.filter((file) => !selected.has(file)).sort(),
       'Every runnable test must be selected or explicitly exempted with a reason',
