@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { BundledGeneratedUiStatus } from '@qwen-code/qwen-code-core/config/generated-ui.js';
 import type {
   ApprovalMode,
   McpAppToolResult,
@@ -477,6 +478,7 @@ export function parseBackgroundNotificationTurn(
 }
 
 export interface BridgeSession {
+  generatedUi?: BundledGeneratedUiStatus;
   startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /**
