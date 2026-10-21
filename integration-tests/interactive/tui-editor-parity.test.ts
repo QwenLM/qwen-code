@@ -730,11 +730,11 @@ for (const key of ['c', 'd'] as const) {
           expect(Date.now() - first).toBeLessThan(850);
           await press('\x03', false);
         } else {
-          release();
           await until(
             async () => /^> CANCEL_ORIGINAL\s*$/m.test(await frame('restored')),
             'cancelled prompt returns to composer',
           );
+          release();
           await press('\x04');
           expect(session.exitResult()).toBeUndefined();
           expect(await frame('restored-d-noop')).toMatch(
