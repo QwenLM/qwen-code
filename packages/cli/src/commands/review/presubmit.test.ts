@@ -432,6 +432,26 @@ describe('presubmitCommand', () => {
     return JSON.parse(String(content));
   }
 
+  // For the shapes the typed helper above cannot express — a resolver input
+  // file (an `anchor` key its signature rejects) or a defectively suffixed id.
+  // Same harness, raw payload.
+  async function presubmitWithRawFindings(raw: string) {
+    ghApiAllMock.mockReturnValue([]);
+    ghApiMock.mockReturnValue(null);
+    readFileSyncMock.mockReturnValue(raw);
+    writeFileSyncMock.mockClear();
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler({
+      ...baseArgs,
+      'new-findings': '/tmp/findings.json',
+    } as unknown as Parameters<typeof handler>[0]);
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    return JSON.parse(String(content));
+  }
+
   it('sets downgradeApprove — not just a reason — when every check was skipped', async () => {
     // The bug this guards was found by dogfooding /review on this very change:
     // `downgradeReasons` gained a "CI did not run" entry while `downgradeApprove`
@@ -681,56 +701,80 @@ describe('presubmitCommand', () => {
     expect(result.downgradeReasons.join(' ')).toContain(
       'the --new-findings file was malformed',
     );
-    // The reason names the shape and rules out the artifact by name: the
+    // The reason names the shape and rules out both sibling files by name: the
     // orchestrator has to produce a usable file, and the dogfood run that
     // filed #9218 handed over the artifact Step 6 had just told it to write.
-    expect(result.downgradeReasons.join(' ')).toContain('{path, line, id?}');
     expect(result.downgradeReasons.join(' ')).toContain(
-      'NOT the canonical findings artifact',
+      '{path, line, start_line?, id?}',
+    );
+    expect(result.downgradeReasons.join(' ')).toContain(
+      'not the artifact, nor …-anchors.json',
     );
   });
 
   it('refuses the canonical findings artifact instead of deduping on claimed lines (#9218)', async () => {
-    // The issue's first remedy — accept the artifact's `file`/`locations[]`
-    // directly — was implemented and reverted, and this pins WHY so it is not
-    // "fixed" back in: an artifact entry's `line` is the agent's claim (the
-    // posted line is the one `resolve-anchors` computes elsewhere) and its
-    // `id` sits on every finding, while presubmit reads the id as the
-    // carried-re-post signal. Both feed the overlap leg, so accepting the
-    // file would replace this loud refusal with a silent all-clear.
-    ghMock.mockReturnValue('{"author":"contributor","headSha":"abc123"}');
-    ghApiMock.mockReturnValue(null);
-    readFileSyncMock.mockImplementation((path: string) =>
-      String(path).includes('findings')
-        ? JSON.stringify({
-            findings: [
-              {
-                id: 'R3-1',
-                severity: 'Critical',
-                source: 'review',
-                summary: 'a defect',
-                failureScenario: 'it fires once',
-                file: 'src/a.ts',
-                line: 42,
-              },
-            ],
-            counts: { total: 1 },
-            outcomesRecorded: false,
-          })
-        : '[]',
+    // The issue's first remedy — accept the artifact's `locations[]` directly —
+    // was implemented and reverted, and this pins WHY so it is not "fixed" back
+    // in: a location's `line` is the agent's claim (the posted line is the one
+    // `resolve-anchors` computes elsewhere) and `id` is required on every
+    // finding, while presubmit reads the id as the carried-re-post signal.
+    // Both feed the overlap leg, so accepting the file would replace this loud
+    // refusal with a silent all-clear.
+    //
+    // The fixture is the shape a REAL artifact has: locations live in
+    // `locations[]`, never as a finding-level `file`/`line` (`validateFindings`
+    // canonicalizes the flat agent input before anything is written). A flat
+    // fixture would let a re-implementation that unwraps `locations[]` pass
+    // this guard while refusing it for the wrong reason (#9218 review, R1-3).
+    const result = await presubmitWithRawFindings(
+      JSON.stringify({
+        findings: [
+          {
+            id: 'R3-1',
+            severity: 'Critical',
+            confidence: 'high',
+            source: 'review',
+            summary: 'a defect',
+            shortSummary: 'a defect',
+            failureScenario: 'it fires once',
+            locations: [{ file: 'src/a.ts', line: 42, anchor: 'const a = 1;' }],
+          },
+        ],
+        counts: { total: 1 },
+        outcomesRecorded: false,
+      }),
     );
 
-    const handler = presubmitCommand.handler;
-    if (!handler) throw new Error('presubmit handler missing');
-    await handler({
-      ...baseArgs,
-      'new-findings': '/tmp/findings.json',
-    } as unknown as Parameters<typeof handler>[0]);
+    expect(result.findingsFileInvalid).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
+  });
 
-    const [, content] = writeFileSyncMock.mock.calls.find(
-      ([path]) => path === '/tmp/presubmit.json',
-    ) ?? [null, null];
-    const result = JSON.parse(String(content));
+  it('refuses the resolver INPUT file — an array the minimal shape accepts in every other respect (#9218 review, R1-1)', async () => {
+    // `…-anchors.json` sits one suffix from the resolved file in the same
+    // directory and is a bare array of `{id, path, anchor, line}`: it passes
+    // `Array.isArray`, the string `path`, the ledger-shaped id and the numeric
+    // line, so without the `anchor` discriminator the gate reports
+    // `findingsFileInvalid: false` and dedups on the agent's claimed lines with
+    // an id on every finding — the silent all-clear this file's contract exists
+    // to prevent.
+    const result = await presubmitWithRawFindings(
+      '[{"id":"R3-2","path":"src/retry.ts","anchor":"charge(amt);","line":42}]',
+    );
+
+    expect(result.findingsFileInvalid).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
+  });
+
+  it('refuses an aggregate’s <id>-k join key — the resolved file is not this list either (#9218 review, R1-5)', async () => {
+    // A mechanical projection of `resolved[]` copies the resolver's join key
+    // (`R3-2-1` for an aggregate's first location), which is not a ledger id.
+    // Admitting it would make the whole file vanish silently — the #9218
+    // downgrade this PR exists to prevent — and the alternative (stripping the
+    // suffix while keeping fresh findings' ids) defeats the single-id fallback.
+    // The rejection is the loud half of that pair.
+    const result = await presubmitWithRawFindings(
+      '[{"path":"src/a.ts","line":1,"id":"R3-2-1"}]',
+    );
 
     expect(result.findingsFileInvalid).toBe(true);
     expect(result.downgradeApprove).toBe(true);
@@ -1126,6 +1170,31 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.total).toBe(1);
       expect(result.existingComments.byBucket.overlap).toBe(1);
       expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('widens the finding range with `start_line` — the span the shape now prints (#9218 review, R1-4)', async () => {
+      // The parser maps `start_line` onto `startLine`, and the overlap test
+      // widens the finding's range with it. A producer that follows the printed
+      // shape but drops the field — or copies the resolved entry's camelCase
+      // `startLine`, which this parser never reads — collapses a 42-48 span to
+      // a point at 48, so a prior comment at 45 reads as disjoint and the
+      // duplicate re-posts beside the thread that already carries it.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 9,
+            body: '**[Critical]** existing finding via Qwen Code /review (v0.25.3)',
+            path: 'src/a.ts',
+            line: 45,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        [{ path: 'src/a.ts', line: 48, start_line: 42 }],
+      );
+
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.noConflict).toBe(0);
     });
   });
 

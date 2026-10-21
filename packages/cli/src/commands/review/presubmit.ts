@@ -271,6 +271,15 @@ interface PresubmitArgs {
  *
  * The skill therefore writes this file from the RESOLVED anchors; the artifact
  * is what `findings` and `resolve-anchors` read, never what this reads.
+ *
+ * Neither of the OTHER two files in that working directory is this list
+ * either, and one of them would slip through silently: the artifact is an
+ * object, rejected below by `Array.isArray`, while the resolver's INPUT
+ * `…-anchors.json` is a bare array of `{id, path, anchor, line}` that passes
+ * every check here — it carries the agent's claimed line and an id on every
+ * entry, the exact two quantities named above. It sits one suffix from the
+ * resolved file in the same directory, so the `anchor` key is refused
+ * explicitly as its signature.
  */
 export function parseFindingsFile(path: string): FindingAnchor[] | null {
   let parsed: unknown;
@@ -293,8 +302,16 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
       path: string;
       line?: unknown;
       start_line?: unknown;
+      anchor?: unknown;
       id?: unknown;
     };
+    // The resolver's INPUT file, not this list. `anchor` is the one key the
+    // minimal shape never carries, so its presence identifies `…-anchors.json`
+    // — which would otherwise be accepted whole and dedup on claimed lines
+    // with an id on every entry (#9218 review). Whole-file rejection, like
+    // every other check here: a skipped entry is the shorter-than-real list
+    // this contract calls the dangerous outcome.
+    if (e.anchor !== undefined) return null;
     // Same fail-safe as `path`: an `id` of the wrong type or shape is a
     // malformed file, and silently ignoring it would let a carried re-post
     // read as a fresh duplicate at the very location it belongs (a typo'd
@@ -1210,12 +1227,18 @@ function writePresubmitReport(input: {
     // the shape to a `--new-findings` help text the dogfood run that filed
     // #9218 never needed to read — the file it handed over was the artifact
     // Step 6 had just told it to write, and nothing said that was not this.
+    // Two copies of this contract tail the line that names the SOURCE: the
+    // resolved anchors supply `line`/`start_line` but not the SET (the
+    // resolver never sees a body-only Critical), and they carry an id on
+    // every entry — the finding's own carried id is what belongs here
+    // (#9218 review). 372 code points, inside compose-review's 400 cap.
     downgradeReasons.push(
       'the --new-findings file was malformed — overlap dedup was disabled and ' +
-        'anchor-risk defaulted to at-risk; expected [{path, line, id?}] built ' +
-        'from the resolved anchors (line as resolve-anchors computed it, id ' +
-        'on carried findings only), NOT the canonical findings artifact; ' +
-        'regenerate it and re-run',
+        'anchor-risk defaulted to at-risk; expected [{path, line, start_line?, ' +
+        'id?}] with line/start_line from the resolved anchors and id only on ' +
+        "carried findings (collapse an aggregate's -k), plus one id-less " +
+        'placeholder per body-only Critical — not the artifact, nor ' +
+        '…-anchors.json; regenerate it and re-run',
     );
   }
 
@@ -1481,7 +1504,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, id?}, ...], where `line` is the line `resolve-anchors` computed (never the agent's claim) and `id` sits on carried-forward findings only — the canonical findings artifact is NOT this input. When provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
+          "Path to a JSON file shaped as [{path, line, start_line?, id?}] — the anchors of the comments you are about to post, one entry per location plus one id-less placeholder per body-only Critical. `line`/`start_line` come from the RESOLVED anchors (`resolve-anchors` writes them to `…-anchors-resolved.json` and names the range field `startLine`); `id` is the FINDING's carried ledger id (`R<round>-<n>`, from the carried-ledger set) — collapse an aggregate's `<id>-k`, and omit it on fresh findings of this round. This is NOT the canonical findings artifact, and NOT the resolver's input `…-anchors.json` (an `anchor` key is refused). When provided, existing comments are checked for same-(path, line) overlap with the new findings: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
       }),
   handler: async (argv) => {
     const host = (argv as { host?: string }).host;
