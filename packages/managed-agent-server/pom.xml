@@ -567,8 +567,10 @@
                                  fork 10328 s, Verify 183 minutes. The FG11d
                                  close-queued cell adds 134 s (2x its measured
                                  67.2 s): healthy 9862 s, fork 10462 s, Verify
-                                 185 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10462</forkedProcessTimeoutInSeconds>
+                                 185 minutes. The FG13f MessageDisplay reload
+                                 cell adds 150 s: healthy 10012 s, fork
+                                 10612 s, Verify 187 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10612</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
