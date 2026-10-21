@@ -94,7 +94,7 @@ every 2 minutes, run ./check-pr.sh 15057 as a gate; when it prints something, ha
 
 Qwen Code calls `CronCreate` with `gate: "./check-pr.sh 15057"` and confirms the command the way it confirms a `Monitor` command: once, when the task is created, with the option to always allow it. The command then runs unattended from the project directory with the session's environment. A durable gated task keeps working after a restart when the command is read-only, a saved `Monitor(...)` or `Bash(...)` rule allows it, or the session runs in auto or yolo mode; otherwise the next fire reports the rule to add instead of running the command. A deny rule for the command stops the gate in every mode.
 
-Write a gated prompt as instructions ("for each event in the gate output, …"), not as a slash command. A gate is not yet available for tasks bound to the current daemon conversation (`sessionMode: "current"`). In a `qwen serve` daemon, "Run now" on a gated task asks the model to run the gate itself first and to follow the task only when the command exits 0 and prints something.
+Write a gated prompt as instructions ("for each event in the gate output, …"), not as a slash command. In a `qwen serve` daemon, the Web Shell's scheduled-task form offers the same gate command, the task card shows its recent outcomes, and "Run now" on a gated task asks the model to run the gate itself first and to follow the task only when the command exits 0 and prints something; a task bound to the current daemon conversation (`sessionMode: "current"`) can carry a gate too.
 
 ## Manage scheduled tasks
 

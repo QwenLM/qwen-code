@@ -18,7 +18,11 @@ import {
 } from '../services/cronTasksFile.js';
 import { Storage } from '../config/storage.js';
 import { ApprovalMode } from '../config/approval-mode.js';
-import type { Config } from '../config/config.js';
+import type {
+  Config,
+  CurrentSessionScheduledTaskCreator,
+} from '../config/config.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import type { PermissionCheckContext } from '../permissions/types.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { buildPermissionCheckContext } from '../core/permission-helpers.js';
@@ -29,6 +33,7 @@ function makeConfig(
   over: {
     mode?: ApprovalMode;
     evaluate?: (ctx: PermissionCheckContext) => Promise<string>;
+    creator?: CurrentSessionScheduledTaskCreator;
   } = {},
 ) {
   const scheduler = new CronScheduler(tmpDir, 7 * 24 * 60 * 60 * 1000);
@@ -40,7 +45,7 @@ function makeConfig(
     getApprovalMode: () => over.mode ?? ApprovalMode.DEFAULT,
     getPermissionManager: () =>
       over.evaluate ? { evaluate: over.evaluate } : null,
-    getCurrentSessionScheduledTaskCreator: () => undefined,
+    getCurrentSessionScheduledTaskCreator: () => over.creator,
     getSessionSourceType: () => undefined,
     _scheduler: scheduler,
   } as unknown as Config & { _scheduler: CronScheduler };
@@ -303,13 +308,34 @@ describe('CronCreateTool gate', () => {
     },
   );
 
-  it('rejects a gate with sessionMode "current"', async () => {
-    const result = await tool
-      .build({ ...params, durable: true, sessionMode: 'current' })
-      .execute(signal());
-    expect(result.error?.message).toContain(
-      'not supported with sessionMode "current"',
+  it('threads the gate to the current-session creator', async () => {
+    const requests: Array<Parameters<CurrentSessionScheduledTaskCreator>[0]> =
+      [];
+    config._scheduler.destroy();
+    config = makeConfig({
+      mode: ApprovalMode.YOLO,
+      creator: async (request) => {
+        requests.push(request);
+        return { id: 'cron-current', cron: request.cron };
+      },
+    });
+    tool = new CronCreateTool(config);
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({ ...params, durable: true, sessionMode: 'current' })
+        .execute(signal()),
     );
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toContain('[gated]');
+    expect(requests).toEqual([
+      {
+        cron: params.cron,
+        prompt: params.prompt,
+        recurring: true,
+        promptId: 'prompt-1',
+        gate: './probe.sh',
+      },
+    ]);
   });
 
   it('rejects a gate on a one-shot task, which a quiet gate would consume', async () => {

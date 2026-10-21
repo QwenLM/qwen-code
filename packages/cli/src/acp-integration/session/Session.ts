@@ -4070,6 +4070,7 @@ export class Session implements SessionContext {
             cron: req.cron,
             prompt: req.prompt,
             recurring: req.recurring,
+            ...(req.gate ? { gate: req.gate } : {}),
           },
         );
       } catch (error) {

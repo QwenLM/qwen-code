@@ -81,6 +81,14 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
   const withheld = run.withheld
     ? ` · ${t('scheduledTasks.runKind.withheld')}`
     : '';
+  // A gated fire that reached the session with a failure or blocked notice
+  // instead of the prompt; a delivered one is an ordinary run.
+  const gate =
+    run.gate === 'failed'
+      ? ` · ${t('scheduledTasks.runKind.gateFailed')}`
+      : run.gate === 'blocked'
+        ? ` · ${t('scheduledTasks.runKind.gateBlocked')}`
+        : '';
   // A per-run fire whose fresh session could not be created: with a sessionId
   // it fell back to the task session and ran there; without one nothing ran.
   const dispatchFailed = run.sessionDispatchFailed
@@ -90,7 +98,23 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
           : 'scheduledTasks.runKind.sessionDispatchFailed',
       )}`
     : '';
-  return `${safeLocaleString(run.at)}${kind}${withheld}${dispatchFailed}`;
+  return `${safeLocaleString(run.at)}${kind}${withheld}${gate}${dispatchFailed}`;
+}
+
+/** The card's gate line: "quiet ×41 · last delivered … · 0 failures". */
+function describeGateStatus(
+  status: DaemonScheduledTask['gateStatus'],
+  t: TranslateFn,
+): string {
+  if (!status) return t('scheduledTasks.gate.notRunYet');
+  return t('scheduledTasks.gate.status', {
+    quiet: status.quietSinceDelivery,
+    delivered:
+      status.lastDeliveredAt !== undefined
+        ? safeLocaleString(status.lastDeliveredAt)
+        : t('scheduledTasks.gate.neverDelivered'),
+    failures: status.consecutiveFailures,
+  });
 }
 
 /**
@@ -109,12 +133,6 @@ function gatedManualRunPrompt(gate: string, prompt: string): string {
     '',
     prompt,
   ].join('\n');
-}
-
-/** The text a manual run sends: the prompt, or for a gated task the
- * instruction to run the gate first. */
-function manualRunPrompt(task: DaemonScheduledTask): string {
-  return task.gate ? gatedManualRunPrompt(task.gate, task.prompt) : task.prompt;
 }
 
 interface ScheduledTasksDialogProps {
@@ -140,7 +158,17 @@ interface ScheduledTasksDialogProps {
   lockedWorkspace?: DaemonWorkspaceCapability;
   currentSession?: DaemonSessionSummary;
   currentSessionSchedulingAvailable?: boolean;
+  /** The daemon advertises `scheduled_task_gate`: the form offers a gate
+   * command and the request carries it. An older daemon would drop the field
+   * silently, so it is never sent without the capability. */
+  gateAvailable?: boolean;
   onError: (error: unknown, fallback: string) => void;
+}
+
+/** The text a manual run sends: the prompt, or for a gated task the
+ * instruction to run the gate first. */
+function manualRunPrompt(task: DaemonScheduledTask): string {
+  return task.gate ? gatedManualRunPrompt(task.gate, task.prompt) : task.prompt;
 }
 
 /** A stable per-card identity. Task ids are unique only WITHIN a workspace's
@@ -581,6 +609,7 @@ export function ScheduledTasksDialog({
   lockedWorkspace,
   currentSession,
   currentSessionSchedulingAvailable,
+  gateAvailable,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -637,6 +666,7 @@ export function ScheduledTasksDialog({
   );
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [gate, setGate] = useState('');
   const [runDestination, setRunDestination] = useState<
     'per_run' | 'dedicated' | 'current'
   >('per_run');
@@ -1082,6 +1112,7 @@ export function ScheduledTasksDialog({
   const resetForm = useCallback(() => {
     setName('');
     setPrompt('');
+    setGate('');
     setRunDestination('per_run');
     setModelServiceId('');
     setGroupChoice('');
@@ -1101,6 +1132,7 @@ export function ScheduledTasksDialog({
     setFormWorkspaceId(lockedWorkspaceId);
     setName('');
     setPrompt('');
+    setGate('');
     setRunDestination('per_run');
     setModelServiceId('');
     setGroupChoice('');
@@ -1119,6 +1151,7 @@ export function ScheduledTasksDialog({
       setFormWorkspaceId(task.workspaceId);
       setName(task.name ?? '');
       setPrompt(task.prompt);
+      setGate(task.gate ?? '');
       setRunDestination(
         task.sessionMode === 'per_run' ? 'per_run' : 'dedicated',
       );
@@ -1206,6 +1239,9 @@ export function ScheduledTasksDialog({
               runDestination === 'per_run' ? modelServiceId || null : null,
             groupId:
               runDestination === 'per_run' ? resolvedGroupId || null : null,
+            // Only a daemon that advertises the gate accepts the field; an
+            // older one would drop it silently. Empty clears it.
+            ...(gateAvailable ? { gate: gate.trim() || null } : {}),
           },
           formWorkspaceId,
         );
@@ -1228,6 +1264,7 @@ export function ScheduledTasksDialog({
             ...(runDestination === 'current' && currentSession?.sessionId
               ? { sessionId: currentSession.sessionId }
               : {}),
+            ...(gateAvailable && gate.trim() ? { gate: gate.trim() } : {}),
           },
           formWorkspaceId,
         );
@@ -1250,6 +1287,8 @@ export function ScheduledTasksDialog({
     formWorkspaceCwd,
     formWorkspaceId,
     formWorkspaceMissing,
+    gate,
+    gateAvailable,
     groupChoice,
     modelServiceId,
     name,
@@ -1572,6 +1611,26 @@ export function ScheduledTasksDialog({
                 })}
               </div>
             </div>
+
+            {gateAvailable && (
+              <label className={styles.field}>
+                <span className={styles.fieldLabel}>
+                  {t('scheduledTasks.gate')}
+                </span>
+                <input
+                  className={styles.input}
+                  type="text"
+                  value={gate}
+                  maxLength={2048}
+                  placeholder={t('scheduledTasks.gatePlaceholder')}
+                  aria-label={t('scheduledTasks.gate')}
+                  onChange={(e) => setGate(e.target.value)}
+                />
+                <span className={styles.fieldHint}>
+                  {t('scheduledTasks.gate.hint')}
+                </span>
+              </label>
+            )}
 
             <label className={styles.field}>
               <span className={styles.fieldLabel}>
@@ -1968,6 +2027,11 @@ export function ScheduledTasksDialog({
                   {task.prompt}
                 </div>
               )}
+              {task.gate && (
+                <div className={styles.cardPrompt} title={task.gate}>
+                  {t('scheduledTasks.gate.cardPrefix')} {task.gate}
+                </div>
+              )}
 
               <div className={styles.cardFooter}>
                 {isMultiWorkspace && task.workspaceCwd && (
@@ -2034,6 +2098,11 @@ export function ScheduledTasksDialog({
                 <span className={styles.lastFired}>
                   {describeLastRun(task, t)}
                 </span>
+                {task.gate && (
+                  <span className={styles.lastFired}>
+                    {describeGateStatus(task.gateStatus, t)}
+                  </span>
+                )}
                 {task.sessionMode !== 'per_run' &&
                 task.sessionId &&
                 onOpenSession ? (

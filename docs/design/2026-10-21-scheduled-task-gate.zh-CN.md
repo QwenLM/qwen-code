@@ -2,7 +2,7 @@
 
 [English](2026-10-21-scheduled-task-gate.md) | [简体中文](2026-10-21-scheduled-task-gate.zh-CN.md)
 
-- **状态**：2026-10-21。PR 1a（第 11 节）已在 PR 分支实现；PR 1b、探针和 skill 仍为提案。事件驱动 PR 监视（issue #15056）的第 1 步；探针（第 2 步，延续 PR #15057）和 skill（第 3 步）在它之上构建。
+- **状态**：2026-10-22。PR 1a（第 11 节）已在 PR #15069 合入，PR 1b 是它的后续；探针在 PR #15057；skill 仍为提案。事件驱动 PR 监视（issue #15056）的第 1 步；探针（第 2 步，延续 PR #15057）和 skill（第 3 步）在它之上构建。
 - **相关**：
   [定时任务绑定当前会话的入口](2026-08-24-scheduled-task-current-session-entrypoints.md)、
   [定时任务空会话持久化](2026-08-26-scheduled-task-empty-session-persistence.md)、
@@ -86,7 +86,7 @@ gate: "qwen review watch-repo --gate QwenLM/qwen-code --review-requested"
 prompt: "For each pull request event in the gate output, run /qreview <number>."
 ```
 
-`gate` 需要循环任务：一次性任务没有下一个时间槽，安静的闸门会把它消耗掉而什么都不投递、不留痕迹，`cron_create` 拒绝这种组合。它可以与 `durable` 以及未绑定的会话模式一起使用（`sessionMode: "current"` 随 daemon 后续 PR 提供）。工具结果会写明闸门，`cron_list` 在提示词之后打印闸门及其最近结果：
+`gate` 需要循环任务：一次性任务没有下一个时间槽，安静的闸门会把它消耗掉而什么都不投递、不留痕迹，`cron_create` 拒绝这种组合。它可以与 `durable`、未绑定的会话模式以及 daemon 中的 `sessionMode: "current"` 一起使用。工具结果会写明闸门，`cron_list` 在提示词之后打印闸门及其最近结果：
 
 ```text
 ab12cd34 — every 2 minutes (recurring) [session-only]: The gate output lists…
@@ -126,7 +126,7 @@ Tell the user, and suggest a fix if the cause is clear (for example expired
 
 ### 4.3 Daemon 与 Web Shell
 
-- 定时任务表单新增一个可选字段"Gate command"，仅在 daemon 报告 `scheduledTaskGate` 能力时显示。旧版 daemon 会在 `POST` 时静默丢弃该字段。
+- 定时任务表单新增一个可选字段"Gate command"，仅在 daemon 报告 `scheduled_task_gate` 能力时显示。旧版 daemon 会在 `POST` 时静默丢弃该字段。
 - 任务卡片显示闸门及其最近结果（`quiet ×41 · last delivered 13:05 · 0 failures`）。
 - 对带闸门的任务点"立即运行"，会发送一条手动运行提示词，要求模型把闸门当作普通 shell 命令先运行一次：只有命令退出码为 0 且有输出时才以其输出为数据执行任务提示词；退出码为 0 但没有输出则说明闸门没有输出；非零退出、超时或被取消则报告失败并停止——与运行器的三种结果一致。常规的工具审批照常生效；和今天一样，调度器不参与。
 
@@ -193,7 +193,7 @@ Tell the user, and suggest a fix if the cause is clear (for example expired
 - 绑定会话由 keepalive 常驻，所以安静的闸门只在 ACP 子进程里花一次进程启动，别无其他。不会为它创建或恢复任何会话。
 - `per_run` 任务在绑定会话的调度器里、进入 per-run 分支之前运行闸门；安静的闸门不会创建子会话。
 - `sessionMode: 'current'` 让 `gate` 沿现有创建链路传递：`getCurrentSessionScheduledTaskCreator` → `qwen/control/scheduled-task/create-current` 扩展方法 → bridge → `createScheduledTaskWithExistingSession`。
-- `scheduledTaskGate` 能力加入 `packages/cli/src/serve/capabilities.ts`，并在 `docs/developers/qwen-serve-protocol.md` 中记录；Web Shell 仅在该能力存在时显示字段。
+- `scheduled_task_gate` 能力加入 `packages/cli/src/serve/capabilities.ts`，并在 `docs/developers/qwen-serve-protocol.md` 中记录；Web Shell 仅在该能力存在时显示字段。
 - keepalive 不变。由 daemon 级的 ticker 运行闸门并解除带闸门会话的常驻是后续工作（第 12 节）。
 
 ## 6. 决策
@@ -261,7 +261,7 @@ E2E 计划：`.qwen/e2e-tests/2026-10-21-scheduled-task-gate.md`——在沙盒�
 ## 11. 交付
 
 1. **PR 1a**（本设计）：`CronScheduler`、`cronTasksFile`、闸门运行器、`cron_create` / `cron_list`、TUI shell 意图修复、无头保持打开条件、带闸门任务的手动运行提示词（daemon 路由和 Web Shell 的"立即运行"——工具创建的持久带闸门任务在那里已经可见）、用户文档。
-2. **PR 1b**：daemon REST 路由、当前会话创建链路传递、`scheduledTaskGate` 能力、Web Shell 表单和卡片。
+2. **PR 1b**：daemon REST 路由、当前会话创建链路传递、`scheduled_task_gate` 能力、Web Shell 表单和卡片。
 3. **第 2 步**：探针——`qwen autofix-pr snapshot --gate`（延续 PR #15057，加入已报事件记录和 check rollup 翻页）以及仓库级探针，覆盖新开和被 push 的 PR，支持作者、draft、label 和评审请求过滤。
 4. **第 3 步**：skill——`/autofix-pr`（先 `--once`，再 watch 模式）和评审者监视，对每个事件运行 `/qreview` 或一次验证。
 5. **独立设计——托管自动化**：托管 schedule 记录上的 `gate`（TypeScript 与 Java 校验器、摘要、DTO、OpenAPI、契约夹具、一次 `ma_schedule` 迁移）、由 `fire_run` 在 claim 之前运行、带派生持久身份的 Runtime "gate probe" 操作、带失败连段的 `skipped/gate_quiet` 与 `skipped/gate_failed` occurrence、定义时审批，以及针对回复丢失、崩溃和未知结果的 FG11 风格故障门禁。

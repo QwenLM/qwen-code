@@ -17946,6 +17946,37 @@ describe('Session', () => {
       );
     });
 
+    it('forwards a gate to the daemon only when the task has one', async () => {
+      vi.mocked(mockClient.extMethod).mockResolvedValue({
+        id: 'cron-1',
+        cron: '*/2 * * * *',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+      expect(create).toBeTypeOf('function');
+
+      await create?.({
+        cron: '*/2 * * * *',
+        prompt: 'handle the events below',
+        recurring: true,
+        promptId: 'prompt-1',
+        gate: './probe.sh --gate',
+      });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        'qwen/control/scheduled-task/create-current',
+        expect.objectContaining({ gate: './probe.sh --gate' }),
+      );
+      await create?.({
+        cron: '*/2 * * * *',
+        prompt: 'plain',
+        recurring: true,
+        promptId: 'prompt-1',
+      });
+      expect(
+        vi.mocked(mockClient.extMethod).mock.lastCall?.[1],
+      ).not.toHaveProperty('gate');
+    });
+
     it('reports an explicit unavailable error for an older daemon bridge', async () => {
       vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
         code: -32601,

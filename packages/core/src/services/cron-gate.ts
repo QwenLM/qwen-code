@@ -25,7 +25,10 @@ import { ToolNames } from '../tools/tool-names.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import {
+  backgroundsAnyPart,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
 import type { CronJob } from './cronScheduler.js';
 
@@ -99,6 +102,35 @@ async function unattendedVerdict(
     reason: 'it has not been approved to run unattended in this session',
     rule: await suggestedGateRule(gate),
   };
+}
+
+/** Longest gate command accepted by `cron_create` and the daemon routes. */
+export const MAX_CRON_GATE_CHARS = 2048;
+
+/**
+ * Why `gate` cannot be a gate command, or null when it can. Shared by the
+ * `cron_create` tool and the daemon's scheduled-task routes so every entry
+ * point refuses the same strings: empty or whitespace-only commands, commands
+ * past the cap, and anything backgrounded with `&` — a backgrounded gate
+ * returns at once with nothing on stdout, so every fire would be quiet.
+ * `backgroundsAnyPart` also looks inside a wrapper's script, behind a prefix
+ * too (`nohup bash -c './probe.sh &'`).
+ */
+export function gateCommandError(gate: unknown): string | null {
+  if (
+    typeof gate !== 'string' ||
+    gate.trim() === '' ||
+    normalizeMonitorCommand(gate).safetyCommand.trim() === ''
+  ) {
+    return 'must be a non-empty shell command';
+  }
+  if (gate.length > MAX_CRON_GATE_CHARS) {
+    return `must be at most ${MAX_CRON_GATE_CHARS} characters`;
+  }
+  if (backgroundsAnyPart(gate) || /(^|[^&])&\s*$/.test(gate.trim())) {
+    return 'must not background any part of the command with "&"';
+  }
+  return null;
 }
 
 /**

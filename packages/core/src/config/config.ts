@@ -2431,6 +2431,8 @@ export interface CurrentSessionScheduledTaskCreateRequest {
   prompt: string;
   recurring: boolean;
   promptId: string;
+  /** Shell command run at each fire outside the model; see cron-gate.ts. */
+  gate?: string;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {

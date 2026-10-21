@@ -305,8 +305,8 @@ export interface DaemonScheduledTask {
   recurring: boolean;
   enabled: boolean;
   /** Shell command the owning session runs at each fire outside the model;
-   * silence skips the fire, output wakes the session. Null for an ungated
-   * task; absent on a daemon that predates gates. */
+   * silence skips the fire, output wakes the session. Null for an ungated task.
+   * Absent on a daemon without the `scheduled_task_gate` capability. */
   gate?: string | null;
   gateStatus?: DaemonScheduledTaskGateStatus | null;
   createdAt: number;
@@ -353,6 +353,9 @@ export interface DaemonCreateScheduledTaskRequest {
   modelServiceId?: string;
   /** Named group for fresh per-run sessions. */
   groupId?: string;
+  /** Gate command; only to a daemon advertising `scheduled_task_gate`, and
+   * only on a recurring task. */
+  gate?: string;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -368,6 +371,8 @@ export interface DaemonUpdateScheduledTaskRequest {
   modelServiceId?: string | null;
   /** Null clears the selected group. */
   groupId?: string | null;
+  /** Null (or '') removes the gate. */
+  gate?: string | null;
 }
 
 export interface DaemonAddWorkspaceResult {

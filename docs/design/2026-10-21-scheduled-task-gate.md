@@ -2,8 +2,9 @@
 
 [English](2026-10-21-scheduled-task-gate.md) | [简体中文](2026-10-21-scheduled-task-gate.zh-CN.md)
 
-- **Status**: 2026-10-21. PR 1a (Section 11) is implemented on the PR
-  branch; PR 1b, the probes and the skills remain proposals. Step 1 of the
+- **Status**: 2026-10-22. PR 1a (Section 11) merged in PR #15069 and PR 1b
+  is its follow-up; the probes are in PR #15057; the skills remain
+  proposals. Step 1 of the
   event-driven PR watch (issue #15056); the probes (step 2, continuing
   PR #15057) and the skills (step 3) build on it.
 - **Related**:
@@ -127,7 +128,7 @@ prompt: "For each pull request event in the gate output, run /qreview <number>."
 `gate` needs a recurring task: a one-shot has no next slot, so a quiet gate
 would consume it with nothing delivered and no trace, and `cron_create`
 refuses the combination. It is accepted with `durable` and with the unbound
-session mode (`sessionMode: "current"` comes with the daemon follow-up). The
+session mode, and with `sessionMode: "current"` in a daemon. The
 tool result names the gate, and `cron_list` prints the gate and its last
 outcome after the prompt:
 
@@ -175,7 +176,7 @@ in the existing `buildScheduledTaskRunPrompt` header.
 ### 4.3 Daemon and Web Shell
 
 - The scheduled-task form gets one optional field, "Gate command", shown
-  only when the daemon reports the `scheduledTaskGate` capability. An older
+  only when the daemon reports the `scheduled_task_gate` capability. An older
   daemon would silently drop the field on `POST`.
 - The task card shows the gate and its last outcome
   (`quiet ×41 · last delivered 13:05 · 0 failures`).
@@ -357,7 +358,7 @@ it", which is the safe outcome.
   `getCurrentSessionScheduledTaskCreator` → the
   `qwen/control/scheduled-task/create-current` ext method → the bridge →
   `createScheduledTaskWithExistingSession`.
-- The `scheduledTaskGate` capability is added to `packages/cli/src/serve/capabilities.ts`
+- The `scheduled_task_gate` capability is added to `packages/cli/src/serve/capabilities.ts`
   and documented in `docs/developers/qwen-serve-protocol.md`; the Web Shell
   shows the field only when it is present.
 - The keepalive is unchanged. Running gates from a daemon-level ticker and
@@ -486,7 +487,7 @@ Web Shell-created gated task across a daemon restart.
    Shell "Run now", since a tool-created durable gated task is already
    visible there), user documentation.
 2. **PR 1b**: daemon REST routes, current-session creator threading,
-   `scheduledTaskGate` capability, Web Shell form and card.
+   `scheduled_task_gate` capability, Web Shell form and card.
 3. **Step 2**: probes — `qwen autofix-pr snapshot --gate` (continuing
    PR #15057 with a surfaced-event record and check-rollup paging) and a
    repository-level probe for opened and pushed PRs with author, draft, label

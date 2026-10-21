@@ -6190,6 +6190,7 @@ async function runQwenServeImpl(
         cron,
         prompt,
         recurring,
+        gate,
         assertCallerPromptActive,
       }) => {
         const targetBridge = getBridge();
@@ -6217,6 +6218,7 @@ async function runQwenServeImpl(
               cron,
               prompt,
               recurring,
+              ...(gate !== undefined ? { gate } : {}),
             },
             { source: 'cron-tool', assertCallerPromptActive },
           );

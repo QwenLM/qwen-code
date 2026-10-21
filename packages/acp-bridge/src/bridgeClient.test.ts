@@ -1986,6 +1986,32 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
     });
   });
 
+  it('forwards a gate command to the handler and rejects a malformed one', async () => {
+    const { client, handler } = makeCurrentSessionClient();
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        { ...request, gate: './probe.sh --gate' },
+      ),
+    ).resolves.toEqual({ id: 'cron-1', cron: request.cron });
+    expect(handler).toHaveBeenCalledWith({
+      ...request,
+      gate: './probe.sh --gate',
+      assertCallerPromptActive: expect.any(Function),
+    });
+
+    for (const gate of ['', '   ', 7, 'x'.repeat(2049)]) {
+      await expect(
+        client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+          { ...request, gate },
+        ),
+      ).rejects.toMatchObject({ code: -32602 });
+    }
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it.each(['prompt-1', 'background-1'])(
     'accepts explicit scheduled-task ownership for %s during a handoff',
     async (promptId) => {

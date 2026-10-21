@@ -116,6 +116,8 @@ import {
 
 const MAX_SCHEDULED_TASK_CRON_CHARS = 200;
 const MAX_SCHEDULED_TASK_PROMPT_CHARS = 100_000;
+// Mirrors core's MAX_CRON_GATE_CHARS; the route applies the full rule.
+const MAX_SCHEDULED_TASK_GATE_CHARS = 2048;
 /**
  * A per-run scheduled task prompt is the task's own prompt (already capped at
  * the same ceiling by the scheduled-task REST route) plus a short execution
@@ -2369,6 +2371,20 @@ export class BridgeClient implements Client {
         '`recurring` must be a boolean',
       );
     }
+    // Shape only: the daemon route validates the command itself with the
+    // same rule `cron_create` applies.
+    const gate = params['gate'];
+    if (
+      gate !== undefined &&
+      (typeof gate !== 'string' ||
+        gate.trim().length === 0 ||
+        gate.length > MAX_SCHEDULED_TASK_GATE_CHARS)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`gate\` must be a non-empty string within the ${MAX_SCHEDULED_TASK_GATE_CHARS}-character limit`,
+      );
+    }
 
     const entry = this.resolveEntry(callerSessionId);
     if (
@@ -2398,6 +2414,7 @@ export class BridgeClient implements Client {
       cron,
       prompt,
       recurring,
+      ...(gate !== undefined ? { gate } : {}),
       assertCallerPromptActive: () => {
         const currentEntry = this.resolveEntry(callerSessionId);
         if (

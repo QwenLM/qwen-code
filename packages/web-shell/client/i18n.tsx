@@ -1872,12 +1872,18 @@ const EN: Messages = {
   'scheduledTasks.group.hint': 'Each run conversation is placed in this group.',
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
-  'scheduledTasks.condition': 'Precondition (optional)',
-  'scheduledTasks.conditionPlaceholder':
-    'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
-  'scheduledTasks.condition.hint':
-    "Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.",
-  'scheduledTasks.condition.cardPrefix': 'If:',
+  'scheduledTasks.gate': 'Gate command (optional)',
+  'scheduledTasks.gatePlaceholder':
+    'e.g. ./check-pr.sh 15057 — a command that prints only what changed',
+  'scheduledTasks.gate.hint':
+    'Runs before each fire, outside the model, from the project directory, unattended once saved. Nothing on stdout skips the fire with no turn; output wakes the session with the output attached as data; a failure is reported once per streak.',
+  'scheduledTasks.gate.cardPrefix': 'Gate:',
+  'scheduledTasks.gate.notRunYet': 'gate not run yet',
+  'scheduledTasks.gate.neverDelivered': 'never',
+  'scheduledTasks.gate.status': (v) =>
+    `quiet ×${v?.quiet ?? 0} · last delivered ${v?.delivered ?? 'never'} · ${v?.failures ?? 0} failures`,
+  'scheduledTasks.runKind.gateFailed': 'gate failed',
+  'scheduledTasks.runKind.gateBlocked': 'gate blocked',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
   'turnOutputs.imagePreview': 'Image Preview',
   'turnOutputs.viewChanges': 'View changes',
@@ -6256,12 +6262,18 @@ const ZH: Messages = {
   'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
-  'scheduledTasks.condition': '前置条件（可选）',
-  'scheduledTasks.conditionPlaceholder':
-    '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
-  'scheduledTasks.condition.hint':
-    '每次触发前，先在本任务自己的会话中检查该条件。只有判定为"是"，才会新建会话执行命令；否则跳过本次运行。',
-  'scheduledTasks.condition.cardPrefix': '若：',
+  'scheduledTasks.gate': '闸门命令（可选）',
+  'scheduledTasks.gatePlaceholder':
+    '例如：./check-pr.sh 15057 —— 一条只打印变化的命令',
+  'scheduledTasks.gate.hint':
+    '每次触发前在模型之外、从项目目录运行，保存后无人值守执行。stdout 没有输出则跳过本次触发、不产生回合；有输出则唤醒会话并把输出作为数据附上；失败每个连段只报告一次。',
+  'scheduledTasks.gate.cardPrefix': '闸门：',
+  'scheduledTasks.gate.notRunYet': '闸门尚未运行',
+  'scheduledTasks.gate.neverDelivered': '从未',
+  'scheduledTasks.gate.status': (v) =>
+    `安静 ×${v?.quiet ?? 0} · 上次投递 ${v?.delivered ?? '从未'} · 失败 ${v?.failures ?? 0} 次`,
+  'scheduledTasks.runKind.gateFailed': '闸门失败',
+  'scheduledTasks.runKind.gateBlocked': '闸门被阻止',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'turnOutputs.imagePreview': '图片预览',
   'turnOutputs.viewChanges': '查看更改',
