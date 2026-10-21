@@ -11,7 +11,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DaemonSessionPrInfo } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
-import { SessionPrBadge } from './SessionPrBadge';
+import { SessionPrBadge, openableSessionPrs } from './SessionPrBadge';
 import styles from './SessionPrStateIcon.module.css';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -77,5 +77,20 @@ describe('SessionPrBadge', () => {
     expect(labelOf('closed')).toContain('Closed');
     expect(labelOf('open')).not.toContain('Open');
     expect(labelOf()).not.toContain('Open');
+  });
+});
+
+describe('openableSessionPrs', () => {
+  it('keeps only openable bindings, in binding order', () => {
+    const first = pr(9500);
+    const latest = pr(9517, 'merged');
+    expect(
+      openableSessionPrs([
+        { number: 1, url: 'javascript:alert(1)' },
+        first,
+        { number: 2, url: '   ' },
+        latest,
+      ]),
+    ).toEqual([first, latest]);
   });
 });
