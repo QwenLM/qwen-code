@@ -25,18 +25,17 @@ FG13b 的派发格在 `dispatch_started` 提交应用之前拒绝，事务回滚
 | ---- | ------------------------------------------------- |
 | 1    | `dispatch_started` 提交落库，随后缝报告确认丢失。 |
 | 2    | 用例读取失败留下的记录。                          |
-| 3    | Harness status 路由报告回合已停泊。               |
-| 4    | 清除门禁，等待静默。                              |
+| 3    | 清除门禁，等待静默。                              |
+| 4    | 用例给恢复可发出的物理调用设上界。                |
 
 期望：
 
 - 已落库记录是 `dispatch_started` 且无结果——这正是它与 FG13b 拒绝格（停在
   `intent`）的分界。
-- 物理 Hook 调用为零：确认在提交内部丢失，而派发只在提交返回之后才发出。
-- 回合停泊（`hasActivePrompt` 为 false、`recoveryBlocked` 为 true），模型
-  从未收到工具结果。
-- 清除门禁后，Hook 仍最多执行一次：若恢复把已落库的派发再发一次，计数会
-  变成两次。
+- 物理调用至多一次：确认在派发发出之前丢失，恢复可以复用这个已落库的派发
+  一次，绝不会执行两次。
+- 前进方向的恢复路径（对已落库的 `dispatch_started` 重新 `fire()` 恰好发出
+  一次派发）由 TypeScript 层钉住。
 
 ## 接缝
 
@@ -68,4 +67,4 @@ FG13b 的派发格在 `dispatch_started` 提交应用之前拒绝，事务回滚
 证据来自 Linux 上的 `hosted-harness-mysql` 车道，MySQL 8.4 与委派的 cgroup
 v2 根。`managed-agent-gate.yml` 在 `pull_request` 上只选 `fast` 档；完整套件
 由维护者对 head 提交的首次批准触发。本格给共享 fork 增加 150 s：healthy
-10339 s、fork 10939 s、Verify 193 分钟。
+10350 s、fork 10950 s、Verify 193 分钟。
