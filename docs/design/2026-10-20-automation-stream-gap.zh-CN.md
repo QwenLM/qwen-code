@@ -10,9 +10,12 @@ Issue：#14446，FG11 tracker。`e` 行把事件流中的缺口记为审计点�
 ## 为什么
 
 其余 FG11 切片故障的是 automation **做了什么**——丢应答、存储失败、崩溃、
-发布。它们都假设客户端读到的事件 journal 是连续的。CI 里没有任何东西回答
-它不连续时会怎样：一个已处理到序号 `N` 的消费者，下一次收到 `N + k`，中间的
-事件就丢了；而恢复路径恰恰是「重复的副作用」与「重放」无法区分的地方。
+发布。它们都假设客户端读到的事件 journal 是连续的。已有三道门禁覆盖其它流的
+连续性——FG6e 的 `sse-gap` driver、FG8e 的断开续传用例、FG12f 的
+`HostedMcpStreamGapIT`——因此 FG11e 是它们没有覆盖的 automation journal 切片。
+它们都没有回答的是：这份 journal 不连续时会怎样——一个已处理到序号 `N` 的
+消费者，下一次收到 `N + k`，中间的事件就丢了；而恢复路径恰恰是「重复的副作用」
+与「重放」无法区分的地方。
 
 这对 automation 尤其重要，因为它的工作由 journal 驱动。被悄悄抹平的缺口会丢掉
 一次 `fire_run`；过于激进的重放会让同一个 occurrence 触发两次——正是 FG11a 与
@@ -85,10 +88,17 @@ tracker 的 FG11e 行点名三个场景；前两个不被上面的 journal 形�
 
 ## 未解问题
 
-- 决定「重放」还是「快照」的分支尚未定位。从 schema 看两条路径都存在；选择它
-  们的代码还没被追出来，在追出之前无法把故障臂对准它。
-- 检测到缺口后的客户端可见契约——错误帧、缺口标记，还是静默续读——在 FG11 的
-  设计集里没有任何一处规定。
+- 「重放」还是「快照」的分支已经定位：游标低于 `replay_floor_sequence` 时
+  `ManagedAgentService.replayableEvents` 抛 `ReplayCursorExpired`，
+  `ManagedEventStreamService` 把它转成一帧 resync。仍未解的问题更窄——哪些
+  automation 事件类型会进入 Session 流，以及同一序号下如何区分「投影缺口」与
+  「投影较慢」。
+- 客户端可见契约存在于 FG11 设计集之外，写在
+  `docs/design/2026-09-27-managed-agent-event-replay.md`（含同版 `.zh-CN.md`）：
+  JSON 读以 `409 cursor_expired` 返回 `replay_floor_sequence` 与
+  `snapshot_through_sequence`，流则发送一帧携带 `reload_snapshot` 的
+  `agent.session.resync_required`，且刻意不带 `id`，使重连不会跳过客户端缺失的
+  事件。仍未解的是 automation 消费者是否遵守 `reload_snapshot`。
 
 ## 限制
 

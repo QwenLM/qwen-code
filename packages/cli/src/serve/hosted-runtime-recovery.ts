@@ -52,7 +52,7 @@ import {
   HOSTED_TOOL_INPUT_ORDER,
   hostedHookOccurrenceId,
   HostedHookRecoveryRequiredError,
-  semanticInputDigest,
+  recordedToolHookFields,
   type HostedHookSession,
 } from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -1053,7 +1053,11 @@ async function hostedSkillResponse(
       new TextDecoder('utf-8', { fatal: true }).decode(
         await session.resources.read(record.planRef),
       ),
-    ) as { refusedInputDigest?: unknown; toolInputOrder?: unknown };
+    ) as {
+      input: Record<string, unknown>;
+      refusedInputDigest?: unknown;
+      toolInputOrder?: unknown;
+    };
     // A Skill's PreToolUse runs on the model's input in either order, but a
     // plan from an unknown order is no evidence of what it decided.
     if (
@@ -1072,14 +1076,17 @@ async function hostedSkillResponse(
       const approval = readHostedApprovalDefinition(definition);
       if (
         !approval ||
-        plan.refusedInputDigest !==
-          semanticInputDigest({
+        typeof plan.refusedInputDigest !== 'string' ||
+        !recordedToolHookFields(
+          { input: plan.input, refusedInputDigest: plan.refusedInputDigest },
+          {
             tool_name: 'skill',
             tool_input: args,
             tool_use_id: callId,
             permission_mode: approval.mode,
             prompt_id: promptId,
-          })
+          },
+        )
       )
         throw new HostedHookRecoveryRequiredError();
     } else {
