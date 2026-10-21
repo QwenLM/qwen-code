@@ -1056,6 +1056,40 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.props?.visibleToolbarActions).not.toContain('addMenu');
   });
 
+  it.each([undefined, false, true])(
+    'imports creation Skills only when supported (%s)',
+    async (skillsSupported) => {
+      const { createSession, getSessionOptions } = approvalSelection();
+      getSessionOptions.mockResolvedValue({
+        approvalMode: 'default',
+        availableApprovalModes: ['default'],
+        ...(skillsSupported === undefined ? {} : { skillsSupported }),
+      });
+      const catalog = [
+        { name: 'review', description: 'Review', body: 'Review changes.' },
+      ];
+      const load = vi.fn().mockResolvedValue(catalog);
+      creationSkills = {
+        workspaceCwd: '/source',
+        list: vi.fn().mockResolvedValue([]),
+        load,
+      };
+      await render();
+      expect(Boolean(editorMocks.props?.onSkillsOpenChange)).toBe(
+        Boolean(skillsSupported),
+      );
+      expect(
+        container.textContent?.includes('Enabled Skills on the Skills page'),
+      ).toBe(Boolean(skillsSupported));
+      await sendInitial('Compatible creation');
+      expect(createSession).toHaveBeenCalledOnce();
+      expect(load).toHaveBeenCalledTimes(skillsSupported ? 1 : 0);
+      if (skillsSupported)
+        expect(createSession.mock.calls[0]![0].skills).toEqual(catalog);
+      else expect(createSession.mock.calls[0]![0]).not.toHaveProperty('skills');
+    },
+  );
+
   it('imports all enabled Skills and keeps the exact snapshot when retrying after reload', async () => {
     const { createSession, getSessionOptions } = approvalSelection();
     getSessionOptions.mockResolvedValue({
@@ -1091,6 +1125,11 @@ describe('WorkspaceBindingCreator', () => {
     await act(async () => root.unmount());
     root = createRoot(container);
     load.mockResolvedValue([]);
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: false,
+    });
     await render();
     expect(container.textContent).toContain('42 Skills are saved');
     await click('Retry the same request');

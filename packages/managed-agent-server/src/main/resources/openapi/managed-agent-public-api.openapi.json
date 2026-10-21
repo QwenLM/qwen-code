@@ -11599,7 +11599,7 @@
         "properties": {
           "skills": {
             "type": "array",
-            "maxItems": 16,
+            "maxItems": 256,
             "items": {
               "$ref": "#/components/schemas/WebShellSkill"
             }

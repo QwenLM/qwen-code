@@ -452,11 +452,14 @@ export function WorkspaceBindingCreator({
 
   const currentOptions =
     sessionOptions?.agentId === agentId ? sessionOptions : undefined;
+  const supportedSkillsSource = currentOptions?.skillsSupported
+    ? creationSkills
+    : undefined;
   const skills = useManagedSkills(
     provider,
     clientId,
     undefined,
-    currentOptions?.skillsSupported ? creationSkills : undefined,
+    supportedSkillsSource,
   );
   const fileReferences = useManagedFileReferences(
     provider,
@@ -549,7 +552,7 @@ export function WorkspaceBindingCreator({
       }
       let input: ManagedInputBlock[] = [];
       let skills: ManagedSessionSkill[] = [];
-      const source = creationSkills;
+      const source = supportedSkillsSource;
       encoding.current = true;
       setBusy(true);
       try {
@@ -558,8 +561,6 @@ export function WorkspaceBindingCreator({
           if (source !== skillsSourceRef.current)
             throw new Error(t('managed.creationSkillsSourceChanged'));
           if (!isManagedSessionSkills(skills))
-            throw new Error(t('managed.creationSkillsUnavailable'));
-          if (skills.length && !currentOptions?.skillsSupported)
             throw new Error(t('managed.creationSkillsUnavailable'));
         }
         if (text !== undefined) {
@@ -583,7 +584,7 @@ export function WorkspaceBindingCreator({
         setBusy(false);
       }
       if (abort.signal.aborted) return;
-      if (source !== skillsSourceRef.current) {
+      if (source && source !== skillsSourceRef.current) {
         setError(t('managed.creationSkillsSourceChanged'));
         return;
       }
@@ -960,7 +961,7 @@ export function WorkspaceBindingCreator({
           {t('managed.newWorkspaceResume')}
         </Button>
       )}
-      {(creationSkills || pending?.skills?.length) && (
+      {(supportedSkillsSource || pending?.skills?.length) && (
         <p className="my-2 text-sm text-muted-foreground">
           {pending?.skills?.length
             ? t('managed.creationSkillsPinned', {
@@ -971,7 +972,7 @@ export function WorkspaceBindingCreator({
             <Button
               type="button"
               variant="link"
-              title={creationSkills?.workspaceCwd}
+              title={supportedSkillsSource?.workspaceCwd}
               onClick={onManageSkills}
             >
               {t('managed.creationSkillsManage')}

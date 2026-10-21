@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
@@ -576,8 +577,14 @@ public final class WorkspaceRecoveryStore {
         fields(creation, receipt, "idempotencyKey", "idempotency_key", "requestDigest", "request_digest",
                 "turnId", "turn_id", "createdAt", "gmt_create");
         if (receipt.get("result_json") != null) {
-            var skills = ManagedSessionSkills.decode((String) receipt.get("result_json"), JSON, SKILL_DIGESTS);
-            creation.put("skillsDigest", SKILL_DIGESTS.digest(skills));
+            try {
+                var skills = ManagedSessionSkills.decode((String) receipt.get("result_json"), JSON, SKILL_DIGESTS);
+                creation.put("skillsDigest", SKILL_DIGESTS.digest(skills));
+            } catch (ManagedAgentException error) {
+                var drift = failure("source_drift");
+                drift.initCause(error);
+                throw drift;
+            }
         }
         // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
         boolean lockHead = lockSources && count(jdbc,

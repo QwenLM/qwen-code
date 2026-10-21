@@ -71,6 +71,9 @@ export function PluginManagerPage({
   const [activeTab, setActiveTab] = useState<PluginTab>(initialTab);
   const [detailOpen, setDetailOpen] = useState(false);
   const [pageRevision, setPageRevision] = useState(0);
+  const skillsWorkspace = splitSkillsRuntimeAvailable
+    ? selectedWorkspaceCwd
+    : workspace.workspaceCwd;
 
   useEffect(() => {
     if (
@@ -85,9 +88,9 @@ export function PluginManagerPage({
   }, [defaultWorkspaceCwd, selectedWorkspaceCwd, workspaces]);
 
   useEffect(() => {
-    if (activeTab === 'skills' && selectedWorkspaceCwd)
-      onSkillsWorkspaceChange?.(selectedWorkspaceCwd);
-  }, [activeTab, onSkillsWorkspaceChange, selectedWorkspaceCwd]);
+    if (activeTab === 'skills' && skillsWorkspace)
+      onSkillsWorkspaceChange?.(skillsWorkspace);
+  }, [activeTab, onSkillsWorkspaceChange, skillsWorkspace]);
 
   const resetToRoot = useCallback(() => {
     setDetailOpen(false);
@@ -190,11 +193,7 @@ export function PluginManagerPage({
             onClose={onClose}
             onUseSkill={onUseSkill}
             embedded={embedded}
-            workspaceCwd={
-              splitSkillsRuntimeAvailable
-                ? selectedWorkspaceCwd
-                : workspace.workspaceCwd
-            }
+            workspaceCwd={skillsWorkspace}
             workspaceControl={workspaceSelect(true)}
           />
         ) : activeTab === 'agents' ? (

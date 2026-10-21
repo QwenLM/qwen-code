@@ -3912,13 +3912,12 @@ export function App({
     [workspace.client],
   );
   const managedCreationSkills = useMemo(() => {
-    if (managedAgentProvider?.kind !== 'java') return undefined;
+    if (managedAgentProvider?.kind !== 'java' || !skillsSourceCwd)
+      return undefined;
     const sourceCwd = skillsSourceCwd;
     return {
-      workspaceCwd: sourceCwd ?? '',
+      workspaceCwd: sourceCwd,
       async list(signal: AbortSignal) {
-        if (!sourceCwd)
-          throw new Error('Skills source Workspace is unavailable.');
         const status = await workspace.client
           .workspaceByCwd(sourceCwd)
           .workspaceConfigSkills();
@@ -3934,8 +3933,6 @@ export function App({
           .map(({ name, description }) => ({ name, description }));
       },
       async load(signal: AbortSignal) {
-        if (!sourceCwd)
-          throw new Error('Skills source Workspace is unavailable.');
         const snapshot = await workspace.client
           .workspaceByCwd(sourceCwd)
           .workspaceSkillsSnapshot(signal);
@@ -9966,6 +9963,7 @@ export function App({
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
     }
+    if (activePanel !== 'plugins') setPluginInitialTab('extensions');
   }, [activePanel]);
   const closePanel = useCallback(() => {
     splitClassificationGenerationRef.current += 1;

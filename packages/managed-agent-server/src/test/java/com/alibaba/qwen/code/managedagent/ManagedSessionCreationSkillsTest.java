@@ -100,7 +100,10 @@ class ManagedSessionCreationSkillsTest {
         mvc.perform(post("/api/agent/web-shell/v1/session-skills/query").principal(actor("actor"))
                         .header(TenantContextFilter.HEADER, tenant).contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsBytes(Map.of("sessionId", session))))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.skills.length()").value(41));
+                .andExpect(status().isOk()).andExpect(jsonPath("$.skills.length()").value(41))
+                .andExpect(result -> assertThat(OpenApiContract.load().validate(
+                        "/components/schemas/WebShellSessionSkills",
+                        json.readTree(result.getResponse().getContentAsString()))).isEmpty());
     }
 
     @Test
