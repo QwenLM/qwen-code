@@ -265,9 +265,12 @@ export function useManagedApprovalChange(
       !options?.supported ||
       (planMode !== undefined && options.planModeSupported !== true) ||
       !options.availableApprovalModes.includes(approvalMode) ||
-      !['created', 'completed', 'failed', 'cancelled'].includes(
+      (!['created', 'completed', 'failed', 'cancelled'].includes(
         current.phase,
-      ) ||
+      ) &&
+        (planMode !== undefined ||
+          options.liveSupported !== true ||
+          current.phase === 'cancelling')) ||
       options.approvalRevision !== (current.approvalRevision ?? 0) ||
       (approvalMode === current.approvalMode &&
         (planMode === undefined || planMode === Boolean(current.planMode)))
