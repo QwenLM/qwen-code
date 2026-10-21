@@ -116,9 +116,10 @@ the journal shapes above, so they are scoped here rather than dropped:
   turns that into one resync frame. What is still open is narrower — which automation event types
   reach the Session stream, and how a projection gap is told apart from a slow
   projection sitting at the same sequence.
-- The client-visible contract exists one design document outside the FG11 set:
-  JSON reads answer `409 cursor_expired` with `replay_floor_sequence` and
-  `snapshot_through_sequence`, and streams send one
+- The client-visible contract lives outside the FG11 set, in
+  `docs/design/2026-09-27-managed-agent-event-replay.md` (with a `.zh-CN.md`
+  sibling): JSON reads answer `409 cursor_expired` with `replay_floor_sequence`
+  and `snapshot_through_sequence`, and streams send one
   `agent.session.resync_required` frame carrying `reload_snapshot`, deliberately
   without an `id` so a reconnect cannot skip what the client lacks. What is open
   is whether automation consumers honour `reload_snapshot`.

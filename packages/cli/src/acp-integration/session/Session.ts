@@ -22,7 +22,11 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -276,13 +280,13 @@ import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
-import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   buildSessionHistoryFromConversation,
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
+  cloneApiHistory,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
@@ -2525,6 +2529,7 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
    * Tail of this session's permission queue. The serialization unit is the
    * session, not the `AgentSideConnection`: one daemon child owns a single
@@ -5125,12 +5130,19 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getLlmClient()!.getChat().getHistoryShallow();
+    const history = this.config.getLlmClient()!.getChat().getHistoryShallow();
+    this.historySnapshotBoundary = {
+      hash: createHash('sha256').update(JSON.stringify(history)).digest('hex'),
+      prefixLength: getStartupContextLength(history, {
+        includeCompressed: true,
+      }),
+    };
+    return history;
   }
 
   getRewindableUserTurnCount(): number {
     return countApiUserPrompts(
-      this.captureHistorySnapshot(),
+      this.config.getLlmClient()!.getChat().getHistoryShallow(),
       ACP_API_USER_PROMPT_OPTIONS,
     );
   }
@@ -5143,7 +5155,17 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config.getLlmClient()!.setHistory(structuredClone(history));
+    const restored = cloneApiHistory(history);
+    if (
+      this.historySnapshotBoundary?.hash ===
+      createHash('sha256').update(JSON.stringify(history)).digest('hex')
+    ) {
+      markCompressedHistory(
+        restored,
+        this.historySnapshotBoundary.prefixLength,
+      );
+    }
+    this.config.getLlmClient()!.setHistory(restored);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -6047,9 +6069,8 @@ export class Session implements SessionContext {
       return undefined;
     }
 
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
+    // Limit meaningful history while retaining trailing notifications for replay.
+    // The authoritative re-detection inside prompt() uses full history to strip.
     const chat = this.#getCurrentChat();
     // A trailing restorable ask_user_question is awaiting its restore
     // prompt, not an interruption to close: `interrupted_turn` would answer
@@ -6071,7 +6092,8 @@ export class Session implements SessionContext {
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
-        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        : (chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+          chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
           chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
       historyGaps: runtimeGaps?.length
         ? runtimeGaps

@@ -318,12 +318,37 @@ describe('Hosted real-process gates', () => {
     expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
     expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
+    const isolationProfile = hosted.split('</profile>')[0];
+    // Scope the parameter assertions to the failsafe plugin itself: a
+    // <properties> block hoisted above the plugin would keep the profile
+    // slice matching while never reaching the fork.
+    const failsafeStart = isolationProfile.indexOf(
+      '<artifactId>maven-failsafe-plugin</artifactId>',
+    );
+    expect(failsafeStart).toBeGreaterThan(-1);
+    const failsafeEnd = isolationProfile.indexOf('</plugin>', failsafeStart);
+    expect(failsafeEnd).toBeGreaterThan(failsafeStart);
+    const failsafeBlock = isolationProfile.slice(failsafeStart, failsafeEnd);
+    expect(failsafeBlock).toContain('<forkCount>1</forkCount>');
+    expect(failsafeBlock).toContain(
+      'junit.jupiter.extensions.autodetection.enabled = true',
+    );
+    expect(failsafeBlock).toContain(
+      'junit.jupiter.execution.parallel.enabled = false',
+    );
+    expect(failsafeBlock).toContain('qwen.hosted.mysql.isolation = true');
+    expect(pom.match(/qwen\.hosted\.mysql\.isolation = true/g)).toHaveLength(1);
+    expect(
+      read(
+        'packages/managed-agent-server/src/test/resources/META-INF/services/org.junit.jupiter.api.extension.Extension',
+      ).trim(),
+    ).toBe('com.alibaba.qwen.code.managedagent.HostedMySqlIsolationExtension');
     // The MariaDB job must not narrow its selection either, or an IT outside
     // the Hosted family would silently run nowhere.
     const mariadbRun = java.jobs['mysql-integration'].steps.find(
       (step) =>
         step.name ===
-        'Run Managed Agent tests, Checkstyle, and MySQL integration',
+        'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
     );
     expect(mariadbRun.run).toContain('-Pmysql-integration');
     expect(mariadbRun.run).not.toContain('-Dit.test');
@@ -341,7 +366,12 @@ describe('Hosted real-process gates', () => {
       expect(profile(id), id).toMatch(skipsUnits);
     }
     expect(profile('mysql-integration')).not.toContain('maven-surefire-plugin');
-    expect(mariadbRun.run).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
+    // The step stages the SDK with -DskipTests before the MySQL run; only
+    // the integration command itself must keep its tests.
+    const mariadbVerify = mariadbRun.run.slice(
+      mariadbRun.run.indexOf('-Pmysql-integration'),
+    );
+    expect(mariadbVerify).not.toMatch(/-D(skipTests|maven\.test\.skip)/);
     // Those checks read only the command lines, so each job also compares
     // the reports of its run with the source tree, right after its last
     // integration-test step.
@@ -475,9 +505,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (178 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (180 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 268, 281],
+    ['hosted-harness-mysql', 270, 283],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -694,12 +724,20 @@ describe('Hosted real-process gates', () => {
       // FG13b Hook dispatch store-rejection cell adds 150 s, so the fork
       // moves to 9411 and the Verify step to 167 minutes; the FG11f publication
       // cell adds 82 s (2x its measured 41.1 s), so the fork moves to 9493 and
-      // the step to 169 minutes):
+      // the step to 169 minutes; FG12f result and catalog delivery add 30 s,
+      // and the FG11f refusing arms add 242 s, moving the fork to 9765 and
+      // the step to 173 minutes. Hook result and plan-result store rejection
+      // add 300 s, moving the fork to 10065 and the step to 178 minutes.
+      // The FG11d cancel cell adds 15 s, moving the fork to 10080 and
+      // the step to 179 minutes. The FG12f delivery allowance adds 20 s,
+      // moving the fork to 10100. The FG11d retire-at-intent cell adds 18 s,
+      // moving the fork to 10118. Cleanup adds 60 s, moving the fork to
+      // 10178 and the step to 180 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10065);
+        expect(forkSeconds).toBe(10178);
       }
     },
   );
@@ -772,13 +810,17 @@ describe('Hosted real-process gates', () => {
   // 8893s; the FG12f delivery cell adds 30s, so it becomes 8923s; the FG11f
   // refusing-arms cells add 242s, so it becomes 9165s; the FG13b Hook result
   // store-rejection cell adds 150s, so it becomes 9315s; the FG13b Hook
-  // plan-result store-rejection cell adds 150s, so it becomes 9465s. The
-  // largest
+  // plan-result store-rejection cell adds 150s, so it becomes 9465s; the FG11d
+  // cancel cell adds 15s (2x its measured 7.4s), so it becomes 9480s; the
+  // FG12f delivery entry moves from 30s to 50s at 2x (four cases, 24.16s
+  // measured), so it becomes 9500s; the FG11d retire-at-intent cell adds 18s
+  // (2x its measured 8.6s), so it becomes 9518s.
+  // Class-boundary cleanup adds 60s for 9578s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 9465;
+  const hostedForkHealthySeconds = 9578;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -856,6 +898,7 @@ describe('Hosted real-process gates', () => {
       'HostedMcpStoreFaultGatesIT',
       'HostedMcpStreamGapIT',
       'HostedMonitorRunFaultGatesIT',
+      'HostedMySqlIsolationIT',
       'HostedProcessCrashIT',
       'HostedPublicWorkspaceIT',
       'HostedSessionRelayFaultGatesIT',

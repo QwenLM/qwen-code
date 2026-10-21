@@ -245,6 +245,27 @@ it('pins discovery, commits raw resource results and replays without another eff
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
 });
 
+it('identifies each server behind opaque model tool names without changing invocation bindings', async () => {
+  mcp = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin, { ...pin, serverId: 'other' }],
+  );
+  await mcp.ensureReady();
+  const tools = mcp.tools();
+  expect(tools).toHaveLength(2);
+  expect(new Set(tools.map((tool) => tool.name)).size).toBe(2);
+  for (const [index, serverId] of ['demo', 'other'].entries()) {
+    expect(tools[index].description).toBe(
+      `MCP server: "${serverId}"\nMCP tool: "echo"\nEcho input`,
+    );
+    expect(
+      mcp.toolInput(tools[index].name!, { text: 'hello' }, `call-${index}`)
+        ?.input,
+    ).toMatchObject({ serverId, request: { kind: 'tool_call', name: 'echo' } });
+  }
+});
+
 it('queries a lost configure reply by its original identity instead of reconnecting', async () => {
   loseAck = true;
   await mcp.ensureReady();

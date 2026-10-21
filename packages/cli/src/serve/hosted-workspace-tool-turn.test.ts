@@ -72,6 +72,7 @@ import {
   hostedActionAllowed,
   resolveHostedAction,
   type HostedApprovalMode,
+  type HostedApprovalSettings,
 } from './hosted-tool-approval.js';
 import * as stdio from '../utils/stdioHelpers.js';
 import { monitorUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
@@ -191,7 +192,12 @@ let waiters: HostedApprovalWaiters;
 let expectWritesStopped: boolean;
 function createTurn(
   shell = false,
-  approval?: { mode: HostedApprovalMode; timeoutMs?: number },
+  approval?: {
+    mode: HostedApprovalMode;
+    timeoutMs?: number;
+    readSettings?: () => Promise<HostedApprovalSettings>;
+    isBlocked?: () => boolean;
+  },
   hooks?: HostedHookSession,
   skills?: HostedSkillCatalog,
   planMode: 'none' | 'public' | 'member' = 'none',
@@ -213,6 +219,8 @@ function createTurn(
         timeoutMs: approval.timeoutMs ?? 60_000,
       },
       waiters,
+      readSettings: approval.readSettings,
+      isBlocked: approval.isBlocked,
     },
     {
       hooks,
@@ -3348,6 +3356,214 @@ async function toolResultErrors() {
     .map((part) => part.functionResponse?.response?.['error']);
 }
 
+it.each(['auto-edit', 'yolo'] as const)(
+  'durably allows a pending ordinary edit after changing to %s in the current Turn',
+  async (mode) => {
+    let selected: HostedApprovalMode = 'default';
+    const readSettings = vi.fn(async () => ({
+      mode: selected,
+      timeoutMs: 60_000,
+    }));
+    turn = createTurn(false, { mode: 'default', readSettings });
+    const running = turn.execute(
+      calls,
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    expect(broker.execute).not.toHaveBeenCalled();
+    selected = mode;
+    const result = await running;
+    expect(
+      result.map((part) => part.functionResponse?.response?.['error']),
+    ).toEqual([undefined, undefined]);
+    expect(
+      hostedActionAllowed(
+        session.authority.action(requestId)!,
+        HOSTED_TOOL_APPROVAL_POLICY,
+      ),
+    ).toBe(true);
+    expect(broker.execute).toHaveBeenCalledTimes(2);
+    expect(actionIds()).toEqual([requestId]);
+  },
+);
+
+it('applies a live downgrade before a subsequent tool in the same Turn', async () => {
+  let selected: HostedApprovalMode = 'yolo';
+  turn = createTurn(false, {
+    mode: 'yolo',
+    readSettings: async () => ({ mode: selected, timeoutMs: 60_000 }),
+  });
+  await turn.execute(
+    [calls[0]!],
+    [parts[0]!],
+    'model',
+    new AbortController().signal,
+  );
+  selected = 'default';
+  const running = turn.execute(
+    [calls[1]!],
+    [parts[1]!],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  expect(broker.execute).toHaveBeenCalledTimes(1);
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  await running;
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+});
+
+it('stops new tool admission when a live policy read fails even from Full Access', async () => {
+  turn = createTurn(false, {
+    mode: 'yolo',
+    readSettings: async () => {
+      throw new Error('writer fenced');
+    },
+  });
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('stops a pending approval when the live policy can no longer be read', async () => {
+  let unavailable = false;
+  turn = createTurn(false, {
+    mode: 'default',
+    readSettings: async () => {
+      if (unavailable) throw new Error('writer fenced');
+      return { mode: 'default', timeoutMs: 60_000 };
+    },
+  });
+  const running = turn.execute(
+    calls,
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+  await requested();
+  unavailable = true;
+  await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('keeps a denial that wins while a live policy poll is in flight', async () => {
+  let poll = false;
+  let entered = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  turn = createTurn(false, {
+    mode: 'default',
+    readSettings: async () => {
+      if (poll) {
+        entered = true;
+        await gate;
+      }
+      return { mode: poll ? 'yolo' : 'default', timeoutMs: 60_000 };
+    },
+  });
+  const running = turn.execute(
+    [calls[1]!],
+    [parts[1]!],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  poll = true;
+  await vi.waitFor(() => expect(entered).toBe(true), { timeout: 5_000 });
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  release();
+  const result = await running;
+  expect(JSON.stringify(result)).toContain('denied');
+  expect(
+    hostedActionAllowed(
+      session.authority.action(requestId)!,
+      HOSTED_TOOL_APPROVAL_POLICY,
+    ),
+  ).toBe(false);
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('does not resolve a pending Action when recovery blocks during the policy read', async () => {
+  let poll = false;
+  let entered = false;
+  let blocked = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  turn = createTurn(false, {
+    mode: 'default',
+    isBlocked: () => blocked,
+    readSettings: async () => {
+      if (poll) {
+        entered = true;
+        await gate;
+      }
+      return { mode: poll ? 'yolo' : 'default', timeoutMs: 60_000 };
+    },
+  });
+  const running = turn.execute(
+    [calls[1]!],
+    [parts[1]!],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  poll = true;
+  await vi.waitFor(() => expect(entered).toBe(true), { timeout: 5_000 });
+  blocked = true;
+  release();
+  await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('keeps an explicit Hook ask pending under a live Full Access selection', async () => {
+  const controller = new AbortController();
+  const fire = vi.fn<HostedHookSession['fire']>(async (event) =>
+    event === HookEventName.PreToolUse
+      ? {
+          hookSpecificOutput: {
+            hookEventName: event,
+            permissionDecision: 'ask',
+          },
+        }
+      : undefined,
+  );
+  turn = createTurn(
+    false,
+    {
+      mode: 'default',
+      readSettings: async () => ({ mode: 'yolo', timeoutMs: 60_000 }),
+    },
+    hookSession(fire),
+  );
+  const running = turn.execute(
+    [calls[1]!],
+    [parts[1]!],
+    'model',
+    controller.signal,
+  );
+  const requestId = await requested();
+  expect(
+    fire.mock.calls.find(([event]) => event === HookEventName.PreToolUse)?.[2],
+  ).toMatchObject({ permission_mode: 'yolo' });
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  expect(broker.execute).not.toHaveBeenCalled();
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  const result = await running;
+  expect(JSON.stringify(result)).toContain('denied');
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
 it('asks before an edit in default mode and runs the batch once the owner allows', async () => {
   turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
   const started = Date.now();
@@ -5734,6 +5950,121 @@ const hookInputs = (
       ? reportedInputs({ input })[0]
       : input['tool_input'],
   ]);
+
+it('completes and replays durable Hook results after a live pending approval change', async () => {
+  let mode: HostedApprovalMode = 'default';
+  const { create, seen } = durableHooks({
+    [HookEventName.PreToolUse]: replaceWith(editB),
+    [HookEventName.PermissionRequest]: () => undefined,
+    [HookEventName.PostToolUse]: () => undefined,
+    [HookEventName.PostToolBatch]: () => undefined,
+  });
+  const approval = {
+    mode: 'default' as const,
+    readSettings: async () => ({ mode, timeoutMs: 60_000 }),
+  };
+  turn = createTurn(false, approval, create());
+  const signal = new AbortController().signal;
+  const running = turn.execute([calls[1]], [parts[1]], 'model', signal);
+  const requestId = await requested();
+  mode = 'yolo';
+  const responses = await running;
+  expect(session.authority.action(requestId)?.state).toBe('decided');
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editB);
+  expect(
+    seen.find(({ event }) => event === HookEventName.PreToolUse)?.input,
+  ).toMatchObject({ permission_mode: 'default' });
+  expect(
+    seen.find(({ event }) => event === HookEventName.PostToolUse)?.input,
+  ).toMatchObject({ permission_mode: 'yolo' });
+  const history = await session.sink.project();
+  await expect(
+    createTurn(false, approval, create()).resumeHookResults(
+      responses,
+      'model',
+      signal,
+    ),
+  ).resolves.toEqual(responses);
+  expect(seen).toHaveLength(4);
+  expect(await session.sink.project()).toEqual(history);
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('preserves each durable Hook mode when the live selection changes within a batch', async () => {
+  let mode: HostedApprovalMode = 'default';
+  const { create, seen } = durableHooks({
+    [HookEventName.PreToolUse]: () => {
+      mode = 'auto-edit';
+      return undefined;
+    },
+    [HookEventName.PostToolUse]: () => undefined,
+    [HookEventName.PostToolBatch]: () => undefined,
+  });
+  const approval = {
+    mode: 'default' as const,
+    readSettings: async () => ({ mode, timeoutMs: 60_000 }),
+  };
+  turn = createTurn(false, approval, create());
+  const signal = new AbortController().signal;
+  const responses = await turn.execute(calls, parts, 'model', signal);
+  expect(
+    seen
+      .filter(({ event }) => event === HookEventName.PreToolUse)
+      .map(({ input }) => input['permission_mode']),
+  ).toEqual(['default', 'auto-edit']);
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+  const count = seen.length;
+  mode = 'yolo';
+  await expect(
+    createTurn(false, approval, create()).resumeHookResults(
+      responses,
+      'model',
+      signal,
+    ),
+  ).resolves.toEqual(responses);
+  expect(seen).toHaveLength(count);
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+});
+
+it('proves a digest-only Hook refusal after the live approval mode changes', async () => {
+  let mode: HostedApprovalMode = 'default';
+  const { create, seen } = durableHooks(
+    {
+      [HookEventName.PreToolUse]: replaceWith(editB),
+      [HookEventName.PostToolBatch]: () => undefined,
+    },
+    HookEventName.PreToolUse,
+  );
+  const hooks = create();
+  const fire = hooks.fire.bind(hooks);
+  vi.spyOn(hooks, 'fire').mockImplementation(async (...args) => {
+    const output = await fire(...args);
+    if (args[0] === HookEventName.PreToolUse) mode = 'yolo';
+    return output;
+  });
+  const approval = {
+    mode: 'default' as const,
+    readSettings: async () => ({ mode, timeoutMs: 60_000 }),
+  };
+  turn = createTurn(false, approval, hooks);
+  const signal = new AbortController().signal;
+  const responses = await turn.execute([calls[1]], [parts[1]], 'model', signal);
+  expect(responses[0].functionResponse?.response?.['error']).toBeTruthy();
+  expect(
+    (await savedHook(HookEventName.PreToolUse, `prompt:${calls[1].callId}`))
+      .plan,
+  ).toHaveProperty('refusedInputDigest');
+  expect(broker.execute).not.toHaveBeenCalled();
+  await expect(
+    createTurn(false, approval, create()).resumeHookResults(
+      responses,
+      'model',
+      signal,
+    ),
+  ).resolves.toEqual(responses);
+  expect(seen).toHaveLength(1);
+});
 
 it('runs what a PermissionRequest allow replaced on the input PreToolUse left, without asking', async () => {
   const { create, seen } = durableHooks({
