@@ -1587,6 +1587,11 @@ export async function runDaemonRestart(
     return 1;
   }
 
+  // Preserve an opted-in persisted token across the instance change. The
+  // sidecar belongs to the old pid and is removed by the stop leg; capture it
+  // before stopping, then recreate it for the pid that actually started.
+  const persistedToken = readDaemonToken(record.port, record.pid);
+
   const stopped = deps.run(plan.command!, plan.stopArgs!, plan.env!);
   if (stopped.error) {
     writeStderrLine(
@@ -1621,7 +1626,7 @@ export async function runDaemonRestart(
   // the start leg succeeds wherever it landed.
   const restarted = deps
     .entries()
-    .some(
+    .find(
       (entry) =>
         entry.record.port === record.port &&
         (entry.record.pid !== record.pid ||
@@ -1632,6 +1637,19 @@ export async function runDaemonRestart(
       `qwen daemon: the restarted daemon is not on port ${record.port}; the port may be in use. Run \`qwen daemon status\` to find it.`,
     );
     return 1;
+  }
+  if (persistedToken !== undefined) {
+    const tokenToPersist = plan.env?.['QWEN_SERVER_TOKEN'] ?? persistedToken;
+    try {
+      writeDaemonToken(record.port, restarted.record.pid, tokenToPersist);
+    } catch (error) {
+      writeStderrLine(
+        `qwen daemon: could not persist the token for the restarted daemon: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return 1;
+    }
   }
   return 0;
 }
