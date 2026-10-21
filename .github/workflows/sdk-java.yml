@@ -1631,9 +1631,9 @@ jobs:
         env:
           RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
         run: 'scripts/rocketmq-lite-broker.sh stop'
-      # The host's docker cleanup service reaps qwen-code-* containers only
-      # after a 24h age gate, so a cancelled job would strand a running mysqld
-      # on the shared pool for up to a day.
+      # The host's daily Docker cleanup reaps qwen-code-* containers only when
+      # older than 24h, so a cancelled job can leave a running mysqld on the
+      # shared pool for roughly 48h (plus the timer's random delay).
       - name: 'Remove the MySQL container'
         if: '${{ always() }}'
         shell: 'bash'
@@ -1641,7 +1641,7 @@ jobs:
           set -uo pipefail
           if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
             docker rm --force "${MYSQL_CONTAINER}" ||
-              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it after 24h"
+              echo "::warning::could not remove ${MYSQL_CONTAINER}; host cleanup runs daily and only reaps containers older than 24h"
           fi
 
   daemon-e2e:
