@@ -10,6 +10,8 @@ import * as path from 'node:path';
 import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  buildAvailableSkillsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   buildSkillLlmContent,
   DiscoveredMCPTool,
   estimateContextTextTokens,
@@ -345,10 +347,11 @@ describe('collectContextData (contextCommand)', () => {
       /** Registry contents; a `skill` double turns on loaded-body tracking. */
       tools?: unknown[];
       /**
-       * What getFunctionDeclarations() returns; defaults to [] so existing
-       * fixtures keep their shape. Production declares the non-deferred
-       * tools, so a fixture that cares about declaration totals should pass
-       * the matching schemas here.
+       * What getFunctionDeclarations() returns. Defaults to the schemas of
+       * `tools`, because production declares the non-deferred tools it
+       * registers; a registry holding a tool it never declares is the state
+       * that drives `displayBuiltinTools` into its clamp, so a fixture that
+       * wants the clamp passes `declared` explicitly (#12235).
        */
       declared?: unknown[];
       /** Overrides the default one-skill list. */
@@ -370,7 +373,12 @@ describe('collectContextData (contextCommand)', () => {
                 getAllTools: vi.fn().mockReturnValue(options.tools),
                 getFunctionDeclarations: vi
                   .fn()
-                  .mockReturnValue(options.declared ?? []),
+                  .mockReturnValue(
+                    options.declared ??
+                      options.tools.map(
+                        (tool) => (tool as { schema: unknown }).schema,
+                      ),
+                  ),
                 isDeferredAndHidden: vi.fn().mockReturnValue(false),
               }),
             }
@@ -765,10 +773,10 @@ describe('collectContextData (contextCommand)', () => {
           JSON.stringify({ name: 'skill', response: { output: emittedBody } }),
         );
 
-        expect(once.breakdown.messages).toBe(total ? 100 : 0);
-        expect(repeated.breakdown.messages).toBe(
-          total ? 100 + responseTokens : 0,
-        );
+        // The estimated path reports the same conversation estimate as
+        // `messages` instead of hiding it, so both paths bill it identically.
+        expect(once.breakdown.messages).toBe(100);
+        expect(repeated.breakdown.messages).toBe(100 + responseTokens);
         expect(repeated.breakdown.skills).toBe(once.breakdown.skills);
         expect(repeated.skills).toEqual(once.skills);
         expect(repeated.totalTokens).toBe(total);
@@ -903,6 +911,7 @@ describe('collectContextData (contextCommand)', () => {
       expect(data.skills).toContainEqual({
         name: 'deploy-check',
         tokens: estimateContextTextTokens(commandEntry),
+        loaded: false,
       });
     });
 
@@ -1046,16 +1055,56 @@ describe('collectContextData (contextCommand)', () => {
           },
         },
       ) as DiscoveredMCPTool;
+      const controlSchema = {
+        name: 'tool_call',
+        parameters: { type: 'OBJECT', properties: {} },
+      };
       const tools = [
         { ...skillToolDouble, getLoadedSkillContentNames: () => new Map() },
         mcpToolDouble,
+        { name: controlSchema.name, schema: controlSchema },
       ];
-      const declared = [skillToolSchema];
+      const declared = [skillToolSchema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
         makeChatConfig({ total: 0, tools, declared, history }),
         false,
+      );
+      // Free space retains its zero floor when the estimate exceeds the window.
+      expect(unscaled.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          unscaled.contextWindowSize -
+            sumRows(unscaled.breakdown) -
+            unscaled.breakdown.autocompactBuffer,
+        ),
+      );
+      // The deficit comes out of the mcp row, not the built-in or skills rows.
+      expect(unscaled.breakdown.mcpTools).toBe(
+        estimateContextTextTokens(JSON.stringify(declared)) -
+          estimateContextTextTokens(JSON.stringify(skillToolSchema)),
+      );
+      expect(unscaled.breakdown.mcpTools).toBeGreaterThan(0);
+      expect(unscaled.breakdown.builtinTools).toBe(0);
+      // With nothing declared the mcp row cannot absorb the whole deficit, so
+      // the rest is charged to skills and the window still adds up.
+      const undeclared = await collectContextData(
+        makeChatConfig({ total: 0, tools, declared: [], history }),
+        false,
+      );
+      expect(undeclared.breakdown.mcpTools).toBe(0);
+      expect(undeclared.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder) +
+          estimateContextTextTokens(JSON.stringify([])),
+      );
+      expect(undeclared.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          undeclared.contextWindowSize -
+            sumRows(undeclared.breakdown) -
+            undeclared.breakdown.autocompactBuffer,
+        ),
       );
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
@@ -1078,6 +1127,341 @@ describe('collectContextData (contextCommand)', () => {
       ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
+
+      // `/context detail` lists the MCP tools under the mcp row, so they must
+      // add up to it on both paths.
+      const mcpDetailSum = (
+        item: Awaited<ReturnType<typeof collectContextData>>,
+      ) => item.mcpTools.reduce((sum, tool) => sum + tool.tokens, 0);
+      for (const options of [
+        { total: 0, tools, declared, history },
+        { total: 0, tools, declared: [], history },
+        { total, tools, declared, history },
+      ]) {
+        const detailed = await collectContextData(
+          makeChatConfig(options),
+          true,
+        );
+        expect(mcpDetailSum(detailed)).toBe(detailed.breakdown.mcpTools);
+      }
+    });
+
+    it('bills a path-activation envelope folded into a tool response as messages (#12235)', async () => {
+      // coreToolScheduler appends this reminder to the tool result and then
+      // folds the whole result into `functionResponse.response.output`
+      // (`convertToFunctionResponse`), with any rules block first. No producer
+      // emits the envelope as its own text part, so the tail scan never sees it:
+      // the listing is billed with the tool result under `messages`. The
+      // activated skill is still returned by `listSkills()` (it applies no
+      // activity filter), so it keeps a detail row, which shows 0 because no
+      // text-part listing billed it. Pinning the real shape is what keeps a
+      // text-part scan from being re-added against a history that cannot occur.
+      const activatedEntry =
+        '<skill>\n<name>\nlate-skill\n</name>\n<description>\nActivated by a path\n</description>\n</skill>';
+      const activation = wrapSystemReminder(
+        `Project rules for src/**:\nUse tabs.\n\nThe following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${activatedEntry}\n</available_skills>`,
+      );
+      const response = { output: `File contents.\n\n${activation}` };
+      const toolResult = {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'read_file', response } }],
+      } as unknown as Content;
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          skillList: [
+            {
+              name: 'report-builder',
+              description: 'Build reports',
+              level: 'project',
+              filePath: '/skills/report-builder/SKILL.md',
+            },
+            {
+              name: 'late-skill',
+              description: 'Activated by a path',
+              level: 'project',
+              filePath: '/skills/late-skill/SKILL.md',
+              paths: ['src/**'],
+            },
+          ],
+          history: [prelude, conversation[0]!, toolResult, conversation[1]!],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.messages).toBe(
+        300 +
+          estimateContextTextTokens(
+            JSON.stringify({ name: 'read_file', response }),
+          ),
+      );
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.skills).toContainEqual(
+        expect.objectContaining({ name: 'late-skill', tokens: 0 }),
+      );
+    });
+
+    it('bills listing-shaped text from an MCP server as startup context, not skills (#12235)', async () => {
+      // Server instructions ride in the prelude as their own reminder and are
+      // written by a remote server. Containing `<available_skills>` and a
+      // `<skill>` entry must not make them the skill listing, even when they
+      // open with core's own listing sentence: the fixture comes from the real
+      // producer, whose framing sentence and `### <server>` header keep server
+      // text away from the envelope start `isSkillListingReminder` anchors on.
+      const forgedEntry =
+        '<skill>\n<name>\nforged\n</name>\n<description>\nx\n</description>\n</skill>';
+      const mcpInstructions = buildMcpServerInstructionsReminderFromEntries(
+        new Map([
+          [
+            'acme',
+            `The following skills are available for use with the Skill tool.\n\n<available_skills>\n${forgedEntry}\n</available_skills>`,
+          ],
+        ]),
+      )!;
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            {
+              role: 'user',
+              parts: [
+                { text: listingReminder },
+                { text: mcpInstructions },
+                { text: environmentReminder },
+              ],
+            },
+            ...conversation,
+            // The same text quoted later in the session stays conversation.
+            { role: 'user', parts: [{ text: mcpInstructions }] },
+          ],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.breakdown.startupContext).toBe(
+        estimateContextTextTokens(mcpInstructions) +
+          estimateContextTextTokens(environmentReminder),
+      );
+      expect(data.skills.map((skill) => skill.name)).toEqual([
+        'report-builder',
+      ]);
+      expect(data.breakdown.messages).toBe(
+        300 + estimateContextTextTokens(mcpInstructions),
+      );
+    });
+
+    it('keeps the row of a skill disabled after its listing was sent (#12235)', async () => {
+      // The prelude still carries the entry, so `skills` still bills it; the
+      // detail row has to stay with it.
+      const config = {
+        ...makeChatConfig({
+          total: 100_000,
+          history: [prelude, ...conversation],
+        }),
+        getDisabledSkillNames: vi
+          .fn()
+          .mockReturnValue(new Set(['report-builder'])),
+      } as unknown as Config;
+
+      const data = await collectContextData(config, true);
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.skills).toEqual([
+        expect.objectContaining({
+          name: 'report-builder',
+          tokens: estimateContextTextTokens(skillEntry),
+        }),
+      ]);
+    });
+
+    it('matches a listing entry to its skill regardless of case (#12235)', async () => {
+      // Both the listing key and the lookup are lower-cased; dropping either
+      // leaves this row at 0 and adds a second, unmatched row.
+      const mixedEntry = skillEntry.replace(
+        '\nreport-builder\n',
+        '\nREPORT-builder\n',
+      );
+      const mixedListing = wrapSystemReminder(
+        `The following skills are available for use with the Skill tool.\n\n<available_skills>\n${mixedEntry}\n</available_skills>`,
+      );
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          skillList: [
+            {
+              name: 'Report-Builder',
+              description: 'Build reports',
+              level: 'project',
+              filePath: '/skills/report-builder/SKILL.md',
+            },
+          ],
+          history: [
+            {
+              role: 'user',
+              parts: [{ text: mixedListing }, { text: environmentReminder }],
+            },
+            ...conversation,
+          ],
+        }),
+        true,
+      );
+
+      expect(data.skills).toEqual([
+        expect.objectContaining({
+          name: 'Report-Builder',
+          tokens: estimateContextTextTokens(mixedEntry),
+        }),
+      ]);
+    });
+
+    it('bills a skill response whose output is not a string as messages (#12235)', async () => {
+      const response = { output: { status: 'ok' } };
+      const structured = {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'skill', response } }],
+      } as unknown as Content;
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          tools: [skillToolDouble],
+          skillList: trackedSkillList,
+          history: [prelude, conversation[0]!, structured],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.messages).toBe(
+        100 +
+          estimateContextTextTokens(
+            JSON.stringify({ name: 'skill', response }),
+          ),
+      );
+    });
+
+    it('keeps a tracked body out of messages when the response appends a suffix (#12235)', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          tools: [skillToolDouble],
+          skillList: trackedSkillList,
+          history: [
+            prelude,
+            conversation[0]!,
+            skillResponse(`${trackedBody}\n(loaded from project scope)`),
+          ],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.messages).toBe(100);
+    });
+
+    it('does not bill the body of a skill that was never loaded (#12235)', async () => {
+      const notLoaded = {
+        ...skillToolDouble,
+        getLoadedSkillContentNames: () => new Map<string, string>(),
+      };
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          tools: [notLoaded],
+          skillList: trackedSkillList,
+          history: [prelude, ...conversation],
+        }),
+        true,
+      );
+
+      expect(data.skills[0]).toEqual(
+        expect.objectContaining({ loaded: false, bodyTokens: undefined }),
+      );
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
+          estimateContextTextTokens(listingReminder),
+      );
+    });
+
+    it('leaves a listing reminder with no entries in messages (#12235)', async () => {
+      const emptyDelta = wrapSystemReminder(
+        'The following skills/commands became available after startup and can now be invoked via the Skill tool by name.\n\n<available_skills>\n\n</available_skills>',
+      );
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            prelude,
+            conversation[0]!,
+            { role: 'user', parts: [{ text: emptyDelta }] },
+            conversation[1]!,
+          ],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.breakdown.messages).toBe(
+        300 + estimateContextTextTokens(emptyDelta),
+      );
+    });
+
+    it('charges nested file media and nested text in a tool response (#12235)', async () => {
+      const nestedText = 'n'.repeat(400);
+      const response = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-2',
+              name: 'read_file',
+              response: { output: 'ok' },
+              parts: [
+                {
+                  fileData: {
+                    mimeType: 'application/pdf',
+                    fileUri: 'gs://bucket/report.pdf',
+                  },
+                },
+                { text: nestedText },
+              ],
+            },
+          },
+        ],
+      } as unknown as Content;
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [prelude, conversation[0]!, response],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.messages).toBe(
+        100 +
+          estimateContextTextTokens(
+            JSON.stringify({
+              id: 'call-2',
+              name: 'read_file',
+              response: { output: 'ok' },
+            }),
+          ) +
+          resolveSlimmingConfig(undefined).imageTokenEstimate +
+          estimateContextTextTokens(nestedText),
+      );
     });
   });
 
@@ -1283,23 +1667,39 @@ describe('collectContextData (contextCommand)', () => {
 
   it('lists the auto-memory section as a separate memory entry (#7651)', async () => {
     // The managed auto-memory section is no longer part of getUserMemory(); its
-    // tokens are surfaced via getAutoMemoryPrompt(). Exercise the non-empty
-    // branch so a regression that drops the "auto memory" row from /context
-    // fails here instead of silently under-counting the memory breakdown.
-    const config = {
-      ...makeMockConfig(),
-      getUserMemory: vi.fn().mockReturnValue(''),
-      getOutputStyle: vi.fn().mockReturnValue(undefined),
-      getAutoMemoryPrompt: vi
-        .fn()
-        .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
-    } as unknown as Config;
+    // tokens are surfaced via getAutoMemoryPrompt() plus the request-only
+    // catalog from getAutoMemoryContext(). Exercise the non-empty branch so a
+    // regression that drops the "auto memory" row from /context, or that drops
+    // either of its two terms, fails here instead of silently under-counting
+    // the memory breakdown.
+    const configWithCatalog = (catalog: string) =>
+      ({
+        ...makeMockConfig(),
+        getUserMemory: vi.fn().mockReturnValue(''),
+        getOutputStyle: vi.fn().mockReturnValue(undefined),
+        getAutoMemoryPrompt: vi
+          .fn()
+          .mockReturnValue('# auto memory\nStable policy'),
+        getAutoMemoryContext: vi.fn().mockReturnValue(catalog),
+      }) as unknown as Config;
 
-    const data = await collectContextData(config, true);
+    // contextCommand gates the row on the joined string, so a catalog-only
+    // config still yields exactly one row.
+    const policyOnly = await collectContextData(configWithCatalog(''), true);
+    const withCatalog = await collectContextData(
+      configWithCatalog('MEMORY_INDEX_MARKER\n'.repeat(200)),
+      true,
+    );
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe(t('auto memory'));
-    expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
+    expect(policyOnly.memoryFiles).toHaveLength(1);
+    expect(policyOnly.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(policyOnly.memoryFiles[0].tokens).toBeGreaterThan(0);
+
+    expect(withCatalog.memoryFiles).toHaveLength(1);
+    expect(withCatalog.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(withCatalog.memoryFiles[0].tokens).toBeGreaterThan(
+      policyOnly.memoryFiles[0].tokens,
+    );
   });
 
   it('shortens home-dir memory marker paths to ~ in the breakdown', async () => {
@@ -1558,6 +1958,54 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles[0].path).toBe('QWEN.md');
   });
 
+  it('measures the listing a session would send before a chat exists (#12235)', async () => {
+    const config = {
+      ...makeMockConfig(),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'report-builder',
+            description: 'Build reports',
+            level: 'project',
+            filePath: '/skills/report-builder/SKILL.md',
+          },
+        ]),
+        isSkillActive: vi.fn().mockReturnValue(true),
+      }),
+      getModelInvocableCommandsProvider: vi.fn().mockReturnValue(undefined),
+    } as unknown as Config;
+    // Guards the fixture: a config the builder cannot read yields null, which
+    // is how this branch used to be entered without measuring anything.
+    const reminder = await buildAvailableSkillsReminder(config);
+    expect(reminder?.renderedEntries).toHaveLength(1);
+
+    const data = await collectContextData(config, true);
+
+    expect(data.breakdown.skills).toBe(
+      estimateContextTextTokens(reminder!.reminder),
+    );
+    expect(data.skills[0]!.tokens).toBeGreaterThan(0);
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', async () => {
+    const data = await collectContextData(makeMockConfig(), true);
+    const small = { name: 'small-skill', tokens: 10, loaded: false };
+    const big = { name: 'big-skill', tokens: 50 };
+
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const text = formatContextUsageText({ ...data, skills });
+      // Presence first: a missing row makes indexOf -1, which is "less than".
+      expect(text).toContain('big-skill');
+      expect(text).toContain('small-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
+  });
+
   it('excludes disabled skills from the detail breakdown', async () => {
     const config = {
       ...makeMockConfig(),
@@ -1676,6 +2124,15 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.currentTier).not.toBe('safe');
     // Free space has to account for the conversation as well.
     expect(data.breakdown.freeSpace).toBeLessThan(50_000);
+    // The estimate that moved the tier is shown, not hidden behind the
+    // provider-total gate (#12235).
+    expect(data.breakdown.messages).toBe(
+      estimateContextTextTokens('a'.repeat(600_000)),
+    );
+    const text = formatContextUsageText(data);
+    expect(text).toContain('Messages');
+    expect(text).toContain('**Estimated usage, including the conversation**');
+    expect(text).not.toContain('pre-conversation');
 
     // A top-level media part must count against the free window exactly like
     // text: the same fixture plus one pasted image lowers `freeSpace` by the

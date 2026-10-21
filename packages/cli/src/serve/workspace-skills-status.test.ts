@@ -25,6 +25,7 @@ import {
   getUserSettingsPath,
 } from '../config/settings.js';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 describe('createWorkspaceSkillsStatusProvider', () => {
   let qwenHome: string;
@@ -921,7 +922,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'fails closed for a searchable but unlistable extensions root',
     async () => {
       const extensionsRoot = path.join(qwenHome, 'extensions');

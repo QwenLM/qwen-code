@@ -192,6 +192,8 @@ export default {
     'El retrocés no afecta els fitxers editats manualment o mitjançant ordres de shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'No es pot retrocedir a un torn que ha estat comprimit. Prova amb un torn més recent.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    "No es pot retrocedir la conversa a aquest torn: ja no correspon a l'historial del model (per exemple, després d'un reintent). Prova amb un torn més recent.",
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'La restauració de fitxers no està disponible per a aquest torn (no s’han capturat canvis, o aquest torn és anterior a la sessió actual).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -1853,6 +1855,10 @@ export default {
   'API key cannot be empty.': 'La API Key no pot estar buida.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key no vàlida. Les API Keys de Coding Plan comencen per "sk-sp-". Comproveu-la.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key no vàlida. Les claus pay-as-you-go comencen per "sk-" o "sk-ws-". Les claus Token Plan ("sk-sp-") necessiten l\'entrada Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key no vàlida. Les Token Plan API Keys comencen per "sk-sp-". Genereu-ne una des de la consola Token Plan o useu l\'entrada Standard API Key per a una clau pay-as-you-go.',
   'You can get your Coding Plan API key here':
     'Podeu obtenir la vostra API Key de Coding Plan aquí',
   'Failed to update Coding Plan configuration: {{message}}':
@@ -1893,13 +1899,17 @@ export default {
     'El context supera el límit! Useu /compress o /clear per reduir-lo.',
   'No API response yet. Send a message to see actual usage.':
     "Encara no hi ha cap resposta de l'API. Envieu un missatge per veure l'ús real.",
+  'Estimated usage, including the conversation':
+    'Ús estimat, inclosa la conversa',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    "Encara no hi ha dades d'ús del proveïdor. Són estimacions locals, inclosa la conversa.",
   'Estimated pre-conversation overhead':
     'Càrrega estimada prèvia a la conversa',
   'Context window': 'Finestra de context',
   tokens: 'tokens',
   Used: 'Usat',
   Free: 'Lliure',
-  'Autocompact buffer': 'Memòria intermèdia de compactació automàtica',
+  'Autocompact buffer': 'Reserva de compactació',
   'Usage by category': 'Ús per categoria',
   'System prompt': 'Missatge del sistema',
   'Built-in tools': 'Eines integrades',

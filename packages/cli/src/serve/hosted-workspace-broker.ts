@@ -1,0 +1,1020 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  parseManagedRuntimeProviderResult,
+  type ManagedWorkspaceContextFile,
+} from './managed-runtime-provider-protocol.js';
+import type {
+  RawFileHistoryOperation,
+  HostedFileHistoryState,
+} from './hosted-file-history-protocol.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type {
+  ToolResultCapture,
+  ToolResultEnvelope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
+import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
+import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
+import {
+  WORKSPACE_CAPABILITY_DIGEST,
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
+import type {
+  ManagedMcpControl,
+  ManagedMcpOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
+
+import type {
+  ManagedHookControl,
+  ManagedHookOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import type {
+  ManagedMonitorControl,
+  ManagedMonitorOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+
+export interface HostedWorkspaceBrokerOptions {
+  baseUrl: string;
+  token: string;
+  lifecycleAuthority?: () => ManagedSessionLifecycleAuthority | undefined;
+  /** Stops for the daemon's owed mount handbacks (#13800). */
+  mountHandbacks?: Set<() => void>;
+}
+
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid Hosted Workspace Broker response.');
+  return value as Record<string, unknown>;
+}
+
+export class HostedWorkspaceBrokerRejection extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: unknown,
+    readonly details?: Record<string, unknown>,
+    readonly reason?: string,
+  ) {
+    super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
+  }
+}
+
+export function isHostedFileHistoryRefusal(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    ((cause.status === 409 &&
+      cause.code === 'managed_runtime_provider_operation_failed') ||
+      (cause.status === 400 &&
+        cause.code === 'runtime_control_operation_invalid'))
+  );
+}
+
+/** The execution states the Broker can report: the four live states it
+ * answers for a record it tracks, `unknown` for a still-reconcilable
+ * outcome gap, and `abandoned` for a record it fenced terminally (see
+ * isTerminalUnknownRejection). The hosted recovery wire vocabulary is the
+ * closed subset without `unknown` (see HostedRuntimeRecoveryExecutionState):
+ * a new state here must be folded deliberately, or the client-side
+ * validator rejects the whole report. */
+export type HostedBrokerExecutionState =
+  | 'prepared'
+  | 'executing'
+  | 'cancel_requested'
+  | 'settled'
+  | 'abandoned'
+  | 'unknown';
+
+/** The Broker fences a record ABANDONED on loss evidence alone and marks the
+ * terminal answer with details.terminal; the record proves no stop, it only
+ * proves the outcome can never be observed again. */
+export function isTerminalUnknownRejection(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    cause.code === 'runtime_broker_execution_unknown' &&
+    cause.details?.['terminal'] === true
+  );
+}
+
+/** A recovery read asked the original Runtime once and still could not prove
+ * whether the command committed. The caller reports the execution as unknown
+ * and re-checks later; it must never dispatch the command again. */
+export class HostedWorkspaceBrokerExecutionUnresolved extends Error {
+  constructor() {
+    super('Runtime execution outcome remains unknown after reconciliation.');
+  }
+}
+
+export class HostedWorkspaceBroker {
+  private readonly baseUrl: URL;
+  private leaseAcquired = false;
+  private capability?: string;
+  private readonly identity: {
+    harnessSessionId: string;
+    runtimeSessionId: string;
+  };
+  runtime?: {
+    bindingId: string;
+    generation: string;
+    workspaceGeneration: string;
+  };
+
+  get runtimeSessionId(): string {
+    return this.identity.runtimeSessionId;
+  }
+
+  get acquired(): boolean {
+    return this.leaseAcquired;
+  }
+
+  get capabilityDigest(): string {
+    if (this.capability === undefined)
+      throw new Error('Runtime capability is unavailable before resolution.');
+    return this.capability;
+  }
+
+  constructor(
+    private readonly options: HostedWorkspaceBrokerOptions,
+    private readonly key: ManagedSessionKey,
+    runtimeSessionId: string,
+  ) {
+    this.baseUrl = resolveManagedRuntimeBrokerBaseUrl(options.baseUrl);
+    this.identity = { harnessSessionId: key.sessionId, runtimeSessionId };
+  }
+
+  async fileHistory(
+    operation: Exclude<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<HostedFileHistoryState>;
+  async fileHistory(
+    operation: Extract<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<{
+    state: HostedFileHistoryState;
+    filesChanged: string[];
+    filesFailed: string[];
+    conflict: boolean;
+  }>;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<
+    | HostedFileHistoryState
+    | {
+        state: HostedFileHistoryState;
+        filesChanged: string[];
+        filesFailed: string[];
+        conflict: boolean;
+      }
+  >;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<unknown> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    });
+  }
+
+  /** The Session's project instruction files, read outside the execution ledger. */
+  async workspaceContext(): Promise<ManagedWorkspaceContextFile[]> {
+    const operation = { kind: 'workspace-context' } as const;
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    }) as ManagedWorkspaceContextFile[];
+  }
+
+  async warm(): Promise<void> {
+    const response = await this.harnessRequest('/runtimes:warm', {});
+    if (response['runtime'] !== undefined) this.readRuntime(response);
+  }
+
+  async authorizeLifecycle(): Promise<void> {
+    if (this.options.lifecycleAuthority?.())
+      await this.request('/runtimes:authorize-lifecycle', {});
+  }
+
+  // The latest acquire's mount claim, recorded before the request leaves
+  // so that a reply lost after the grant still names it: only that claim
+  // may hand the mount back, and any later acquire supersedes it (#13800).
+  private claim?: string;
+
+  mountClaim(): string | undefined {
+    return this.claim;
+  }
+
+  async acquire(expected?: {
+    runtimeBindingId: string;
+    generation: string;
+  }): Promise<void> {
+    this.claim = randomUUID();
+    const response = await this.request('/tool-sessions:acquire', {
+      turnKind: 'bootstrap',
+      mountClaimId: this.claim,
+      ...(expected
+        ? {
+            recoveryBindingId: expected.runtimeBindingId,
+            recoveryGeneration: expected.generation,
+          }
+        : {}),
+    });
+    if (response['acquired'] !== true)
+      throw new Error('Runtime did not acquire the Session.');
+    this.readRuntime(response);
+    this.leaseAcquired = true;
+  }
+
+  private readRuntime(response: Record<string, unknown>): void {
+    const scope = object(response['scope']);
+    if (
+      scope['tenantId'] !== this.key.tenantId ||
+      scope['workspaceId'] !== this.key.workspaceId ||
+      (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
+        !(
+          scope['capabilityDigest'] === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
+          scope['isolationClass'] === 'workspace'
+        )) ||
+      (this.capability !== undefined &&
+        this.capability !== scope['capabilityDigest'])
+    )
+      throw new Error(
+        'Hosted Workspace Broker scope does not match the saved Session.',
+      );
+    this.capability = scope['capabilityDigest'] as string;
+    const runtime = response['runtime'];
+    if (runtime !== undefined) {
+      const binding = object(runtime);
+      const generation = String(binding['generation']);
+      const workspaceGeneration = String(scope['workspaceGeneration']);
+      if (
+        typeof binding['bindingId'] !== 'string' ||
+        !/^[1-9][0-9]{0,18}$/u.test(generation) ||
+        !/^[1-9][0-9]{0,18}$/u.test(workspaceGeneration)
+      )
+        throw new Error('Runtime Broker binding is invalid.');
+      this.runtime = {
+        bindingId: binding['bindingId'],
+        generation,
+        workspaceGeneration,
+      };
+    }
+  }
+
+  async registerPublisher(publisher: {
+    url: string;
+    token: string;
+  }): Promise<string> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:publisher`,
+      { publisher },
+    );
+    const generation = response['bindingGeneration'];
+    if (
+      response['installed'] !== true ||
+      typeof generation !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/.test(generation) ||
+      BigInt(generation) > 2n ** 63n - 1n
+    ) {
+      throw new Error('Runtime did not install the original Shell publisher.');
+    }
+    return generation;
+  }
+
+  async prepare(
+    callId: string,
+    digest: string,
+    inputDigest?: string,
+    turnId = this.identity.runtimeSessionId,
+  ): Promise<string> {
+    const reservation = {
+      idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
+      turnId,
+      toolCallId: callId,
+      requestDigest: digest,
+      reference: {
+        sessionId: this.identity.runtimeSessionId,
+        promptId: turnId,
+        callId,
+        argsDigest: digest,
+        ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
+      },
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request('/executions:prepare', reservation);
+    } catch (cause) {
+      if (
+        !(cause instanceof TypeError) &&
+        !(cause instanceof DOMException && cause.name === 'TimeoutError')
+      )
+        throw cause;
+      response = await this.request('/executions:prepare', reservation);
+    }
+    const id = response['executionCallId'];
+    if (
+      typeof id !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,128}$/u.test(id) ||
+      object(response['status'])['state'] !== 'prepared'
+    )
+      throw new Error(
+        'Hosted Workspace Broker did not reserve a fresh execution.',
+      );
+    return id;
+  }
+
+  async prepareV3(
+    callId: string,
+    argsDigest: string,
+    requestDigest: string,
+    publicationId: string,
+    turnId: string,
+  ): Promise<{
+    executionCallId: string;
+    runtimeBindingId: string;
+    bindingGeneration: string;
+  }> {
+    const response = await this.request('/executions:prepare', {
+      idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
+      // One pair, two axes, same as the publisher registration: the
+      // logical turn id on the checkpoint axis (the reserve's reference
+      // and the persisted execution must both carry it, or the
+      // publication store's `execution.turnId == reference.promptId`
+      // refuses), the mapped Runtime Session on the execution axis.
+      turnId,
+      toolCallId: callId,
+      requestDigest,
+      toolProtocol: 'v3',
+      publicationId,
+      reference: {
+        sessionId: this.identity.runtimeSessionId,
+        promptId: turnId,
+        callId,
+        argsDigest,
+      },
+    });
+    const executionCallId = response['executionCallId'];
+    const runtimeBindingId = response['runtimeBindingId'];
+    const bindingGeneration = response['bindingGeneration'];
+    if (
+      typeof executionCallId !== 'string' ||
+      typeof runtimeBindingId !== 'string' ||
+      typeof bindingGeneration !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(bindingGeneration) ||
+      object(response['status'])['state'] !== 'prepared'
+    )
+      throw new Error(
+        'Hosted Broker did not reserve the original Tool v3 execution.',
+      );
+    return { executionCallId, runtimeBindingId, bindingGeneration };
+  }
+
+  async executeV3(
+    id: string,
+    payloadJson: string,
+    publicationId: string,
+    publicationToken: string,
+    signal: AbortSignal,
+  ): Promise<ToolResultEnvelope> {
+    const path = `/executions/${encodeURIComponent(id)}`;
+    let response: Record<string, unknown> | undefined;
+    let cancellationSent = false;
+    let startUncertain = false;
+    let startAttempts = 0;
+    let preparedObservations = 0;
+    const definiteStartFailure = (failure: unknown): boolean =>
+      failure instanceof HostedWorkspaceBrokerRejection &&
+      ([400, 401, 403, 404, 409].includes(failure.status) ||
+        (failure.status === 501 &&
+          failure.code === 'runtime_tool_v3_unsupported'));
+    if (!signal.aborted) {
+      startAttempts++;
+      try {
+        response = await this.request(`${path}:start`, {
+          payloadJson,
+          publicationId,
+          publicationToken,
+        });
+      } catch (failure) {
+        if (definiteStartFailure(failure)) throw failure;
+        startUncertain = true;
+      }
+    }
+    const deadline = Date.now() + 30 * 60_000;
+    while (Date.now() < deadline) {
+      if (signal.aborted && !cancellationSent) {
+        cancellationSent = true;
+        response = await this.request(`${path}:cancel`, {});
+      }
+      response ??= await this.request(path);
+      if (response['executionCallId'] !== id)
+        throw new Error('Tool v3 execution identity changed.');
+      const status = object(response['status']);
+      if (status['state'] === 'settled') {
+        const result = object(status['result']);
+        if (
+          !['success', 'error', 'cancelled', 'not_started'].includes(
+            String(result['executionStatus']),
+          ) ||
+          !Array.isArray(result['responseParts'])
+        )
+          throw new Error('Tool v3 result is invalid.');
+        return result as unknown as ToolResultEnvelope;
+      }
+      if (status['state'] === 'prepared' && startUncertain && !signal.aborted) {
+        preparedObservations++;
+        if (preparedObservations >= 10) {
+          if (startAttempts >= 3)
+            throw new Error('Tool v3 start was not confirmed.');
+          startAttempts++;
+          preparedObservations = 0;
+          try {
+            response = await this.request(`${path}:start`, {
+              payloadJson,
+              publicationId,
+              publicationToken,
+            });
+            startUncertain = false;
+          } catch (failure) {
+            if (definiteStartFailure(failure)) throw failure;
+            response = undefined;
+          }
+          continue;
+        }
+      }
+      if (
+        !['prepared', 'executing', 'cancel_requested'].includes(
+          String(status['state']),
+        )
+      )
+        throw new Error('Tool v3 execution outcome is unknown.');
+      response = undefined;
+      await delay(100);
+    }
+    throw new Error('Tool v3 execution exceeded its observation deadline.');
+  }
+
+  async execute(
+    id: string,
+    payloadJson: string,
+    signal: AbortSignal,
+    observationMs = 120_000,
+    waitForUnknown = false,
+    reconcileUnknownOnce = false,
+  ): Promise<
+    ManagedToolResultPayload & { capture?: ToolResultCapture | null }
+  > {
+    const path = `/executions/${encodeURIComponent(id)}`;
+    let response: Record<string, unknown> | undefined;
+    let cancellationSent = false;
+    let reconciledUnknown = false;
+    if (!signal.aborted) {
+      try {
+        response = await this.request(`${path}:start`, { payloadJson });
+      } catch (error) {
+        if (
+          error instanceof HostedWorkspaceBrokerRejection &&
+          error.status === 409 &&
+          (error.code === 'runtime_idempotency_conflict' ||
+            error.code === 'runtime_execution_conflict')
+        )
+          throw error;
+        // A lost start reply is not permission to start another invocation.
+      }
+    }
+    const end = Date.now() + observationMs;
+    while (Date.now() < end) {
+      const cancelling = signal.aborted && !cancellationSent;
+      try {
+        if (cancelling) {
+          cancellationSent = true;
+          response = await this.request(`${path}:cancel`, {});
+        }
+        response ??= await this.request(
+          waitForUnknown ? `${path}?reconcile=true` : path,
+        );
+      } catch (cause) {
+        const transportFailed =
+          cause instanceof TypeError ||
+          (cause instanceof DOMException && cause.name === 'TimeoutError');
+        if (cancelling && transportFailed) cancellationSent = false;
+        const stillUnknown =
+          cause instanceof HostedWorkspaceBrokerRejection &&
+          cause.status === 409 &&
+          cause.code === 'runtime_broker_execution_unknown' &&
+          !isTerminalUnknownRejection(cause);
+        if (reconcileUnknownOnce && stillUnknown && !reconciledUnknown) {
+          // The durable record is UNKNOWN: ask the original Runtime once for
+          // the evidence that decides the command. A settled answer is the
+          // observation; anything else is an outcome the takeover reports as
+          // unknown, so it never waits on the gap or dispatches the command
+          // again.
+          reconciledUnknown = true;
+          try {
+            response = await this.request(`${path}?reconcile=true`);
+          } catch (asked) {
+            if (
+              asked instanceof HostedWorkspaceBrokerRejection &&
+              asked.status === 409 &&
+              asked.code === 'runtime_broker_execution_unknown' &&
+              !isTerminalUnknownRejection(asked)
+            )
+              throw new HostedWorkspaceBrokerExecutionUnresolved();
+            throw asked;
+          }
+          if (object(response['status'])['state'] !== 'settled')
+            throw new HostedWorkspaceBrokerExecutionUnresolved();
+        } else if (waitForUnknown && (stillUnknown || transportFailed)) {
+          response = undefined;
+          await delay(250);
+          continue;
+        } else {
+          throw cause;
+        }
+      }
+      if (response['executionCallId'] !== id)
+        throw new Error('Runtime execution identity changed.');
+      const status = object(response['status']);
+      if (status['state'] === 'settled') {
+        const result = object(status['result']);
+        if (
+          !['success', 'error', 'cancelled', 'not_started'].includes(
+            String(result['executionStatus']),
+          ) ||
+          (result['executionStatus'] === 'success' &&
+            !Array.isArray(result['responseParts'])) ||
+          (result['responseParts'] !== undefined &&
+            !Array.isArray(result['responseParts']))
+        )
+          throw new Error('Runtime execution result is invalid.');
+        return {
+          ...result,
+          responseParts: result['responseParts'] ?? [],
+        } as unknown as ManagedToolResultPayload;
+      }
+      if (
+        !(waitForUnknown && status['state'] === 'unknown') &&
+        !['prepared', 'executing', 'cancel_requested'].includes(
+          String(status['state']),
+        )
+      )
+        throw new Error('Runtime execution outcome is unknown.');
+      response = undefined;
+      await delay(waitForUnknown ? 250 : 50);
+    }
+    throw new Error(
+      'Runtime execution did not settle within its observation window.',
+    );
+  }
+
+  async cancel(id: string): Promise<void> {
+    await this.request(`/executions/${encodeURIComponent(id)}:cancel`, {});
+  }
+
+  async control(
+    operation: ManagedMcpControl,
+  ): Promise<ManagedMcpOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !==
+        (operation.kind === 'mcp-status' || operation.kind === 'mcp-cancel'
+          ? operation.targetOperationId
+          : operation.operationId) ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime MCP response identity is invalid.');
+    return result as unknown as ManagedMcpOperationView;
+  }
+
+  async hookControl(
+    operation: ManagedHookControl,
+  ): Promise<ManagedHookOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !==
+        (operation.kind === 'hook-status' || operation.kind === 'hook-cancel'
+          ? operation.targetOperationId
+          : operation.operationId) ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime Hook response identity is invalid.');
+    return result as unknown as ManagedHookOperationView;
+  }
+
+  /**
+   * #13896: one watch's maintenance through the client route. A watch
+   * answers running, exited or unknown — never the Hook/MCP settlement
+   * states — and only `exited` with its evidence proves the watch ended.
+   */
+  async monitorControl(
+    operation: ManagedMonitorControl,
+  ): Promise<ManagedMonitorOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !== operation.targetOperationId ||
+      !['running', 'exited', 'unknown'].includes(String(result['state'])) ||
+      (result['state'] === 'exited' && !result['evidence'])
+    )
+      throw new Error('Runtime Monitor response is invalid.');
+    return result as unknown as ManagedMonitorOperationView;
+  }
+
+  async acknowledgeV3(
+    id: string,
+    receipt: {
+      executionCallId: string;
+      manifest: unknown;
+      deliveryStatus: 'committed' | 'blocked';
+      historyRevision: number | null;
+    },
+  ): Promise<void> {
+    const response = await this.request(
+      `/executions/${encodeURIComponent(id)}:acknowledge`,
+      { receipt },
+    );
+    if (
+      response['acknowledged'] !== true ||
+      response['executionCallId'] !== id ||
+      object(response['status'])['state'] !== 'settled'
+    )
+      throw new Error('Original Tool v3 ACK was not confirmed.');
+  }
+
+  /**
+   * Read-only execution state. Only a definitive not-found resolves to
+   * undefined; an unknown outcome is not proof that execution stopped, and a
+   * terminally abandoned record reaches the caller as the distinct
+   * `abandoned` state rather than folding into that sentinel. A settled
+   * record also names its result's execution status.
+   *
+   * `reconcile` is the recovery read: it asks the original Runtime once about
+   * an UNKNOWN record instead of answering a state nobody refreshes. A
+   * settled answer becomes observable; anything the Runtime still cannot
+   * prove keeps the record's UNKNOWN.
+   */
+  async status(
+    id: string,
+    options: { reconcile?: boolean } = {},
+  ): Promise<
+    | {
+        state: HostedBrokerExecutionState;
+        executionStatus?: string;
+      }
+    | undefined
+  > {
+    let response: Record<string, unknown>;
+    const path = `/executions/${encodeURIComponent(id)}`;
+    try {
+      response = await this.request(
+        options.reconcile === true ? `${path}?reconcile=true` : path,
+      );
+    } catch (cause) {
+      if (cause instanceof HostedWorkspaceBrokerRejection) {
+        if (
+          cause.status === 404 &&
+          cause.code === 'runtime_execution_not_found'
+        )
+          return undefined;
+        if (
+          cause.status === 409 &&
+          cause.code === 'runtime_broker_execution_unknown'
+        )
+          // The terminal marker distinguishes a fenced ABANDONED record from
+          // a still-reconcilable UNKNOWN; only the latter may yet be running.
+          return {
+            state: isTerminalUnknownRejection(cause) ? 'abandoned' : 'unknown',
+          };
+      }
+      throw cause;
+    }
+    if (response['executionCallId'] !== id)
+      throw new Error('Runtime execution identity changed.');
+    const status = object(response['status']);
+    const state = status['state'];
+    if (
+      typeof state !== 'string' ||
+      !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
+    )
+      throw new Error('Runtime execution outcome is unknown.');
+    const result = status['result'];
+    const executionStatus =
+      state === 'settled' &&
+      typeof result === 'object' &&
+      result !== null &&
+      typeof (result as Record<string, unknown>)['executionStatus'] === 'string'
+        ? ((result as Record<string, unknown>)['executionStatus'] as string)
+        : undefined;
+    return {
+      state: state as HostedBrokerExecutionState,
+      ...(executionStatus === undefined ? {} : { executionStatus }),
+    };
+  }
+
+  async readSettledShellResult(
+    id: string,
+  ): Promise<
+    { bindingGeneration: string; result: ToolResultEnvelope } | undefined
+  > {
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+    } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 404 &&
+        cause.code === 'runtime_execution_not_found'
+      )
+        return undefined;
+      throw cause;
+    }
+    const generation = response['bindingGeneration'];
+    const bindingId = response['runtimeBindingId'];
+    const status = object(response['status']);
+    if (
+      response['protocolVersion'] !== 1 ||
+      response['harnessSessionId'] !== this.identity.harnessSessionId ||
+      response['runtimeSessionId'] !== this.identity.runtimeSessionId ||
+      response['executionCallId'] !== id ||
+      typeof bindingId !== 'string' ||
+      !bindingId ||
+      typeof generation !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(generation) ||
+      BigInt(generation) > 2n ** 63n - 1n ||
+      status['state'] !== 'settled'
+    ) {
+      throw new Error(
+        'Original Shell result is not settled under its binding.',
+      );
+    }
+    const result = object(status['result']);
+    if (!('capture' in result)) {
+      const error = 'error' in result ? object(result['error']) : undefined;
+      if (
+        Object.keys(result).some(
+          (key) => !['executionStatus', 'responseParts', 'error'].includes(key),
+        ) ||
+        typeof result['executionStatus'] !== 'string' ||
+        !['success', 'error', 'cancelled', 'not_started'].includes(
+          result['executionStatus'],
+        ) ||
+        !Array.isArray(result['responseParts']) ||
+        (error &&
+          (Object.keys(error).some(
+            (key) => !['message', 'type'].includes(key),
+          ) ||
+            typeof error['message'] !== 'string' ||
+            !error['message'] ||
+            ('type' in error &&
+              (typeof error['type'] !== 'string' || !error['type']))))
+      )
+        throw new Error('Legacy Shell result is invalid.');
+      return undefined;
+    }
+    return {
+      bindingGeneration: generation,
+      result: parseToolResultEnvelope(result),
+    };
+  }
+
+  /**
+   * Read-only never-started proof component for one background dispatch. A
+   * definitive not-found is terminal evidence only after the caller has
+   * established that no pending start can still admit the process row, such
+   * as a reload boundary or a successful Broker cancellation barrier.
+   */
+  async backgroundProcessStatus(
+    executionCallId: string,
+  ): Promise<{ state: string } | undefined> {
+    return this.status(`${executionCallId}:process`);
+  }
+
+  async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
+    const path = `/executions/${encodeURIComponent(id)}:acknowledge`;
+    const body = {
+      receipt: {
+        executionCallId: receipt.executionCallId,
+        manifest: receipt.manifest,
+        deliveryStatus: receipt.deliveryStatus,
+        historyRevision: receipt.historyRevision,
+      },
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(path, body);
+    } catch (cause) {
+      // The acknowledgement runs after every durable record is committed, so
+      // a lost reply is replayed the way prepare() replays its reservation:
+      // the runtime deduplicates an identical receipt.
+      if (
+        !(cause instanceof TypeError) &&
+        !(cause instanceof DOMException && cause.name === 'TimeoutError')
+      )
+        throw cause;
+      response = await this.request(path, body);
+    }
+    if (
+      response['executionCallId'] !== id ||
+      response['acknowledged'] !== true
+    ) {
+      throw new Error(
+        'Runtime did not acknowledge the original Shell receipt.',
+      );
+    }
+  }
+
+  /**
+   * #13930 R1-2: the read-only inventory of this Harness Session's Runtime
+   * Sessions that a live hold row still pins — the read a reloaded Harness
+   * makes to restore the close's drain obligation after a restart.
+   */
+  async activeHoldRuntimeSessionIds(): Promise<string[]> {
+    const response = await this.harnessRequest(
+      '/tool-sessions:active-holds',
+      {},
+    );
+    const ids = response['heldRuntimeSessionIds'];
+    if (
+      !Array.isArray(ids) ||
+      ids.some(
+        // The close's drain re-maps each entry through
+        // hostedRuntimeSessionId, so the answer must already sit in its
+        // idempotent path-safe shape; anything else would drain wrong. The
+        // fixed-point check asks that mapping directly rather than copying
+        // its predicate, so the two can never drift apart (#13986 R1-6).
+        (id) => typeof id !== 'string' || hostedRuntimeSessionId(id) !== id,
+      )
+    )
+      throw new Error('Runtime Broker active-holds answer is invalid.');
+    return ids;
+  }
+
+  async release(
+    options?:
+      | { bindingId: string; generation: string; readonly drain?: boolean }
+      | { readonly drain?: boolean },
+  ): Promise<void> {
+    const expected = options && 'bindingId' in options ? options : undefined;
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
+      {
+        ...(expected
+          ? {
+              cleanupBindingId: expected.bindingId,
+              cleanupGeneration: expected.generation,
+            }
+          : {}),
+        ...(options?.drain === true ? { drain: true } : {}),
+      },
+    );
+    if (response['released'] !== true)
+      throw new Error('Runtime Session release is unconfirmed.');
+    this.leaseAcquired = false;
+  }
+
+  // Frees only the Workspace execution mount: unlike release(), the
+  // Runtime Session keeps its READY identity for the recovery fleet — a
+  // recovery-blocked turn hands its mount back through here (#13800),
+  // never through a full release, whose RELEASED-forever verdict would
+  // strand the Session's later runtime recovery outright.
+  async releaseMount(mountClaimId: string): Promise<void> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release-mount`,
+      { mountClaimId },
+    );
+    if (response['mountReleased'] !== true)
+      throw new Error('Runtime Session mount release is unconfirmed.');
+  }
+
+  /**
+   * Harness-scoped routes carry and answer no Runtime Session identity:
+   * the request omits the id and the response check skips its echo, so a
+   * new harness-scoped caller cannot forget to exempt itself (#13986 R1-5).
+   */
+  private harnessRequest(
+    path: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request(path, body, true);
+  }
+
+  private async request(
+    path: string,
+    body?: Record<string, unknown>,
+    harnessScoped = false,
+  ): Promise<Record<string, unknown>> {
+    const url = new URL(`/internal/runtime-broker/v1${path}`, this.baseUrl);
+    const fields = {
+      protocolVersion: 1,
+      requestId: randomUUID(),
+      ...(harnessScoped
+        ? { harnessSessionId: this.identity.harnessSessionId }
+        : this.identity),
+      ...body,
+    };
+    if (!body)
+      for (const [key, value] of Object.entries(fields))
+        url.searchParams.set(key, String(value));
+    const authority = this.options.lifecycleAuthority?.();
+    const response = await fetch(url, {
+      method: body ? 'POST' : 'GET',
+      headers: {
+        Authorization: `Bearer ${this.options.token}`,
+        'Content-Type': 'application/json',
+        ...(authority
+          ? {
+              'X-Qwen-Lifecycle-Operation-Id': authority.operationId,
+              'X-Qwen-Lifecycle-Claim-Generation': String(
+                authority.claimGeneration,
+              ),
+            }
+          : {}),
+      },
+      ...(body ? { body: JSON.stringify(fields) } : {}),
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.body) throw new Error('Runtime Broker returned no body.');
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        length += chunk.value.length;
+        if (length > 2 * 1024 * 1024) {
+          await reader.cancel();
+          throw new Error('Runtime Broker response exceeds its limit.');
+        }
+        chunks.push(chunk.value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const parsed = object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    if (!response.ok) {
+      const details = parsed['details'];
+      throw new HostedWorkspaceBrokerRejection(
+        response.status,
+        parsed['code'],
+        details && typeof details === 'object' && !Array.isArray(details)
+          ? (details as Record<string, unknown>)
+          : undefined,
+        typeof parsed['error'] === 'string' ? parsed['error'] : undefined,
+      );
+    }
+    if (
+      parsed['protocolVersion'] !== 1 ||
+      parsed['harnessSessionId'] !== this.key.sessionId ||
+      // Harness-scoped routes answer no Runtime Session identity.
+      (!harnessScoped &&
+        parsed['runtimeSessionId'] !== this.identity.runtimeSessionId)
+    )
+      throw new Error('Runtime Broker response identity changed.');
+    return parsed;
+  }
+}
+
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
+}

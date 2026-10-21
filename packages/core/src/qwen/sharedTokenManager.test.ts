@@ -5,6 +5,7 @@
  *
  */
 
+import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs, unlinkSync, type Stats } from 'node:fs';
 import * as os from 'os';
@@ -57,34 +58,45 @@ vi.mock('node:path', async (importOriginal) => {
   };
 });
 
-/**
- * Helper to access private properties for testing
- */
+/** Read a private property for testing. */
 function getPrivateProperty<T>(obj: unknown, property: string): T {
   return (obj as Record<string, T>)[property];
 }
 
-/**
- * Helper to set private properties for testing
- */
+/** Set a private property for testing. */
 function setPrivateProperty<T>(obj: unknown, property: string, value: T): void {
   (obj as Record<string, T>)[property] = value;
 }
 
-/**
- * Creates a mock QwenOAuth2Client for testing
- */
+/** The manager's private in-memory credential cache. */
+function cacheOf(manager: SharedTokenManager) {
+  return getPrivateProperty<{
+    credentials: QwenCredentials | null;
+    fileModTime: number;
+    lastCheck: number;
+  }>(manager, 'memoryCache');
+}
+
+/** Builds `<kind>_access_token` credentials expiring `expiresInMs` from now. */
+const credentialsFactory =
+  (kind: string, expiresInMs: number) =>
+  (overrides: Partial<QwenCredentials> = {}): QwenCredentials => ({
+    access_token: `${kind}_access_token`,
+    refresh_token: `${kind}_refresh_token`,
+    token_type: 'Bearer',
+    expiry_date: Date.now() + expiresInMs,
+    resource_url: 'https://api.example.com',
+    ...overrides,
+  });
+/** Creates valid (1 hour from now) or expired (1 hour ago) credentials. */
+const createValidCredentials = credentialsFactory('valid', 3600000);
+const createExpiredCredentials = credentialsFactory('expired', -3600000);
+
+/** Creates a mock QwenOAuth2Client for testing. */
 function createMockQwenClient(
   initialCredentials: Partial<QwenCredentials> = {},
 ): IQwenOAuth2Client {
-  let credentials: QwenCredentials = {
-    access_token: 'mock_access_token',
-    refresh_token: 'mock_refresh_token',
-    token_type: 'Bearer',
-    expiry_date: Date.now() + 3600000, // 1 hour from now
-    resource_url: 'https://api.example.com',
-    ...initialCredentials,
-  };
+  let credentials = credentialsFactory('mock', 3600000)(initialCredentials);
 
   return {
     setCredentials: vi.fn((creds: QwenCredentials) => {
@@ -98,41 +110,37 @@ function createMockQwenClient(
   };
 }
 
-/**
- * Creates valid mock credentials
- */
-function createValidCredentials(
-  overrides: Partial<QwenCredentials> = {},
-): QwenCredentials {
+/** A mock client (expired credentials by default) using `refresh`. */
+function refreshingClient(
+  refresh: IQwenOAuth2Client['refreshAccessToken'],
+  initial: Partial<QwenCredentials> = createExpiredCredentials(),
+): IQwenOAuth2Client {
+  const client = createMockQwenClient(initial);
+  client.refreshAccessToken = refresh;
+  return client;
+}
+
+/** A bare client stub whose getCredentials returns `credentials` as-is. */
+function stubClient(credentials: unknown, refreshAccessToken = vi.fn()) {
   return {
-    access_token: 'valid_access_token',
-    refresh_token: 'valid_refresh_token',
-    token_type: 'Bearer',
-    expiry_date: Date.now() + 3600000, // 1 hour from now
-    resource_url: 'https://api.example.com',
-    ...overrides,
+    getCredentials: vi.fn().mockReturnValue(credentials),
+    setCredentials: vi.fn(),
+    getAccessToken: vi.fn(),
+    requestDeviceAuthorization: vi.fn(),
+    pollDeviceToken: vi.fn(),
+    refreshAccessToken,
   };
 }
 
-/**
- * Creates expired mock credentials
- */
-function createExpiredCredentials(
-  overrides: Partial<QwenCredentials> = {},
-): QwenCredentials {
-  return {
-    access_token: 'expired_access_token',
-    refresh_token: 'expired_refresh_token',
-    token_type: 'Bearer',
-    expiry_date: Date.now() - 3600000, // 1 hour ago
-    resource_url: 'https://api.example.com',
-    ...overrides,
-  };
-}
+/** Expired credentials without a resource_url. */
+const staleCredentials = () => ({
+  access_token: 'expired-token',
+  refresh_token: 'expired-refresh',
+  token_type: 'Bearer',
+  expiry_date: Date.now() - 1000, // Expired
+});
 
-/**
- * Creates a successful token refresh response
- */
+/** Creates a successful token refresh response. */
 function createSuccessfulRefreshResponse(
   overrides: Partial<TokenRefreshData> = {},
 ): TokenRefreshData {
@@ -146,9 +154,7 @@ function createSuccessfulRefreshResponse(
   };
 }
 
-/**
- * Creates an error response
- */
+/** Creates an error response. */
 function createErrorResponse(
   error = 'invalid_grant',
   description = 'Token expired',
@@ -159,6 +165,15 @@ function createErrorResponse(
   };
 }
 
+/** A refresh result the test resolves by hand. */
+function deferredRefresh() {
+  let resolve!: (value: TokenRefreshData) => void;
+  const promise = new Promise<TokenRefreshData>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+const enoent = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+
 describe('SharedTokenManager', () => {
   let tokenManager: SharedTokenManager;
 
@@ -168,15 +183,32 @@ describe('SharedTokenManager', () => {
   const mockPath = vi.mocked(path);
   const mockUnlinkSync = vi.mocked(unlinkSync);
 
+  /** stat resolves with `mtimeMs`. */
+  const statAt = (mtimeMs: number) =>
+    mockFs.stat.mockResolvedValue({ mtimeMs } as Stats);
+
+  /** Each named fs operation resolves to undefined. */
+  const resolveFs = (
+    ...ops: Array<'writeFile' | 'mkdir' | 'rename' | 'unlink'>
+  ): void => {
+    for (const op of ops) (mockFs[op] as Mock).mockResolvedValue(undefined);
+  };
+
+  const expectRejects = (
+    client: IQwenOAuth2Client,
+    error: unknown = TokenManagerError,
+    manager = tokenManager,
+  ) =>
+    expect(manager.getValidCredentials(client)).rejects.toThrow(
+      error as string,
+    );
+
   beforeEach(() => {
     // Clean up any existing instance's listeners first
-    const existingInstance = getPrivateProperty(
+    getPrivateProperty<SharedTokenManager | null>(
       SharedTokenManager,
       'instance',
-    ) as SharedTokenManager;
-    if (existingInstance) {
-      existingInstance.cleanup();
-    }
+    )?.cleanup();
 
     // Reset all mocks
     vi.clearAllMocks();
@@ -201,9 +233,7 @@ describe('SharedTokenManager', () => {
 
   afterEach(() => {
     // Clean up listeners after each test
-    if (tokenManager) {
-      tokenManager.cleanup();
-    }
+    tokenManager?.cleanup();
   });
 
   describe('Singleton Pattern', () => {
@@ -232,15 +262,11 @@ describe('SharedTokenManager', () => {
       const validCredentials = createValidCredentials();
 
       // Mock file operations to indicate no file changes
-      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
+      statAt(1000);
 
       // Manually set cached credentials
       tokenManager.clearCache();
-      const memoryCache = getPrivateProperty<{
-        credentials: QwenCredentials | null;
-        fileModTime: number;
-        lastCheck: number;
-      }>(tokenManager, 'memoryCache');
+      const memoryCache = cacheOf(tokenManager);
       memoryCache.credentials = validCredentials;
       memoryCache.fileModTime = 1000;
       memoryCache.lastCheck = Date.now();
@@ -252,18 +278,15 @@ describe('SharedTokenManager', () => {
     });
 
     it('should refresh expired credentials', async () => {
-      const mockClient = createMockQwenClient(createExpiredCredentials());
       const refreshResponse = createSuccessfulRefreshResponse();
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(refreshResponse),
+      );
 
-      mockClient.refreshAccessToken = vi
-        .fn()
-        .mockResolvedValue(refreshResponse);
-
-      // Mock file operations (writeFile still needed for the wx lock path;
-      // credential save now routes through the mocked atomicWriteFile).
-      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
+      // writeFile is still needed for the wx lock path; the credential
+      // save routes through the mocked atomicWriteFile.
+      statAt(1000);
+      resolveFs('writeFile', 'mkdir');
 
       const result = await tokenManager.getValidCredentials(mockClient);
 
@@ -273,32 +296,25 @@ describe('SharedTokenManager', () => {
     });
 
     it('wraps atomicWriteFile failure in TokenManagerError(FILE_ACCESS_ERROR)', async () => {
-      // PR #4333 review fold-in: the catch block in saveCredentialsToFile
-      // that maps disk-full / permission-denied to TokenManagerError was
-      // never exercised — atomicWriteFile is mocked as always-successful.
-      // Verify the error path so a regression that swallowed the failure
-      // (or skipped the cache-mtime update on failure) would be caught.
-      const mockClient = createMockQwenClient(createExpiredCredentials());
-      const refreshResponse = createSuccessfulRefreshResponse();
-      mockClient.refreshAccessToken = vi
-        .fn()
-        .mockResolvedValue(refreshResponse);
-
-      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
-      mockFs.writeFile.mockResolvedValue(undefined); // wx lock path still needed
-      mockFs.mkdir.mockResolvedValue(undefined);
+      // PR #4333 review fold-in: saveCredentialsToFile's catch block that
+      // maps disk-full / permission-denied to TokenManagerError was never
+      // exercised (atomicWriteFile is mocked as always-successful). Catches
+      // a regression that swallowed the failure (or skipped the cache-mtime
+      // update on failure).
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(createSuccessfulRefreshResponse()),
+      );
+      statAt(1000);
+      resolveFs('writeFile', 'mkdir'); // wx lock path still needed
       vi.mocked(atomicWriteFile).mockRejectedValueOnce(
         Object.assign(new Error('ENOSPC: no space left on device'), {
           code: 'ENOSPC',
         }),
       );
 
-      let caught: unknown;
-      try {
-        await tokenManager.getValidCredentials(mockClient);
-      } catch (e) {
-        caught = e;
-      }
+      const caught: unknown = await tokenManager
+        .getValidCredentials(mockClient)
+        .catch((e: unknown) => e);
       expect(caught).toBeInstanceOf(TokenManagerError);
       expect((caught as TokenManagerError).type).toBe(
         TokenError.FILE_ACCESS_ERROR,
@@ -307,17 +323,13 @@ describe('SharedTokenManager', () => {
     });
 
     it('should force refresh when forceRefresh is true', async () => {
-      const mockClient = createMockQwenClient(createValidCredentials());
       const refreshResponse = createSuccessfulRefreshResponse();
-
-      mockClient.refreshAccessToken = vi
-        .fn()
-        .mockResolvedValue(refreshResponse);
-
-      // Mock file operations
-      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(refreshResponse),
+        createValidCredentials(),
+      );
+      statAt(1000);
+      resolveFs('writeFile', 'mkdir');
 
       const result = await tokenManager.getValidCredentials(mockClient, true);
 
@@ -332,66 +344,40 @@ describe('SharedTokenManager', () => {
         expiry_date: Date.now() - 3600000,
       });
 
-      await expect(
-        tokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow(TokenManagerError);
-
-      await expect(
-        tokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow('No refresh token available');
+      await expectRejects(mockClient);
+      await expectRejects(mockClient, 'No refresh token available');
     });
 
     it('should throw TokenManagerError when refresh fails', async () => {
-      const mockClient = createMockQwenClient(createExpiredCredentials());
-      const errorResponse = createErrorResponse();
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(createErrorResponse()),
+      );
+      statAt(1000);
 
-      mockClient.refreshAccessToken = vi.fn().mockResolvedValue(errorResponse);
-
-      // Mock file operations
-      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
-
-      await expect(
-        tokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow(TokenManagerError);
+      await expectRejects(mockClient);
     });
 
     it('should handle network errors during refresh', async () => {
-      const mockClient = createMockQwenClient(createExpiredCredentials());
-      const networkError = new Error('Network request failed');
+      const mockClient = refreshingClient(
+        vi.fn().mockRejectedValue(new Error('Network request failed')),
+      );
+      statAt(1000);
 
-      mockClient.refreshAccessToken = vi.fn().mockRejectedValue(networkError);
-
-      // Mock file operations
-      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
-
-      await expect(
-        tokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow(TokenManagerError);
+      await expectRejects(mockClient);
     });
 
     it('should wait for ongoing refresh and return same result', async () => {
-      const mockClient = createMockQwenClient(createExpiredCredentials());
-      const refreshResponse = createSuccessfulRefreshResponse();
+      const refresh = deferredRefresh();
+      const mockClient = refreshingClient(
+        vi.fn().mockReturnValue(refresh.promise),
+      );
+      statAt(1000);
+      resolveFs('writeFile', 'mkdir');
 
-      // Create a delayed refresh response
-      let resolveRefresh: (value: TokenRefreshData) => void;
-      const refreshPromise = new Promise<TokenRefreshData>((resolve) => {
-        resolveRefresh = resolve;
-      });
-
-      mockClient.refreshAccessToken = vi.fn().mockReturnValue(refreshPromise);
-
-      // Mock file operations
-      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
-
-      // Start two concurrent refresh operations
+      // Start two concurrent refresh operations, then resolve the refresh
       const promise1 = tokenManager.getValidCredentials(mockClient);
       const promise2 = tokenManager.getValidCredentials(mockClient);
-
-      // Resolve the refresh
-      resolveRefresh!(refreshResponse);
+      refresh.resolve(createSuccessfulRefreshResponse());
 
       const [result1, result2] = await Promise.all([promise1, promise2]);
 
@@ -406,16 +392,11 @@ describe('SharedTokenManager', () => {
       });
 
       // Mock file operations to simulate file modification
-      mockFs.stat.mockResolvedValue({ mtimeMs: 2000 } as Stats);
+      statAt(2000);
       mockFs.readFile.mockResolvedValue(JSON.stringify(fileCredentials));
 
-      // Set initial cache state
       tokenManager.clearCache();
-      const memoryCache = getPrivateProperty<{ fileModTime: number }>(
-        tokenManager,
-        'memoryCache',
-      );
-      memoryCache.fileModTime = 1000; // Older than file
+      cacheOf(tokenManager).fileModTime = 1000; // Older than file
 
       const result = await tokenManager.getValidCredentials(mockClient);
 
@@ -426,12 +407,8 @@ describe('SharedTokenManager', () => {
 
   describe('Cache Management', () => {
     it('should clear cache', () => {
-      // Set some cache data
       tokenManager.clearCache();
-      const memoryCache = getPrivateProperty<{
-        credentials: QwenCredentials | null;
-      }>(tokenManager, 'memoryCache');
-      memoryCache.credentials = createValidCredentials();
+      cacheOf(tokenManager).credentials = createValidCredentials();
 
       tokenManager.clearCache();
 
@@ -440,12 +417,8 @@ describe('SharedTokenManager', () => {
 
     it('should return current credentials from cache', () => {
       const credentials = createValidCredentials();
-
       tokenManager.clearCache();
-      const memoryCache = getPrivateProperty<{
-        credentials: QwenCredentials | null;
-      }>(tokenManager, 'memoryCache');
-      memoryCache.credentials = credentials;
+      cacheOf(tokenManager).credentials = credentials;
 
       expect(tokenManager.getCurrentCredentials()).toEqual(credentials);
     });
@@ -463,35 +436,23 @@ describe('SharedTokenManager', () => {
     });
 
     it('should return true when refresh is in progress', async () => {
-      const mockClient = createMockQwenClient(createExpiredCredentials());
+      const refresh = deferredRefresh();
+      const mockClient = refreshingClient(
+        vi.fn().mockReturnValue(refresh.promise),
+      );
 
       // Clear cache to ensure refresh is triggered
       tokenManager.clearCache();
 
-      // Mock stat for file check to fail (no file initially) - need to mock it twice
-      // Once for checkAndReloadIfNeeded, once for forceFileCheck during refresh
+      // No file initially: stat fails twice, once for
+      // checkAndReloadIfNeeded and once for forceFileCheck during refresh.
       mockFs.stat
-        .mockRejectedValueOnce(
-          Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
-        )
-        .mockRejectedValueOnce(
-          Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
-        );
+        .mockRejectedValueOnce(enoent())
+        .mockRejectedValueOnce(enoent());
+      // Lock and save (the save goes through the atomicWriteFile mock;
+      // writeFile is kept for the wx lock).
+      resolveFs('writeFile', 'mkdir');
 
-      // Create a delayed refresh response
-      let resolveRefresh: (value: TokenRefreshData) => void;
-      const refreshPromise = new Promise<TokenRefreshData>((resolve) => {
-        resolveRefresh = resolve;
-      });
-
-      mockClient.refreshAccessToken = vi.fn().mockReturnValue(refreshPromise);
-
-      // Mock file operations for lock and save (credential save now goes
-      // through atomicWriteFile mock; writeFile mock kept for the wx lock).
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
-
-      // Start refresh
       const refreshOperation = tokenManager.getValidCredentials(mockClient);
 
       // Wait a tick to ensure the refresh promise is set
@@ -499,8 +460,7 @@ describe('SharedTokenManager', () => {
 
       expect(tokenManager.isRefreshInProgress()).toBe(true);
 
-      // Complete refresh
-      resolveRefresh!(createSuccessfulRefreshResponse());
+      refresh.resolve(createSuccessfulRefreshResponse());
       await refreshOperation;
 
       expect(tokenManager.isRefreshInProgress()).toBe(false);
@@ -509,13 +469,8 @@ describe('SharedTokenManager', () => {
 
   describe('Debug Info', () => {
     it('should return complete debug information', () => {
-      const credentials = createValidCredentials();
-
       tokenManager.clearCache();
-      const memoryCache = getPrivateProperty<{
-        credentials: QwenCredentials | null;
-      }>(tokenManager, 'memoryCache');
-      memoryCache.credentials = credentials;
+      cacheOf(tokenManager).credentials = createValidCredentials();
 
       const debugInfo = tokenManager.getDebugInfo();
 
@@ -527,13 +482,8 @@ describe('SharedTokenManager', () => {
     });
 
     it('should indicate expired credentials in debug info', () => {
-      const expiredCredentials = createExpiredCredentials();
-
       tokenManager.clearCache();
-      const memoryCache = getPrivateProperty<{
-        credentials: QwenCredentials | null;
-      }>(tokenManager, 'memoryCache');
-      memoryCache.credentials = expiredCredentials;
+      cacheOf(tokenManager).credentials = createExpiredCredentials();
 
       const debugInfo = tokenManager.getDebugInfo();
 
@@ -569,35 +519,22 @@ describe('SharedTokenManager', () => {
 
     it('should handle file access errors gracefully', async () => {
       const mockClient = createMockQwenClient(createExpiredCredentials());
+      mockFs.stat.mockRejectedValue(
+        Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
+      );
 
-      // Mock file stat to throw access error
-      const accessError = new Error(
-        'Permission denied',
-      ) as NodeJS.ErrnoException;
-      accessError.code = 'EACCES';
-      mockFs.stat.mockRejectedValue(accessError);
-
-      await expect(
-        tokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow(TokenManagerError);
+      await expectRejects(mockClient);
     });
 
     it('should handle missing file gracefully', async () => {
       const mockClient = createMockQwenClient();
       const validCredentials = createValidCredentials();
-
-      // Mock file stat to throw file not found error
-      const notFoundError = new Error(
-        'File not found',
-      ) as NodeJS.ErrnoException;
-      notFoundError.code = 'ENOENT';
-      mockFs.stat.mockRejectedValue(notFoundError);
+      mockFs.stat.mockRejectedValue(
+        Object.assign(new Error('File not found'), { code: 'ENOENT' }),
+      );
 
       // Set valid credentials in cache
-      const memoryCache = getPrivateProperty<{
-        credentials: QwenCredentials | null;
-      }>(tokenManager, 'memoryCache');
-      memoryCache.credentials = validCredentials;
+      cacheOf(tokenManager).credentials = validCredentials;
 
       const result = await tokenManager.getValidCredentials(mockClient);
 
@@ -614,12 +551,10 @@ describe('SharedTokenManager', () => {
       });
 
       // Mock stat for file check to pass (no file initially)
-      mockFs.stat.mockRejectedValueOnce(
-        Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
-      );
+      mockFs.stat.mockRejectedValueOnce(enoent());
 
-      // Mock writeFile to always throw EEXIST for lock file writes (flag: 'wx')
-      // but succeed for regular file writes
+      // Lock file writes (flag: 'wx') always hit EEXIST; regular writes
+      // succeed.
       const lockError = new Error('File exists') as NodeJS.ErrnoException;
       lockError.code = 'EEXIST';
 
@@ -630,15 +565,12 @@ describe('SharedTokenManager', () => {
         return Promise.resolve(undefined);
       });
 
-      // Mock stat to return recent lock file (not stale) when checking lock age
-      mockFs.stat.mockResolvedValue({ mtimeMs: Date.now() } as Stats);
+      // Lock age checks see a recent (not stale) lock file; unlink
+      // simulates lock file removal attempts.
+      statAt(Date.now());
+      resolveFs('unlink');
 
-      // Mock unlink to simulate lock file removal attempts
-      mockFs.unlink.mockResolvedValue(undefined);
-
-      await expect(
-        tokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow(TokenManagerError);
+      await expectRejects(mockClient);
     }, 500); // 500ms timeout for lock test (3 attempts × 50ms = ~150ms + buffer)
 
     it('should handle refresh response without access token', async () => {
@@ -646,17 +578,14 @@ describe('SharedTokenManager', () => {
       setPrivateProperty(SharedTokenManager, 'instance', null);
       const freshTokenManager = SharedTokenManager.getInstance();
 
-      const mockClient = createMockQwenClient(createExpiredCredentials());
-      const invalidResponse = {
-        token_type: 'Bearer',
-        expires_in: 3600,
-        // access_token is missing, so we use undefined explicitly
-        access_token: undefined,
-      } as Partial<TokenRefreshData>;
-
-      mockClient.refreshAccessToken = vi
-        .fn()
-        .mockResolvedValue(invalidResponse);
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue({
+          token_type: 'Bearer',
+          expires_in: 3600,
+          // access_token is missing, so we use undefined explicitly
+          access_token: undefined,
+        } as Partial<TokenRefreshData>),
+      );
 
       // Completely reset all fs mocks to ensure no contamination
       mockFs.stat.mockReset();
@@ -666,30 +595,18 @@ describe('SharedTokenManager', () => {
       mockFs.rename.mockReset();
       mockFs.unlink.mockReset();
 
-      // Mock stat for file check to fail (no file initially) - need to mock it twice
-      // Once for checkAndReloadIfNeeded, once for forceFileCheck during refresh
+      // No file initially: stat fails twice, once for
+      // checkAndReloadIfNeeded and once for forceFileCheck during refresh.
       mockFs.stat
-        .mockRejectedValueOnce(
-          Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
-        )
-        .mockRejectedValueOnce(
-          Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
-        );
-
-      // Mock file operations for lock acquisition
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
+        .mockRejectedValueOnce(enoent())
+        .mockRejectedValueOnce(enoent());
+      resolveFs('writeFile', 'mkdir'); // lock acquisition
 
       // Clear cache to force refresh
       freshTokenManager.clearCache();
 
-      await expect(
-        freshTokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow(TokenManagerError);
-
-      await expect(
-        freshTokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow('no token returned');
+      await expectRejects(mockClient, TokenManagerError, freshTokenManager);
+      await expectRejects(mockClient, 'no token returned', freshTokenManager);
 
       // Clean up the fresh instance
       freshTokenManager.cleanup();
@@ -697,83 +614,49 @@ describe('SharedTokenManager', () => {
   });
 
   describe('File System Operations', () => {
-    it('should handle file reload failures gracefully', async () => {
-      const mockClient = createMockQwenClient();
-
-      // Mock successful refresh for when cache is cleared
-      mockClient.refreshAccessToken = vi
-        .fn()
-        .mockResolvedValue(createSuccessfulRefreshResponse());
-
-      // Mock file operations
+    /** The file (mtime 2000) is newer than the cache (1000), so the manager
+     * reloads it (the test decides how the read goes), then refreshes. */
+    const reloadThenRefresh = () => {
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(createSuccessfulRefreshResponse()),
+        {},
+      );
       mockFs.stat
         .mockResolvedValueOnce({ mtimeMs: 2000 } as Stats) // For checkAndReloadIfNeeded
         .mockResolvedValue({ mtimeMs: 1000 } as Stats); // For later operations
-      mockFs.readFile.mockRejectedValue(new Error('Read failed'));
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
+      resolveFs('writeFile', 'rename', 'mkdir');
 
-      // Set initial cache state to trigger reload
       tokenManager.clearCache();
-      const memoryCache = getPrivateProperty<{ fileModTime: number }>(
-        tokenManager,
-        'memoryCache',
-      );
-      memoryCache.fileModTime = 1000;
+      cacheOf(tokenManager).fileModTime = 1000;
+      return tokenManager.getValidCredentials(mockClient);
+    };
+
+    it('should handle file reload failures gracefully', async () => {
+      mockFs.readFile.mockRejectedValue(new Error('Read failed'));
 
       // Should not throw error, should refresh and get new credentials
-      const result = await tokenManager.getValidCredentials(mockClient);
+      const result = await reloadThenRefresh();
 
       expect(result).toBeDefined();
       expect(result.access_token).toBe('fresh_access_token');
     });
 
     it('should handle invalid JSON in credentials file', async () => {
-      const mockClient = createMockQwenClient();
-
-      // Mock successful refresh for when cache is cleared
-      mockClient.refreshAccessToken = vi
-        .fn()
-        .mockResolvedValue(createSuccessfulRefreshResponse());
-
-      // Mock file operations with invalid JSON
-      mockFs.stat
-        .mockResolvedValueOnce({ mtimeMs: 2000 } as Stats) // For checkAndReloadIfNeeded
-        .mockResolvedValue({ mtimeMs: 1000 } as Stats); // For later operations
       mockFs.readFile.mockResolvedValue('invalid json content');
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
 
-      // Set initial cache state to trigger reload
-      tokenManager.clearCache();
-      const memoryCache = getPrivateProperty<{ fileModTime: number }>(
-        tokenManager,
-        'memoryCache',
-      );
-      memoryCache.fileModTime = 1000;
-
-      // Should handle JSON parse error gracefully, then refresh and get new credentials
-      const result = await tokenManager.getValidCredentials(mockClient);
+      // Should handle the JSON parse error, then refresh
+      const result = await reloadThenRefresh();
 
       expect(result).toBeDefined();
       expect(result.access_token).toBe('fresh_access_token');
     });
 
     it('should handle directory creation during save', async () => {
-      const mockClient = createMockQwenClient(createExpiredCredentials());
-      const refreshResponse = createSuccessfulRefreshResponse();
-
-      mockClient.refreshAccessToken = vi
-        .fn()
-        .mockResolvedValue(refreshResponse);
-
-      // Mock file operations
-      mockFs.stat.mockResolvedValue({ mtimeMs: 1000 } as Stats);
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(createSuccessfulRefreshResponse()),
+      );
+      statAt(1000);
+      resolveFs('writeFile', 'rename', 'mkdir');
 
       await tokenManager.getValidCredentials(mockClient);
 
@@ -800,30 +683,25 @@ describe('SharedTokenManager', () => {
     });
 
     it('should handle stale lock cleanup', async () => {
-      const mockClient = createMockQwenClient(createExpiredCredentials());
       const refreshResponse = createSuccessfulRefreshResponse();
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(refreshResponse),
+      );
 
-      mockClient.refreshAccessToken = vi
-        .fn()
-        .mockResolvedValue(refreshResponse);
-
-      // First writeFile call throws EEXIST (lock exists)
-      // Second writeFile call succeeds (after stale lock cleanup)
+      // The first writeFile hits EEXIST (lock exists); the second succeeds
+      // after the stale lock is cleaned up.
       const lockError = new Error('File exists') as NodeJS.ErrnoException;
       lockError.code = 'EEXIST';
       mockFs.writeFile
         .mockRejectedValueOnce(lockError)
         .mockResolvedValue(undefined);
 
-      // Mock stat to return stale lock (old timestamp)
       mockFs.stat
         .mockResolvedValueOnce({ mtimeMs: Date.now() - 20000 } as Stats) // Stale lock
         .mockResolvedValueOnce({ mtimeMs: 1000 } as Stats); // Credentials file
 
-      // Mock rename and unlink to succeed (for atomic stale lock removal)
-      mockFs.rename.mockResolvedValue(undefined);
-      mockFs.unlink.mockResolvedValue(undefined);
-      mockFs.mkdir.mockResolvedValue(undefined);
+      // rename and unlink succeed (atomic stale lock removal)
+      resolveFs('rename', 'unlink', 'mkdir');
 
       const result = await tokenManager.getValidCredentials(mockClient);
 
@@ -841,28 +719,14 @@ describe('SharedTokenManager', () => {
       tokenManager.clearCache();
 
       // Set up some credentials in memory cache
-      const mockCredentials = {
-        access_token: 'expired-token',
-        refresh_token: 'expired-refresh',
-        token_type: 'Bearer',
-        expiry_date: Date.now() - 1000, // Expired
-      };
-
-      const memoryCache = getPrivateProperty<{
-        credentials: QwenCredentials | null;
-        fileModTime: number;
-      }>(tokenManager, 'memoryCache');
+      const mockCredentials = staleCredentials();
+      const memoryCache = cacheOf(tokenManager);
       memoryCache.credentials = mockCredentials;
       memoryCache.fileModTime = 12345;
 
-      // Mock the client to throw CredentialsClearRequiredError
-      const mockClient = {
-        getCredentials: vi.fn().mockReturnValue(mockCredentials),
-        setCredentials: vi.fn(),
-        getAccessToken: vi.fn(),
-        requestDeviceAuthorization: vi.fn(),
-        pollDeviceToken: vi.fn(),
-        refreshAccessToken: vi
+      const mockClient = stubClient(
+        mockCredentials,
+        vi
           .fn()
           .mockRejectedValue(
             new CredentialsClearRequiredError(
@@ -870,31 +734,21 @@ describe('SharedTokenManager', () => {
               { status: 400, response: 'Bad Request' },
             ),
           ),
-      };
-
-      // Mock file system operations
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.stat.mockResolvedValue({ mtimeMs: 12345 } as Stats);
-      mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
-      mockFs.unlink.mockResolvedValue(undefined);
+      );
+      statAt(12345);
+      resolveFs('writeFile', 'mkdir', 'rename', 'unlink');
 
       // Attempt to get valid credentials should fail and clear cache
-      await expect(
-        tokenManager.getValidCredentials(mockClient),
-      ).rejects.toThrow(TokenManagerError);
+      await expectRejects(mockClient, TokenManagerError, tokenManager);
 
       // Verify memory cache was cleared
       expect(tokenManager.getCurrentCredentials()).toBeNull();
-      const memoryCacheAfter = getPrivateProperty<{
-        fileModTime: number;
-      }>(tokenManager, 'memoryCache');
       const refreshPromise =
         getPrivateProperty<Promise<QwenCredentials> | null>(
           tokenManager,
           'refreshPromise',
         );
-      expect(memoryCacheAfter.fileModTime).toBe(0);
+      expect(cacheOf(tokenManager).fileModTime).toBe(0);
       expect(refreshPromise).toBeNull();
     });
 
@@ -904,32 +758,16 @@ describe('SharedTokenManager', () => {
       const tokenManager = SharedTokenManager.getInstance();
       tokenManager.clearCache();
 
-      const mockCredentials = {
-        access_token: 'expired-token',
-        refresh_token: 'expired-refresh',
-        token_type: 'Bearer',
-        expiry_date: Date.now() - 1000,
-      };
-
-      const mockClient = {
-        getCredentials: vi.fn().mockReturnValue(mockCredentials),
-        setCredentials: vi.fn(),
-        getAccessToken: vi.fn(),
-        requestDeviceAuthorization: vi.fn(),
-        pollDeviceToken: vi.fn(),
-        refreshAccessToken: vi
+      const mockClient = stubClient(
+        staleCredentials(),
+        vi
           .fn()
           .mockRejectedValue(
             new CredentialsClearRequiredError('Test error message'),
           ),
-      };
-
-      // Mock file system operations
-      mockFs.writeFile.mockResolvedValue(undefined);
-      mockFs.stat.mockResolvedValue({ mtimeMs: 12345 } as Stats);
-      mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.rename.mockResolvedValue(undefined);
-      mockFs.unlink.mockResolvedValue(undefined);
+      );
+      statAt(12345);
+      resolveFs('writeFile', 'mkdir', 'rename', 'unlink');
 
       try {
         await tokenManager.getValidCredentials(mockClient);
@@ -950,20 +788,13 @@ describe('SharedTokenManager', () => {
       const tokenManager = SharedTokenManager.getInstance();
       tokenManager.clearCache();
 
-      const mockClient = {
-        getCredentials: vi.fn().mockReturnValue(null),
-        setCredentials: vi.fn(),
-        getAccessToken: vi.fn(),
-        requestDeviceAuthorization: vi.fn(),
-        pollDeviceToken: vi.fn(),
-        refreshAccessToken: vi.fn(),
-      };
+      const mockClient = stubClient(null);
 
       // Mock clearTimeout to verify it's called
       const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
 
       // Mock file stat to resolve quickly (before timeout)
-      mockFs.stat.mockResolvedValue({ mtimeMs: 12345 } as Stats);
+      statAt(12345);
 
       // Call checkAndReloadIfNeeded which uses withTimeout internally
       const checkMethod = getPrivateProperty(

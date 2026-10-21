@@ -10,7 +10,10 @@ import {
 import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
-import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from '../utils/env-provenance.js';
+import {
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
+  RELAUNCH_SUPERVISED_ENV,
+} from '../utils/env-provenance.js';
 export { PRIVATE_RELAUNCH_ENV_PROVENANCE };
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
@@ -42,6 +45,19 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
   // Downloaded updates execute as the user; a project must not select them.
   'QWEN_UPDATE_BASE_URL',
+  // The model catalog is written to the global cache that every project
+  // reads, so all three of its keys are operator decisions. A project must
+  // not choose where it is downloaded from; and because `qwen serve`
+  // snapshots and freezes this environment before any workspace file loads
+  // — every workspace child inherits that snapshot, and a workspace can only
+  // add absent keys (`setRuntimeEnvIfUnset`) — a repository's own config
+  // would otherwise decide catalog behaviour for every *other* workspace the
+  // daemon hosts, and override an operator's exported `off` on the reload
+  // path. The rejection is silent (it is not a loader key), so nothing else
+  // reports it either.
+  'QWEN_CODE_MODELS_DEV_URL',
+  'QWEN_CODE_MODELS_DEV',
+  'QWEN_CODE_MODELS_DEV_REFRESH',
   // This points to a host temp file that carries build warnings. A project
   // `.env` must not redirect it to an arbitrary file to read or delete.
   'QWEN_CODE_WARNINGS_FILE',
@@ -275,6 +291,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // unbound-durable-task skip onto sessions the contract does not cover).
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
+  // Only a relaunch supervisor marks its child; a forged marker would make a
+  // piped, one-shot run exit as if its supervisor had gone.
+  RELAUNCH_SUPERVISED_ENV,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -319,6 +338,7 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
 const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
   PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
   PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
+  RELAUNCH_SUPERVISED_ENV.toLowerCase(),
   'sandbox',
   'sandbox_enforcement',
 ]);
@@ -433,6 +453,21 @@ export function isLoaderEnvKey(key: string): boolean {
   const canonical = canonicalLoaderKey(key);
   return canonical.startsWith('bash-func-') || LOADER_ENV_KEYS.has(canonical);
 }
+
+/**
+ * Whether `key` names NODE_OPTIONS, in any spelling that the predicate above
+ * accepts.
+ */
+export function isNodeOptionsEnvKey(key: string): boolean {
+  return canonicalLoaderKey(key) === 'node-options';
+}
+
+/**
+ * The loader vars this process booted with, kept when its own boot scrub
+ * removed them. A qwen process it starts for itself, such as a Managed
+ * session's Runtime worker, boots the same way and scrubs them in turn.
+ */
+export const processBootLoaderEnv = new Map<string, string>();
 
 export function scrubInheritedLoaderEnv(
   env: NodeJS.ProcessEnv,

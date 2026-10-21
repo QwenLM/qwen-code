@@ -286,6 +286,16 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # Fail fast on a saturated pool host instead of dying on ENOSPC
+      # mid-job (#10035): run 36241138248 lost this leg with no failed step
+      # and no test result when the runner's own worker died writing its
+      # diag log on a full disk (#12764). ci.yml and the release lane already
+      # gate on this script; a gate failure is a clear, retryable signal and
+      # a re-run lands on a host with headroom.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Install dependencies'
         env:
           # `npm ci` runs the `prepare` script, which builds and bundles the
@@ -323,6 +333,16 @@ jobs:
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
 
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
@@ -478,6 +498,16 @@ jobs:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
 
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
+
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -585,6 +615,16 @@ jobs:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
 
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
+
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -688,6 +728,16 @@ jobs:
         with:
           name: 'e2e-build'
           path: '${{ runner.temp }}/e2e-build'
+
+      # The retry does not fire back-to-back: the artifact client treats a
+      # network-level timeout as fail-fast (NetworkError on ETIMEDOUT — no
+      # internal retry), so run 37119220504's macOS shard 1/2 lost both
+      # attempts inside one window at least 2.5 minutes long while its
+      # sibling shard downloaded the same artifact (#13284). The wait lets
+      # the retry sample a later network state.
+      - name: 'Wait before download retry'
+        if: "${{ steps.download-build.outcome == 'failure' }}"
+        run: 'sleep 60'
 
       - name: 'Download build artifact (retry)'
         if: "${{ steps.download-build.outcome == 'failure' }}"

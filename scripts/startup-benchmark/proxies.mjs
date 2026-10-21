@@ -11,9 +11,11 @@
 //       before it exits)
 //   D2  bytes of JavaScript those processes opened
 //
-//   node scripts/startup-benchmark/proxies.mjs [--entry <cli-entry.js>] [--runs N]
+//   node scripts/startup-benchmark/proxies.mjs [--entry <cli-entry.js>] [--runs N] \
+//     [--credentials shell|settings|dotenv]
 //
-// Linux only: it needs strace. See
+// `--credentials settings|dotenv` moves the model key and URL from the shell
+// into the settings file or `~/.qwen/.env`. Linux only: it needs strace. See
 // docs/design/2026-09-25-startup-benchmark-harness.md.
 
 import { execFileSync } from 'node:child_process';
@@ -23,6 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
+  CREDENTIAL_SOURCES,
   makeRunEnvironment,
   parseStrace,
   quantiles,
@@ -36,8 +39,13 @@ const { values: options } = parseArgs({
   options: {
     entry: { type: 'string', default: path.join(here, '..', 'cli-entry.js') },
     runs: { type: 'string', default: '3' },
+    credentials: { type: 'string', default: 'shell' },
   },
 });
+if (!CREDENTIAL_SOURCES.includes(options.credentials)) {
+  console.error('--credentials must be shell, settings or dotenv');
+  process.exit(2);
+}
 
 // Containers can ship strace without the right to trace, so try it once.
 try {
@@ -58,7 +66,11 @@ const results = { interactive: [], headless: [] };
 try {
   for (let i = 0; i < Number(options.runs); i++) {
     for (const mode of ['interactive', 'headless']) {
-      const run = makeRunEnvironment({ root, modelServer });
+      const run = makeRunEnvironment({
+        root,
+        modelServer,
+        credentials: options.credentials,
+      });
       const trace = path.join(run.dir, 'strace.txt');
       const args = [
         '-f',
@@ -105,6 +117,7 @@ try {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
+console.log(`credentials: ${options.credentials}`);
 for (const mode of ['interactive', 'headless']) {
   const counts = results[mode].map((r) => r.nodeProcesses);
   const megabytes = (

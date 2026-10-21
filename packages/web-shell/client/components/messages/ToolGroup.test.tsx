@@ -25,6 +25,12 @@ import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import {
+  result as managedResult,
+  notStartedResult,
+  blockedResult,
+  previewOnlyResult,
+} from '../managed/managed-tool-result.test-fixtures';
 
 vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -70,6 +76,66 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
     ...overrides,
   };
 }
+
+describe('ReadFile output availability', () => {
+  it.each(['failed', 'completed'] as const)(
+    'labels missing %s read details',
+    (status) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          status,
+        }),
+        { forceExpanded: true },
+      );
+      expect(container.textContent).toContain(
+        'Output is unavailable for this tool call.',
+      );
+    },
+  );
+
+  it('distinguishes an explicitly empty read from missing output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        rawOutput: '',
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps waiting for an active read without output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('Waiting for output…');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('recognizes a recorded empty text block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        content: [{ type: 'content', content: { type: 'text', text: '' } }],
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps an opaque recorded result distinct from missing output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', rawOutput: { type: 'structured' } }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+});
 
 function renderToolLine(
   tool: ACPToolCall,
@@ -210,6 +276,73 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
 };
 
 describe('tool group summary logic', () => {
+  it.each([
+    [notStartedResult, 'Command not executed'],
+    [blockedResult, 'Output delivery blocked'],
+    [previewOnlyResult, 'Command succeeded'],
+  ])(
+    'renders the shared result facts in tool summaries: %s',
+    (result, expected) => {
+      const container = renderToolLine(
+        makeTool({ toolResult: result }),
+        { onToolResultOpen: vi.fn() },
+        {},
+      );
+      if (result === previewOnlyResult) {
+        expect(container.textContent).not.toContain(expected);
+        const header = container.querySelector(
+          '[role="button"]',
+        ) as HTMLElement;
+        act(() => header.click());
+      }
+      expect(container.textContent).toContain(expected);
+    },
+  );
+  it('rerenders a result-only revision change and opens its canonical Item', () => {
+    const onOpen = vi.fn();
+    const customization = {};
+    const tool = makeTool({
+      rawOutput: 'unchanged preview',
+      toolResult: managedResult,
+    });
+    const container = renderToolLine(
+      tool,
+      { onToolResultOpen: onOpen },
+      customization,
+    );
+    expect(container.textContent).not.toContain('Capture complete');
+    const header = container.querySelector('[role="button"]') as HTMLElement;
+    act(() => header.click());
+    expect(container.textContent).toContain('Capture complete');
+    const { root } = mounted.at(-1)!;
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider value={customization}>
+            <ToolLine
+              tool={{
+                ...tool,
+                toolResult: {
+                  ...managedResult,
+                  projection_revision: 2,
+                  capture_status: 'partial',
+                  delivery_status: 'blocked',
+                },
+              }}
+              onToolResultOpen={onOpen}
+            />
+          </WebShellCustomizationProvider>
+        </I18nProvider>,
+      ),
+    );
+    expect(container.textContent).toContain('Capture incomplete');
+    expect(container.textContent).toContain('Output delivery blocked');
+    const button = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent === 'View output',
+    );
+    act(() => button!.click());
+    expect(onOpen).toHaveBeenCalledWith('item-1');
+  });
   it('counts agents separately only for compact summaries', () => {
     const tools = [
       makeTool({ callId: 'agent-1', toolName: 'Agent' }),
@@ -772,6 +905,30 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('shows the Advisor verdict and expands the full review', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'advisor',
+        status: 'completed',
+        rawOutput: {
+          type: 'advisor_review',
+          verdict: 'Sound approach.',
+          risks: 'Retry handling is unclear.',
+          missingEvidence: 'No integration result.',
+          recommendation: 'Run the integration test.',
+        },
+      }),
+    ]);
+
+    act(() => {
+      (container.querySelector('button') as HTMLElement).click();
+    });
+
+    expect(container.textContent).toContain('Sound approach.');
+    expect(container.textContent).toContain('Retry handling is unclear.');
+    expect(container.textContent).toContain('Run the integration test.');
+  });
+
   it('expands a workflow tool into its live execution graph', () => {
     const tool = makeTool({
       toolName: 'workflow',

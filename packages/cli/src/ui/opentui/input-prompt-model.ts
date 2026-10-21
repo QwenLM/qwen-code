@@ -216,7 +216,7 @@ export function detectCompletionTarget(
       const pathStart = i + 1;
       return {
         mode: CompletionMode.AT,
-        query: currentLine.substring(pathStart, end),
+        query: codePoints.slice(pathStart, end).join(''),
         start: pathStart,
         end,
       };

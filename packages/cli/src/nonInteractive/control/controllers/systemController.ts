@@ -408,6 +408,8 @@ export class SystemController extends BaseController {
       undefined, // alwaysLoadTools
       undefined, // agentPluginV1
       config.versionNegotiation,
+      config.appResourceMaxBytes,
+      config.appResourceTimeoutMs,
     );
   }
 

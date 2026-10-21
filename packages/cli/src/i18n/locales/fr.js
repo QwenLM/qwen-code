@@ -194,6 +194,8 @@ export default {
     'Le retour en arrière n’affecte pas les fichiers édités manuellement ou via des commandes shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Impossible de revenir à un tour qui a été compressé. Essayez un tour plus récent.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    "Impossible de ramener la conversation à ce tour : il ne correspond plus à l'historique du modèle (par exemple après une nouvelle tentative). Essayez un tour plus récent.",
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'La restauration des fichiers est indisponible pour ce tour (aucune modification capturée, ou ce tour est antérieur à la session actuelle).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -1899,12 +1901,16 @@ export default {
   'Context Usage': 'Utilisation du contexte',
   'No API response yet. Send a message to see actual usage.':
     "Pas encore de réponse API. Envoyez un message pour voir l'utilisation réelle.",
+  'Estimated usage, including the conversation':
+    'Utilisation estimée, conversation comprise',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    "Pas encore d'utilisation du fournisseur. Ce sont des estimations locales, conversation comprise.",
   'Estimated pre-conversation overhead':
     'Surcharge estimée avant la conversation',
   'Context window': 'Fenêtre de contexte',
   Used: 'Utilisé',
   Free: 'Libre',
-  'Autocompact buffer': 'Tampon de compaction automatique',
+  'Autocompact buffer': 'Réserve de compaction',
   'Usage by category': 'Utilisation par catégorie',
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',
@@ -2134,6 +2140,10 @@ export default {
     "Impossible d'écrire dans le terminal — copiez manuellement l'URL ci-dessus.",
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key invalide. Les clés à la demande commencent par "sk-" ou "sk-ws-". Les clés Token Plan ("sk-sp-") nécessitent l\'entrée Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key invalide. Les Token Plan API Keys commencent par "sk-sp-". Générez-en une depuis la console Token Plan, ou utilisez l\'entrée Standard API Key pour une clé à la demande.',
   'Lock release warning': 'Avertissement de libération du verrou',
   'Metadata write warning': "Avertissement d'écriture des métadonnées",
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":

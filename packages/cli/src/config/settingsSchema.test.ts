@@ -23,6 +23,7 @@ import {
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
@@ -31,6 +32,28 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('declares a replace-only Web Shell approval mode allowlist', () => {
+    const { allowedApprovalModes } = getSettingsSchema().ui.properties;
+    expect(allowedApprovalModes).toMatchObject({
+      type: 'array',
+      default: undefined,
+      mergeStrategy: MergeStrategy.REPLACE,
+      showInDialog: false,
+      items: {
+        type: 'string',
+        // Pinned to the SDK vocabulary rather than restated as a literal, so
+        // a permission mode added there without this schema following turns
+        // this assertion red instead of shipping a stale editor enum.
+        enum: DAEMON_APPROVAL_MODES.filter((mode) => mode !== 'plan'),
+      },
+    });
+    // The key is workspace-restricted; the description is the only in-editor
+    // signal, so it must say so (mirrored verbatim into the VSCode schema).
+    expect(allowedApprovalModes.description).toMatch(
+      /values set in Workspace settings are ignored/,
+    );
+  });
+
   describe('getSettingsSchema', () => {
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =
@@ -288,6 +311,23 @@ describe('SettingsSchema', () => {
       });
     });
 
+    // The bundled Mem0 runtime validates this same field with its own zod copy
+    // (mem0-settings.ts `int().min(1).max(30_000).default(5000)`, pinned by
+    // mem0-settings.test.ts). Neither copy is derived from the other, so both
+    // are asserted against the documented contract in
+    // docs/users/features/mem0.md: drifting either one turns a test red.
+    it('should bound memory.mem0.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().memory.properties.mem0.jsonSchemaOverride
+          ?.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: 30_000,
+        default: 5000,
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');
@@ -344,8 +384,8 @@ describe('SettingsSchema', () => {
       expect(advisorModel.type).toBe('string');
       expect(advisorModel.category).toBe('Model');
       expect(advisorModel.default).toBe('');
-      expect(advisorModel.requiresRestart).toBe(false);
-      expect(advisorModel.showInDialog).toBe(true);
+      expect(advisorModel.requiresRestart).toBe(true);
+      expect(advisorModel.showInDialog).toBe(false);
     });
 
     it('should define the built-in Explore model setting', () => {
@@ -677,6 +717,9 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().security.properties.auth.showInDialog).toBe(
         false,
       );
+      expect(getSettingsSchema().tools.properties.freeform.showInDialog).toBe(
+        false,
+      );
       expect(getSettingsSchema().permissions.showInDialog).toBe(false);
       expect(getSettingsSchema().mcpServers.showInDialog).toBe(false);
       expect(getSettingsSchema().telemetry.showInDialog).toBe(false);
@@ -749,6 +792,17 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.default).toBe(true);
       expect(mouseTracking.showInDialog).toBe(true);
       expect(mouseTracking.requiresRestart).toBe(true);
+    });
+
+    it('should have arrowKeysScrollTranscript in ui settings', () => {
+      const arrowKeysScrollTranscript =
+        getSettingsSchema().ui.properties.arrowKeysScrollTranscript;
+      expect(arrowKeysScrollTranscript).toBeDefined();
+      expect(arrowKeysScrollTranscript.type).toBe('boolean');
+      // Default must stay false — bare ↑/↓ are input-history keys.
+      expect(arrowKeysScrollTranscript.default).toBe(false);
+      expect(arrowKeysScrollTranscript.showInDialog).toBe(true);
+      expect(arrowKeysScrollTranscript.requiresRestart).toBe(false);
     });
 
     it('should expose tool call details as a live UI setting', () => {

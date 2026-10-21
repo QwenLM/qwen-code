@@ -433,7 +433,7 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
-  it('omits the content body when the tool input is empty', () => {
+  it('omits the empty MCP subtitle and content body without dangling descriptions', () => {
     const adapted = extractPendingPermission([
       {
         id: 'permission-empty-input',
@@ -450,7 +450,125 @@ describe('ToolApproval accessibility', () => {
     ])!;
     render(undefined, { ...adapted, options: request.options });
     expect(container!.querySelector('pre')).toBeNull();
+    expect(container!.querySelector('[class*="desc"]')).toBeNull();
+    expect(container!.textContent).toContain('mcp__sample__write');
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const descriptions = panel.getAttribute('aria-describedby')!.split(' ');
+    expect(descriptions).toHaveLength(1);
+    expect(document.getElementById(descriptions[0])?.textContent).toBe(
+      'Apply this change?',
+    );
+    expect(optionButtons()).toHaveLength(2);
+    pressKey(panel, 'Escape');
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'request-empty-input',
+      'reject',
+    );
   });
+
+  it.each([
+    {
+      name: 'whitespace around the placeholder',
+      title: '  {}  ',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: undefined,
+    },
+    {
+      name: 'MCP display-name prefix',
+      title: 'ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'ping (sample MCP Server)',
+    },
+    {
+      name: 'provider-normalized MCP server key',
+      title: 'ask_question (mcp.deepwiki.com MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__mcp_deepwiki_com__ask_question_0gk4gom',
+      description: 'ask_question (mcp.deepwiki.com MCP Server)',
+    },
+    {
+      name: 'mismatched MCP tool name',
+      title: 'ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping_other',
+      description: 'ping (sample MCP Server): {}',
+    },
+    {
+      name: 'meaningful title',
+      title: 'Check server health',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Check server health',
+    },
+    {
+      name: 'prose ending in an empty object',
+      title: 'Expected response: {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Expected response: {}',
+    },
+    {
+      name: 'explicit description',
+      title: '{}',
+      rawInput: { description: '  Check server health  ' },
+      toolName: 'mcp__sample__ping',
+      description: 'Check server health',
+    },
+    {
+      name: 'prose containing an MCP display name',
+      title: 'Expected response from ping (sample MCP Server): {}',
+      rawInput: {},
+      toolName: 'mcp__sample__ping',
+      description: 'Expected response from ping (sample MCP Server): {}',
+    },
+    {
+      name: 'serialized nonempty input',
+      title: '{"target":"health"}',
+      rawInput: { target: 'health' },
+      toolName: 'mcp__sample__ping',
+      description: '{"target":"health"}',
+    },
+    {
+      name: 'nonempty input with a {} title',
+      title: '{}',
+      rawInput: { target: 'health' },
+      toolName: 'mcp__sample__ping',
+      description: '{}',
+    },
+    {
+      name: 'missing input with a {} title',
+      title: '{}',
+      rawInput: undefined,
+      toolName: 'mcp__sample__ping',
+      description: '{}',
+    },
+    {
+      name: 'non-MCP tool',
+      title: '{}',
+      rawInput: {},
+      toolName: 'custom_tool',
+      description: '{}',
+    },
+  ])(
+    'renders the expected subtitle: $name',
+    ({ title, rawInput, toolName, description }) => {
+      render(undefined, { ...request, title, rawInput, toolName });
+      expect(container!.querySelector('[class*="desc"]')?.textContent).toBe(
+        description,
+      );
+      const panel = container!.querySelector('[role="alertdialog"]')!;
+      const descriptions = panel.getAttribute('aria-describedby')!.split(' ');
+      expect(
+        descriptions.map((id) => document.getElementById(id)?.textContent),
+      ).toEqual(
+        description === undefined
+          ? ['Apply this change?']
+          : ['Apply this change?', description],
+      );
+    },
+  );
 
   it('renders the command block for an execute-kind tool under a non-canonical name', () => {
     const adapted = extractPendingPermission([
@@ -475,6 +593,161 @@ describe('ToolApproval accessibility', () => {
     render(undefined, { ...adapted, options: request.options });
     const command = container!.querySelector('pre');
     expect(command?.textContent).toBe('ls -la');
+  });
+
+  it('neutralises bidi and C0 controls in the rendered command block', () => {
+    // Mirrors what `toManagedPermissionRequest` produces for an exec tool
+    // (`rawInput: tool.args` + `contentIsInput: true`), i.e. the shape from
+    // #13517: the card takes the `isExec && command` branch and renders
+    // `rawInput.command`, so escaping the `content` producer is not enough.
+    const craftedCommand = [
+      'rm -rf /tmp/\u202eppa', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'git push \u2066--force\u2069', // bidi isolates
+      'ls \u001b[31m--all\u001b[0m', // C0 ANSI escape
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: JSON.stringify({ craftedCommand }) }],
+      contentIsInput: true,
+      rawInput: { command: craftedCommand },
+    });
+    const pre = container!.querySelector('pre')!;
+    const rendered = pre.textContent!;
+    // The invisible code points must not survive into the DOM, while the
+    // command stays legible and multi-line (`\n` is preserved on purpose).
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).toBe(
+      [
+        'rm -rf /tmp/\\u202eppa',
+        'git push \\u2066--force\\u2069',
+        'ls \\u001b[31m--all\\u001b[0m',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(pre.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the model-supplied description text', () => {
+    // `.desc` renders `getDescriptionText`, which returns `rawInput.description`
+    // verbatim and otherwise falls back to `request.title` — on the daemon/ACP
+    // path that title is built from `ShellTool.getDescription()`, i.e. the raw
+    // command. #13566: this sibling of the sanitised command block was still
+    // rendered raw, in its body, in its tooltip and in the `aria-describedby`
+    // target a screen reader reads.
+    const craftedDescription = [
+      'Delete temporary data\u202e', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'ls \u001b[31m--all\u001b[0m\t--color', // C0 ANSI escape, tab kept
+      'rm -rf /tmp/data\u0007', // BEL
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      rawInput: {
+        command: 'rm -rf /tmp/data',
+        description: craftedDescription,
+      },
+    });
+    // `.desc` is a <div>, not a <pre>: reach it through the `aria-describedby`
+    // IDREF that references it, which also asserts the IDREF still resolves.
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const descEl = panel
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .map((id) => document.getElementById(id))
+      .find(
+        (el): el is HTMLElement =>
+          el?.tagName === 'DIV' && el.hasAttribute('title'),
+      )!;
+    expect(descEl).toBeTruthy();
+    const rendered = descEl.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).not.toContain('\u0007');
+    // `\n` and `\t` stay unescaped (the helper's own pin lives at
+    // toolFormatting.test.ts:51) so a multi-line description stays legible.
+    expect(rendered).toBe(
+      [
+        'Delete temporary data\\u202e',
+        'ls \\u001b[31m--all\\u001b[0m\t--color',
+        'rm -rf /tmp/data\\u0007',
+      ].join('\n'),
+    );
+    expect(descEl.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the exec warnings block', () => {
+    // The warnings text is model-influenced: `buildOutsideWorkspaceWarning`
+    // (packages/core/src/utils/shell-utils.ts:2093) interpolates the raw
+    // `directory` argument verbatim, and real text content blocks reach
+    // `contentText` unescaped. #13566: this sibling <pre>, inside the same
+    // `isExec && command` fragment as the sanitised command block, was raw.
+    const craftedDirectory = '/tmp/\u202eevil\u001b[31m\u0007';
+    const warnings = `Runs outside the workspace in ${craftedDirectory}`;
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: warnings }],
+      rawInput: { command: 'ls -la', description: 'List files' },
+    });
+    const warningPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent!.includes('Runs outside the workspace'),
+    )!;
+    expect(warningPre).toBeTruthy();
+    const rendered = warningPre.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).not.toContain('\u0007');
+    expect(rendered).toBe(
+      'Runs outside the workspace in /tmp/\\u202eevil\\u001b[31m\\u0007',
+    );
+    expect(warningPre.getAttribute('title')).toBe(rendered);
+    // The command block next to it keeps its own, separate payload intact.
+    const commandPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent === 'ls -la',
+    )!;
+    expect(commandPre).toBeTruthy();
+  });
+
+  it('neutralises bidi and C0 controls in the generic content block', () => {
+    // #13566 named three sites. The command block, the exec warnings and the
+    // description were sanitised by #13578; this `<pre>` — rendered for any
+    // approval that shows content without being an exec one, and reused as the
+    // body, the tooltip and the `aria-describedby` target — was still raw.
+    const craftedContent = [
+      'Writes to notes\u202e.txt', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'then \u2066--force\u2069', // bidi isolates
+      'and \u001b[31mstops\u001b[0m\tthere', // C0 ANSI escape, tab kept
+    ].join('\n');
+    render(undefined, {
+      id: 'req-13566-content',
+      toolName: 'write_file',
+      title: 'write_file',
+      content: [{ type: 'text', text: craftedContent }],
+      options: [
+        { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const contentPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent!.includes('Writes to notes'),
+    )!;
+    expect(contentPre).toBeTruthy();
+    const rendered = contentPre.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    // `\n` and `\t` stay unescaped so the block stays legible.
+    expect(rendered).toBe(
+      [
+        'Writes to notes\\u202e.txt',
+        'then \\u2066--force\\u2069',
+        'and \\u001b[31mstops\\u001b[0m\tthere',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(contentPre.getAttribute('title')).toBe(rendered);
   });
 
   it('renders exec warnings alongside the command block', () => {
@@ -736,6 +1009,23 @@ describe('ToolApproval accessibility', () => {
     ]);
     act(() => optionButtons()[0].click());
     expect(onConfirm).toHaveBeenCalledWith(planRequest.id, 'reject');
+  });
+  it('labels the Managed allow/deny plan options with the frozen execution policy', () => {
+    const req = {
+      ...planRequest,
+      options: [
+        { id: 'allow', label: 'Allow', kind: 'allow_once' as const },
+        { id: 'deny', label: 'Deny', kind: 'reject_once' as const },
+      ],
+    };
+    render(undefined, req, undefined, 'en', undefined, 'yolo');
+    expect(optionButtons().map((button) => button.dataset.optionId)).toEqual([
+      'deny',
+      'allow',
+    ]);
+    expect(container!.textContent).toContain('Full Access');
+    act(() => optionButtons()[1].click());
+    expect(onConfirm).toHaveBeenCalledWith(req.id, 'allow');
   });
 
   it('keeps ordinary tool permissions unchanged when a plan execution mode is supplied', () => {

@@ -160,6 +160,7 @@ export const DialogManager = ({
   if (uiState.loopDetectionConfirmationRequest) {
     return (
       <LoopDetectionConfirmation
+        cause={uiState.loopDetectionConfirmationRequest.cause}
         onComplete={uiState.loopDetectionConfirmationRequest.onComplete}
       />
     );
@@ -272,6 +273,7 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isAdvisorModelMode={uiState.isAdvisorModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
         isVisionModelMode={uiState.isVisionModelMode}
         isCompactionModelMode={uiState.isCompactionModelMode}

@@ -57,6 +57,6 @@ export const WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA =
   '- Use other tools (Read, Grep, etc.) to gather information first.\n' +
   '- When ready, call `structured_output` ONCE with the conforming JSON object.\n' +
   '- If validation fails, the error tells you what to fix. Try again with corrected fields.\n' +
-  '- After two failed attempts, the run terminates — get the arguments right.\n' +
+  '- The third failed attempt ends the run — get the arguments right.\n' +
   '- Do NOT use SendUserMessage to deliver your answer.\n' +
   '- Be concise; the script reads only the structured payload, not your prose.';

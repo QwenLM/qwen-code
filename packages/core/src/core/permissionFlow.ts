@@ -79,6 +79,7 @@ export async function evaluatePermissionFlow(
     invocation.getPermissionMatchParams?.() ?? toolParams,
     config.getTargetDir?.() ?? '',
     invocation.permissionAliases,
+    invocation.mcpIdentity,
   );
   const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
     pm,

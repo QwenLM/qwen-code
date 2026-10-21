@@ -82,7 +82,7 @@ const schema = JSON.parse(
 ) as Record<string, unknown>;
 
 interface ToolFixtureRoute {
-  readonly key: 'execute' | 'status' | 'cancel';
+  readonly key: 'execute' | 'status' | 'cancel' | 'acknowledge';
   readonly method: string;
   readonly path: string;
   readonly protocolVersion: number;
@@ -100,7 +100,7 @@ interface ToolFixtureSuite {
     readonly epoch: number;
   };
   readonly suites: ReadonlyArray<{
-    readonly route: 'execute' | 'status' | 'cancel';
+    readonly route: 'execute' | 'status' | 'cancel' | 'acknowledge';
     readonly canonicalRequest: {
       readonly headers: Readonly<Record<string, string>>;
       readonly body: Readonly<Record<string, unknown>>;
@@ -115,7 +115,7 @@ interface MutableToolFixtureSuite {
     responseBodyLimitBytes: number;
   }>;
   suites: Array<{
-    route: 'execute' | 'status' | 'cancel';
+    route: 'execute' | 'status' | 'cancel' | 'acknowledge';
     canonicalRequest: {
       headers: Record<string, string>;
       body: Record<string, unknown>;
@@ -485,6 +485,18 @@ describe('Managed Runtime tool contract', () => {
       },
     ],
     [
+      'acknowledge forbids afterSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[3].canonicalRequest.body['afterSequence'] = 0;
+      },
+    ],
+    [
+      'acknowledge forbids toolName',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[3].canonicalRequest.body['toolName'] = 'read_file';
+      },
+    ],
+    [
       'execute case body overrides stay route-specific',
       (clone: MutableToolFixtureSuite) => {
         clone.suites[0].cases[0].request = {
@@ -523,6 +535,12 @@ describe('Managed Runtime tool contract', () => {
         clone.suites[2].cases[0].expected.body!['lastSequence'] = 1;
       },
     ],
+    [
+      'acknowledge responses forbid lastSequence',
+      (clone: MutableToolFixtureSuite) => {
+        clone.suites[3].cases[0].expected.body!['lastSequence'] = 1;
+      },
+    ],
   ])('rejects fixtures when %s', (_label, mutate) => {
     const validate = new Ajv2020({ strict: true }).compile(toolSchema);
     const invalidFixtures = structuredClone(
@@ -533,7 +551,7 @@ describe('Managed Runtime tool contract', () => {
     expect(validate(invalidFixtures)).toBe(false);
   });
 
-  it.each([0, 1, 2])('pins envelope limits for route %i', (routeIndex) => {
+  it.each([0, 1, 2, 3])('pins envelope limits for route %i', (routeIndex) => {
     const validate = new Ajv2020({ strict: true }).compile(toolSchema);
     for (const field of [
       'requestBodyLimitBytes',
@@ -598,6 +616,9 @@ describe('Managed Runtime tool contract', () => {
     expect(definitions['cancelRequestBody']?.['additionalProperties']).toBe(
       false,
     );
+    expect(
+      definitions['acknowledgeRequestBody']?.['additionalProperties'],
+    ).toBe(false);
     expect(definitions['toolResponseBody']?.['additionalProperties']).toBe(
       false,
     );
@@ -640,7 +661,7 @@ describe('Managed Runtime tool contract', () => {
     }
   });
 
-  it('rejects declared tool routes until their handlers land', async () => {
+  it('admits exactly the declared tool routes through the owned-route gate', async () => {
     const app = express();
     for (const route of toolFixtures.routes) {
       app.post(route.path, (_req, res) => {
@@ -665,8 +686,28 @@ describe('Managed Runtime tool contract', () => {
         headers: { 'content-type': 'application/json' },
         body: '{}',
       });
-      expect(response.status).toBe(404);
-      expect(await response.text()).toBe('');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        protocolVersion: 2,
+        state: 'unknown',
+      });
+
+      for (const [method, suffix] of [
+        ['GET', ''],
+        ['POST', '/'],
+        ['POST', '?unexpected=1'],
+      ]) {
+        const rejected = await fetch(`${origin}${route.path}${suffix}`, {
+          method,
+        });
+        expect(rejected.status).toBe(404);
+        expect(await rejected.text()).toBe('');
+      }
     }
+    const unlisted = await fetch(
+      `${origin}/internal/managed-runtime/v2/prepare`,
+      { method: 'POST' },
+    );
+    expect(unlisted.status).toBe(404);
   });
 });

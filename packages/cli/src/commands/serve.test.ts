@@ -62,6 +62,25 @@ describe('serve command args', () => {
     );
   });
 
+  it('documents Hosted Runtime Broker options and does not declare them unimplemented', async () => {
+    // yargs hard-wraps the description column mid-word at its 80-column
+    // default, so compare with whitespace and type hints removed. The next
+    // row starts with "--", so stale text appended to a row cannot hide.
+    const squash = (text: string) => text.replace(/\[string\]|\s+/g, '');
+    const help = squash(await buildParser().getHelp());
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-url Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. --',
+      ),
+    );
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. --',
+      ),
+    );
+    expect(help).not.toContain('ReservedBroker');
+  });
+
   it('defaults authenticated open to disabled', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['open-with-auth']).toBe(false);
@@ -411,7 +430,28 @@ describe('serve rate limit env parsing', () => {
         rateLimitRead: 121,
         rateLimitWindowMs: 60000,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
+  });
+
+  it.each([
+    ['--experimental-paired-engines --no-web', true],
+    ['--no-web', undefined],
+  ])('maps "%s" to experimentalPairedEngines', async (args, expected) => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(args);
+
+    expect(
+      (
+        mockRunQwenServe.mock.calls[0]?.[0] as {
+          experimentalPairedEngines?: boolean;
+        }
+      ).experimentalPairedEngines,
+    ).toBe(expected);
   });
 
   it('applies authenticated open before the yargs path starts the daemon', async () => {
@@ -488,6 +528,7 @@ describe('serve rate limit env parsing', () => {
         maxJournalEvents: 5000,
         maxJournalBytes: 1048576,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -503,6 +544,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxJournalEvents: 5000 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
       'maxJournalBytes',
@@ -519,6 +561,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxJournalBytes: 1048576 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
       'maxJournalEvents',
@@ -597,6 +640,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ token: 'generated-token' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockQr.generate).toHaveBeenCalledWith(
       'http://192.168.1.20:4170/#token=pairing-token',
@@ -719,6 +763,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -736,6 +781,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         compactedReplayMaxBytes: 1024 * 1024,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -749,6 +795,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxTotalSessions: 42 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -762,6 +809,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryProjectScope: 'git-root' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -787,6 +835,7 @@ describe('serve rate limit env parsing', () => {
           timeoutMs: 2500,
         },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
   });
@@ -821,6 +870,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryPressureMode: 'off' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -836,6 +886,7 @@ describe('serve rate limit env parsing', () => {
 
       expect(mockRunQwenServe).toHaveBeenCalledWith(
         expect.objectContaining({ childHeapMode: mode }),
+        expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
       );
     },
   );
@@ -850,6 +901,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ childHeapMode: 'observe' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(() => buildParser().parseSync('--child-heap-mode unknown')).toThrow(
       /Invalid values/,
@@ -866,6 +918,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryPressureMode: 'observe' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -887,6 +940,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'all' },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -1272,6 +1326,7 @@ describe('serve tokenQr resolution', () => {
     await startWith('--token-qr --no-web');
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ tokenQr: true }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -1279,6 +1334,7 @@ describe('serve tokenQr resolution', () => {
     await startWith('--no-token-qr --no-web');
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ tokenQr: false }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 

@@ -54,8 +54,10 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo,
       sendFailed,
       onRetrySend,
+      assistantFeedbackPromptId,
     }: {
       message: Message;
+      assistantFeedbackPromptId?: string;
       showAssistantActions?: boolean;
       showAssistantBranch?: boolean;
       onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
@@ -77,6 +79,7 @@ vi.mock('./MessageItem', async () => {
         {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
+          'data-feedback-prompt': assistantFeedbackPromptId,
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
           'data-timestamp': message.timestamp,
@@ -368,6 +371,7 @@ function mount(
     };
     includeSubagentToolUsageInMetrics?: boolean;
     onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
+    sourceSessionId?: string;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
     compactMode?: boolean;
@@ -411,6 +415,7 @@ function mount(
                   opts.includeSubagentToolUsageInMetrics
                 }
                 onBranchSession={opts.onBranchSession}
+                sourceSessionId={opts.sourceSessionId}
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
@@ -6484,6 +6489,96 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it("never takes an agent's reply as the turn's answer", () => {
+    // The agent's record landed after the main reply, inside the same turn.
+    const agentReply: AssistantMessage = {
+      ...asstMsg('agent'),
+      content: 'agent says',
+      author: { name: 'claude-B' },
+      agentMessage: {
+        kind: 'agent_message',
+        runId: 'run-1',
+        status: 'completed',
+        author: { agentId: 'a1', name: 'claude-B' },
+      },
+      branchRecordId: 'checkpoint-agent',
+    };
+    const onBranchSession = vi.fn();
+    const c = mount(
+      [
+        userMsg('u1'),
+        toolMsg('g1'),
+        {
+          ...asstMsg('a1'),
+          branchRecordId: 'checkpoint-main',
+          promptId: 'prompt-1',
+        },
+        { ...agentReply, promptId: 'prompt-1' },
+      ],
+      undefined,
+      {
+        onBranchSession,
+        sourceSessionId: 'session-1',
+        customization: { assistantFeedback: {} },
+      },
+    );
+
+    // Collapse folds the step, keeps the main answer and the agent's reply.
+    expect(isCollapsed(c, 'g1')).toBe(true);
+    expect(has(c, 'a1')).toBe(true);
+    expect(has(c, 'agent')).toBe(true);
+    // The main reply keeps the final-answer footer and its branch action.
+    expect(assistantActions(c, 'a1')).toBe('true');
+    expect(c.querySelector('[data-testid="branch-a1"]')).not.toBeNull();
+    expect(
+      c
+        .querySelector('[data-testid="msg-a1"]')
+        ?.getAttribute('data-feedback-prompt'),
+    ).toBe('prompt-1');
+    // The agent's reply gets copy only: no feedback marks, no branch.
+    expect(assistantActions(c, 'agent')).toBe('true');
+    expect(c.querySelector('[data-testid="branch-agent"]')).toBeNull();
+    expect(
+      c
+        .querySelector('[data-testid="msg-agent"]')
+        ?.getAttribute('data-feedback-prompt'),
+    ).toBeNull();
+  });
+
+  it("keeps an agent's reply visible in a collapsed turn and out of its answer", () => {
+    const agentReply: AssistantMessage = {
+      ...asstMsg('agent'),
+      agentMessage: { kind: 'agent_message', runId: 'run-1' },
+    };
+    // The agent replied mid-turn; the main reply comes after more work.
+    const c = mount([
+      userMsg('u1'),
+      toolMsg('g1'),
+      agentReply,
+      toolMsg('g2'),
+      asstMsg('a1'),
+    ]);
+    expect(isCollapsed(c, 'g1')).toBe(true);
+    expect(isCollapsed(c, 'g2')).toBe(true);
+    expect(has(c, 'agent')).toBe(true);
+    expect(has(c, 'a1')).toBe(true);
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('gives a turn of only an agent reply no final answer', () => {
+    const c = mount([
+      userMsg('u1'),
+      {
+        ...asstMsg('agent'),
+        agentMessage: { kind: 'agent_message', runId: 'run-1' },
+      },
+    ]);
+    expect(has(c, 'agent')).toBe(true);
+    // Copy only, through the agent path; the turn has nothing to fold.
+    expect(assistantActions(c, 'agent')).toBe('true');
+    expect(queryToggle(c, 'u1')).toBeNull();
   });
 
   it('shows branch only for anchored replies and forwards the checkpoint', () => {

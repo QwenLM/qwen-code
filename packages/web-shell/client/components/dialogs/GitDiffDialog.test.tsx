@@ -183,6 +183,7 @@ describe('GitDiffDialog', () => {
       'src/a.ts',
       undefined,
       undefined,
+      undefined,
     );
     // Plain-text fallback: the line bodies render without the +/- prefix
     // (the marker is a separate column).
@@ -277,6 +278,7 @@ describe('GitDiffDialog', () => {
       'src/new.ts',
       'src/old.ts',
       undefined,
+      undefined,
     );
   });
 
@@ -353,6 +355,7 @@ describe('GitDiffDialog', () => {
 
     expect(workspaceGitDiffFile).toHaveBeenCalledWith(
       'src/a.ts',
+      undefined,
       undefined,
       undefined,
     );
@@ -511,13 +514,20 @@ describe('GitDiffDialog', () => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <GitDiffContent workspaceCwd="/repo" gitCwd="/worktrees/wt" />
+          <GitDiffContent
+            workspaceCwd="/repo"
+            gitCwd="/worktrees/wt"
+            gitSessionId="session-worktree"
+          />
         </I18nProvider>,
       );
     });
     await flush();
 
-    expect(workspaceGitDiff).toHaveBeenCalledWith('/worktrees/wt');
+    expect(workspaceGitDiff).toHaveBeenCalledWith(
+      '/worktrees/wt',
+      'session-worktree',
+    );
 
     const header = document.body.querySelector(
       'button[aria-expanded="false"]',
@@ -532,6 +542,7 @@ describe('GitDiffDialog', () => {
       'src/a.ts',
       undefined,
       '/worktrees/wt',
+      'session-worktree',
     );
   });
 });

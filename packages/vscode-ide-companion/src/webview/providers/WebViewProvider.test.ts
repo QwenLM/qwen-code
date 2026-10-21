@@ -35,6 +35,7 @@ const {
   mockClipboardWriteText,
   mockEnvRemoteName,
   mockAsExternalUri,
+  mockProbePreAuthHostGateRejection,
 } = vi.hoisted(() => ({
   mockConfigChangeHandlers: [] as Array<
     (event: { affectsConfiguration: (section: string) => boolean }) => unknown
@@ -114,6 +115,9 @@ const {
   // ('ssh-remote', 'dev-container', 'wsl', ...) in a remote one.
   mockEnvRemoteName: { current: undefined as string | undefined },
   mockAsExternalUri: vi.fn(),
+  mockProbePreAuthHostGateRejection: vi.fn<
+    (daemonBaseUrl: string, externalAuthority: string) => Promise<boolean>
+  >(() => Promise.resolve(false)),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -184,6 +188,13 @@ vi.mock('../../services/qwenDaemonProcess.js', () => ({
       daemonMocks.instances.push(this);
     }
   },
+}));
+
+// The probe's classification is pinned by preAuthHostGateProbe.test.ts
+// against a real node:http server; here it is mocked at the module boundary
+// so the bootstrap wiring can be driven both ways.
+vi.mock('./preAuthHostGateProbe.js', () => ({
+  probePreAuthHostGateRejection: mockProbePreAuthHostGateRejection,
 }));
 
 vi.mock('vscode', () => ({
@@ -516,6 +527,8 @@ beforeEach(() => {
   mockClipboardWriteText.mockResolvedValue(undefined);
   mockEnvRemoteName.current = undefined;
   mockAsExternalUri.mockReset();
+  mockProbePreAuthHostGateRejection.mockReset();
+  mockProbePreAuthHostGateRejection.mockResolvedValue(false);
 });
 
 describe('WebViewProvider.attachToView', () => {
@@ -2655,6 +2668,62 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     expect(
       bootstrapPayloads(setup.postMessage).map((data) => data?.baseUrl),
     ).toEqual(['http://localhost:52100', 'http://localhost:52101']);
+  });
+
+  it('fails fast with guidance when the Host gate rejects the forwarded authority', async () => {
+    // The client-side forwarded port (52100) differs from the daemon's bound
+    // port (4101): the webview's browser would send `Host: localhost:52100`
+    // and the pre-auth Host gate would 403 every daemon call — opaquely,
+    // because the gate sits ahead of CORS. The host-side probe sees it.
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://localhost:52100',
+    });
+    mockProbePreAuthHostGateRejection.mockResolvedValue(true);
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    // The probe asks the gate about the exact authority the browser will
+    // send, against the daemon's own loopback URL.
+    expect(mockProbePreAuthHostGateRejection).toHaveBeenCalledWith(
+      'http://127.0.0.1:4101',
+      'localhost:52100',
+    );
+    // Deterministic config breakage: guidance, not a half-booted shell.
+    expect(bootstrapPayloads(setup.postMessage)).toHaveLength(0);
+    const errors = setup.postMessage.mock.calls
+      .map(
+        ([message]) => message as { type?: string; data?: { reason?: string } },
+      )
+      .filter((message) => message.type === 'webShellBootstrapError');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data).toEqual({ reason: 'daemonPreAuthHostGate' });
+  });
+
+  it('bootstraps normally when the Host gate accepts the forwarded authority', async () => {
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://localhost:4101',
+    });
+    mockProbePreAuthHostGateRejection.mockResolvedValue(false);
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    const [bootstrap] = bootstrapPayloads(setup.postMessage);
+    expect(bootstrap?.baseUrl).toBe('http://localhost:4101');
+    const errors = setup.postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellBootstrapError',
+    );
+    expect(errors).toHaveLength(0);
   });
 
   it('refuses a resolution that is not a forwarded loopback address', async () => {

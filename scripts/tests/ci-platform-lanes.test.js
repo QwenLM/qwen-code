@@ -40,10 +40,10 @@ const LANES = ['test_macos', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
-// The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
-// ubuntu-latest for fork PRs from untrusted authors and when
-// MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths keep the
-// pre-contention ceiling. Evaluate the real timeout expression for both
+// The extended ceilings below, except the test lane's, are scoped to the ECS
+// pool: `runs-on` falls back to ubuntu-latest for fork PRs from untrusted
+// authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths
+// keep the pre-contention ceiling. Evaluate the real timeout expression for both
 // routings instead of pinning a bare number -- the same
 // substitute-then-evaluate technique
 // `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on` -- so a
@@ -71,13 +71,12 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
   return Number(new Function(`return (${expr});`)());
 };
 
-it('keeps the shared Linux test lane above its contention budget on ECS', () => {
+it('gives the shared Linux test lane one ceiling on both pools', () => {
+  // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
+  // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
   expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
-});
-
-it('keeps the shared Linux test lane on its pre-contention ceiling when hosted', () => {
-  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(60);
-  expect(timeoutMinutesOn('test', '')).toBe(60);
+  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(120);
+  expect(timeoutMinutesOn('test', '')).toBe(120);
 });
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
@@ -102,15 +101,22 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
-it('keeps browser gates hosted independently of the shared Linux runner', () => {
-  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
-  // 30, not 20: at 184 smoke tests plus ~7.5 min of setup, passing runs hit
-  // 20 flat (tests done at 20:07:49, cancelled 20:07:53; the last of 184
-  // still running at 02:04:58, cancelled 02:05:04). Sharding is the fix at
-  // the source once the suite keeps growing.
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(30);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(30);
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(30);
+it('routes browser gates like the shared Linux test lane, at the hosted worker count', () => {
+  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe(ci.jobs.test['runs-on']);
+  const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Run web-shell browser smoke',
+  );
+  expect(smoke.run).toMatch(/ -- --workers=2$/);
+  // Slow hosted browser installs took over 23 min, so reserve time in the
+  // 60-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded.
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
+  );
+  expect(hostedInstall['timeout-minutes']).toBe(30);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
@@ -373,7 +379,11 @@ describe('post-merge push lane', () => {
     // dispatch and push; widening this — say by copying `test`'s block when
     // adding a reporter — hands write tokens to that code. `test`'s own
     // wider block is legitimate: dorny/test-reporter needs `checks: write`.
-    expect(ci.jobs.lint_and_static.permissions).toEqual({ contents: 'read' });
+    // The contract guard reads the PR file list; it needs no write access.
+    expect(ci.jobs.lint_and_static.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'read',
+    });
   });
 
   it('keeps every shared prelude step identical between test and lint_and_static', () => {
@@ -479,8 +489,8 @@ describe('post-merge push lane', () => {
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
-      'Generate VS Code companion notices',
-      'Check VS Code companion notices are up-to-date',
+      'Generate Web Shell and VS Code companion notices',
+      'Check Web Shell and VS Code companion notices are up-to-date',
       'Check serve fast-path bundle closure',
       'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
@@ -500,6 +510,30 @@ describe('post-merge push lane', () => {
         )
         .map((x) => x.name),
     ).toEqual(FULL_PAYLOAD);
+    const generateNotices = stepByName.get(
+      'Generate Web Shell and VS Code companion notices',
+    ).run;
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=@qwen-code/web-shell',
+    );
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=qwen-code-vscode-ide-companion',
+    );
+    expect(
+      stepByName.get(
+        'Check Web Shell and VS Code companion notices are up-to-date',
+      ).run,
+    ).toContain(
+      'git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt',
+    );
+    const checkNotices = stepByName.get(
+      'Check Web Shell and VS Code companion notices are up-to-date',
+    );
+    expect(checkNotices['continue-on-error']).toBeUndefined();
+    expect(checkNotices.run).toContain(
+      'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
+    );
+    expect(checkNotices.run).toContain('exit 1');
     for (const n of FULL_PAYLOAD) {
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
     }
@@ -609,10 +643,16 @@ describe('post-merge push lane', () => {
     // the most common head_ref there is. Dropping the ref half entirely would
     // collapse every PR into one group and leave this suite green.
     //
-    // cancel-in-progress: flipping it to `true` was measured to be invisible
-    // to all 1854 test:scripts tests, while consecutive merges would cancel
-    // each other — the history this repo already recorded once, when 67 of
-    // 100 push runs were cancelled and only 25 ever reported.
+    // cancel-in-progress: `main` stays out of cancellation on purpose, not by
+    // accident. A shared group holds at most one running plus one pending run,
+    // and a newer pending run REPLACES the older one even while this reads
+    // `false`, so back-to-back merges still coalesce onto the newest tree —
+    // but the in-flight run always finishes and reports, which matters
+    // because with no merge queue this lane is the only fast witness of a
+    // merged tree and its coverage upload is `always()`-gated. The history of
+    // flipping it the other way is recorded once already: 67 of 100 push runs
+    // cancelled and only 25 ever reported (#5859). Pinning the literal keeps
+    // a later "make main cancellable" change from landing unnoticed.
     expect(String(ci.concurrency.group)).toBe(
       '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
     );
@@ -658,8 +698,47 @@ describe('GitHub helper tests', () => {
       .filter((step) => String(step.run ?? '').includes('env.HELPER_TESTS'));
     expect(helperSteps).not.toHaveLength(0);
     for (const step of helperSteps) {
-      expect(String(step.run), step.name).toContain('--test-concurrency=1');
+      // Split at each `node --test` occurrence, not per line: a second
+      // invocation on the SAME line still gets its own segment.
+      const invocations = String(step.run)
+        .split(/(?=node --test)/)
+        .filter((segment) => segment.startsWith('node --test'));
+      expect(invocations, step.name).not.toHaveLength(0);
+      for (const invocation of invocations) {
+        expect(invocation, step.name).toContain('--test-concurrency=1');
+      }
     }
+  });
+
+  it('retries the full-profile battery once against pool contention', () => {
+    // #12772: the battery spawns real subprocess loops on the shared ECS
+    // pool, and a push to main has no flaky-rerun patrol — one host hiccup
+    // failed the lane on a CSS-only commit. The unit lane got VITEST_RETRY
+    // for the same fleet condition (#10868); this lane retries inline. The
+    // github_ci_only fast lane stays single-attempt: it runs only on PRs, so
+    // a red check is visible to its author and manually re-runnable. (The
+    // flaky-rerun patrol is PR-scoped but best-effort — do not rely on it.)
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    const invocations =
+      String(step.run).match(/node --test --test-concurrency=1/g) ?? [];
+    expect(invocations).toHaveLength(2);
+    expect(String(step.run)).toContain('||');
+    // The retry re-runs the SAME battery, not a cheaper subset.
+    expect(String(step.run)).not.toContain('HELPER_TESTS_DEP_FREE');
+    // The retry's exit status decides the step: nothing swallows it.
+    expect(String(step.run)).not.toMatch(/\|\|\s*(true|:)/);
+    expect(String(step.run).trimEnd().endsWith('}')).toBe(true);
+    expect(step['continue-on-error']).toBeUndefined();
+    // The warning fires only when the retry absorbed the flake, and names
+    // the attempt-1 failures (the datum #12772 asked for).
+    expect(String(step.run)).toMatch(/&&\s+echo "::warning::/);
+    expect(String(step.run)).toMatch(
+      /tee "\$\{RUNNER_TEMP\}\/helper-attempt1\.log"/,
+    );
+    expect(String(step.run)).toMatch(/::warning::.*\$\(/);
   });
 
   it('keeps the dependency-free fast lane off npm-package suites', () => {

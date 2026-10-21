@@ -89,6 +89,43 @@ describe('resolveEnvVars', () => {
 });
 
 describe('parseChannelConfig', () => {
+  it('accepts independent session rotation bounds', async () => {
+    const config = await parseChannelConfig('bot', {
+      type: 'bare',
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
+    });
+    expect(config.sessionRotation).toEqual({ maxTurns: 200, maxAgeHours: 24 });
+    expect(
+      (await parseChannelConfig('bot', { type: 'bare' })).sessionRotation,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    null,
+    [],
+    {},
+    { maxTurns: 0 },
+    { maxTurns: 1.5 },
+    { maxAgeHours: -1 },
+    { maxAgeHours: Infinity },
+    { maxTurns: 1, unknown: 2 },
+  ])('rejects invalid session rotation %j', async (sessionRotation) => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', sessionRotation }),
+    ).rejects.toThrow('sessionRotation');
+  });
+
+  it('rejects rotation with named tasks', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        sessionScope: 'user',
+        multiSession: true,
+        sessionRotation: { maxTurns: 2 },
+      }),
+    ).rejects.toThrow('cannot use sessionRotation');
+  });
+
   it('normalizes message routes and resolves the default route', async () => {
     const config = await parseChannelConfig('bot', {
       type: 'bare',

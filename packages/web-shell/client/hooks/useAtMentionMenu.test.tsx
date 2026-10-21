@@ -144,6 +144,98 @@ afterEach(() => {
 });
 
 describe('useAtMentionMenu', () => {
+  it('prepares a Managed snapshot before inserting its file chip', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    let resolve!: (tag: WebShellComposerTag) => void;
+    const pending = new Promise<WebShellComposerTag>((done) => {
+      resolve = done;
+    });
+    const prepare = vi.fn(() => pending);
+    const discarded = vi.fn();
+    const effect = vi.fn(() => StateEffect.define<unknown>().of('snapshot'));
+    mount({
+      view,
+      builtinProviders: ['files'],
+      createInlineTagEffect: effect,
+      actions: {
+        filesOnly: true,
+        prepareFileReference: prepare,
+        onFileReferenceDiscarded: discarded,
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [{ name: 'notes.ts', kind: 'file', ignored: false }],
+          truncated: false,
+        }),
+      },
+    });
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: { fileKind: 'file', filePath: 'notes.ts' },
+      }),
+    );
+    expect(view.dispatch).not.toHaveBeenCalled();
+    await act(async () =>
+      resolve({
+        id: 'snapshot',
+        kind: 'file',
+        value: 'notes.ts',
+        metadata: { contents: 'selected bytes' },
+      }),
+    );
+    expect(effect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tag: expect.objectContaining({
+          id: 'snapshot',
+          metadata: { contents: 'selected bytes' },
+        }),
+      }),
+    );
+    expect(view.dispatch).toHaveBeenCalledTimes(1);
+    expect(discarded).not.toHaveBeenCalled();
+  });
+
+  it('keeps a changed draft intact and reports a discarded file selection', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    let resolve!: (tag: WebShellComposerTag) => void;
+    const pending = new Promise<WebShellComposerTag>((done) => {
+      resolve = done;
+    });
+    const discarded = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      actions: {
+        filesOnly: true,
+        prepareFileReference: () => pending,
+        onFileReferenceDiscarded: discarded,
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [{ name: 'notes.ts', kind: 'file', ignored: false }],
+          truncated: false,
+        }),
+      },
+    });
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => latest!.accept(0));
+    setViewState(view, 'changed draft');
+    await act(async () =>
+      resolve({ id: 'snapshot', kind: 'file', value: 'notes.ts' }),
+    );
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(view.state.doc.toString()).toBe('changed draft');
+    expect(discarded).toHaveBeenCalledTimes(1);
+  });
+
   it('does not open while disabled', () => {
     mount({ disabled: true });
 
@@ -774,6 +866,36 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('runs an action item instead of inserting it, dropping the typed query', async () => {
+    vi.useFakeTimers();
+    const onSelect = vi.fn();
+    const view = makeView('ask @custom:ne');
+    mount({
+      view,
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi
+            .fn()
+            .mockResolvedValue([{ id: 'new', label: 'New agent…', onSelect }]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 4, to: 14, insert: '' },
+      selection: { anchor: 4 },
+    });
+    expect(latest!.state).toBeNull();
+  });
+
   it('strips the mcp prefix while refreshing MCP server searches', async () => {
     vi.useFakeTimers();
     const loadMcpStatus = vi.fn().mockResolvedValue({
@@ -968,6 +1090,69 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items.map((item) => item.label)).toEqual([
       'package.json',
     ]);
+  });
+
+  it('lets a custom provider claim a typed query before the file fallback', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [],
+      truncated: false,
+    });
+    const search = vi
+      .fn()
+      .mockResolvedValue([
+        { id: 'ag_1', label: 'reviewer', insertText: '@reviewer ' },
+      ]);
+    mount({
+      actions: { listDirectory },
+      providers: [
+        {
+          id: 'people',
+          label: 'People',
+          search,
+          claimsTypedQuery: (query) => 'reviewer'.startsWith(query),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@rev')));
+    await runDebounce();
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'rev' }),
+    );
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'people',
+      query: 'rev',
+    });
+  });
+
+  it('falls back to files when no custom provider claims the typed query', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [],
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      providers: [
+        {
+          id: 'people',
+          label: 'People',
+          search: vi.fn().mockResolvedValue([]),
+          claimsTypedQuery: (query) => 'reviewer'.startsWith(query),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@src/')));
+    await runDebounce();
+    expect(latest!.state).toMatchObject({ selectedProviderId: 'files' });
   });
 
   it('searches matching files across the workspace', async () => {
@@ -1678,11 +1863,12 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('shows an empty MCP resource list when resource loading is unavailable', async () => {
+  it('inserts an MCP server reference when resource loading is unavailable', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const view = makeView('@');
     mount({
-      view: makeView('@'),
+      view,
       actions: {
         loadMcpStatus: vi.fn().mockResolvedValue({
           servers: [
@@ -1705,16 +1891,11 @@ describe('useAtMentionMenu', () => {
     });
     await runDebounce();
 
-    expect(warn).toHaveBeenCalledWith(
-      '[@mention] loadMcpResources not available for server="docs"',
-    );
-    expect(latest!.state).toMatchObject({
-      level: 'items',
-      selectedProviderId: 'mcp-resources',
-      itemMode: 'mcpResources',
-      mcpServerName: 'docs',
-      items: [],
-      loading: false,
+    expect(warn).not.toHaveBeenCalled();
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@mcp:docs ' },
+      selection: { anchor: 10 },
+      scrollIntoView: true,
     });
     warn.mockRestore();
   });

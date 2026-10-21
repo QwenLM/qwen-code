@@ -49,7 +49,7 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 
 控制操作限定为现有私有 Runtime kind：`bind-history`、`checkpoint`、`history`、`manifest`、`begin-turn`、`prepare`、`confirmation`、`confirm` 和 `preflight`，并要求进程内 Session 对应的 repository 记录仍为 `READY`。
 
-释放操作首先拒绝仍有未结算 execution 的 Session。服务持久化 `RELEASING`，调用 Runtime transport，并仅在收到肯定的释放确认后持久化 `RELEASED`。不确定或否定的释放结果保留为 `RELEASING`，调用方可以重试幂等 Runtime release，而不是重新打开 Session。一旦 `RELEASED` 已持久化，重复 release 无需依赖已移除的进程内路由，也不会再次调用 Runtime，而是直接返回成功。
+释放操作首先拒绝仍有未结算 execution 的 Session。拒绝与 RELEASING 转换在同一事务内提交，事务持有准入同样获取的 Session 行锁，因此共享数据库的两个 Broker 进程无法在检查与转换之间插入准入。服务持久化 `RELEASING`，调用 Runtime transport，并仅在收到肯定的释放确认后持久化 `RELEASED`。不确定或否定的释放结果保留为 `RELEASING`，调用方可以重试幂等 Runtime release，而不是重新打开 Session。一旦 `RELEASED` 已持久化，重复 release 无需依赖已移除的进程内路由，也不会再次调用 Runtime，而是直接返回成功。
 
 ## Tool execution 生命周期
 
@@ -63,7 +63,7 @@ dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并
 
 `reconcileExecution` 是 `resolveUnknown` 唯一的调用方。每次调用最多查询一次，内部不重试；轮询由调用方负责，例如每 250 ms 至 2 s 一次并带抖动，调用方还应自行限定轮询总预算。它从不调用 `execute`，从不 claim dispatch，自身也从不推导出"未开始"结果。
 
-- 先读取记录，且记录必须属于调用方的 Harness Session 和 Runtime Session。不处于 `UNKNOWN` 的记录在任何 Session 或存活检查之前就从 repository 作答：`ALREADY_SETTLED` 表示轮询可以结束；`IN_FLIGHT` 表示记录既未结算也不是 `UNKNOWN`，暂无可对账的内容。`IN_FLIGHT` 并不证明仍有 dispatcher 在处理。已过期的 `EXECUTING` 或 `CANCEL_REQUESTED` 记录会停留在这里，直到持有该 Session 的进程用同一幂等键重试或取消，把它隔离为 `UNKNOWN`，或者由接管扫描完成隔离；而同一幂等键的重试会重新分发 `PREPARED` 或已过期的 `DISPATCHING` 记录，这类记录从未到达 Runtime。对账器自身从不隔离也不 claim dispatch。由于这一应答不需要本地 Session，Session release 之后已结算的结果仍可读取；谁可以调用由嵌入 adapter 的鉴权决定。
+- 先读取记录，且记录必须属于调用方的 Harness Session 和 Runtime Session。不处于 `UNKNOWN` 的记录在任何 Session 或存活检查之前就从 repository 作答：`ALREADY_SETTLED` 表示轮询可以结束；`IN_FLIGHT` 表示记录既未结算也不是 `UNKNOWN`，暂无可对账的内容。`IN_FLIGHT` 并不证明仍有 dispatcher 在处理。已过期的 `EXECUTING` 或 `CANCEL_REQUESTED` 记录会停留在这里，直到持有该 Session 的进程用同一幂等键重试或取消，把它隔离为 `UNKNOWN`，或者由接管扫描直接依据 Runtime 证据结算；而同一幂等键的重试会重新分发 `PREPARED` 或已过期的 `DISPATCHING` 记录，这类记录从未到达 Runtime。对账器自身从不隔离也不 claim dispatch。由于这一应答不需要本地 Session，Session release 之后已结算的结果仍可读取；谁可以调用由嵌入 adapter 的鉴权决定。
 - 只能由原 Runtime 作答。记录上登记的 binding generation 已不存在、已被取代，或不再处于 `READY` 或 `DRAINING` 时，该 generation 不可用于查询，调用以不可重试的 `runtime_execution_evidence_unavailable` 失败；恢复被 recovery 阻断的 generation 属于本切片之外的运维工作。lease 已失效时，与其他操作一样先让该 binding 退役，然后以同样方式失败；本进程已让其 lease 退役的 Session 也同样失败，因为退役时已释放了 worker，即使因另一个 owner 持有 operation claim 而 binding 行仍是 `READY`。该 generation 仍可能作答、但本进程没有通往它的已证明路由时（Session 不是在本进程 acquire 的、仍在 acquire 中，或本进程中该 id 被另一个 Harness 占用），调用以可重试的 `runtime_reconciliation_required` 失败。只有当某个 Broker 进程接管该 binding、并以相同身份重新 acquire 该 Runtime Session 之后，才可能得到应答；对账器两者都不做。provisioner 不支持接管时则永远不会得到应答，因此调用方需要轮询预算。Session 的 binding 与 execution 不一致属于数据不一致，以不可重试的 `runtime_execution_conflict` 失败；只有 resolver 改变了某个 Harness Session 的 scope 才会出现这种情况，而 Adapter 边界禁止这样做。与其他操作共用的 Session 检查保留各自的错误码：`runtime_session_not_found`、`runtime_session_conflict`、`runtime_session_not_ready` 和 `runtime_scope_resolution_failed`。以上情况都不会发出查询。
 - 服务发送记录的 `reference` 与 `lastSequence`。响应是封闭的：只有 `state`，以及仅在 `settled` 时出现的 `result`。`state` 取 `prepared`、`executing`、`cancel_requested`、`settled` 或 `unknown`。本版契约不返回 `lastSequence` 之后的事件。
 - `settled` 且结果有效时，用 Runtime 自己的结果经 `resolveUnknown` 结算（结果类别 `RESOLVED`），包括 Runtime 自己上报的 `not_started`。并发的取消会推进 version，服务会重新读取后再次 compare-and-set；期间已被其他写入方结算的记录以 `ALREADY_SETTLED` 返回，不会被覆盖。
@@ -73,11 +73,13 @@ dispatcher 取得记录 claim，在调用 Runtime 前持久化 `EXECUTING`，并
 
 查询以"一个 `reference` 标识一次调用"为前提，这也是 Runtime 标识调用的方式；同时假定 Runtime 会让已结算调用的结果对 `status` 保持可查，保留期属于随 execute 处理器落地的 Runtime 路由契约。即使在同一进程内这一保留也很重要：本进程仍在运行的调用若在其记录变为 `UNKNOWN` 之后才完成，结果不会经由已过期的 claim 写入，要靠之后的查询来结算记录。对 Runtime 报告仍在运行的 `UNKNOWN` execution 发送物理取消、能证明"未开始"的持久回执存储、运维恢复，以及启动或接管时的扫描，都不在本切片范围内。在这些工作落地之前，原 generation 无法作答的 `UNKNOWN` execution 会一直挡住所在 Runtime Session 的 release。busy 检查只按 Runtime Session id 判断，因此在本进程中另一个 Harness 以相同 id 持有的 Session 也无法 release；该 Harness 同时让原 Harness 无法在本进程 acquire 这个 id，只能由另一个 Broker 进程接管。按 Session 身份判断 busy 属于后续工作。以 `FAILED` 退役的 generation 不会阻塞整个 scope：它不再处于 active，下一次放置会供应新的 generation。但 `LOST` 的 generation 会，而这个状态现在已经存在——只要还有未结算的 execution 或活跃 Session 引用它，它就保持 active，因此已证明 `LOST` 的 generation 上任何未结算的 execution 都会卡住其 scope：`release` 持续返回可重试的 `runtime_reconciliation_required`，该请求之后每次新的放置都得到 `runtime_broker_runtime_lost`。`reconcileExecution` 也无法清除它——`UNKNOWN` 记录得到不可重试的 `runtime_execution_evidence_unavailable`，而崩溃时停留在 `EXECUTING` 或 `DISPATCHING` 的记录只会被答为 `IN_FLIGHT`，因为没有同 key 重试、取消或接管扫描就不会有任何机制把它转成 `UNKNOWN`。结算或隔离这类 execution 需要单独的规则，且该规则必须覆盖所有未结算状态，而不只是 `UNKNOWN`；见 [Runtime 绑定对账](2026-09-24-runtime-binding-reconciliation.zh-CN.md)。
 
+G2 现已在 Broker 获取持久 READY Session 时加入自动分页证据对账，覆盖 EXECUTING 和 CANCEL_REQUESTED 记录。它不会认领或隔离派发；实现范围与边界见[接管对账扫描](managed-runtime-takeover-scan.zh-CN.md)。
+
 ## 并发与所有权
 
 服务只使用进程内 future 合并同一 Broker 实例中的重复供应、Session acquire 和 dispatch 工作。repository version 和 lease 仍是状态变更的权威依据。`brokerOwnerId` 必须标识一个存活 Broker 进程；外部工作活跃期间，operation claim 和 dispatch claim 按配置租期的三分之一间隔续租。
 
-关闭服务后会拒绝新工作、取消内部等待者，并停止服务自身持有的续租 scheduler。关闭并不声明进行中的外部工作已经停止；过期的 repository claim 会保留 fail-closed 的接管语义。
+关闭服务后会拒绝新工作、取消内部等待者，并停止服务自身持有的调度器——续约运行在独立线程池，因此卡住的续约不再占用协调线程，协调运行在单线程。卡住的续约仍持有该 claim 的续约监视器，而围栏与结算路径会取这把监视器，所以一次足够长的存储停顿仍可能通过它阻塞协调。关闭并不声明进行中的外部工作已经停止；过期的 repository claim 会保留 fail-closed 的接管语义。
 
 ## 错误与安全
 
@@ -95,7 +97,7 @@ Runtime token 保留在 `RuntimeLease` 中。服务会把 lease 交给 binding r
 - 不确定的 execution transport 失败进入 `UNKNOWN`。
 - 对账只在查询结果为 `settled` 且结果有效时结算 `UNKNOWN` execution。非终态、`unknown`、格式错误的响应和 transport 失败都保持 `UNKNOWN`，任何情况都不会再次调用 `execute`。
 - 对账只询问原始的、存活且已 attestation 的 binding generation；已无法作答的 generation 以不可重试错误终止轮询；不处于 `UNKNOWN` 的记录不做存活检查即以 `ALREADY_SETTLED` 或 `IN_FLIGHT` 作答；并发查询共享一次有时限的 Runtime 调用；并发取消会在结算前被重新读取。
-- 活跃 execution 阻止 Session release；成功释放后 Session 进入 `RELEASED` 并移除进程内路由。
+- 活跃 execution 阻止 Session release（单进程内与共享数据库的跨进程场景均成立）；成功释放后 Session 进入 `RELEASED` 并移除进程内路由。
 - 超过一个租期间隔的 execution 仍持续续租 dispatch claim。
 - Java 21 下 Maven 单元测试和 Checkstyle 通过。
 

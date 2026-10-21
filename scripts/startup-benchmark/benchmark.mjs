@@ -16,7 +16,9 @@
 //     --base /tmp/base/dist/cli-entry.js --head /tmp/head/dist/cli-entry.js
 //
 // Lay both builds out at the same path depth; each keeps its own compile
-// cache unless --cold. Linux only (RSS comes from /proc). See
+// cache unless --cold. `--credentials settings|dotenv` moves the model key
+// and URL from the shell into the settings file or `~/.qwen/.env`. Linux only
+// (RSS comes from /proc). See
 // docs/design/2026-09-25-startup-benchmark-harness.md.
 
 import fs from 'node:fs';
@@ -24,6 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import {
+  CREDENTIAL_SOURCES,
   makeRunEnvironment,
   quantiles,
   runHeadless,
@@ -40,12 +43,17 @@ const { values: options } = parseArgs({
     mode: { type: 'string', default: 'both' },
     cold: { type: 'boolean', default: false },
     'silent-terminal': { type: 'boolean', default: false },
+    credentials: { type: 'string', default: 'shell' },
     json: { type: 'string' },
   },
 });
-if (!options.base || !options.head) {
+if (
+  !options.base ||
+  !options.head ||
+  !CREDENTIAL_SOURCES.includes(options.credentials)
+) {
   console.error(
-    'Usage: benchmark.mjs --base <cli-entry.js> --head <cli-entry.js> [--pairs N] [--mode interactive|headless|both] [--cold] [--silent-terminal] [--json file]',
+    'Usage: benchmark.mjs --base <cli-entry.js> --head <cli-entry.js> [--pairs N] [--mode interactive|headless|both] [--cold] [--silent-terminal] [--credentials shell|settings|dotenv] [--json file]',
   );
   process.exit(2);
 }
@@ -68,6 +76,7 @@ async function runOnce(build, mode) {
     root,
     modelServer,
     tmpDir: options.cold ? undefined : cacheDirs[build],
+    credentials: options.credentials,
   });
   const args = [
     builds[build],
@@ -139,7 +148,9 @@ try {
 const fmt = (v, metric) =>
   metric.endsWith('Mb') ? `${v.toFixed(0)} MB` : `${v.toFixed(0)} ms`;
 for (const mode of modes) {
-  console.log(`\n${mode} (${options.pairs} pairs)`);
+  console.log(
+    `\n${mode} (${options.pairs} pairs, credentials: ${options.credentials})`,
+  );
   console.log(
     'metric            base p50/p75        head p50/p75        paired Δ   head won',
   );

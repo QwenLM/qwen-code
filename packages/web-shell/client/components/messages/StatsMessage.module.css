@@ -32,21 +32,38 @@
 
 /* ---------- Pivoted table (metric rows × model columns) ---------- */
 
+.pivotTable {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.pivotTable th,
+.pivotTable td {
+  vertical-align: baseline;
+}
+
+.pivotHeader {
+  border-bottom: 1px solid var(--border);
+}
+
 .pivotRow {
-  display: flex;
-  align-items: baseline;
-  min-height: 20px;
+  height: 20px;
+}
+
+.pivotTable tbody .metricCellSection {
+  padding-top: 8px;
 }
 
 .metricCell {
-  flex: 0 0 24ch;
+  width: 24ch;
   min-width: 24ch;
   color: var(--agent-blue-500);
   white-space: nowrap;
 }
 
 .metricCellSection {
-  flex: 0 0 24ch;
+  width: 24ch;
   min-width: 24ch;
   color: var(--foreground);
   font-weight: 700;
@@ -54,7 +71,7 @@
 }
 
 .metricCellSub {
-  flex: 0 0 24ch;
+  width: 24ch;
   min-width: 24ch;
   padding-left: 2ch;
   color: var(--muted-foreground);
@@ -62,15 +79,15 @@
 }
 
 .modelCell {
-  flex: 1 1 20ch;
-  min-width: 16ch;
+  min-width: 20ch;
+  padding-left: 2ch;
   color: var(--foreground);
   white-space: nowrap;
 }
 
 .modelCellHeader {
-  flex: 1 1 20ch;
-  min-width: 16ch;
+  min-width: 20ch;
+  padding-left: 2ch;
   color: var(--foreground);
   font-weight: 700;
   white-space: nowrap;

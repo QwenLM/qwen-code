@@ -59,6 +59,8 @@ import {
   shouldOfferAssistantFeedback,
 } from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
+import { Checkbox } from './ui/checkbox';
+import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -77,6 +79,7 @@ import {
   isAskUserQuestionToolName,
   toolContainsCallId,
 } from './messages/toolFormatting';
+import { McpAppSessionContext } from '../mcpAppHostContext';
 import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
@@ -97,6 +100,7 @@ const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
 export interface MessageListProps {
+  deletion?: MessageDeletionControls;
   messages: Message[];
   frozenViewport?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
@@ -190,6 +194,7 @@ export interface MessageListProps {
   turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
   sourceEntries?: readonly WebShellSource[];
   sourceSessionId?: string;
+  mcpAppSessionId?: string;
   onSourceOpen?: (source: WebShellSource) => void;
   turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
   onReviewChanges?: (
@@ -199,6 +204,7 @@ export interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
@@ -732,12 +738,28 @@ export interface ApplyTurnCollapseOptions {
   enabled: boolean;
 }
 
+/**
+ * A workspace agent's reply in the session. It is never the session's own
+ * answer: its record can land inside a main-model turn (the user prompted
+ * while the agent ran), and taking it as that turn's final answer would fold
+ * the main reply on collapse and move the copy / feedback / branch footer
+ * onto the agent's reply.
+ */
+function isAgentReply(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'assistant' &&
+    item.message.agentMessage?.kind === 'agent_message'
+  );
+}
+
 function isFinalContentCandidate(
   item: DisplayItem,
   includeBackgroundNotifications: boolean,
 ): boolean {
   return (
     item.type === 'message' &&
+    !isAgentReply(item) &&
     (item.message.role === 'assistant' ||
       (includeBackgroundNotifications &&
         item.message.role === 'system' &&
@@ -834,9 +856,9 @@ function collectFinalAssistantTurnIds(
 
 /**
  * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
- * and non-final background notifications. The final content and any other
- * system/shell/insight rows (errors, cancellations, command output) are kept
- * visible even when the turn is collapsed.
+ * non-final background notifications, and background result markers. Final
+ * content and other system/shell/insight rows (errors, cancellations, command
+ * output) are kept visible even when the turn is collapsed.
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
@@ -848,14 +870,19 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'plan':
       return true;
     case 'assistant':
-      return !isFinalAnswer;
+      // An agent's reply is its own message, kept like a user row.
+      return !isFinalAnswer && !isAgentReply(item);
     case 'thinking':
       return true;
     case 'system':
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
       }
-      return item.message.source === 'vision_bridge_notice';
+      return (
+        item.message.source === 'background_notification_turn_started' ||
+        item.message.source === 'background_task_completed' ||
+        item.message.source === 'vision_bridge_notice'
+      );
     case 'user':
     case 'user_shell':
     case 'btw':
@@ -2471,6 +2498,14 @@ interface TurnCollapseRowProps {
   onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
+function hasTurnMetadataRow(turn: TurnCollapseHead): boolean {
+  return (
+    turn.hiddenCount > 0 ||
+    turn.liveStartedAt !== undefined ||
+    hasNonDurationMetrics(turn)
+  );
+}
+
 const TurnCollapseRow = memo(function TurnCollapseRow({
   turnCollapse,
   onToggleCollapse,
@@ -2478,10 +2513,7 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
   const { t } = useI18n();
   const hasToggle = turnCollapse.hiddenCount > 0;
   const liveStartedAt = turnCollapse.liveStartedAt;
-  const showMetadataRow =
-    hasToggle ||
-    liveStartedAt !== undefined ||
-    hasNonDurationMetrics(turnCollapse);
+  const showMetadataRow = hasTurnMetadataRow(turnCollapse);
 
   const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
@@ -3005,6 +3037,7 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      deletion,
       frozenViewport = false,
       sessionKey,
       terminalBackgroundShellTaskIds,
@@ -3051,12 +3084,14 @@ export const MessageList = memo(
       turnArtifacts,
       sourceEntries,
       sourceSessionId,
+      mcpAppSessionId = sourceSessionId,
       onSourceOpen,
       turnScheduledTasks,
       onReviewChanges,
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onToolResultOpen,
       onError,
       generateContent,
     },
@@ -5865,8 +5900,13 @@ export const MessageList = memo(
           // only stamps the prompt's; both carry the same value.
           const feedbackPromptId =
             displayItem.message.promptId ?? feedbackHead?.promptId;
+          // An agent's reply gets a copy button only: no feedback marks (they
+          // rate the session's own answer) and no branching from it.
+          const agentReply =
+            displayItem.message.role === 'assistant' &&
+            displayItem.message.agentMessage?.kind === 'agent_message';
           const branchRecordId =
-            displayItem.message.role === 'assistant'
+            displayItem.message.role === 'assistant' && !agentReply
               ? displayItem.message.branchRecordId
               : undefined;
           const editableUserContent =
@@ -5906,11 +5946,25 @@ export const MessageList = memo(
                   ? scrollToMessage
                   : undefined
               }
+              onDeleteMessage={
+                deletion &&
+                (deletion.active || !deletion.disabled) &&
+                deletion.canDelete(displayItem.message) &&
+                (displayItem.message.role === 'user' ||
+                  displayItem.message.localCommandId) &&
+                (displayItem.message.promptId ||
+                  displayItem.message.sourceRecordIds?.length ||
+                  displayItem.message.localCommandId)
+                  ? () => deletion.start(displayItem.message)
+                  : undefined
+              }
+              deleteMessageDisabled={deletion?.active}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
               onTurnOutputOpen={onTurnOutputOpen}
+              onToolResultOpen={onToolResultOpen}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
                 onEditUserMessage && userMessageEditTarget
@@ -5942,21 +5996,27 @@ export const MessageList = memo(
               branchRecordId={branchRecordId}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
+                (agentReply ||
+                  finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
+                !agentReply &&
                 !isResponding &&
                 branchRecordId !== undefined
               }
               assistantFeedbackTurnId={
-                assistantFeedbackEnabled ? finalAssistantTurnId : undefined
+                assistantFeedbackEnabled && !agentReply
+                  ? finalAssistantTurnId
+                  : undefined
               }
               assistantFeedbackPromptId={
-                assistantFeedbackEnabled ? feedbackPromptId : undefined
+                assistantFeedbackEnabled && !agentReply
+                  ? feedbackPromptId
+                  : undefined
               }
               assistantFeedbackRating={
-                assistantFeedbackEnabled && feedbackPromptId
+                assistantFeedbackEnabled && !agentReply && feedbackPromptId
                   ? assistantFeedbackRatings[feedbackPromptId]
                   : undefined
               }
@@ -6012,6 +6072,7 @@ export const MessageList = memo(
         onAttachmentPreview,
         onInsightReportOpen,
         onEditUserMessage,
+        deletion,
         onSubmitUserMessageEdit,
         editableUserTurn,
         hasOlderHistory,
@@ -6038,6 +6099,7 @@ export const MessageList = memo(
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onToolResultOpen,
         sourcesByTurn,
         onSourceOpen,
         onError,
@@ -6099,109 +6161,187 @@ export const MessageList = memo(
       scheduleScrollOverflowReport();
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
-    return (
-      <div
-        ref={containerRef}
-        className={joinClassNames(
-          styles.list,
-          hasHeader && centerWelcomeHeader
-            ? styles.listWithWelcomeHeader
-            : undefined,
-        )}
-        data-web-shell-message-list
-        onClickCapture={handleDisclosureClickCapture}
-      >
-        {showLoadingSkeleton && (
-          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
-        )}
-        {loadingOlderHistory &&
-          !showLoadingSkeleton &&
-          !suppressOlderHistoryLoadingStatus && (
-            <div className={styles.historyStatus} role="status">
-              {t('history.loadingEarlier')}
-            </div>
-          )}
-        {historyCapacityReached && !showLoadingSkeleton && (
-          <div className={styles.historyStatus} role="status">
-            {t('history.capacityReached')}
-          </div>
-        )}
-        {historyPaginationError &&
-          !showLoadingSkeleton &&
-          !historyCapacityReached && (
-            <div className={styles.historyStatus}>
-              <span role="status">{t('history.paginationError')}</span>
-              {onLoadOlderHistory && (
-                <button
-                  type="button"
-                  className={styles.historyRetryButton}
-                  onClick={retryOlderHistory}
-                >
-                  {t('history.retry')}
-                </button>
-              )}
-            </div>
-          )}
-        <SessionTimeline
-          action={timelineAction}
-          entries={sessionTimelineEntries}
-          currentTurnId={currentTimelineTurnId}
-          currentRange={sessionTimelineRange}
-          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
-          onSelect={scrollToMessage}
+    const selectionByItem = useMemo(() => {
+      const selections = new Map<DisplayItem, string | undefined>();
+      if (!deletion?.active) return selections;
+      const groupOf = (item: DisplayItem) => {
+        const messageId =
+          item.type === 'message'
+            ? item.message.id
+            : item.type === 'turn_collapse'
+              ? item.turnCollapse.turnId
+              : item.turnId;
+        return (
+          deletion.groupByMessage.get(messageId) ??
+          deletion.groupByMessage.get(
+            summaryRunFirstMemberId(messageId) ?? messageId,
+          )
+        );
+      };
+      const replyGroups = new Set<string>();
+      for (const item of visibleItems) {
+        if (
+          item.type === 'turn_collapse' &&
+          hasTurnMetadataRow(item.turnCollapse)
+        ) {
+          const group = groupOf(item);
+          const key = group ?? item.turnCollapse.turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      let turnId = 'unowned';
+      for (const item of visibleItems) {
+        if (item.type === 'turn_collapse' || item.type === 'turn_outputs')
+          continue;
+        const group = groupOf(item);
+        if (item.type === 'message' && isTurnStartMessage(item.message)) {
+          turnId = item.message.id;
+          selections.set(item, group);
+        } else {
+          const key = group ?? turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      return selections;
+    }, [deletion, visibleItems]);
+
+    const renderSelection = (item: DisplayItem | undefined) => {
+      if (!deletion?.active || !item || !selectionByItem.has(item)) return null;
+      const groupId = selectionByItem.get(item);
+      return (
+        <Checkbox
+          className={styles.deletionCheckbox}
+          aria-label={t('messageDelete.selectGroup')}
+          title={!groupId ? t('messageDelete.unavailable') : undefined}
+          checked={groupId ? deletion.selected.has(groupId) : false}
+          disabled={
+            !groupId || deletion.disabled || !deletion.allowed.has(groupId)
+          }
+          onCheckedChange={() => {
+            if (groupId) deletion.toggle(groupId);
+          }}
         />
-        {useVirtualScroll ? (
-          <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
-            {virtualItems.map((virtualRow) => (
-              <div
-                key={virtualRow.key}
-                data-index={virtualRow.index}
-                ref={measureVirtualRow}
-                className={joinClassNames(
-                  styles.virtualRow,
-                  getRowClassName(
+      );
+    };
+
+    return (
+      <McpAppSessionContext.Provider value={mcpAppSessionId}>
+        <div
+          ref={containerRef}
+          className={joinClassNames(
+            styles.list,
+            deletion?.active ? styles.deletionMode : undefined,
+            hasHeader && centerWelcomeHeader
+              ? styles.listWithWelcomeHeader
+              : undefined,
+          )}
+          data-web-shell-message-list
+          onClickCapture={handleDisclosureClickCapture}
+        >
+          {showLoadingSkeleton && (
+            <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+          )}
+          {loadingOlderHistory &&
+            !showLoadingSkeleton &&
+            !suppressOlderHistoryLoadingStatus && (
+              <div className={styles.historyStatus} role="status">
+                {t('history.loadingEarlier')}
+              </div>
+            )}
+          {historyCapacityReached && !showLoadingSkeleton && (
+            <div className={styles.historyStatus} role="status">
+              {t('history.capacityReached')}
+            </div>
+          )}
+          {historyPaginationError &&
+            !showLoadingSkeleton &&
+            !historyCapacityReached && (
+              <div className={styles.historyStatus}>
+                <span role="status">{t('history.paginationError')}</span>
+                {onLoadOlderHistory && (
+                  <button
+                    type="button"
+                    className={styles.historyRetryButton}
+                    onClick={retryOlderHistory}
+                  >
+                    {t('history.retry')}
+                  </button>
+                )}
+              </div>
+            )}
+          <SessionTimeline
+            action={timelineAction}
+            entries={sessionTimelineEntries}
+            currentTurnId={currentTimelineTurnId}
+            currentRange={sessionTimelineRange}
+            hidden={
+              !isSessionTimelineVisible || !hasEnoughSessionTimelineEntries
+            }
+            onSelect={scrollToMessage}
+          />
+          {useVirtualScroll ? (
+            <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
+              {virtualItems.map((virtualRow) => (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={measureVirtualRow}
+                  className={joinClassNames(
+                    styles.virtualRow,
+                    getRowClassName(
+                      visibleItems[virtualRow.index - headerOffset],
+                    ),
+                  )}
+                  data-message-row-key={String(getItemKey(virtualRow.index))}
+                  data-source-block-ids={displayItemSourceBlockIds(
                     visibleItems[virtualRow.index - headerOffset],
-                  ),
-                )}
-                data-message-row-key={String(getItemKey(virtualRow.index))}
-                data-source-block-ids={displayItemSourceBlockIds(
-                  visibleItems[virtualRow.index - headerOffset],
-                  messages,
-                )}
-                data-web-shell-message-row
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                }}
-              >
-                {renderVirtualItem(virtualRow.index)}
-              </div>
-            ))}
-          </div>
-        ) : (
-          Array.from({ length: totalCount }, (_, index) => {
-            const key = getItemKey(index);
-            const item = visibleItems[index - headerOffset];
-            return (
-              <div
-                key={key}
-                data-index={index}
-                className={getRowClassName(item)}
-                data-message-row-key={String(key)}
-                data-source-block-ids={displayItemSourceBlockIds(
-                  item,
-                  messages,
-                )}
-                data-web-shell-message-row
-              >
-                {renderVirtualItem(index)}
-              </div>
-            );
-          })
-        )}
-      </div>
+                    messages,
+                  )}
+                  data-web-shell-message-row
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                  }}
+                >
+                  {renderSelection(
+                    visibleItems[virtualRow.index - headerOffset],
+                  )}
+                  {renderVirtualItem(virtualRow.index)}
+                </div>
+              ))}
+            </div>
+          ) : (
+            Array.from({ length: totalCount }, (_, index) => {
+              const key = getItemKey(index);
+              const item = visibleItems[index - headerOffset];
+              return (
+                <div
+                  key={key}
+                  data-index={index}
+                  className={getRowClassName(item)}
+                  data-message-row-key={String(key)}
+                  data-source-block-ids={displayItemSourceBlockIds(
+                    item,
+                    messages,
+                  )}
+                  data-web-shell-message-row
+                >
+                  {renderSelection(item)}
+                  {renderVirtualItem(index)}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </McpAppSessionContext.Provider>
     );
   }),
 );

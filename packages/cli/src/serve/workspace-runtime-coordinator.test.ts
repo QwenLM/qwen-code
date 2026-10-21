@@ -1019,6 +1019,63 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(coordinator.hasActiveWork()).toBe(true);
   });
 
+  describe('while only another execution engine is live', () => {
+    function otherEngineLive() {
+      const harness = makeRuntime();
+      harness.setSnapshot({
+        state: 'active',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: true,
+        workspaceControl: 'cold',
+      });
+      harness.preheat.mockImplementation(async () => {
+        harness.setSnapshot({ runtimeEpoch: 2, workspaceControl: 'live' });
+      });
+      return harness;
+    }
+
+    it('reports the workspace-control runtime with aggregate activity', () => {
+      const harness = otherEngineLive();
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      expect(coordinator.status()).toMatchObject({
+        state: 'cold',
+        runtimeLive: false,
+        runtimeEpoch: 1,
+      });
+      expect(coordinator.hasActiveWork()).toBe(true);
+    });
+
+    it('defers Skills reconciliation and preheats before preparing it', async () => {
+      const harness = otherEngineLive();
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      expect(coordinator.reconcileSkillsConfiguration()).toBe('deferred');
+      await expect(coordinator.ensure({})).resolves.toMatchObject({
+        runtimeLive: true,
+        runtimeEpoch: 2,
+        capabilities: {
+          skills: { state: 'ready', revision: 1, runtimeEpoch: 2 },
+        },
+      });
+      expect(harness.preheat).toHaveBeenCalledOnce();
+      expect(harness.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    });
+
+    it('retries a Skills refresh requested while workspace control starts', async () => {
+      const harness = otherEngineLive();
+      harness.setSnapshot({ workspaceControl: 'starting' });
+      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+      expect(coordinator.reconcileSkillsConfiguration()).toBe('deferred');
+      await expect(coordinator.ensure()).resolves.toMatchObject({
+        capabilities: { skills: { state: 'ready', revision: 1 } },
+      });
+      expect(harness.invokeWorkspaceCommand).toHaveBeenCalledOnce();
+    });
+  });
+
   it('does not project queued Skills work into runtime lifecycle', async () => {
     const harness = makeRuntime();
     harness.setSnapshot({ state: 'idle', runtimeLive: true, runtimeEpoch: 1 });

@@ -14,7 +14,8 @@
  *                            stripped by default (NO_TOOLS) to prevent
  *                            function calls; pass preserveTools: true to
  *                            keep the parent's tools prefix for Anthropic
- *                            prompt-cache hits.
+ *                            prompt-cache hits. Structured-output requests without preserved
+ *                            tools use a synthetic schema-response tool.
  *                            Use for: /btw, suggestions, pipelined suggestions.
  *
  *   WITHOUT cacheSafeParams → AgentHeadless multi-turn, full tool access,
@@ -34,6 +35,7 @@ import type {
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
   Part,
+  Schema,
 } from '@google/genai';
 import {
   runWithRuntimeContentGenerator,
@@ -41,6 +43,7 @@ import {
 } from './runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { LlmChat, StreamEventType } from '../core/llm-chat.js';
+import { FunctionCallingConfigMode } from '../core/genai-compat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -338,8 +341,9 @@ export async function runWithForkedChatModel<T>(
 
 /**
  * Result from a cache-path runForkedAgent (with cacheSafeParams).
- * Single-turn, text-only. Tools stripped by default; pass preserveTools
- * to keep the parent's tools for cache-prefix matching.
+ * Single-turn. Tools are stripped by default, or replaced with a synthetic
+ * schema-response tool when structured output is requested. preserveTools
+ * retains the parent tool prefix and uses responseJsonSchema instead.
  */
 export interface ForkedQueryResult {
   /** Extracted text response, or null if no text */
@@ -364,6 +368,12 @@ function extractQueryUsage(
     outputTokens: metadata?.candidatesTokenCount ?? 0,
     cacheHitTokens: metadata?.cachedContentTokenCount ?? 0,
   };
+}
+
+function asJsonObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +409,8 @@ export interface CachePathParams {
    * When true, keep the parent's tools in the per-request config so the
    * Anthropic prompt-cache key (system + tools) matches the main agent's.
    * Default (false/omitted): strip tools via NO_TOOLS to prevent function
-   * calls — appropriate for most forked queries.
+   * calls — appropriate for most forked queries. Structured output retains
+   * the parent tools when this is true.
    */
   preserveTools?: boolean;
 }
@@ -462,6 +473,12 @@ export interface ForkedAgentResult {
   filesTouched: string[];
   /** File paths from successful mutating tool results. */
   filesWritten?: string[];
+  /** Aggregate model usage for this isolated agent run. */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
 }
 
 /**
@@ -550,9 +567,27 @@ export async function runForkedAgent(
         ? {}
         : { ...NO_TOOLS };
       if (abortSignal) requestConfig.abortSignal = abortSignal;
-      if (jsonSchema) {
+      if (jsonSchema && preserveTools) {
         requestConfig.responseMimeType = 'application/json';
         requestConfig.responseJsonSchema = jsonSchema;
+      } else if (jsonSchema) {
+        requestConfig.tools = [
+          {
+            functionDeclarations: [
+              {
+                name: 'respond_in_schema',
+                description: 'Provide the response in the required schema',
+                parameters: jsonSchema as Schema,
+              },
+            ],
+          },
+        ];
+        requestConfig.toolConfig = {
+          functionCallingConfig: {
+            mode: FunctionCallingConfigMode.ANY,
+            allowedFunctionNames: ['respond_in_schema'],
+          },
+        };
       }
 
       const sendParams = {
@@ -575,17 +610,29 @@ export async function runForkedAgent(
         outputTokens: 0,
         cacheHitTokens: 0,
       };
+      let jsonResult: Record<string, unknown> | undefined;
 
       for await (const event of stream) {
         if (event.type !== StreamEventType.CHUNK) continue;
         const response = event.value;
         const parts = response.candidates?.[0]?.content?.parts ?? [];
 
-        // Defensive: when preserveTools is true the model could produce
-        // functionCall parts instead of text. Log and discard them.
+        const schemaCall = parts.find(
+          (part) => part.functionCall?.name === 'respond_in_schema',
+        )?.functionCall;
+        if (schemaCall?.args) {
+          jsonResult ??= asJsonObject(schemaCall.args);
+        }
+
+        // Defensive: when preserveTools is true the model could produce an
+        // unexpected parent function call instead of text. Log and discard it.
         if (
           preserveTools &&
-          parts.some((p) => (p as Record<string, unknown>)['functionCall'])
+          parts.some(
+            (part) =>
+              part.functionCall &&
+              part.functionCall.name !== 'respond_in_schema',
+          )
         ) {
           debugLogger.warn(
             'Cache-path forked query received functionCall with preserveTools; discarding.',
@@ -603,10 +650,9 @@ export async function runForkedAgent(
       }
 
       const trimmed = fullText.trim() || null;
-      let jsonResult: Record<string, unknown> | undefined;
-      if (jsonSchema && trimmed) {
+      if (jsonSchema && !jsonResult && trimmed) {
         try {
-          jsonResult = JSON.parse(trimmed) as Record<string, unknown>;
+          jsonResult = asJsonObject(JSON.parse(trimmed) as unknown);
         } catch {
           // non-JSON response despite schema constraint — treat as text
         }
@@ -639,6 +685,7 @@ export async function runForkedAgent(
   const filesTouched = new Set<string>();
   const pendingMutatingPaths = new Map<string, string[]>();
   const filesWritten = new Set<string>();
+  let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
   const initialMessages =
     params.extraHistory &&
@@ -713,6 +760,14 @@ export async function runForkedAgent(
     }
   });
 
+  emitter.on(AgentEventType.FINISH, (event) => {
+    usage = {
+      inputTokens: event.inputTokens ?? 0,
+      outputTokens: event.outputTokens ?? 0,
+      totalTokens: event.totalTokens ?? 0,
+    };
+  });
+
   try {
     const headless = await AgentHeadless.create(
       params.name,
@@ -782,6 +837,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        usage,
       };
     }
     if (terminateReason === AgentTerminateMode.CANCELLED) {
@@ -791,6 +847,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        usage,
       };
     }
     if (terminateReason !== AgentTerminateMode.GOAL) {
@@ -800,6 +857,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        usage,
       };
     }
     return {
@@ -808,6 +866,7 @@ export async function runForkedAgent(
       finalText,
       filesTouched: touched,
       filesWritten: written,
+      usage,
     };
   } finally {
     executionController.abort();

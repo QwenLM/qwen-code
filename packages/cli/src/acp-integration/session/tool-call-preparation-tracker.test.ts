@@ -51,6 +51,46 @@ describe('ToolCallPreparationTracker', () => {
     expect(emitPreparationDiscarded).not.toHaveBeenCalled();
   });
 
+  it('reports a tool call as soon as one starts, before its frame is emitted', () => {
+    emitStart.mockReturnValue(new Promise(() => {}));
+    const tracker = new ToolCallPreparationTracker(emitter);
+    const text = new GenerateContentResponse();
+    const preparing = new GenerateContentResponse();
+    setToolCallPreparations(preparing, [
+      { callId: 'call-1', toolName: 'write_file' },
+    ]);
+
+    void tracker.observe(text);
+    expect(tracker.hasToolCall).toBe(false);
+    void tracker.observe(preparing);
+    expect(tracker.hasToolCall).toBe(true);
+  });
+
+  it('reports a complete function call that had no preparation', () => {
+    const tracker = new ToolCallPreparationTracker(emitter);
+
+    void tracker.observe({
+      functionCalls: [{ id: 'call-1', name: 'read_file', args: {} }],
+    } as unknown as GenerateContentResponse);
+
+    expect(tracker.hasToolCall).toBe(true);
+    expect(emitStart).not.toHaveBeenCalled();
+  });
+
+  it('forgets its tool calls only when the whole attempt is discarded', async () => {
+    const tracker = new ToolCallPreparationTracker(emitter);
+    const preparing = new GenerateContentResponse();
+    setToolCallPreparations(preparing, [
+      { callId: 'call-1', toolName: 'write_file' },
+    ]);
+    await tracker.observe(preparing);
+
+    await tracker.discard();
+    expect(tracker.hasToolCall).toBe(true);
+    await tracker.discard(true);
+    expect(tracker.hasToolCall).toBe(false);
+  });
+
   it('discards every unresolved preparation exactly once', async () => {
     const tracker = new ToolCallPreparationTracker(emitter);
     const response = new GenerateContentResponse();

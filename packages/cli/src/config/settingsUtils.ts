@@ -276,6 +276,9 @@ export function validateSettingValue(
  * runtime import cycle.
  */
 export const WORKSPACE_RESTRICTED_SETTINGS = [
+  { section: 'memory', key: 'mem0' },
+  { section: 'memory', key: 'agentMaxTurns' },
+  { section: 'memory', key: 'agentTimeoutMinutes' },
   { section: 'tools', key: 'executionSandbox' },
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
@@ -283,10 +286,23 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'goals', key: 'modelProposed' },
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
+  { section: 'ui', key: 'allowedApprovalModes' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
 }>;
+
+/**
+ * The root-level half of the restriction above: top-level settings that have
+ * no section to name in the `{ section, key }` shape. Its consumers — the
+ * Workspace strip, the "ignored" warning, and the daemon route that refuses
+ * the write — read it beside `WORKSPACE_RESTRICTED_SETTINGS`.
+ */
+export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
+  'advisorModel',
+  'advisorMaxUses',
+  'pluginConfigs',
+] as const;
 
 /**
  * Settings a Workspace may only make stricter.

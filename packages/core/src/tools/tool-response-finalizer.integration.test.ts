@@ -14,6 +14,7 @@ import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
+import { fnResponse } from '../test-utils/model-fixtures.js';
 
 describe('tool response finalization persistence', () => {
   const tempDirs: string[] = [];
@@ -50,13 +51,7 @@ describe('tool response finalization persistence', () => {
       callId,
       toolName: 'shell',
       responseParts: [
-        {
-          functionResponse: {
-            id: callId,
-            name: 'shell',
-            response: { output: contents[index] },
-          },
-        } satisfies Part,
+        fnResponse('shell', { output: contents[index] }, callId) satisfies Part,
       ],
     }));
 

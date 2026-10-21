@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
-import { parseStrace } from '../startup-benchmark/lib.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { makeRunEnvironment, parseStrace } from '../startup-benchmark/lib.mjs';
 
 const sizes = {
   '/q/cli-entry.js': 10,
@@ -44,5 +47,71 @@ describe('parseStrace', () => {
       nodeProcesses: 2,
       jsBytes: 10 + 100 + 100 + 1000,
     });
+  });
+});
+
+describe('makeRunEnvironment', () => {
+  const modelServer = { baseUrl: (runId) => `http://127.0.0.1:1/${runId}` };
+  let root;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-bench-test-'));
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const layout = (run) => {
+    const qwenDir = path.join(run.env.HOME, '.qwen');
+    const dotenv = path.join(qwenDir, '.env');
+    return {
+      settings: JSON.parse(
+        fs.readFileSync(path.join(qwenDir, 'settings.json'), 'utf8'),
+      ),
+      dotenv: fs.existsSync(dotenv) ? fs.readFileSync(dotenv, 'utf8') : null,
+    };
+  };
+
+  it('exports the model credentials in the shell by default', () => {
+    const run = makeRunEnvironment({ root, modelServer });
+    expect(run.env.OPENAI_API_KEY).toBe('bench-key');
+    expect(run.env.OPENAI_BASE_URL).toBe(`http://127.0.0.1:1/${run.runId}`);
+    const { settings, dotenv } = layout(run);
+    expect(settings.env).toBeUndefined();
+    expect(dotenv).toBeNull();
+  });
+
+  it('puts them in the settings env block for credentials: settings', () => {
+    const run = makeRunEnvironment({
+      root,
+      modelServer,
+      credentials: 'settings',
+    });
+    expect(run.env.OPENAI_API_KEY).toBeUndefined();
+    expect(run.env.OPENAI_BASE_URL).toBeUndefined();
+    const { settings, dotenv } = layout(run);
+    expect(settings.env).toEqual({
+      OPENAI_API_KEY: 'bench-key',
+      OPENAI_BASE_URL: `http://127.0.0.1:1/${run.runId}`,
+    });
+    expect(dotenv).toBeNull();
+  });
+
+  it('puts them in ~/.qwen/.env for credentials: dotenv', () => {
+    const run = makeRunEnvironment({
+      root,
+      modelServer,
+      credentials: 'dotenv',
+    });
+    expect(run.env.OPENAI_API_KEY).toBeUndefined();
+    const { settings, dotenv } = layout(run);
+    expect(settings.env).toBeUndefined();
+    expect(dotenv).toBe(
+      `OPENAI_API_KEY=bench-key\nOPENAI_BASE_URL=http://127.0.0.1:1/${run.runId}\n`,
+    );
+  });
+
+  it('rejects an unknown credentials source', () => {
+    expect(() =>
+      makeRunEnvironment({ root, modelServer, credentials: 'vault' }),
+    ).toThrow(/credentials must be one of/);
   });
 });
