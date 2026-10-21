@@ -771,14 +771,14 @@ describe('Hosted real-process gates', () => {
       // 4.5 s), moving the fork to 10683; the FG13a result store ack-loss
       // cell adds 150 s, moving the fork to 10833 and the step to 191
       // minutes; the FG13a dispatch ack-loss cell adds 150 s, moving the fork
-      // to 10983 and the step to 194 minutes; the FG11e stream cells add 39 s
-      // (2x their measured 13.8 s and 5.2 s), moving the fork to 11022 and the
+      // to 10983 and the step to 194 minutes; the FG11e stream cells add 41 s
+      // (2x their measured 14.1 s and 5.6 s), moving the fork to 11024 and the
       // step stays 194 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11022);
+        expect(forkSeconds).toBe(11024);
       }
     },
   );
@@ -868,13 +868,13 @@ describe('Hosted real-process gates', () => {
   // 9s (2x its measured 4.5s), so it becomes 10083s; the FG13a result store
   // ack-loss cell adds 150s, so it becomes 10233s; the FG13a dispatch
   // ack-loss cell adds 150s, so it becomes 10383s; the FG11e stream cells
-  // add 39s (2x their measured 13.8s and 5.2s), so it becomes 10422s. The
+  // add 41s (2x their measured 14.1s and 5.6s), so it becomes 10424s. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10422;
+  const hostedForkHealthySeconds = 10424;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
