@@ -3893,6 +3893,7 @@ describe('OpenTuiInputPrompt editing ownership and recall', () => {
       if (action === 'session') {
         id = 'second';
         view.rerender(component());
+        expect(currentEditor().plainText).toBe('old');
       }
       if (action === 'unmount') view.unmount();
       else if (action !== 'keep') await typeText('successor');
@@ -3909,7 +3910,23 @@ describe('OpenTuiInputPrompt editing ownership and recall', () => {
       } else {
         expect(mocks.state.editExternally).not.toHaveBeenCalled();
         if (action !== 'unmount')
-          expect(currentEditor().plainText).toBe('successor');
+          expect(currentEditor().plainText).toBe(
+            action === 'session' ? 'oldsuccessor' : 'successor',
+          );
+        if (action === 'session') {
+          await pressKey('return');
+          expect(submit).toHaveBeenCalledExactlyOnceWith(
+            'oldsuccessor',
+            undefined,
+            expect.objectContaining({
+              submittedPrompt: 'oldsuccessor',
+              displayText: 'oldsuccessor',
+              humanInput: { text: 'oldsuccessor' },
+              hasUnknownInput: false,
+              deferUntilIdle: false,
+            }),
+          );
+        }
         if (action === 'submit')
           expect(submit).toHaveBeenCalledExactlyOnceWith(
             'old',
