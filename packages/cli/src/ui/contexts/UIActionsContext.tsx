@@ -90,6 +90,10 @@ export interface UIActions {
       pasteExpansions?: ReadonlyMap<string, string>;
     },
   ) => void;
+  // The composer registers its own submit path (large-paste expansion, epoch
+  // bump, stash cleanup) so the vim-mode Enter can run it instead of calling
+  // handleFinalSubmit directly.
+  registerPromptSubmit?: (handler: ((value: string) => void) | null) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   setPendingPastes?: React.Dispatch<React.SetStateAction<Map<string, string>>>;

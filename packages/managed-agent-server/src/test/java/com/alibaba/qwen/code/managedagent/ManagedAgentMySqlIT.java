@@ -1838,6 +1838,8 @@ class ManagedAgentMySqlIT {
                 source, jdbc, store, authority);
         com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.verifyOperatorPrepare(
                 source, jdbc, store, authority);
+        com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.verifySharedExecution(
+                source, jdbc, store, authority);
     }
 
     @Test

@@ -636,17 +636,16 @@ class HostedMcpStoreFaultGatesIT {
     }
 
     private String holderIdentity() {
-        List<String> rows = jdbc.queryForList("SELECT CONVERT(holder_key"
-                + " USING utf8mb4) FROM ma_storage_owner WHERE tenant_id = ?"
-                + " AND holder_key IS NOT NULL", String.class, tenant);
+        List<String> rows = jdbc.queryForList("SELECT CONCAT(CONVERT(binding_id USING utf8mb4),"
+                + " ':', runtime_generation, ':', CONVERT(runtime_session_id USING utf8mb4),"
+                + " ':', execution_storage_key) FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND execution_storage_key IS NOT NULL", String.class, tenant);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     private int storageHolds() {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                + " ma_storage_owner WHERE tenant_id = ? AND holder_key IS"
-                + " NOT NULL", Integer.class, tenant);
-        return count == null ? 0 : count;
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND execution_storage_key IS NOT NULL", Integer.class, tenant);
     }
 
     private int drainReceipts(SessionRef session) {

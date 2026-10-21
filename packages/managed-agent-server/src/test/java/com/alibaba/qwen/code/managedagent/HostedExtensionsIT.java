@@ -488,7 +488,7 @@ class HostedExtensionsIT {
                 String.class, binding)).isNotBlank();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                 + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ? AND holder_key IS NOT NULL",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
                 Integer.class, binding)).isZero();
         assertThat(canary.isAlive()).isTrue();
     }

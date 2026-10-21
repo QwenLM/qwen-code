@@ -1375,6 +1375,12 @@ button.livePendingSession:hover {
     min-width: var(--session-actions-width, 78px);
   }
 
+  /* Rows with a PR badge hold the overlay's width at rest, so revealing the
+     actions never moves the badge out from under the pointer. */
+  .sessionMetaSlotReserved {
+    min-width: var(--session-actions-width, 78px);
+  }
+
   .sessionRow:hover:not(.runningSession) .sessionGitIcon,
   .sessionRow:hover:not(.runningSession) .sessionAttention,
   .sessionMetaSlot:hover .sessionGitIcon,
