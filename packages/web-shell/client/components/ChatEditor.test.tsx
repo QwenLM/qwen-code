@@ -4154,6 +4154,9 @@ describe('ChatEditor toolbar popovers', () => {
     );
     expect(disabled?.getAttribute('aria-disabled')).toBe('true');
     expect(disabled?.textContent).toContain('Qwen Max');
+    expect(
+      disabled?.querySelector('[data-web-shell-unavailable-model-lock]'),
+    ).not.toBeNull();
     act(() => disabled?.click());
     expect(onSelectModel).not.toHaveBeenCalled();
     expect(

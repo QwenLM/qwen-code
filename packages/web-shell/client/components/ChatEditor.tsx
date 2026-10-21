@@ -738,6 +738,34 @@ function CheckIcon() {
   );
 }
 
+function LockIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      data-web-shell-unavailable-model-lock=""
+    >
+      <rect
+        x="3.5"
+        y="7"
+        width="9"
+        height="7"
+        rx="1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      <path
+        d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function getModeLabel(modeId: string, t: (key: string) => string): string {
   const labels: Record<string, string> = {
     plan: t('mode.label.plan'),
@@ -887,7 +915,9 @@ function ToolbarPopover({
                   )}
                 </span>
                 <span className={styles.dropdownItemCheck}>
-                  {item.id === activeId && !item.disabled ? (
+                  {item.disabled ? (
+                    <LockIcon />
+                  ) : item.id === activeId ? (
                     <CheckIcon />
                   ) : null}
                 </span>

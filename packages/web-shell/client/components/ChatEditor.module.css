@@ -1500,6 +1500,12 @@
 .dropdownItem[data-disabled] {
   color: var(--muted-foreground);
   cursor: default;
+  opacity: 0.5;
+}
+
+.dropdownItem[data-disabled] .dropdownItemLabel,
+.dropdownItem[data-disabled] .dropdownItemCheck {
+  color: var(--muted-foreground);
 }
 
 .dropdownItem:hover {
@@ -1510,6 +1516,7 @@
 .dropdownItem[data-disabled]:focus-visible,
 .dropdownItem[data-disabled][aria-expanded='true'] {
   background: var(--accent);
+  opacity: 0.7;
 }
 
 .dropdownItemActive {
