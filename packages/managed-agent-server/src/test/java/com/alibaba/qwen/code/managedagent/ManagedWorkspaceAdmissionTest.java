@@ -56,6 +56,7 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -1966,6 +1967,53 @@ class ManagedWorkspaceAdmissionTest {
         // the Turn lookup for the operator even after the creator falls.
         assertRefused(() -> service.cancelTurn(tenant, "operator2",
                 "cancel-1", sessionId, "turn_missing"), "turn_not_found");
+    }
+
+    @Test
+    void renameCapabilityUsesTheRoleAndFrozenFactsIndependentlyOfTurnApprovalSupport() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        grant(tenant, "ws-a", "operator2", true);
+        grant(tenant, "ws-a", "reader", false);
+        ManagedAgentService enabled = boundServiceWithWorkingHarness();
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().rename()).isTrue();
+        assertThat(enabled.getWebShellSession(tenant, "reader", session).capabilities().rename()).isFalse();
+
+        jdbc.update("UPDATE ma_session SET selected_approval_mode='default', approval_revision=1"
+                + " WHERE tenant_id=? AND session_id=?", tenant, session);
+        var summary = enabled.getWebShellSession(tenant, "operator2", session);
+        assertThat(summary.capabilities().workspaceTurns()).isFalse();
+        assertThat(summary.capabilities().rename()).isTrue();
+
+        jdbc.update("UPDATE ma_workspace_access SET role='READER' WHERE tenant_id=? AND actor_id=?", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().rename()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"workspace_generation=workspace_generation+1", "storage_id='replacement'", "state='DRAINING'"})
+    void renameCapabilityRefusesAChangedWorkspaceBinding(String changedFact) {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        ManagedAgentService enabled = boundServiceWithWorkingHarness();
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", session).capabilities().rename()).isTrue();
+        jdbc.update("UPDATE ma_workspace SET " + changedFact + " WHERE tenant_id=?", tenant);
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", session).capabilities().rename()).isFalse();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,true,true", "true,false,true", "true,true,false", "true,true,true"})
+    void renameCapabilityRequiresAvailableFencedTitlesAndWorkspaceFiles(boolean available,
+            boolean fencedTitles, boolean workspaceFiles) {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(available);
+        when(harness.supportsFencedTitles()).thenReturn(fencedTitles);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(workspaceFiles);
+        var enabled = boundServiceWith(harness);
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", session).capabilities().rename())
+                .isEqualTo(available && fencedTitles && workspaceFiles);
     }
 
     @Test

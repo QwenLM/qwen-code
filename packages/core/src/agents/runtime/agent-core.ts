@@ -1386,6 +1386,8 @@ export class AgentCore {
             break;
           }
           currentMessages = toolCallResult.messages;
+          const toolPartCount =
+            currentMessages[currentMessages.length - 1]?.parts?.length ?? 0;
 
           const externalInputs = this.drainExternalInputs(options);
           if (externalInputs.length > 0) {
@@ -1405,6 +1407,16 @@ export class AgentCore {
           if ((currentMessages[0]?.parts?.length ?? 0) === 0) {
             terminateMode = AgentTerminateMode.ERROR;
             break;
+          }
+          // Right after the tool results, before any external input, as in
+          // the core client and the daemon.
+          const loopReminder = loopDetector.takeLoopReminder();
+          if (loopReminder) {
+            currentMessages[currentMessages.length - 1].parts!.splice(
+              toolPartCount,
+              0,
+              { text: loopReminder },
+            );
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);

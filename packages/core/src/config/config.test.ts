@@ -6525,6 +6525,14 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('DW03: applies the constructor and live workflow keyword preference', () => {
+      const config = makeConfig({ workflowKeywordTriggerEnabled: false });
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(false);
+      config.setWorkflowKeywordTriggerEnabled(true);
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(true);
+      expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
@@ -10424,6 +10432,21 @@ describe('Server Config (config.ts)', () => {
       expect(makeConfig().getMaxToolCallsPerTurn()).toBe(
         DEFAULT_MAX_TOOL_CALLS_PER_TURN,
       );
+    });
+
+    it('defaults loopProtection to warn', () => {
+      expect(makeConfig().getLoopProtection()).toBe('warn');
+      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
+        'stop',
+      );
+    });
+
+    it('falls back to warn for an unknown loopProtection mode', () => {
+      expect(
+        makeConfig({
+          loopProtection: 'Stop' as never,
+        }).getLoopProtection(),
+      ).toBe('warn');
     });
 
     it('should use a custom maxToolCallsPerTurn if provided', () => {

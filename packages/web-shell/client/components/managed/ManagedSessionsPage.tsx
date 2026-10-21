@@ -15,8 +15,10 @@ import {
   type ToolDetailsLoader,
 } from '../messages/tools/ToolDetailsContext';
 import { ChatEditor } from '../ChatEditor';
+import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { WelcomeHeader } from '../WelcomeHeader';
 import { ChatContextHeader } from '../ChatContextHeader';
+import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import type {
   EditorHandle,
   ComposerSubmitCommit,
@@ -36,6 +38,7 @@ import {
 import { useManagedFileReferences } from './use-managed-file-references';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
+import { useManagedSessionRename } from './use-managed-session-rename';
 import { useManagedActions } from './use-managed-actions';
 import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedModelChange } from './use-managed-model-change';
@@ -48,6 +51,7 @@ import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import type { ManagedCreationSkillsSource } from './managed-creation-skills';
+import { ManagedWorkspaceNavigation } from './ManagedWorkspaceNavigation';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
@@ -55,6 +59,7 @@ import { useManagedTaskCancel } from './use-managed-task-cancel';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
+  ManagedAgentWorkspace,
   ManagedInputBlock,
 } from './managed-agent-provider';
 import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
@@ -119,16 +124,43 @@ async function persistPending(
 
 export function ManagedSessionsPage({
   sessionId,
+  workspaceCreationOpen,
+  onWorkspaceCreationOpenChange,
+  onWorkspaceCreated,
+  onOpenLocalWorkspace,
+  daemonWorkspaces,
+  onSelectDaemonWorkspace,
+  onWorkspacesChange,
   onSelectSession,
+  onOpenSession,
+  workspaceId,
+  onSelectWorkspace,
+  onSessionWorkspaceChange,
   workspaceCwd,
   managedAgentProvider,
   navigationTarget,
   interactive = true,
   creationSkills,
   onManageSkills,
+  navigationActive = interactive,
+  navigationSearch = '',
 }: {
   sessionId?: string;
-  onSelectSession: (sessionId: string | undefined) => void;
+  workspaceCreationOpen?: boolean;
+  onWorkspaceCreationOpenChange?: (open: boolean) => void;
+  onWorkspaceCreated?: (workspaceId: string) => void;
+  onOpenLocalWorkspace?: () => void;
+  daemonWorkspaces?: WorkspaceSelectorOption[];
+  onSelectDaemonWorkspace?: (workspace: WorkspaceSelectorOption) => void;
+  onWorkspacesChange?: (workspaces: ManagedAgentWorkspace[]) => void;
+  onSelectSession: (
+    sessionId: string | undefined,
+    workspaceId?: string,
+  ) => void;
+  onOpenSession?: (sessionId: string, workspaceId?: string) => void;
+  workspaceId?: string;
+  onSelectWorkspace?: (workspaceId: string) => void;
+  onSessionWorkspaceChange?: (workspaceId: string | null) => void;
   workspaceCwd?: string;
   managedAgentProvider?: ManagedAgentProvider;
   /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
@@ -136,6 +168,8 @@ export function ManagedSessionsPage({
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
+  navigationActive?: boolean;
+  navigationSearch?: string;
 }) {
   const { t } = useI18n();
   if (managedAgentProvider) {
@@ -143,7 +177,18 @@ export function ManagedSessionsPage({
       <ManagedSessionsContent
         key={managedAgentProvider.storageKey}
         sessionId={sessionId}
+        workspaceCreationOpen={workspaceCreationOpen}
+        onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
+        onWorkspaceCreated={onWorkspaceCreated}
+        onOpenLocalWorkspace={onOpenLocalWorkspace}
+        daemonWorkspaces={daemonWorkspaces}
+        onSelectDaemonWorkspace={onSelectDaemonWorkspace}
+        onWorkspacesChange={onWorkspacesChange}
         onSelectSession={onSelectSession}
+        onOpenSession={onOpenSession}
+        workspaceId={workspaceId}
+        onSelectWorkspace={onSelectWorkspace}
+        onSessionWorkspaceChange={onSessionWorkspaceChange}
         workspaceCwd={workspaceCwd}
         provider={managedAgentProvider}
         cancellationEnabled={managedAgentProvider.canCancel}
@@ -151,6 +196,8 @@ export function ManagedSessionsPage({
         interactive={interactive}
         creationSkills={creationSkills}
         onManageSkills={onManageSkills}
+        navigationActive={navigationActive}
+        navigationSearch={navigationSearch}
       />
     );
   }
@@ -159,7 +206,18 @@ export function ManagedSessionsPage({
 
 function ManagedSessionsContent({
   sessionId,
+  workspaceCreationOpen,
+  onWorkspaceCreationOpenChange,
+  onWorkspaceCreated,
+  onOpenLocalWorkspace,
+  daemonWorkspaces,
+  onSelectDaemonWorkspace,
+  onWorkspacesChange,
   onSelectSession,
+  onOpenSession,
+  workspaceId,
+  onSelectWorkspace,
+  onSessionWorkspaceChange,
   workspaceCwd,
   provider,
   cancellationEnabled,
@@ -167,9 +225,25 @@ function ManagedSessionsContent({
   interactive,
   creationSkills,
   onManageSkills,
+  navigationActive,
+  navigationSearch,
 }: {
   sessionId?: string;
-  onSelectSession: (sessionId: string | undefined) => void;
+  workspaceCreationOpen?: boolean;
+  onWorkspaceCreationOpenChange?: (open: boolean) => void;
+  onWorkspaceCreated?: (workspaceId: string) => void;
+  onOpenLocalWorkspace?: () => void;
+  daemonWorkspaces?: WorkspaceSelectorOption[];
+  onSelectDaemonWorkspace?: (workspace: WorkspaceSelectorOption) => void;
+  onWorkspacesChange?: (workspaces: ManagedAgentWorkspace[]) => void;
+  onSelectSession: (
+    sessionId: string | undefined,
+    workspaceId?: string,
+  ) => void;
+  onOpenSession?: (sessionId: string, workspaceId?: string) => void;
+  workspaceId?: string;
+  onSelectWorkspace?: (workspaceId: string) => void;
+  onSessionWorkspaceChange?: (workspaceId: string | null) => void;
   workspaceCwd?: string;
   provider: ManagedAgentProvider;
   cancellationEnabled: boolean;
@@ -177,6 +251,8 @@ function ManagedSessionsContent({
   interactive: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   onManageSkills?: () => void;
+  navigationActive: boolean;
+  navigationSearch: string;
 }) {
   const { t } = useI18n();
   const home = navigationTarget !== undefined;
@@ -186,6 +262,15 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const sessionWorkspaceId =
+    sessionId && detail.summary?.sessionId === sessionId
+      ? (detail.summary.workspace?.workspaceId ?? null)
+      : undefined;
+  useEffect(() => {
+    if (sessionWorkspaceId !== undefined) {
+      onSessionWorkspaceChange?.(sessionWorkspaceId);
+    }
+  }, [sessionWorkspaceId, onSessionWorkspaceChange]);
   const fileReferences = useManagedFileReferences(
     provider,
     clientId,
@@ -252,6 +337,27 @@ function ManagedSessionsContent({
   const [nextCursor, setNextCursor] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
   const [listRevision, setListRevision] = useState(0);
+  const rename = useManagedSessionRename(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    interactive,
+    (displayName) => {
+      if (!sessionId) return;
+      detail.applyTitle(sessionId, displayName);
+      listLifetime.current?.abort();
+      setSessions((current) =>
+        current.map((session) =>
+          session.sessionId === sessionId
+            ? { ...session, title: displayName }
+            : session,
+        ),
+      );
+      setListRevision((current) => current + 1);
+    },
+  );
+  const [workspaceRevision, setWorkspaceRevision] = useState(0);
   const [error, setError] = useState<string>();
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
@@ -463,6 +569,7 @@ function ManagedSessionsContent({
   const refresh = useCallback(() => {
     setError(undefined);
     setListRevision((current) => current + 1);
+    setWorkspaceRevision((current) => current + 1);
     reloadSession();
   }, [reloadSession]);
 
@@ -627,7 +734,9 @@ function ManagedSessionsContent({
         setText('');
       }
       if (selection.current === selectedAtSubmit) {
-        onSelectSession(admission.sessionId);
+        if (summary?.workspace)
+          onSelectSession(admission.sessionId, summary.workspace.workspaceId);
+        else onSelectSession(admission.sessionId);
         detail.reload();
       }
     } catch (failure) {
@@ -751,6 +860,14 @@ function ManagedSessionsContent({
         {t('managed.cancel')}
       </Button>
     ) : null;
+  function openSession(id: string, targetWorkspaceId?: string) {
+    const open = onOpenSession ?? onSelectSession;
+    if (targetWorkspaceId) open(id, targetWorkspaceId);
+    else open(id);
+    setText('');
+    setError(undefined);
+  }
+
   const navigation = (
     <nav
       ref={sessionsNavRef}
@@ -766,37 +883,74 @@ function ManagedSessionsContent({
           </Button>
         </div>
       )}
-      {sessions.map((session) => {
-        const current =
-          summary?.sessionId === session.sessionId ? summary : session;
-        return (
-          <Button
-            key={session.sessionId}
-            variant={sessionId === session.sessionId ? 'secondary' : 'ghost'}
-            className="h-auto shrink-0 justify-start py-2 text-left"
-            aria-current={sessionId === session.sessionId ? 'page' : undefined}
-            onClick={() => {
-              onSelectSession(session.sessionId);
-              setText('');
-              setError(undefined);
-            }}
-          >
-            <span className="min-w-0">
-              <span className="block truncate">
-                {session.title || session.sessionId}
-              </span>
-              <span className="block text-xs text-muted-foreground">
-                {t(`managed.phase.${current.phase}`)}
-              </span>
-            </span>
-          </Button>
-        );
-      })}
-      {!sessions.length && !listLoading && (
-        <p className="p-2 text-sm text-muted-foreground">
-          {t('managed.empty')}
-        </p>
+      {home && provider.workspaceBinding ? (
+        <ManagedWorkspaceNavigation
+          provider={provider}
+          clientId={clientId}
+          sessions={[
+            ...new Map(
+              [...sessions, ...(summary ? [summary] : [])].map((session) => [
+                session.sessionId,
+                session,
+              ]),
+            ).values(),
+          ]}
+          sessionId={sessionId}
+          workspaceId={workspaceId}
+          active={navigationActive}
+          search={navigationSearch}
+          revision={workspaceRevision}
+          onSelectWorkspace={onSelectWorkspace}
+          onSelectSession={openSession}
+          onWorkspacesChange={onWorkspacesChange}
+        />
+      ) : (
+        sessions
+          .filter((session) =>
+            `${summary?.sessionId === session.sessionId ? summary.title : session.title} ${session.sessionId}`
+              .toLocaleLowerCase()
+              .includes(navigationSearch.trim().toLocaleLowerCase()),
+          )
+          .map((session) => {
+            const current =
+              summary?.sessionId === session.sessionId ? summary : session;
+            return (
+              <Button
+                key={session.sessionId}
+                variant={
+                  navigationActive && sessionId === session.sessionId
+                    ? 'secondary'
+                    : 'ghost'
+                }
+                className="h-auto shrink-0 justify-start py-2 text-left"
+                aria-current={
+                  navigationActive && sessionId === session.sessionId
+                    ? 'page'
+                    : undefined
+                }
+                onClick={() =>
+                  openSession(session.sessionId, session.workspace?.workspaceId)
+                }
+              >
+                <span className="min-w-0">
+                  <span className="block truncate">
+                    {current.title || session.sessionId}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    {t(`managed.phase.${current.phase}`)}
+                  </span>
+                </span>
+              </Button>
+            );
+          })
       )}
+      {!sessions.length &&
+        !listLoading &&
+        !(home && provider.workspaceBinding) && (
+          <p className="p-2 text-sm text-muted-foreground">
+            {t('managed.empty')}
+          </p>
+        )}
       {listLoading && (
         <p role="status" className="p-2 text-sm">
           {t('managed.loading')}
@@ -805,6 +959,7 @@ function ManagedSessionsContent({
       {nextCursor && (
         <Button
           variant="ghost"
+          aria-label={`${t('managed.more')} ${t('managed.sessions')}`}
           disabled={listLoading}
           onClick={() => void loadMore()}
         >
@@ -823,6 +978,16 @@ function ManagedSessionsContent({
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
+      {rename.editor && (
+        <SessionRenameDialog
+          value={rename.editor.value}
+          busy={rename.editor.busy}
+          error={rename.editor.error}
+          onChange={rename.setValue}
+          onSubmit={(displayName) => void rename.submit(displayName)}
+          onClose={rename.close}
+        />
+      )}
       {!home && (
         <div className="flex items-center justify-between gap-2">
           <Button
@@ -908,9 +1073,18 @@ function ManagedSessionsContent({
             <div className="shrink-0">
               <ChatContextHeader
                 content={
-                  summary.title === summary.sessionId
-                    ? summary.sessionId.slice(0, 8)
-                    : summary.title
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate" onDoubleClick={rename.open}>
+                      {summary.title === summary.sessionId
+                        ? summary.sessionId.slice(0, 8)
+                        : summary.title}
+                    </span>
+                    {rename.supported && (
+                      <Button variant="ghost" size="sm" onClick={rename.open}>
+                        {t('sidebar.rename')}
+                      </Button>
+                    )}
+                  </span>
                 }
                 workspaceName={summary.workspace?.workspaceId}
                 workspacePath={summary.workspaceCwd}
@@ -942,7 +1116,17 @@ function ManagedSessionsContent({
           )}
           {summary && !home && (
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium">{summary.title}</span>
+              <span
+                className="max-w-full break-words font-medium"
+                onDoubleClick={rename.open}
+              >
+                {summary.title}
+              </span>
+              {rename.supported && (
+                <Button variant="outline" size="sm" onClick={rename.open}>
+                  {t('sidebar.rename')}
+                </Button>
+              )}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (
@@ -1079,20 +1263,38 @@ function ManagedSessionsContent({
               {summary.failure.message}
             </p>
           )}
-          {!sessionId && provider.workspaceBinding ? (
-            <WorkspaceBindingCreator
-              provider={provider}
-              clientId={clientId}
-              interactive={interactive}
-              creationSkills={creationSkills}
-              onManageSkills={onManageSkills}
-              onCreated={(createdId) => {
-                setListRevision((current) => current + 1);
-                onSelectSession(createdId);
-              }}
-              onAbandoned={() => setListRevision((current) => current + 1)}
-            />
-          ) : (
+          {provider.workspaceBinding &&
+            (!sessionId || workspaceCreationOpen) && (
+              <WorkspaceBindingCreator
+                provider={provider}
+                workspaceCreationOpen={workspaceCreationOpen}
+                onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
+                onOpenLocalWorkspace={onOpenLocalWorkspace}
+                daemonWorkspaces={daemonWorkspaces}
+                onSelectDaemonWorkspace={onSelectDaemonWorkspace}
+                creationOnly={Boolean(sessionId)}
+                clientId={clientId}
+                workspaceId={workspaceId}
+                onSelectWorkspace={
+                  !sessionId
+                    ? (onSessionWorkspaceChange ?? onSelectWorkspace)
+                    : undefined
+                }
+                interactive={interactive}
+                creationSkills={creationSkills}
+                onManageSkills={onManageSkills}
+                onWorkspaceCreated={(id) => {
+                  setWorkspaceRevision((current) => current + 1);
+                  onWorkspaceCreated?.(id);
+                }}
+                onCreated={(createdId, createdWorkspaceId) => {
+                  setListRevision((current) => current + 1);
+                  onSelectSession(createdId, createdWorkspaceId);
+                }}
+                onAbandoned={() => setListRevision((current) => current + 1)}
+              />
+            )}
+          {!(!sessionId && provider.workspaceBinding) && (
             <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
               <ToolDetailsContext.Provider value={loadToolDetails}>
                 <MessageList

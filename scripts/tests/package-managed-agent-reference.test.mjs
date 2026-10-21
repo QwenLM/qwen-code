@@ -309,12 +309,7 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   const server = renderServerEnv(secrets, '/tmp/application.yml');
   assert.ok(server.includes(secrets.token));
   assert.ok(server.includes(secrets.digest));
-  assert.match(server, /^QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=true$/m);
-  assert.match(
-    server,
-    /^QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL=http:\/\/127\.0\.0\.1:8080$/m,
-  );
-  assert.match(server, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=\S+$/m);
+  assertDerivesSessionStoreWiring(server);
   assert.match(
     renderApplicationYml(secrets),
     /credential-key-id: 'reference-test'/,
@@ -509,7 +504,7 @@ test('bootstrap refuses to run while another bootstrap holds the lock', async ()
   }
 });
 
-test('enables the Session Store wherever the env template enables the Harness', async () => {
+test('leaves the Session Store wiring to the server defaults in the env template', async () => {
   const template = await readFile(
     new URL(
       '../../packages/managed-agent-server/distribution/systemd/server.env.example',
@@ -518,13 +513,19 @@ test('enables the Session Store wherever the env template enables the Harness', 
     'utf8',
   );
   assert.match(template, /^QWEN_MANAGED_AGENT_HARNESS_ENABLED=true$/m);
-  assert.match(template, /^QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=true$/m);
-  assert.match(
-    template,
-    /^QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL=http:\/\/127\.0\.0\.1:8080$/m,
-  );
-  assert.match(template, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=\S+$/m);
+  assertDerivesSessionStoreWiring(template);
 });
+
+// The server derives the store switch, URL and workspace ID; an explicit
+// workspace ID would conflict with the local-process Broker's derived one.
+function assertDerivesSessionStoreWiring(env) {
+  assert.doesNotMatch(env, /^QWEN_MANAGED_AGENT_SESSION_STORE_/m);
+  assert.doesNotMatch(env, /^QWEN_MANAGED_AGENT_WORKSPACE_ID=/m);
+  assert.match(
+    env,
+    /^QWEN_MANAGED_AGENT_WORKSPACE_CWD=\/srv\/qwen-workspace$/m,
+  );
+}
 
 test('rejects a stable distribution version', async () => {
   await assert.rejects(

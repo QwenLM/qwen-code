@@ -60,10 +60,18 @@ asserts:
 - the cancelled run reaches `cancelled` from its committed proof, and its
   occurrence settles once;
 - the schedule, future slots, sibling runs and foreground work are untouched;
-- a queued input cancelled before any attempt settles with no model call, and
-  a run that completes naturally keeps its outcome;
-- a retry under the same key reuses the original operation and run, and a
-  parked cancel is never redelivered.
+- a queued input cancelled before any attempt settles with no model call; that
+  a run which completes on its own keeps its outcome — delivered: a cancel
+  arriving after settlement is refused with `409 task_action_unavailable`
+  (`The task does not accept a cancellation now.`), and the run stays
+  `completed` with its occurrence `fired`;
+- a cancel retried under the same key reuses its committed operation and changes
+  nothing — delivered: the second request answers the cancelled task, the run
+  stays `cancelled` and the occurrence settles once;
+- a retry under the same key reuses the original operation and run — delivered:
+  the second `POST /runs` answers the run it already made, records no second
+  occurrence and starts no second Turn. That a parked cancel is never
+  redelivered stays open.
 
 - `cancel-stops-only-the-target` is delivered. With the wake turn parked on the
   model, the public task cancel settles the task and the run `cancelled` in
