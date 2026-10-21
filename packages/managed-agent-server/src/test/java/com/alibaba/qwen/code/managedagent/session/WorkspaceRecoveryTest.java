@@ -22,6 +22,11 @@ class WorkspaceRecoveryTest {
     @Autowired private WorkspaceExecutionStore authority;
 
     @Test
+    void sharedExecutionRetainsEveryPhysicalMaintenanceBlocker() throws Exception {
+        WorkspaceRecoveryContract.verifySharedExecution(source, jdbc, store, authority);
+    }
+
+    @Test
     void cleanupUsesOriginalPhysicalOwnershipAndFencesLateAcquisition() throws Exception {
         WorkspaceRecoveryContract.verify(source, jdbc, store, authority);
     }

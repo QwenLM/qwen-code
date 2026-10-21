@@ -43,6 +43,11 @@ import {
 } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import {
+  DEFAULT_LOOP_PROTECTION,
+  isLoopProtectionMode,
+} from '../services/loop-protection.js';
+import type { LoopProtectionMode } from '../services/loop-protection.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
 import {
   getQualifiedVisionModelId,
@@ -1547,6 +1552,8 @@ export interface ConfigParameters {
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
+  /** What a firing loop detector does; defaults to `warn`. */
+  loopProtection?: LoopProtectionMode;
   /** Per-turn tool-call cap; <= 0 disables. See getMaxToolCallsPerTurn. */
   maxToolCallsPerTurn?: number;
   truncateToolOutputThreshold?: number;
@@ -3234,6 +3241,7 @@ export class Config {
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
+  private readonly loopProtection: LoopProtectionMode;
   private readonly maxToolCallsPerTurn: number;
   private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
@@ -3664,6 +3672,10 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
+    // Embedders bypass the CLI's check; an unknown mode would act as `off`.
+    this.loopProtection = isLoopProtectionMode(params.loopProtection)
+      ? params.loopProtection
+      : DEFAULT_LOOP_PROTECTION;
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
       params.maxToolCallsPerTurn,
     );
@@ -11717,6 +11729,10 @@ export class Config {
 
   getSkipLoopDetection(): boolean {
     return this.skipLoopDetection;
+  }
+
+  getLoopProtection(): LoopProtectionMode {
+    return this.loopProtection;
   }
 
   /**
