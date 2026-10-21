@@ -5,6 +5,8 @@
  */
 
 export const MCP_APP_MESSAGES_EN: Record<string, string> = {
+  'mcpApp.generatedUi.unavailable':
+    'Generated UI is unavailable for this session.',
   'mcpApp.message.title': 'Review App message',
   'mcpApp.message.description':
     'This text comes from an MCP App. Sending starts an ordinary request in the session below; normal tool approvals still apply.',
@@ -32,6 +34,7 @@ export const MCP_APP_MESSAGES_EN: Record<string, string> = {
 };
 
 export const MCP_APP_MESSAGES_ZH: Record<string, string> = {
+  'mcpApp.generatedUi.unavailable': '此会话未启用内置 Generated UI。',
   'mcpApp.message.title': '审阅 App 消息',
   'mcpApp.message.description':
     '以下文字来自 MCP App。发送后将作为普通请求进入下方会话，工具仍需按正常规则审批。',

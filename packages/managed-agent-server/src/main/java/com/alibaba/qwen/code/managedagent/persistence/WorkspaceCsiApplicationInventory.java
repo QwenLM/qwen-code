@@ -165,7 +165,7 @@ final class WorkspaceCsiApplicationInventory {
             declaration("ma_resource_ref", "session_scope_key,owner_kind,owner_key,owner_revision,resource_key",
                     "session_scope_key:CHAR,owner_kind:VARCHAR,owner_key:CHAR,owner_revision:BIGINT,resource_key:CHAR,"
                     + "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,journal_revision:BIGINT,"
-                    + "resource_id:VARBINARY,gmt_create:BIGINT"),
+                    + "resource_id:VARBINARY,gmt_create:BIGINT,runtime_binding_key:CHAR"),
             declaration("ma_runtime_binding", "binding_id",
                     "binding_id:VARBINARY,request_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "workspace_generation:VARBINARY,canonical_cwd:VARCHAR,capability_digest:VARBINARY,"
@@ -183,7 +183,8 @@ final class WorkspaceCsiApplicationInventory {
                     "scope_key:CHAR,runtime_session_id:VARBINARY,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "workspace_generation:VARBINARY,canonical_cwd:VARCHAR,capability_digest:VARBINARY,"
                     + "isolation_class:VARCHAR,harness_session_id:VARBINARY,turn_kind:VARCHAR,binding_id:VARBINARY,"
-                    + "runtime_generation:BIGINT,session_state:VARCHAR,record_version:BIGINT,last_active_at:BIGINT"),
+                    + "runtime_generation:BIGINT,session_state:VARCHAR,record_version:BIGINT,last_active_at:BIGINT,"
+                    + "execution_storage_key:CHAR,execution_exclusive:BOOLEAN"),
             declaration("ma_runtime_slot", "request_key",
                     "request_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:VARBINARY,"
                     + "canonical_cwd:VARCHAR,capability_digest:VARBINARY,isolation_class:VARCHAR,isolation_key:VARBINARY,"
@@ -227,7 +228,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "activation_expires_at:BIGINT,activation_head_revision:BIGINT,tenant_key:CHAR,harness_key:CHAR,"
                     + "harness_session_id:VARBINARY,head_kind:VARCHAR,phase:VARCHAR,operation_id:VARBINARY,"
                     + "claim_generation:BIGINT,claim_lease_until:BIGINT,wake_pending:BOOLEAN,wake_head_revision:BIGINT,"
-                    + "wake_retry_at:BIGINT,wake_scan_pending:BOOLEAN"),
+                    + "wake_retry_at:BIGINT,wake_scan_pending:BOOLEAN,cleanup_head_revision:BIGINT"),
             declaration("ma_session_journal_tx", "tenant_id,session_id,journal_revision",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,journal_revision:BIGINT,"
                     + "command_key_hash:CHAR,transaction_id:VARBINARY,operation:LONGTEXT,command_id:VARBINARY,"
@@ -1568,7 +1569,7 @@ final class WorkspaceCsiApplicationInventory {
                 if (!instructions) {
                     JsonNode skills = publicJson(raw);
                     requireEncoded(skills.isArray());
-                    AgentDefinitionExtensions.skills(PUBLIC_ARTIFACTS.convertValue(skills, Object.class), true);
+                    AgentDefinitionExtensions.sessionSkills(PUBLIC_ARTIFACTS.convertValue(skills, Object.class));
                 }
             } catch (IOException malformed) {
                 throw new IllegalArgumentException("Invalid agent instructions", malformed);
@@ -3078,6 +3079,7 @@ final class WorkspaceCsiApplicationInventory {
                         && Objects.equals(intent.resourceHandleVersion().longValue(), row.number("resource_handle_version"))
                         && Objects.equals(intent.attestationGeneration(), row.number("attestation_generation")));
                 case "ma_runtime_session" -> expect(table, row, scope(row)
+                        && row.cell("execution_storage_key").isNull() && Boolean.FALSE.equals(row.bool("execution_exclusive"))
                         && original.bindingId().equals(row.text("binding_id")) && session.equals(row.text("runtime_session_id"))
                         && session.equals(row.text("harness_session_id")) && "bootstrap".equals(row.text("turn_kind"))
                         && Objects.equals(original.generation(), row.number("runtime_generation"))

@@ -70,7 +70,8 @@ public final class ApiModels {
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
             Boolean stream,
-            JsonNode workspace) {
+            JsonNode workspace,
+            @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
     }
 
     // D7-3: admission_profile asks a Turn input or cancel for the
@@ -154,7 +155,8 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean modelChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean durableOperations,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -279,6 +281,14 @@ public final class ApiModels {
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
 
+    public record WebShellRenameRequest(@Size(max = 128) String requestId,
+            @NotBlank @Size(max = 128) String sessionId,
+            @NotNull String idempotencyKey, String title) {
+    }
+
+    public record WebShellRenameResult(String sessionId, String title, boolean replayed) {
+    }
+
     public record WebShellSkill(String name, String description) { }
 
     public record WebShellSessionSkills(List<WebShellSkill> skills) { }
@@ -297,14 +307,19 @@ public final class ApiModels {
             String environmentId, String title,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
-            JsonNode workspace, String approvalMode, Boolean planMode) {
+            JsonNode workspace, String approvalMode, Boolean planMode,
+            @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
     }
 
     public record WebShellSessionOptionsRequest(@NotBlank @Size(max = 128) String agentId) {
     }
 
     public record WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
-            boolean planModeSupported, boolean inputAttachments) {
+            boolean planModeSupported, boolean inputAttachments, boolean skillsSupported) {
+        public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes,
+                boolean planModeSupported, boolean inputAttachments) {
+            this(approvalMode, availableApprovalModes, planModeSupported, inputAttachments, false);
+        }
         public WebShellSessionOptions(String approvalMode, List<String> availableApprovalModes) {
             this(approvalMode, availableApprovalModes, false, false);
         }
@@ -317,7 +332,8 @@ public final class ApiModels {
     }
 
     public record WebShellSessionApproval(String approvalMode, long approvalRevision,
-            List<String> availableApprovalModes, boolean supported, boolean planMode, boolean planModeSupported) {}
+            List<String> availableApprovalModes, boolean supported, boolean planMode, boolean planModeSupported,
+            boolean liveSupported) {}
 
     public record WebShellSessionApprovalRequest(@NotBlank @Size(max = 128) String sessionId) {}
 

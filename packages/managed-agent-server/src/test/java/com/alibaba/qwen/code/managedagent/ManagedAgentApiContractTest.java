@@ -230,6 +230,10 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.WebShellRenameRequest.class,
+                            List.of("WebShellRenameRequest")),
+                    entry(ApiModels.WebShellRenameResult.class,
+                            List.of("WebShellRenameResult")),
                     entry(WebShellTranscriptRequest.class,
                             List.of("WebShellTranscriptRequest")),
                     entry(WebShellStreamRequest.class,
@@ -881,6 +885,23 @@ class ManagedAgentApiContractTest {
                  "agentId":"qwen-code","title":"web",
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
+        String renameBody = """
+                {"requestId":"contract-rename","sessionId":"%s",
+                 "idempotencyKey":"contract-web-rename","title":"renamed web"}
+                """.formatted(webSessionId);
+        JsonNode renamed = json(exchange(drift, "webShellRenameSession", 200,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant), renameBody));
+        assertThat(renamed.path("sessionId").asText()).isEqualTo(webSessionId);
+        assertThat(renamed.path("title").asText()).isEqualTo("renamed web");
+        assertThat(renamed.path("replayed").asBoolean()).isFalse();
+        JsonNode renameReplay = json(exchange(drift, "webShellRenameSession", 200,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant), renameBody));
+        assertThat(renameReplay.path("replayed").asBoolean()).isTrue();
+        exchange(drift, "webShellRenameSession", 400,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant),
+                renameBody.replace("renamed web", " "));
+        exchange(drift, "webShellRenameSession", 404,
+                post(WEB_SHELL + "/sessions/rename").header(TENANT, otherTenant), renameBody);
         // The widened metadata contract: a body with keys beyond clientId
         // is both served (202) and schema-valid. exchange() validates
         // sub-300 request bodies, so re-tightening WebShellMetadata to
@@ -1449,6 +1470,22 @@ class ManagedAgentApiContractTest {
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
                         .header(TENANT, workspaceTenant).principal(actor), null);
         assertThat(json(mcpCatalog).path("servers")).isEmpty();
+        String webMcp = exchange(drift, "queryWebShellSessionMcp", 200,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        assertThat(json(webMcp)).isEqualTo(json(mcpCatalog));
+        exchange(drift, "queryWebShellSessionMcp", 401,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 404,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, otherTenant).principal(actor(otherTenant)),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 403,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor(otherTenant)),
+                "{\"sessionId\":\"" + publicBoundId + "\"}");
+        exchange(drift, "queryWebShellSessionMcp", 400,
+                post(WEB_SHELL + "/session-mcp/query").header(TENANT, workspaceTenant).principal(actor),
+                "{}");
         exchange(drift, "getSessionMcpCatalog", 404,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
                         .header(TENANT, otherTenant), null);
@@ -1516,6 +1553,23 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant), create);
         exchange(drift, "webShellGetWorkspaceOperation", 401,
                 post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant), "{\"operationId\":\"missing\"}");
+    }
+
+    @Test
+    void localPathContractRequiresExplicitImportCapability() throws Exception {
+        String tenant = "contract-local-import-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        assertThat(json(exchange(drift, "webShellCreateWorkspace", 409,
+                post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"displayName\":\"Project\",\"idempotencyKey\":\"local\",\"localPath\":\"/not-admitted\"}"))
+                .at("/error/code").asText()).isEqualTo("workspace_creation_unavailable");
+        assertThat(json(exchange(drift, "queryWebShellWorkspaceDirectories", 409,
+                post(WEB_SHELL + "/workspaces/directories/query").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"localPath\":\"\"}"))
+                .at("/error/code").asText()).isEqualTo("workspace_creation_unavailable");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(drift).isEmpty();
     }
 
     @Test
@@ -2679,7 +2733,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true}
                                 """);
                 if (javaDurableAdmission != null) {
                     ((com.fasterxml.jackson.databind.node.ObjectNode) webCapabilities)

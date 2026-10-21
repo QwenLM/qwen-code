@@ -130,6 +130,7 @@
 }
 
 .chatRow:hover > .chatActions,
-.chatRow:focus-within > .chatActions {
+.chatRow:focus-within > .chatActions,
+.chatActions[data-menu-open='true'] {
   opacity: 1;
 }

@@ -14,12 +14,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 
 /**
@@ -67,13 +63,9 @@ public class LiteTopicPublicEventTransport implements EventTransport, Closeable 
             ClientServiceProvider provider, String topic, ObjectMapper mapper,
             BiFunction<String, String, Optional<String>> workspaces) {
         this(producer, provider, topic, mapper, workspaces,
-                new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
-                        new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
-                            Thread thread = new Thread(runnable,
-                                    "event-transport-public");
-                            thread.setDaemon(true);
-                            return thread;
-                        }, new ThreadPoolExecutor.AbortPolicy()));
+                TransportExecutors.bounded(Thread.ofPlatform().daemon()
+                        .name("event-transport-public").factory(),
+                        1, QUEUE_CAPACITY));
     }
 
     // The executor is injectable so a test can distribute synchronously.
@@ -92,14 +84,7 @@ public class LiteTopicPublicEventTransport implements EventTransport, Closeable 
     /** Stops the distribution thread; the shared producer is the config's. */
     @Override
     public void close() {
-        if (executor instanceof ExecutorService service) {
-            service.shutdown();
-            try {
-                service.awaitTermination(2, TimeUnit.SECONDS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        TransportExecutors.close(executor);
     }
 
     @Override

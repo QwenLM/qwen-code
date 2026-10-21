@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { BundledGeneratedUiStatus } from '@qwen-code/qwen-code-core/config/generated-ui.js';
 import type {
   ApprovalMode,
   McpAppToolResult,
@@ -63,6 +64,7 @@ import type {
   ServeSessionResourcesStatus,
   ServeSessionSavedWorkflowStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeSessionTaskRuntimeStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
   ServeWorkflowActionInput,
@@ -325,6 +327,26 @@ function requireManagedSessionStoreString(
 
 export type { ManagedToolV2Client } from '@qwen-code/qwen-code-core';
 
+export interface MessageGroupsSnapshot {
+  snapshot: string;
+  groups: Array<{
+    id: string;
+    promptId?: string;
+    promptIds?: string[];
+    recordIds: string[];
+  }>;
+}
+
+export interface DeleteMessageGroupsRequest {
+  snapshot: string;
+  groupIds: string[];
+}
+
+export interface DeleteMessageGroupsResponse {
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
+}
+
 export interface RewindRequest {
   promptId: string;
   rewindFiles?: boolean;
@@ -456,6 +478,7 @@ export function parseBackgroundNotificationTurn(
 }
 
 export interface BridgeSession {
+  generatedUi?: BundledGeneratedUiStatus;
   startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /**
@@ -2356,6 +2379,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<SessionArtifactMutationResult>;
 
   /**
+   * Only for management routes with strict mutation and workspace ownership
+   * checks; clients cannot grant themselves this authority.
+   */
+  removeSessionArtifactForWorkspaceOwner(
+    sessionId: string,
+    artifactId: string,
+  ): Promise<SessionArtifactMutationResult>;
+
+  /**
    * Remove an artifact from the session. Missing artifact ids are idempotent
    * no-ops; unknown session ids still throw `SessionNotFoundError`.
    */
@@ -2544,6 +2576,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     opts?: { includeWorkflows?: boolean },
   ): Promise<ServeSessionTasksStatus>;
+
+  /**
+   * Read on-demand runtime detail for one shell task: the process-tree RSS,
+   * the captured-output size/mtime, and the output tail. Read-only; returns
+   * `runtime: null` for an unknown/evicted task or a non-shell task.
+   */
+  getSessionTaskRuntime(
+    sessionId: string,
+    taskId: string,
+  ): Promise<ServeSessionTaskRuntimeStatus>;
 
   /** Read persisted and live subagents for a live session. */
   getSessionAgentsStatus(sessionId: string): Promise<ServeSessionAgentsStatus>;
@@ -3014,11 +3056,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<ShellCommandResult>;
 
+  /** List persisted message groups after previously admitted history mutations. */
+  getMessageGroups(sessionId: string): Promise<MessageGroupsSnapshot>;
+  deleteMessageGroups(
+    sessionId: string,
+    req: DeleteMessageGroupsRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<DeleteMessageGroupsResponse>;
+
   /**
    * List rewindable snapshots for a session with per-turn diff stats.
-   * Answered only after every rewind admitted before the call has run, so
-   * the listing never describes a turn the bridge has already agreed to
-   * drop.
+   * Answered after previously admitted history mutations.
    */
   getRewindSnapshots(
     sessionId: string,

@@ -16,6 +16,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsApprovalSelection() { return false; }
 
+    default boolean supportsLiveApprovalSelection() { return false; }
+
     default boolean supportsAgentDefinitionApprovalSelection() { return false; }
 
     default boolean supportsModelSelection() { return false; }
@@ -23,6 +25,8 @@ public interface HarnessConnector extends AutoCloseable {
     default boolean supportsPlanMode() { return false; }
 
     default boolean supportsInputAttachments() { return false; }
+
+    default boolean supportsSessionSkills() { return false; }
 
     default boolean isWorkspaceFilesAvailable() {
         return false;

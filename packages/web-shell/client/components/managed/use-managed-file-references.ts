@@ -21,6 +21,15 @@ function object(value: unknown): Record<string, unknown> {
     : {};
 }
 
+// Some deployments cannot serve Workspace file references at all: the runtime
+// broker's CLI predates the workspaceFiles handshake, or the storage kind does
+// not support references. The mount probe treats that as an absent capability
+// and reports nothing; a refusal later in the Session still surfaces, because
+// the same code also covers a broker that failed mid-request.
+function isFileAccessUnsupported(error: unknown): boolean {
+  return object(error).code === 'workspace_files_unsupported';
+}
+
 export function useManagedFileReferences(
   provider: ManagedAgentProvider,
   clientId: string,
@@ -190,7 +199,13 @@ export function useManagedFileReferences(
         .then(() => {
           if (!controller.signal.aborted) setReady(source);
         })
-        .catch(() => undefined);
+        .catch((error: unknown) => {
+          // The probe is the only path that treats this code as an absent
+          // capability. Clearing the failure it just recorded keeps the
+          // composer clean; the same code on a later read still surfaces.
+          if (!controller.signal.aborted && isFileAccessUnsupported(error))
+            setFailure(undefined);
+        });
     return () => {
       active.current = false;
       controller.abort();

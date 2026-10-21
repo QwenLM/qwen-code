@@ -46,7 +46,8 @@ qwen:
       port: '${QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT:0}'
       address: '${QWEN_MANAGED_AGENT_INTERNAL_SERVER_ADDRESS:127.0.0.1}'
     session-store:
-      enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}'
+      # The Hosted Harness requires the store, so it follows the Harness.
+      enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:${qwen.managed-agent.harness.enabled:false}}'
       base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:}'
       workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
       writer-lease-duration: '${QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION:60s}'
@@ -124,6 +125,7 @@ qwen:
       v3-result-window: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW:30m}'
       workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
       workspace-creation-root: '${QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT:}'
+      local-directory-import-enabled: '${QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED:false}'
       workspace-generation: '${QWEN_MANAGED_AGENT_WORKSPACE_GENERATION:1}'
       workspace-cwd: '${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}'
       isolation-class: '${QWEN_MANAGED_AGENT_RUNTIME_ISOLATION:session}'

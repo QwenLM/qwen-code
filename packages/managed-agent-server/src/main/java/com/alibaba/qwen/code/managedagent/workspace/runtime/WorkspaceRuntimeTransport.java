@@ -401,6 +401,18 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         } else if (managed(session) && !"history".equals(operation.get("kind"))) {
             Context context = context(lease, session, true);
             ownership.assertHeld(context.binding(), context.session());
+            if (!ResidentWorkspaceProfile.selects(session.getScope())
+                    && "raw-file-history".equals(operation.get("kind")) && "rewind".equals(operation.get("action"))) {
+                if (!ownership.beginRewind(context.binding(), context.session())) {
+                    return delegate.control(lease, session, Map.of("kind", "raw-file-history", "action", "snapshot"))
+                            .thenApply(state -> Map.of("state", state, "filesChanged", List.of(),
+                                    "filesFailed", List.of(), "conflict", true));
+                }
+                return delegate.control(lease, session, operation).thenApply(result -> {
+                    ownership.endRewind(context.binding(), context.session());
+                    return result;
+                });
+            }
         }
         return delegate.control(lease, session, operation);
     }
@@ -474,6 +486,10 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         // worker), so it owes the same detach; one with no holder never
         // installed anything and keeps the shortcut.
         Context context = context(lease, session, false);
+        if (ownership.hasExclusiveClaim(context.session())) {
+            throw new RuntimeBrokerException(409, "workspace_writer_unproven",
+                    "A Workspace rewind must settle before its mount can be handed back.", false);
+        }
         if (context.session().getState() == RuntimeSessionRecord.State.READY
                 || ownership.isHeld(context.binding(), context.session())) {
             detachOwed.add(detachKey(context));
