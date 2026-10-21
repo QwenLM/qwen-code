@@ -781,7 +781,7 @@ The following events are logged:
 
 - `loop_protection`: A loop detector governed by `model.loopProtection` reached a reminder or stop point. _(Note: emitted without `qwen-code.` prefix, like `loop_detected`.)_
   - **Attributes**: `prompt_id` (string), `loop_type` (string), `decision` (string: `reminded`, `stopped` or `observed`), `mode` (string: `stop`, `warn` or `off`), `loop_reason` (string, optional)
-  - `reminded` is logged when the reminder is sent to the model; `stopped` is logged once per turn and also as `loop_detected`; `observed` is logged once per pattern under `off`. Budget stops (an explicit cap, the backstop) and the duplicate provider tool-call id guard are not governed and log no `loop_protection` event.
+  - `reminded` is logged when the reminder is sent to the model; `stopped` is logged once per turn and also as `loop_detected`; `observed` is logged once per pattern under `off`, and under `warn` when a stateful read tool reaches the stop point without the result evidence a reminder needs. Budget stops (an explicit cap, the backstop) and the duplicate provider tool-call id guard are not governed and log no `loop_protection` event.
 
 - `kitty_sequence_overflow`: Kitty graphics protocol sequence exceeded buffer size. _(Note: emitted without `qwen-code.` prefix — pre-existing inconsistency.)_
   - **Attributes**: `sequence_length` (int), `truncated_sequence` (string, first 20 chars)

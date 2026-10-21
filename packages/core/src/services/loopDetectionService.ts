@@ -75,10 +75,10 @@ function getLoopDetectionToolCall<T extends { name: string; args: object }>(
 
 // Consecutive identical tool calls (same name + identical args) tolerated
 // before the always-on guard halts the turn. Repeating an identical call
-// yields an identical result, so this is never a productive pattern. Kept
-// below the DashScope server-side "Repetitive tool calls detected" threshold
-// so the client breaks the loop before the server rejects the whole
-// conversation with a 400 (issue #5019).
+// yields an identical result, so this is never a productive pattern. It was
+// first kept below a DashScope server-side "Repetitive tool calls detected"
+// 400 (issue #5019), which no longer reproduces (#14828); under `stop` it
+// halts here, under `warn` it only reminds.
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
@@ -1167,6 +1167,7 @@ export class LoopDetectionService {
       this.lastToolCallKey = key;
       this.toolCallRepetitionCount = 1;
       this.loopProtectionHandled.delete('identical');
+      this.loopProtectionHandled.delete('identical-unverified');
     }
     const repeated = {
       loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
@@ -1193,8 +1194,7 @@ export class LoopDetectionService {
         // result changed, the model's re-poll was productive — restart the
         // streak instead of halting. Missing result evidence (results never
         // recorded for this streak) fails safe and keeps the pre-#9450
-        // behavior, so the DashScope protection (#5019) is never loosened by
-        // a wiring gap.
+        // stop, so a wiring gap never loosens the guard under `stop`.
         const state = this.statefulRepeatState.get(key);
         const expectedResults = this.toolCallRepetitionCount - 1;
         if (state && state.resultsObserved >= expectedResults) {
@@ -1203,17 +1203,19 @@ export class LoopDetectionService {
             state.resultsObserved = 0;
             state.unchangedStreak = 0;
             this.loopProtectionHandled.delete('identical');
+            this.loopProtectionHandled.delete('identical-unverified');
             return false;
           }
         }
         // Without that evidence the stop still fails safe, but a `warn`
         // reminder would tell the model a result that may be changing will
-        // not change, so it is only recorded.
+        // not change, so it is only recorded. It is recorded under its own
+        // key: results that arrive later can still earn the reminder.
         if (
           this.config.getLoopProtection() === 'warn' &&
           !this.statefulResultsUnchanged(key)
         ) {
-          this.observe('identical', repeated.loopType, {});
+          this.observe('identical-unverified', repeated.loopType, {});
           return false;
         }
       }
@@ -2061,6 +2063,7 @@ export class LoopDetectionService {
     this.lastShellInspectionKey = null;
     this.shellInspectionStreak = 0;
     this.loopProtectionHandled.delete('identical');
+    this.loopProtectionHandled.delete('identical-unverified');
     this.loopProtectionHandled.delete('shell');
   }
 

@@ -10073,11 +10073,11 @@ export class Session implements SessionContext {
         `[repeated-tool-failure-guard] mode=${toolLoopState.repeatedToolFailureMode} decision=${repeatedToolFailureDecision.kind} phase=${state.phase} candidate=${state.candidateOrdinal} failures=${state.failureCount} batches=${state.batchCount}`,
       );
     }
-    const loopReminder = takeDaemonLoopReminders(
-      this.config,
-      promptId,
-      toolLoopState,
-    );
+    // A stop sends nothing, so its batch leaves the reminders unlogged.
+    const loopReminder =
+      repeatedToolFailureDecision.kind === 'stop'
+        ? undefined
+        : takeDaemonLoopReminders(this.config, promptId, toolLoopState);
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),

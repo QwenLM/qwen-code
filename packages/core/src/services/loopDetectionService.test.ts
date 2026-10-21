@@ -2607,6 +2607,31 @@ ${boardState}
       expect(decisions()).toEqual([`${IDENTICAL}:observed`]);
     });
 
+    it('reminds a stateful read once late results show it unchanged under warn', () => {
+      withMode('warn');
+      const args = { status: 'open' };
+      // One response repeats the call before any result is recorded.
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(toolCall('task_list', args, `b-${i}`)),
+        ).toBe(false);
+      }
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        service.recordToolResultByCallId(`b-${i}`, [
+          fnResponse('task_list', { output: 'board' }, `b-${i}`),
+        ]);
+      }
+      expect(service.takeLoopReminder()).toBeUndefined();
+      expect(
+        service.checkAlwaysOnSafeties(toolCall('task_list', args, 'p-0')),
+      ).toBe(false);
+      expect(service.takeLoopReminder()).toContain('task_list');
+      expect(decisions()).toEqual([
+        `${IDENTICAL}:observed`,
+        `${IDENTICAL}:reminded`,
+      ]);
+    });
+
     it('still stops a stateful read with no result evidence under stop', () => {
       withMode('stop');
       for (let i = 1; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
