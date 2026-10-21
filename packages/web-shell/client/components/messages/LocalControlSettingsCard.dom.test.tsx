@@ -138,6 +138,58 @@ describe('LocalControlSettingsCard', () => {
     expect(enableBodies[0]).toMatchObject({ address: '203.0.113.10' });
   });
 
+  it('keeps the CLI-granted address when the fresh candidate list omits it (#14140)', async () => {
+    // A granted address is never an automatic candidate by construction, so
+    // its absence from a fresh list is not evidence of staleness. Dropping it
+    // here would enable on a network the operator explicitly avoided and
+    // revoke the grant for the daemon's lifetime.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: true,
+          address: '10.8.0.2',
+          interfaceName: 'utun4',
+          interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+          explicitCandidate: { interfaceName: 'utun4', address: '10.8.0.2' },
+        });
+      }
+      if (url.includes('/workspace/local-control/disable')) {
+        return localControlResponse({
+          active: false,
+          interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+        });
+      }
+      enableBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+      return localControlResponse({
+        active: true,
+        address: '10.8.0.2',
+        interfaceName: 'utun4',
+        interfaces: [{ interfaceName: 'en0', address: '192.168.1.10' }],
+      });
+    });
+
+    const container = mount();
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Disconnect phone access').click();
+    });
+    await flush();
+
+    const enable = buttonWithText(container, 'Turn on Local Control');
+    act(() => {
+      enable.click();
+    });
+    await flush();
+
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).toMatchObject({ address: '10.8.0.2' });
+  });
+
   it('drops the retained pick when the daemon refuses it and recovers from the fresh candidate list', async () => {
     // Stale-DHCP recovery must survive retention: an empty candidate list
     // proves nothing (the pick may live on a filtered tunnel interface), so

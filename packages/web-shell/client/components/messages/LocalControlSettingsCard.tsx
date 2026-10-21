@@ -30,6 +30,16 @@ function getLocalControlTarget(): string {
   return `${url.pathname}${url.search}`;
 }
 
+interface RetainedSelection {
+  candidate: LanCandidate;
+  /**
+   * The daemon granted this address from `--local-control-address`. Such an
+   * address is never an automatic candidate by construction, so its absence
+   * from a fresh candidate list says nothing about staleness.
+   */
+  granted: boolean;
+}
+
 interface SelectionState {
   /** The address the next enable posts. */
   selected: string;
@@ -40,7 +50,7 @@ interface SelectionState {
    * trip re-posts the operator's pick instead of silently falling back to an
    * automatic candidate (#14136).
    */
-  retained: LanCandidate | undefined;
+  retained: RetainedSelection | undefined;
 }
 
 // Re-run on every status update, not just mount: enable/disable responses
@@ -50,43 +60,53 @@ interface SelectionState {
 function reconcileSelection(
   interfaces: LanCandidate[] | undefined,
   current: string,
-  retained: LanCandidate | undefined,
+  retained: RetainedSelection | undefined,
 ): string {
   if (!interfaces) return current;
   if (
     current &&
-    (current === retained?.address ||
+    (current === retained?.candidate.address ||
       interfaces.some((c) => c.address === current))
   ) {
     return current;
   }
   // The committed pick outranks the single-candidate auto-fill: it is the
   // address the operator (or the daemon's grant) actually chose.
-  if (retained) return retained.address;
+  if (retained) return retained.candidate.address;
   if (interfaces.length === 1) return interfaces[0]!.address;
   return '';
 }
 
 function reconcileRetained(
-  retained: LanCandidate | undefined,
+  retained: RetainedSelection | undefined,
   next: LocalControlStatus,
-): LanCandidate | undefined {
-  // What the daemon is serving right now is the strongest truth.
+): RetainedSelection | undefined {
+  // What the daemon is serving right now is the strongest truth. It is
+  // granted when the daemon also reports it as its explicit candidate.
   if (next.active && next.address) {
-    return { interfaceName: next.interfaceName ?? '', address: next.address };
+    return {
+      candidate: {
+        interfaceName: next.interfaceName ?? '',
+        address: next.address,
+      },
+      granted: next.explicitCandidate?.address === next.address,
+    };
   }
   // The daemon vouches for its CLI-granted address only while the host still
   // holds it.
-  if (next.explicitCandidate) return next.explicitCandidate;
-  // A non-empty candidate list that no longer contains the retained address
-  // proves it stale (same adapter, new DHCP address) — drop it so the picker
-  // recovers. An empty or absent list proves nothing: the retained address
-  // may live on an interface the automatic filter excludes.
+  if (next.explicitCandidate) {
+    return { candidate: next.explicitCandidate, granted: true };
+  }
+  // A non-empty candidate list that no longer contains a retained automatic
+  // pick proves it stale (same adapter, new DHCP address) — drop it so the
+  // picker recovers. A granted pick is never in that list, and an empty or
+  // absent list proves nothing at all.
   if (
     retained &&
+    !retained.granted &&
     next.interfaces &&
     next.interfaces.length > 0 &&
-    !next.interfaces.some((c) => c.address === retained.address)
+    !next.interfaces.some((c) => c.address === retained.candidate.address)
   ) {
     return undefined;
   }
@@ -188,9 +208,10 @@ export function LocalControlSettingsCard() {
         setStatus((prev) => (prev ? { ...prev, interfaces: recovered } : prev));
         setSelection((prev) => {
           // The daemon just refused the retained pick itself — it is gone
-          // (stale DHCP, departed VPN) — so stop offering it.
+          // (stale DHCP, departed VPN) — so stop offering it, even when it
+          // came from the CLI grant.
           const retained =
-            prev.retained && postedAddress === prev.retained.address
+            prev.retained && postedAddress === prev.retained.candidate.address
               ? undefined
               : prev.retained;
           return {
@@ -207,8 +228,8 @@ export function LocalControlSettingsCard() {
   const candidates = status?.interfaces ?? [];
   const retainedExtra =
     selection.retained &&
-    !candidates.some((c) => c.address === selection.retained!.address)
-      ? selection.retained
+    !candidates.some((c) => c.address === selection.retained!.candidate.address)
+      ? selection.retained.candidate
       : undefined;
   // The retained explicit pick renders as its own row, so a card holding one
   // still offers (and pre-selects) it even with zero automatic candidates.
