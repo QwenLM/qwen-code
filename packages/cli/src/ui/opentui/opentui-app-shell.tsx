@@ -1003,6 +1003,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         );
         return false;
       }
+      if (hasImages && gateway.isBusy()) {
+        notify('A slash command is already running.');
+        return false;
+      }
       setNoticeText(null);
       // Ahead of the gate and the dispatch, exactly where ink's
       // handleFinalSubmit puts it: a quit has to be able to stop the stream, so
@@ -1439,7 +1443,17 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 focus
                 streaming={streaming}
                 onInterrupt={onInterrupt}
-                onRetry={props.onRetryPrompt}
+                onRetry={
+                  props.onRetryPrompt
+                    ? () => {
+                        if (gateway.isBusy()) {
+                          notify('A slash command is already running.');
+                          return;
+                        }
+                        props.onRetryPrompt?.();
+                      }
+                    : undefined
+                }
                 onRewind={() => {
                   if (
                     !config.getIdeMode() &&

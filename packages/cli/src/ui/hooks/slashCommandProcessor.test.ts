@@ -284,6 +284,128 @@ describe('useSlashCommandProcessor', () => {
     return result;
   };
 
+  it.each(['unchanged', 'changed'] as const)(
+    'keeps command history current across an await when history is %s',
+    async (kind) => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let context: CommandContext | undefined;
+      let before: CommandContext['ui']['history'] = [];
+      let after: CommandContext['ui']['history'] = [];
+      const initial: CommandContext['ui']['history'] = [
+        { id: 10, type: MessageType.INFO, text: 'before-await' },
+      ];
+      const command = createTestCommand({
+        name: 'history-getter',
+        action: async (value) => {
+          context = value;
+          before = value.ui.history;
+          await held;
+          after = value.ui.history;
+          value.ui.addItem(
+            { type: MessageType.INFO, text: 'getter-own-result' },
+            200,
+          );
+        },
+      });
+      mockBuiltinLoadCommands.mockResolvedValue([command]);
+      const hook = renderHook(
+        ({ history }) =>
+          useSlashCommandProcessor(
+            mockConfig,
+            mockSettings,
+            history,
+            mockAddItem,
+            mockClearItems,
+            mockLoadHistory,
+            vi.fn(),
+            vi.fn(),
+            false,
+            vi.fn(),
+            { current: true },
+            vi.fn(),
+            createMockActions(),
+            new Map(),
+            true,
+            null,
+            mockUpdateItem,
+          ),
+        { initialProps: { history: initial } },
+      );
+      let pending:
+        | ReturnType<typeof hook.result.current.handleSlashCommand>
+        | undefined;
+      try {
+        await waitFor(() =>
+          expect(
+            hook.result.current.slashCommands.some(
+              (item) => item.name === 'history-getter',
+            ),
+          ).toBe(true),
+        );
+        act(() => {
+          pending = hook.result.current.handleSlashCommand('/history-getter');
+        });
+        await waitFor(() => expect(context).toBeDefined());
+        expect(before).toEqual(initial);
+        const expected =
+          kind === 'changed'
+            ? [
+                ...initial,
+                {
+                  id: 11,
+                  type: MessageType.INFO,
+                  text: 'after-await',
+                } as const,
+              ]
+            : initial;
+        await act(async () => {
+          hook.rerender({ history: expected });
+        });
+        await act(async () => {
+          release();
+          await pending;
+        });
+        const record = vi.mocked(
+          mockConfig.getChatRecordingService()!.recordSlashCommand,
+        );
+        expect(after).toEqual(expected);
+        expect(after.every((item, index) => item === expected[index])).toBe(
+          true,
+        );
+        expect(
+          mockAddItem.mock.calls.filter(
+            ([item]) => item.text === 'getter-own-result',
+          ),
+        ).toHaveLength(1);
+        expect(
+          record.mock.calls.filter(([value]) => value.phase === 'result'),
+        ).toEqual([
+          [
+            {
+              phase: 'result',
+              rawCommand: '/history-getter',
+              outputHistoryItems: [
+                { type: MessageType.INFO, text: 'getter-own-result' },
+              ],
+            },
+          ],
+        ]);
+      } finally {
+        release();
+        await act(async () => {
+          try {
+            await pending;
+          } finally {
+            hook.unmount();
+          }
+        });
+      }
+    },
+  );
+
   describe('Initialization and Command Loading', () => {
     it('retains recovery commands when the Mod loader rejects startup', async () => {
       const ready = Promise.reject(new Error('Mod startup failed'));

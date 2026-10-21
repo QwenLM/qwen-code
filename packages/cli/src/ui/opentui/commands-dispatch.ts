@@ -712,6 +712,9 @@ export class OpenTuiSlashDispatcher {
             ...baseContext,
             ui: {
               ...baseContext.ui,
+              get history() {
+                return baseContext.ui.history;
+              },
               addItem: (item, timestamp) =>
                 addItemWithRecording(item, timestamp),
             },

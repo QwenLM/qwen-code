@@ -1123,6 +1123,9 @@ export const useSlashCommandProcessor = (
               ...commandContext,
               ui: {
                 ...commandContext.ui,
+                get history() {
+                  return commandContext.ui.history;
+                },
                 addItem: addItemWithRecording,
               },
               invocation: {

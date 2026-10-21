@@ -238,6 +238,70 @@ async function dispatch(
 }
 
 describe('guards (ink handleSlashCommand parity)', () => {
+  it.each(['unchanged', 'changed'] as const)(
+    'keeps command history current across an await when history is %s',
+    async (kind) => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let before: readonly HistoryItem[] | undefined;
+      let after: readonly HistoryItem[] = [];
+      const recordSlashCommand = vi.fn();
+      const config = makeFakeConfig({});
+      config.getChatRecordingService = () =>
+        ({ recordSlashCommand }) as ReturnType<
+          Config['getChatRecordingService']
+        >;
+      const host = createFakeHost();
+      host.addItem({ type: 'info', text: 'before-await' }, 1);
+      const command = stub({
+        name: 'history-getter',
+        action: async (context) => {
+          before = context.ui.history;
+          await held;
+          after = context.ui.history;
+          context.ui.addItem({ type: 'info', text: 'own-result' }, 3);
+        },
+      });
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [command],
+      );
+      const pending = dispatcher.handle('/history-getter');
+      try {
+        await vi.waitFor(() => expect(before).toBeDefined());
+        expect(before).toEqual(host.getHistory());
+        if (kind === 'changed')
+          host.addItem({ type: 'info', text: 'after-await' }, 2);
+        const expected = [...host.getHistory()];
+        release();
+        expect(await pending).toEqual({ kind: 'handled' });
+        expect(after).toEqual(expected);
+        expect(after.every((item, index) => item === expected[index])).toBe(
+          true,
+        );
+        expect(
+          host.items.filter(
+            (item) => 'text' in item && item.text === 'own-result',
+          ),
+        ).toHaveLength(1);
+        expect(
+          recordSlashCommand.mock.calls.find(
+            ([value]) => value.phase === 'result',
+          )?.[0].outputHistoryItems,
+        ).toEqual([{ type: 'info', text: 'own-result' }]);
+      } finally {
+        release();
+        try {
+          await pending;
+        } finally {
+          dispatcher.dispose();
+        }
+      }
+    },
+  );
   it.each([
     ['startup', 'Error'],
     ['startup', 'string'],
