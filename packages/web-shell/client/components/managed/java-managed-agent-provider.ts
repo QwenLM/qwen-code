@@ -239,6 +239,9 @@ export function createJavaManagedAgentProvider(
                 approvalRevision: result.approvalRevision,
                 availableApprovalModes: result.availableApprovalModes,
                 supported: result.supported,
+                ...(result.liveSupported === true
+                  ? { liveSupported: true }
+                  : {}),
                 ...(typeof result.planMode === 'boolean'
                   ? { planMode: result.planMode }
                   : {}),

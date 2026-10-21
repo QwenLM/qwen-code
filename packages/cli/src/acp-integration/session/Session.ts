@@ -10,9 +10,9 @@ import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/ag
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
-import { getStartupContextLength } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import {
   buildSessionHistoryFromConversation,
+  cloneApiHistory,
   findApiHistoryPromptIndex,
   getApiHistoryPromptId,
   getLastApiHistoryPromptId,
@@ -31,7 +31,11 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  getStartupContextLength,
+  markCompressedHistory,
+} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -156,6 +160,7 @@ import {
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
   isSystemReminderContent,
+  countApiUserPrompts,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -629,6 +634,29 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
     remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
   );
 }
+
+/**
+ * ACP rewind's binding of the shared user-prompt classifier
+ * (`isApiUserPrompt` in core). The three deltas from the TUI binding are
+ * deliberate:
+ *
+ * - The todo-stop-guard's synthetic continuation prompts are injected as user
+ *   entries but are not turns a client can rewind to, so they must not
+ *   consume an ordinal.
+ * - Delivered background-notification turns (`[...systemReminders,
+ *   ...notificationParts]` as one user entry) likewise never produced a
+ *   client-visible turn or a per-prompt file-history snapshot, so counting
+ *   them inflates the rewindable count and shifts every cut point after
+ *   them (#9608).
+ * - Microcompaction media-clear placeholders stay COUNTED here, unlike the
+ *   TUI binding. ACP rewind maps against per-prompt file-history snapshots,
+ *   which ARE created for media-only prompts, so a cleared entry still owns
+ *   an ordinal on this surface.
+ */
+const ACP_API_USER_PROMPT_OPTIONS = {
+  excludeTextPart: isTodoStopGuardPromptText,
+  excludeTaskNotifications: true,
+};
 
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
 async function finalizeToolCallPreparations(
@@ -2517,6 +2545,7 @@ export class Session implements SessionContext {
   readonly sessionId: string;
   private sessionReasoningSelection?: ReasoningSelection;
   private readonly restoredHistoryGaps?: HistoryGap[];
+  private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
    * Tail of this session's permission queue. The serialization unit is the
    * session, not the `AgentSideConnection`: one daemon child owns a single
@@ -5135,7 +5164,14 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getLlmClient()!.getChat().getHistoryShallow();
+    const history = this.config.getLlmClient()!.getChat().getHistoryShallow();
+    this.historySnapshotBoundary = {
+      hash: createHash('sha256').update(JSON.stringify(history)).digest('hex'),
+      prefixLength: getStartupContextLength(history, {
+        includeCompressed: true,
+      }),
+    };
+    return history;
   }
 
   getRewindCutPoint(promptId: string): number {
@@ -5156,6 +5192,13 @@ export class Session implements SessionContext {
     );
   }
 
+  getRewindableUserTurnCount(): number {
+    return countApiUserPrompts(
+      this.config.getLlmClient()!.getChat().getHistoryShallow(),
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
+  }
+
   restoreHistory(history: Content[]): void {
     if (!this.isTurnIdle()) {
       throw RequestError.invalidParams(
@@ -5164,15 +5207,27 @@ export class Session implements SessionContext {
       );
     }
 
-    const restoredHistory = history.map((content) => {
-      const { rewindId, ...message } = content as Content & {
-        rewindId?: unknown;
-      };
-      const copy = structuredClone(message);
+    const restored = cloneApiHistory(history);
+    history.forEach((content, index) => {
+      const { rewindId } = content as Content & { rewindId?: unknown };
+      if (rewindId === undefined) return;
+      const copy = restored[index] as
+        | (Content & { rewindId?: unknown })
+        | undefined;
+      if (!copy) return;
+      delete copy.rewindId;
       markApiHistoryPrompt(copy, getApiHistoryPromptId(content) ?? rewindId);
-      return copy;
     });
-    this.config.getLlmClient()!.setHistory(restoredHistory);
+    if (
+      this.historySnapshotBoundary?.hash ===
+      createHash('sha256').update(JSON.stringify(history)).digest('hex')
+    ) {
+      markCompressedHistory(
+        restored,
+        this.historySnapshotBoundary.prefixLength,
+      );
+    }
+    this.config.getLlmClient()!.setHistory(restored);
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -6065,9 +6120,8 @@ export class Session implements SessionContext {
       return undefined;
     }
 
-    // Classify from a bounded, shallow tail — this accept/reject pre-check does
-    // not need to structuredClone the whole history. The authoritative
-    // re-detection inside the fired prompt() reads full history for the strip.
+    // Limit meaningful history while retaining trailing notifications for replay.
+    // The authoritative re-detection inside prompt() uses full history to strip.
     const chat = this.#getCurrentChat();
     // A trailing restorable ask_user_question is awaiting its restore
     // prompt, not an interruption to close: `interrupted_turn` would answer
@@ -6089,7 +6143,8 @@ export class Session implements SessionContext {
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
-        : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        : (chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+          chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
           chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT)),
       historyGaps: runtimeGaps?.length
         ? runtimeGaps
