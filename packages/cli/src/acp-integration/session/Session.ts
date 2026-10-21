@@ -2389,6 +2389,7 @@ export class Session implements SessionContext {
   private goalHostUnbind?: () => void;
   private goalRuntimeUnsubscribe?: () => void;
   private removeSkillChangeListener?: () => void;
+  private commandSnapshotInFlight?: Promise<void>;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -2676,7 +2677,9 @@ export class Session implements SessionContext {
     this.#registerCurrentSessionScheduledTaskCreator();
     this.removeSkillChangeListener = this.config
       .getSkillManager()
-      ?.addChangeListener(() => this.sendAvailableCommandsUpdate());
+      ?.addChangeListener(() => {
+        void this.sendAvailableCommandsUpdate();
+      });
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
@@ -12971,22 +12974,31 @@ export class Session implements SessionContext {
   }
 
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
-    if (this.#isAutomaticWorkHeld()) return;
-    const { availableCommands, availableSkills, availableSkillDetails } =
-      await this.buildAvailableCommandsSnapshot();
-    const update: SessionUpdate = {
-      sessionUpdate: 'available_commands_update',
-      availableCommands,
-      ...(availableSkills !== undefined
-        ? {
-            _meta: {
-              availableSkills,
-              ...(availableSkillDetails ? { availableSkillDetails } : {}),
-            },
-          }
-        : {}),
-    };
-    await this.sendUpdate(update);
+    if (this.commandSnapshotInFlight) return this.commandSnapshotInFlight;
+    const publish = (async () => {
+      if (this.#isAutomaticWorkHeld()) return;
+      const { availableCommands, availableSkills, availableSkillDetails } =
+        await this.buildAvailableCommandsSnapshot();
+      const update: SessionUpdate = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+        ...(availableSkills !== undefined
+          ? {
+              _meta: {
+                availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
+              },
+            }
+          : {}),
+      };
+      await this.sendUpdate(update);
+    })();
+    this.commandSnapshotInFlight = publish;
+    try {
+      await publish;
+    } finally {
+      this.commandSnapshotInFlight = undefined;
+    }
   }
 
   #withBackgroundPermission(

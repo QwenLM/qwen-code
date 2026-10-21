@@ -10962,9 +10962,16 @@ describe('Session', () => {
         const skillManager = new core.SkillManager(mockConfig);
         vi.mocked(mockConfig.getSkillManager).mockReturnValue(skillManager);
         await skillManager.refreshCache();
-        getAvailableCommandsSpy.mockImplementation((_config, signal) =>
-          new SkillCommandLoader(mockConfig).loadCommands(signal),
-        );
+        let snapshotBuilds = 0;
+        getAvailableCommandsSpy.mockImplementation(async (_config, signal) => {
+          snapshotBuilds += 1;
+          if (snapshotBuilds > 1) throw new Error('recursive snapshot rebuild');
+          const commands = await new SkillCommandLoader(
+            mockConfig,
+          ).loadCommands(signal);
+          await skillManager.notifyConfigChanged();
+          return commands;
+        });
         session = new Session(
           'test-session-id',
           mockConfig,
@@ -10979,20 +10986,24 @@ describe('Session', () => {
         );
         await skillManager.refreshCache();
 
-        expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
-          expect.objectContaining({
-            update: expect.objectContaining({
-              sessionUpdate: 'available_commands_update',
-              availableCommands: expect.arrayContaining([
-                expect.objectContaining({
-                  name: 'review',
-                  description: 'Review the staged diff',
-                  input: { hint: '<path>' },
-                }),
-              ]),
+        await vi.waitFor(() => {
+          expect(snapshotBuilds).toBe(1);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              update: expect.objectContaining({
+                sessionUpdate: 'available_commands_update',
+                availableCommands: expect.arrayContaining([
+                  expect.objectContaining({
+                    name: 'review',
+                    description: 'Review the staged diff',
+                    input: { hint: '<path>' },
+                  }),
+                ]),
+              }),
             }),
-          }),
-        );
+          );
+        });
 
         session.dispose();
         vi.mocked(mockClient.sessionUpdate).mockClear();
@@ -11010,6 +11021,33 @@ describe('Session', () => {
         }
         await fs.rm(projectRoot, { recursive: true, force: true });
       }
+    });
+
+    it('does not block skill refresh on command publication', async () => {
+      session.dispose();
+      const skillManager = new core.SkillManager(mockConfig);
+      vi.mocked(mockConfig.getSkillManager).mockReturnValue(skillManager);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      getAvailableCommandsSpy.mockResolvedValue([]);
+      vi.mocked(mockClient.sessionUpdate).mockReturnValue(
+        new Promise(() => undefined),
+      );
+
+      const outcome = await Promise.race([
+        skillManager
+          .refreshCache({ throwOnError: true })
+          .then(() => 'resolved'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('blocked'), 100),
+        ),
+      ]);
+
+      expect(outcome).toBe('resolved');
     });
 
     it('sends available_commands_update from getAvailableCommands()', async () => {
