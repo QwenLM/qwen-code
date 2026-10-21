@@ -526,6 +526,8 @@ describe('requestConsentNonInteractive', () => {
             fake.emit('close');
           } else if (newline) {
             cb(answer);
+            // Real readline closes the interface after an answered prompt.
+            fake.emit('close');
           } else {
             fake.emit('line', answer);
             fake.emit('close');
@@ -539,8 +541,21 @@ describe('requestConsentNonInteractive', () => {
     return fake;
   };
 
+  const setStdinState = (state: {
+    readableEnded?: boolean;
+    destroyed?: boolean;
+  }) => {
+    for (const [key, value] of Object.entries(state)) {
+      Object.defineProperty(process.stdin, key, {
+        value,
+        configurable: true,
+      });
+    }
+  };
+
   beforeEach(() => {
     readlineMock.createInterface.mockReset();
+    setStdinState({ readableEnded: false, destroyed: false });
   });
 
   it('treats a closed stdin as a refusal instead of hanging into exit 0', async () => {
@@ -560,6 +575,22 @@ describe('requestConsentNonInteractive', () => {
     stderr.mockRestore();
   });
 
+  it('refuses a stdin that already ended before the prompt (#15037 review)', async () => {
+    // The marketplace plugin picker can consume EOF first; an interface created
+    // after that emits nothing at all, so the promise would never settle and
+    // the process would exit 0 silently.
+    setStdinState({ readableEnded: true, destroyed: true });
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(false);
+
+    expect(readlineMock.createInterface).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('Could not read an answer from stdin'),
+    );
+    stderr.mockRestore();
+  });
+
   it('accepts an answer that never got a newline (#15037 review)', async () => {
     // `printf 'y' | qwen extensions install …` reaches readline as a final
     // unterminated line: the question callback is skipped once the interface
@@ -569,6 +600,21 @@ describe('requestConsentNonInteractive', () => {
     );
 
     await expect(requestConsentNonInteractive('consent?')).resolves.toBe(true);
+  });
+
+  it('does not report an EOF refusal for an answered prompt (#15037 review)', async () => {
+    // The `answered` guard in the close handler is what keeps the diagnostic
+    // off a real answer; without it every successful consent prints a
+    // spurious refusal.
+    readlineMock.createInterface.mockReturnValue(fakeInterface('y'));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(true);
+
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not read an answer from stdin'),
+    );
+    stderr.mockRestore();
   });
 
   it.each([
@@ -583,4 +629,23 @@ describe('requestConsentNonInteractive', () => {
       expected,
     );
   });
+
+  it.each([
+    ['y', true],
+    ['n', false],
+    ['yes', false],
+  ])(
+    'maps unterminated answer %j to %s (#15037 review)',
+    async (answer, expected) => {
+      // An empty stdin emits only `close`, never `line`, so '' is not reachable
+      // on this path and is deliberately absent from this table.
+      readlineMock.createInterface.mockReturnValue(
+        fakeInterface(answer, { newline: false }),
+      );
+
+      await expect(requestConsentNonInteractive('consent?')).resolves.toBe(
+        expected,
+      );
+    },
+  );
 });
