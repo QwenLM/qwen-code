@@ -622,8 +622,18 @@ describe('AnthropicContentGenerator', () => {
   describe('per-request anthropic-beta header', () => {
     // Native baseURL: the cache-scope beta needs both `enableCacheControl`
     // and a native host (proxies are covered below).
+    // `forceGlobalCacheScope` opts into cache-scope (beta + body-side
+    // `scope: 'global'`). Since #15039 a native baseURL no longer implies
+    // global scope — the API rejects a global breakpoint whose preceding
+    // blocks are unmarked, and our shape marks only the last tool plus
+    // system[0] — so these tests observe the scope behaviour through the
+    // explicit opt-in.
     const base = (overrides: Partial<ContentGeneratorConfig> = {}) =>
-      maxCfg(100, { baseUrl: NATIVE, ...overrides });
+      maxCfg(100, {
+        baseUrl: NATIVE,
+        forceGlobalCacheScope: true,
+        ...overrides,
+      });
     const weatherTools = () => [
       {
         functionDeclarations: [
@@ -872,12 +882,44 @@ describe('AnthropicContentGenerator', () => {
       expect(headers['anthropic-beta']).toBe(SCOPE_BETA);
     });
 
+    it('keeps session scope on an Anthropic-native baseURL by default (#15039)', async () => {
+      // #15039: the API rejects a `scope: 'global'` breakpoint whose
+      // preceding blocks are unmarked, and this request shape marks only the
+      // last tool plus system[0] — so a native endpoint must not get global
+      // scope implicitly, or the first prompt of every session 400s.
+      const { req, headers } = await send(
+        maxCfg(100, { baseUrl: NATIVE }),
+        sysAndTools(),
+      );
+      expect(headers['anthropic-beta']).not.toContain(SCOPE_BETA);
+      expect(req.system).toEqual([
+        { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+      ]);
+      expect(req.tools?.[0]?.cache_control).toEqual({ type: 'ephemeral' });
+    });
+
+    it('honours forceGlobalCacheScope: false as an explicit off switch (#15039)', async () => {
+      const { req, headers } = await send(
+        maxCfg(100, { baseUrl: NATIVE, forceGlobalCacheScope: false }),
+        sysAndTools(),
+      );
+      expect(headers['anthropic-beta']).not.toContain(SCOPE_BETA);
+      expect(req.system).toEqual([
+        { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+      ]);
+      expect(req.tools?.[0]?.cache_control).toEqual({ type: 'ephemeral' });
+    });
+
     it('strips the cache-scope beta and scope:"global" field on non-Anthropic baseURLs', async () => {
       // Both are Anthropic-only extensions that proxies may not ignore
       // safely. Proxies keep per-session ephemeral cache_control (pre-PR
       // behavior), so prompt caching is preserved.
       const { req, headers } = await send(
-        base({ baseUrl: DEEPSEEK, reasoning: false }),
+        base({
+          baseUrl: DEEPSEEK,
+          reasoning: false,
+          forceGlobalCacheScope: false,
+        }),
         sysAndTools(),
       );
       expect(headers['anthropic-beta']).toBeUndefined();
@@ -1438,9 +1480,12 @@ describe('AnthropicContentGenerator', () => {
         // systemInstruction supplies its scope field). If Anthropic ever
         // requires `output_config.effort` with adaptive thinking, this
         // surfaces here instead of as a 400.
-        const { req, headers } = await send(nativeCfg('claude-opus-4-7'), {
-          config: { systemInstruction: 'sys' },
-        });
+        const { req, headers } = await send(
+          nativeCfg('claude-opus-4-7', { forceGlobalCacheScope: true }),
+          {
+            config: { systemInstruction: 'sys' },
+          },
+        );
         expect(req.thinking).toEqual(ADAPTIVE);
         expect(req).toEqual(
           expect.not.objectContaining({ output_config: expect.anything() }),

@@ -604,9 +604,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
   /**
    * Whether to ATTACH the body-side `scope: 'global'` field on
    * `cache_control` entries this request. Requires
-   * `enableCacheControl !== false` AND either an Anthropic-native baseURL
-   * OR `forceGlobalCacheScope` (opt-in for proxy providers that forward
-   * the `prompt-caching-scope-2026-01-05` beta; see issue #6642).
+   * `enableCacheControl !== false` AND `forceGlobalCacheScope` (opt-in for
+   * proxy providers that forward the `prompt-caching-scope-2026-01-05`
+   * beta; see issue #6642).
+   *
+   * #15039: an Anthropic-native baseURL no longer implies global scope.
+   * The API rejects a `scope: 'global'` breakpoint whose preceding blocks
+   * are unmarked ("`cache_control.scope: "global"` is only valid when
+   * every preceding block is also globally scoped"), and the request shape
+   * we build marks only the last tool plus system[0] — so on a native
+   * endpoint the first prompt of every session failed with HTTP 400.
+   * The 4-breakpoint cap also rules out marking every tool, so session
+   * scope (no `scope` field) is the native default; global scope stays an
+   * explicit opt-in.
+   *
    * Computed per request: `Config.handleModelChange()` hot-updates
    * `enableCacheControl` in-place on the qwen-oauth path (without
    * recreating the ContentGenerator); non-qwen-oauth providers refresh
@@ -626,10 +637,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (this.contentGeneratorConfig.enableCacheControl === false) {
       return false;
     }
-    return (
-      isAnthropicNativeBaseUrl(this.contentGeneratorConfig) ||
-      this.contentGeneratorConfig.forceGlobalCacheScope === true
-    );
+    return this.contentGeneratorConfig.forceGlobalCacheScope === true;
   }
 
   /**
