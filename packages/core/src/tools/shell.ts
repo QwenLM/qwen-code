@@ -117,6 +117,9 @@ const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
 // append loop share it so the two cannot drift.
 const APPENDED_METADATA_SEPARATOR = '\n\n';
 
+export const SHELL_RECORD_ARTIFACT_REMINDER =
+  'If this command created or rewrote a deliverable file (csv, html, sql, py, md, json, image, or pdf), call record_artifact for each one with a workspace-relative workspacePath. Do not call it for files already recorded by write_file, edit, or notebook_edit.';
+
 function getShellOutputThreshold(config: Config): number {
   return config.isTruncateToolOutputThresholdExplicit()
     ? config.getTruncateToolOutputThreshold()
@@ -3178,15 +3181,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // below (deliberately outside the truncation envelope — see the append
     // loop), so their size comes out of the body budget here: the marker
     // asserts the ASSEMBLED string fits the declared budget, and a body that
-    // fits whole must still fit once they land. The reservation and the
-    // append loop both iterate this one list, so the two cannot disagree.
+    // fits whole must still fit once they land. The reservation counts every
+    // model-facing notice; the record-artifact reminder is not shown in the TUI.
     const longRunHint = shouldAppendLongRunHint
       ? buildLongRunningForegroundHint(elapsedMs)
       : null;
+    const recordArtifactReminder =
+      !result.aborted &&
+      !result.error &&
+      !isSignalTermination(result.signal) &&
+      !isShellExitError(this.params.command, result.exitCode)
+        ? SHELL_RECORD_ARTIFACT_REMINDER
+        : null;
     const appendedMetadata = [longRunHint, attributionWarning].filter(
       (s): s is string => s !== null,
     );
-    const appendedMetadataChars = appendedMetadata.reduce(
+    const modelNotices = [...appendedMetadata, recordArtifactReminder].filter(
+      (s): s is string => s !== null,
+    );
+    const appendedMetadataChars = modelNotices.reduce(
       (total, s) => total + APPENDED_METADATA_SEPARATOR.length + s.length,
       0,
     );
@@ -3327,6 +3340,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
               },
             }
           : {};
+
+    // Shell cannot see which files the command wrote. Ask only the model,
+    // after truncation, and not on a failure the scheduler reports via error.message.
+    if (recordArtifactReminder && typeof llmContent === 'string') {
+      llmContent += `${APPENDED_METADATA_SEPARATOR}${recordArtifactReminder}`;
+    }
 
     return {
       llmContent,
