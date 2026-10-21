@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // The helper's queue lives under $HOME, so every case gets a private HOME.
 // flock itself is stubbed on PATH: the production command line is unchanged,
@@ -31,28 +31,18 @@ const script = '.github/scripts/sdk-java-lock.sh';
 const queueDir = (home) =>
   join(home, '.cache/qwen-code-ci/sdk-java-tests.lock.queue');
 
+// Tests decide the promotion window themselves. A value exported by the
+// invoking shell would silently re-order cases that never asked to vary it,
+// so the base env is captured without it and `...env` still wins at the end.
+const baseEnv = { ...process.env };
+delete baseEnv.SDK_JAVA_LOCK_PROMOTE_AFTER;
+
 const flockStub = (behavior) => {
   const stubDir = mkdtempSync(join(tmpdir(), 'flock-stub-'));
   writeFileSync(join(stubDir, 'flock'), behavior, { mode: 0o755 });
   return stubDir;
 };
 const freeFlock = '#!/bin/sh\nexit 0';
-// fd 8 is the counter lock and must always succeed; fd 9 is the host lock
-// under test. A stub that failed both would abort at the counter, which an
-// errexit-suspending harness could not see.
-const heldFlock = (held, order) => `#!/bin/sh
-case "$*" in
-  *" 9")
-    if [ -f "${held}" ]; then
-      sleep 0.2
-      exit 1
-    fi
-    echo "$LOCK_LABEL" >> "${order}"
-    exit 0
-    ;;
-  *) exit 0 ;;
-esac
-`;
 
 // A held lock behaves like a real sibling hold: the non-blocking probe fails
 // at once, the blocking wait stays parked until the test kills the child.
@@ -68,9 +58,10 @@ esac
 // only when the test releases the lock or the wait runs out, so a head that
 // entered `flock --wait` never loops again before it is served. Release is
 // not exclusive, so only the order of tickets still waiting is meaningful.
-const parkedFlock = (held, order) => `#!/bin/sh
+const parkedFlock = (held, order, parks = '') => `#!/bin/sh
 case "$*" in
   *"--wait "*" 9")
+    [ -n "${parks}" ] && echo "$LOCK_LABEL park" >> "${parks}"
     n=$(($2 * 10))
     while [ -f "${held}" ]; do
       [ "$n" -le 0 ] && exit 1
@@ -94,6 +85,11 @@ const waitFor = async (what, check) => {
 const hasTicket = (home, pattern) =>
   existsSync(queueDir(home)) &&
   readdirSync(queueDir(home)).some((f) => pattern.test(f));
+const headTicket = (home) =>
+  join(
+    queueDir(home),
+    readdirSync(queueDir(home)).find((f) => f !== '.seq'),
+  );
 
 const startAcquire = (
   home,
@@ -121,7 +117,7 @@ const startAcquire = (
     ],
     {
       env: {
-        ...process.env,
+        ...baseEnv,
         HOME: home,
         PATH: `${stubDir}:${process.env.PATH}`,
         LOCK_LABEL: label,
@@ -141,6 +137,10 @@ const startAcquire = (
 const acquire = (...args) => startAcquire(...args).done;
 
 describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it(
     'grants the lock to the head of the queue before a later ticket',
     { timeout: 30000 },
@@ -149,20 +149,13 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const held = join(home, 'held');
       const order = join(home, 'order');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held, order));
+      const stub = flockStub(parkedFlock(held, order));
       const a = acquire(home, 30, stub, 'sleep 1', 'A');
       // Wait for A's published ticket instead of a fixed sleep: on a loaded
       // runner 800 ms can run out and B then takes sequence 1.
-      const deadline = Date.now() + 10000;
-      while (
-        !(
-          existsSync(queueDir(home)) &&
-          readdirSync(queueDir(home)).some((f) => /^\d-\d{10}-\d+$/.test(f))
-        )
-      ) {
-        if (Date.now() > deadline) throw new Error('A took no ticket');
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      await waitFor('A took no ticket', () =>
+        hasTicket(home, /^\d-\d{10}-\d+$/),
+      );
       const b = acquire(home, 30, stub, '', 'B');
       await new Promise((r) => setTimeout(r, 2500));
       rmSync(held);
@@ -197,9 +190,76 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const announced = state.out.includes(
         'Waiting for the sdk-java host lock as queue ticket 1',
       );
+      const ticket = headTicket(home);
+      const before = statSync(ticket).mtimeMs;
       child.kill('SIGKILL');
       await done;
+      // The keepalive's owner-death guard must stop it within one 2 s cycle;
+      // without it the orphan keeps refreshing a dead owner's ticket.
+      await new Promise((r) => setTimeout(r, 4500));
+      expect(statSync(ticket).mtimeMs - before).toBeLessThan(1000);
       expect(announced).toBe(true);
+    },
+  );
+
+  it(
+    'names the ticket that displaced a parked head when it times out',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-stale-head-'));
+      const held = join(home, 'held');
+      const order = join(home, 'order');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, order));
+      const head = startAcquire(home, 5, stub, '', 'head', {}, 'full');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const fast = acquire(home, 30, stub, '', 'fast', {}, 'fast');
+      await waitFor('fast took no ticket', () =>
+        hasTicket(home, /^0-0000000002-/),
+      );
+      // The head parked on its own name; the fast ticket is the lexical
+      // minimum at timeout. The error must name the queue as it is then.
+      const result = await head.done;
+      expect(result.code).toBe(1);
+      expect(result.out).toContain('as queue ticket 1 (normal)');
+      expect(result.out).toContain('head of queue is 0-0000000002-');
+      expect(result.out).not.toContain('head of queue is 1-0000000001-');
+      rmSync(held);
+      const fastResult = await fast;
+      expect(fastResult.code).toBe(0);
+    },
+  );
+
+  it(
+    'reaps the keepalive at acquisition while the owner shell lives',
+    { timeout: 30000 },
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), 'lock-teardown-'));
+      const held = join(home, 'held');
+      const order = join(home, 'order');
+      writeFileSync(held, '');
+      const stub = flockStub(parkedFlock(held, order));
+      // Keep the owner alive after acquisition the way the Maven step is:
+      // otherwise the keepalive's own owner check masks a missing teardown.
+      const head = startAcquire(home, 30, stub, 'sleep 5', 'head', {}, 'fast');
+      await waitFor('head did not park', () =>
+        head.state.out.includes('queue ticket 1'),
+      );
+      const ticket = headTicket(home);
+      rmSync(held);
+      await waitFor('head did not acquire', () => !existsSync(ticket));
+      // Recreate the removed ticket: a leaked keepalive's `touch -c` would
+      // refresh this path, a reaped one cannot.
+      const sentinel = new Date(Date.now() - 60 * 1000);
+      writeFileSync(ticket, '');
+      utimesSync(ticket, sentinel, sentinel);
+      await new Promise((r) => setTimeout(r, 2500));
+      expect(statSync(ticket).mtimeMs).toBeLessThan(Date.now() - 30000);
+      const result = await head.done;
+      expect(result.code).toBe(0);
+      rmSync(ticket, { force: true });
     },
   );
 
@@ -207,11 +267,15 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
     'serves a fast ticket ahead of a normal ticket still waiting its turn',
     { timeout: 30000 },
     async () => {
+      // A leaked tuning knob must not re-order this case: the helper default
+      // is the harness's choice, not the invoking shell's.
+      vi.stubEnv('SDK_JAVA_LOCK_PROMOTE_AFTER', '0');
       const home = mkdtempSync(join(tmpdir(), 'lock-fast-'));
       const held = join(home, 'held');
       const order = join(home, 'order');
+      const parks = join(home, 'parks');
       writeFileSync(held, '');
-      const stub = flockStub(parkedFlock(held, order));
+      const stub = flockStub(parkedFlock(held, order, parks));
       // The production shape: the oldest normal ticket is already parked in
       // `flock --wait` as head, a second normal ticket sleeps behind it, and
       // only then does the fast ticket arrive.
@@ -227,9 +291,10 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       await waitFor('fast took no ticket', () =>
         hasTicket(home, /^\d-0000000003-/),
       );
-      // Let both waiters complete a loop with the fast ticket queued, so the
-      // release cannot hand the turn to the normal ticket by timing.
-      await new Promise((r) => setTimeout(r, 2500));
+      // Let both waiters complete a loop with the fast ticket queued, and
+      // leave room for a second blocking entry, so the release cannot hand
+      // the turn to the normal ticket by timing.
+      await new Promise((r) => setTimeout(r, 4500));
       rmSync(held);
       const results = await Promise.all([head.done, normal, fast]);
       expect(results.map((r) => r.code)).toEqual([0, 0, 0]);
@@ -237,6 +302,17 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       // not overtaken, so only the fast-before-normal order is the claim.
       const served = readFileSync(order, 'utf8').trim().split('\n');
       expect(served.indexOf('fast')).toBeLessThan(served.indexOf('normal'));
+      // A full-tier caller is the normal class, and the log names the class
+      // the ticket actually has, not the raw workflow tier.
+      expect(results[1].out).toContain('(normal,');
+      // Each ticket enters the blocking wait once while the hold lasts: the
+      // parked head keeps its kernel position and the fast ticket behind it
+      // parks once as the new minimum. Re-entering every few seconds would
+      // lose that position.
+      const parkLog = readFileSync(parks, 'utf8').trim().split('\n');
+      expect(parkLog.filter((line) => line === 'head park')).toHaveLength(1);
+      expect(parkLog.filter((line) => line === 'fast park')).toHaveLength(1);
+      expect(parkLog).not.toContain('normal park');
     },
   );
 
@@ -392,7 +468,7 @@ describe.skipIf(process.platform === 'win32')('sdk-java-lock.sh', () => {
       const home = mkdtempSync(join(tmpdir(), 'lock-timeout-'));
       const held = join(home, 'held');
       writeFileSync(held, '');
-      const stub = flockStub(heldFlock(held, join(home, 'order')));
+      const stub = flockStub(parkedFlock(held, join(home, 'order')));
       const result = await acquire(home, 5, stub);
       expect(result.code).toBe(1);
       // The `::error::` prefix is what the infra classifier matches: a bare

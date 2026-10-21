@@ -42,11 +42,14 @@ jobs:
     # hold measures 925 s (the sdk-java suite plus the managed-agent H2
     # suite), so the 5400-second wait covers about 5.8 of them. The
     # ticketed queue in .github/scripts/sdk-java-lock.sh serves the fast
-    # class first, so this job waits for the running hold and any head
-    # already parked behind it, not for the full-tier queue behind them.
-    # The ceiling is that wait plus one hold plus ~11 minutes of uncapped
-    # setup and margin: 150. Hosted lanes never take the lock and inherit
-    # this ceiling as a bound, not as an expected duration.
+    # class first: a fast-tier leg waits for the running hold and at most two
+    # parked heads, overtaking only full-tier tickets younger than
+    # SDK_JAVA_LOCK_PROMOTE_AFTER (under a longer hold the queue is plain
+    # sequence order), while a full-tier leg (the default) keeps its FIFO
+    # position among the other rank-1 tickets. The ceiling is that wait plus
+    # one hold plus ~11 minutes of uncapped setup and margin: 150. Hosted
+    # lanes never take the lock and inherit this ceiling as a bound, not as
+    # an expected duration.
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -235,9 +238,9 @@ jobs:
           MATRIX_JAVA: '${{ matrix.java }}'
           TIER: '${{ inputs.tier }}'
         run: |-
-          # Ticketed queue, not a bare flock: only the oldest live ticket
-          # retries the lock, and the fast class is served first — see the
-          # sourced helper.
+          # Ticketed queue, not a bare flock: only the head ticket — lowest
+          # class, then oldest — retries the lock, and the fast class is
+          # served first — see the sourced helper.
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
             sdk_java_lock_acquire 5400 "${TIER}"

@@ -10,24 +10,37 @@
 #
 # Two classes share the one physical lock. `fast` is the pull-request and
 # push feedback lane; its tickets sort before `normal` (approval and main
-# full-tier work), so a fast job overtakes every full-tier ticket still
-# waiting its turn. It does not overtake the hold already running, nor a
-# head already parked in `flock`, which keeps its kernel wait position: a
-# fast job waits for those two holds, not for the full-tier queue behind
+# full-tier work), so a fast job overtakes full-tier tickets still waiting in
+# userspace that have waited less than SDK_JAVA_LOCK_PROMOTE_AFTER. It does
+# not overtake the hold already running, nor a head already parked in `flock`,
+# which keeps its kernel wait position: a fast job waits for the hold already
+# running plus at most two parked heads, not for the full-tier queue behind
 # them. A normal ticket that waits more than SDK_JAVA_LOCK_PROMOTE_AFTER
 # seconds (default 1200) is promoted into the fast class, so continuous fast
-# traffic cannot starve the full tier.
+# traffic cannot starve the full tier; under a single hold longer than that
+# window every waiting normal ticket crosses the threshold together and the
+# queue is plain sequence order.
 #
-# Source this file and call
-# `sdk_java_lock_acquire <wait-seconds> [fast|normal]`; it returns non-zero
-# on timeout with the pinned `lock not acquired within` error.
+# Source this file and call `sdk_java_lock_acquire <wait-seconds> [fast|full]`
+# (an empty tier means normal); it returns non-zero on timeout with the pinned
+# `lock not acquired within` error.
 sdk_java_lock_acquire() {
   local wait_seconds="${1:?wait seconds required}"
-  local priority="${2:-normal}"
+  # Callers pass the workflow tier (`fast`, `full`, or empty); everything but
+  # `fast` is the normal class. Resolve it once so the rank, the periodic wait
+  # line, and the timeout line all report the class the ticket actually has.
+  local class=normal
+  if [[ ${2:-normal} == 'fast' ]]; then
+    class=fast
+  fi
   local rank=1
-  if [[ ${priority} == 'fast' ]]; then
+  if [[ ${class} == 'fast' ]]; then
     rank=0
   fi
+  # 1200 s leaves 4200 s of the 5400 s acquisition budget, enough for four
+  # 925 s holds. At or above the budget promotion would rename a ticket in the
+  # same iteration whose timeout arm deletes it; sdk-java-workflow.test.js
+  # pins the default below both acquisition budgets.
   local promote_after="${SDK_JAVA_LOCK_PROMOTE_AFTER:-1200}"
   local lock="${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
   local queue="${lock}.queue"
@@ -115,7 +128,7 @@ sdk_java_lock_acquire() {
     fi
     if ((SECONDS - start - last_log >= 60)); then
       last_log=$((SECONDS - start))
-      echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${priority}, ${remaining}s left in a ${wait_seconds}s budget)"
+      echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${class}, ${remaining}s left in a ${wait_seconds}s budget)"
     fi
     if ((blocking)); then
       # A parked head cannot touch its own ticket, and one hold can outlast
@@ -145,7 +158,11 @@ sdk_java_lock_acquire() {
     fi
     if ((SECONDS - start >= wait_seconds)); then
       rm -f "${ticket}"
-      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq}; head of queue is ${head##*/}"
+      # Rank order and promotion can displace a parked head after it entered
+      # `flock --wait`; name the queue as it is at timeout, not the value this
+      # ticket saw when it parked.
+      head=$(printf '%s\n' "${queue}/"* | grep -v '/\.seq$' | sort | sed -n '1p')
+      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq} (${class}); head of queue is ${head##*/}"
       echo "holder of ${lock} at timeout:"
       sdk_java_lock_holder_hint "${lock}"
       return 1
@@ -173,6 +190,6 @@ sdk_java_lock_holder_hint() {
 }
 
 if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
-  echo "source ${0} and call sdk_java_lock_acquire <wait-seconds> [fast|normal]" >&2
+  echo "source ${0} and call sdk_java_lock_acquire <wait-seconds> [fast|full]" >&2
   exit 2
 fi

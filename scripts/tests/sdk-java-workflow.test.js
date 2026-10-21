@@ -984,6 +984,18 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // acquisition budget applies to every lane; run 39229303984 died at the
     // old 60-minute wait before Maven started.
     expect(seconds).toBe(90 * 60);
+    // This site stays in the normal class: a tier argument here would put
+    // full-tier MariaDB holds ahead of fast PR-feedback work.
+    expect(step.run).toContain('sdk_java_lock_acquire 5400\n');
+    // Promotion must fire strictly inside the acquisition budget; at or
+    // above it the rename lands in the iteration whose timeout arm deletes
+    // the ticket, and no test would see the anti-starvation arm go dead.
+    const helper = readFileSync('.github/scripts/sdk-java-lock.sh', 'utf8');
+    const promoteAfter = Number(
+      helper.match(/SDK_JAVA_LOCK_PROMOTE_AFTER:-(\d+)/)?.[1],
+    );
+    expect(promoteAfter).toBeGreaterThan(0);
+    expect(promoteAfter).toBeLessThan(seconds);
     const lockWait = step.run.match(/sdk_java_lock_acquire \d+/)?.[0];
     expect(lockWait).toBeDefined();
     const lockAt = step.run.indexOf(lockWait);

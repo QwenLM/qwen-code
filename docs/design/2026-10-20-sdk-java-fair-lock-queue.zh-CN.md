@@ -80,19 +80,25 @@ FIFO 队列把 waiter 的等待限制在它的排位内，但 fast 档 job 仍�
 区分两个档位：
 
 - 票据命名为 `rank-sequence-pid`。`fast` 是 rank 0，`normal` 是 rank 1；
-  队首是最小的活动名字，因此每张 fast 票都排在所有仍在等待的 normal
-  票前面。
+  队首是最小的活动名字，因此每张 fast 票都排在所有尚未被提升的
+  full 档票前面。
 - test job 把自己的 tier 传给辅助脚本：fast 档进入 fast 类，
   approval、release 和 MariaDB 工作保持 normal。
-- 已经阻塞在 `flock(2)` 里的队首保留它在内核等待队列中的位置；在它
-  之后到达的 fast 票会成为队首并同样阻塞。为本队列实测的 Linux 唤醒
-  顺序是插入顺序，因此先阻塞的队首仍赢得下一次释放。fast job 因此
-  等的是当前正在运行的那次持锁加上至多一个已阻塞的队首，而不是它们
-  后面的 full 档队列。
+- 已经阻塞在 `flock(2)` 里的 full 档队首保留它在内核等待队列中的位置；
+  在它之后到达的最小 fast 票会成为新的最小值并同样阻塞。为本队列实测
+  的 Linux 唤醒顺序是插入顺序，因此先阻塞的队首仍赢得下一次释放。
+  fast job 因此等的是当前正在运行的那次持锁加上至多两个已阻塞的队首，
+  而不是它们后面的 full 档队列；在已阻塞的 fast 票存在期间，更晚到达的
+  fast 票永远不是最小值，因此它们只会循环并按票据顺序被服务。
 - 等待超过 `SDK_JAVA_LOCK_PROMOTE_AFTER`（默认 1200 秒）的 normal 票
   会被重命名进 fast 类。它保留自己的顺序号，因此仍排在它之后到达的
   fast 票之前，连续的 fast 流量无法饿死 full 档。只有尚未成为队首的
   票需要这一步：已阻塞的队首本来就是下一个。
+- 提升窗口限制的是超过的范围，而不是单次持锁。在提升之前到达、且已经
+  阻塞进 `flock` 的 fast 票保留它更早的内核位置，因此被提升的票仍要
+  在它后面多等一次持锁；代价被已经阻塞的票据封顶，不构成饿死。当单次
+  持锁长于该窗口时，所有正在等待的 normal 票会一起越过阈值，队列按
+  顺序号服务，此后到达的 fast 票已没有可超过的对象。
 
 释放语义、5400 秒预算和固定的 `lock not acquired within` 错误文案都
 不变。
@@ -137,9 +143,11 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
 - 辅助脚本的单元行为由 `scripts/tests/sdk-java-lock.test.js` 钉住
   （仅 POSIX）：两个 waiter 的 FIFO 顺序、已阻塞队首之后 fast 票超过
   仍在等待的 normal 票、等待中的 normal 票提升后排在更晚的 fast 票之前、
-  已阻塞队首的票在其他 waiter 的回收逻辑下存活、过期 owner 的回收、
-  超时签名与票据清理，`flock` 以 PATH stub 注入。排序用的 stub 会像内核
-  一样让 `flock --wait` 一直阻塞到释放，因此队首不会循环、也不会被超过。
+  已阻塞队首的票在其他 waiter 的回收逻辑下存活、超时的已阻塞队首点名
+  取代它的票据、keepalive 在获取锁时与 owner 死亡后停止、过期 owner 的
+  回收、超时签名与票据清理，`flock` 以 PATH stub 注入。排序用的 stub
+  会像内核一样让 `flock --wait` 一直阻塞到释放，因此队首不会循环、
+  也不会被超过。
 - 工作流的 pin 随机制迁移：`scripts/tests/sdk-java-workflow.test.js`
   现在 pin 的是 source 该辅助脚本和两处 `sdk_java_lock_acquire 5400`
   预算，`.size-baseline` 记录工作流的新尺寸。

@@ -90,20 +90,29 @@ physical lock:
 
 - Tickets are named `rank-sequence-pid`. `fast` is rank 0 and `normal` is
   rank 1; the head is the smallest live name, so every fast ticket precedes
-  every normal ticket still waiting its turn.
+  every full-tier ticket that has not yet been promoted.
 - The test job passes its tier to the helper, so a fast-tier run enters the
   fast class while approval, release, and MariaDB work stays normal.
-- A head already blocked in `flock(2)` keeps its kernel wait position, and a
-  fast ticket that arrives behind it becomes head and blocks too. The Linux
-  wake order measured for this queue is insertion order, so the parked head
-  still wins the next release. A fast job therefore waits for the hold
-  already running plus at most one parked head, not for the full-tier queue
-  behind them.
+- A full-tier head already blocked in `flock(2)` keeps its kernel wait
+  position, and the smallest fast ticket that arrives behind it becomes the
+  new minimum and parks too. The Linux wake order measured for this queue is
+  insertion order, so the parked head still wins the next release. A fast job
+  therefore waits for the hold already running plus at most two parked heads,
+  not for the full-tier queue behind them; later fast tickets are never the
+  minimum while that parked fast ticket stands, so they loop and are served
+  in ticket order.
 - A normal ticket that waits past `SDK_JAVA_LOCK_PROMOTE_AFTER` (default
   1200 s) is renamed into the fast class. It keeps its sequence, so it
   precedes fast tickets that arrived after it, and continuous fast traffic
   cannot starve the full tier. Only a ticket that is not head yet needs this:
   a parked head is already next.
+- The promotion window bounds the overtake, not a hold. A fast ticket that
+  arrived before the promotion and already parked in `flock` keeps its
+  earlier kernel position, so the promoted ticket waits one more hold behind
+  it; the cost is bounded by tickets already parked, not starvation. Under a
+  single hold longer than the window every waiting normal ticket crosses the
+  threshold together, the queue is plain sequence order, and a fast ticket
+  arriving afterwards has nothing left to overtake.
 
 The release semantics, the 5400 s budget, and the pinned
 `lock not acquired within` error are unchanged.
@@ -157,9 +166,11 @@ order this section exists to prevent.
   two waiters, a fast ticket overtaking a waiting normal ticket behind a
   parked head, promotion of a waiting normal ticket ahead of a later fast
   ticket, a parked head's ticket surviving another waiter's reaper,
-  stale-owner reaping, timeout signature and ticket cleanup, with `flock`
-  stubbed on `PATH`. The ordering stubs park `flock --wait` until release,
-  as the kernel does, so a head cannot loop and be overtaken.
+  a timed-out parked head naming the ticket that displaced it, the keepalive
+  stopping at acquisition and after its owner dies, stale-owner reaping,
+  timeout signature and ticket cleanup, with `flock` stubbed on `PATH`. The
+  ordering stubs park `flock --wait` until release, as the kernel does, so a
+  head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` now pins the sourced helper and
   the `sdk_java_lock_acquire 5400` budget at each acquisition site, and the
