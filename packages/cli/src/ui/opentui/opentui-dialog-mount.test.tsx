@@ -229,6 +229,7 @@ function mount(
     onClose?: () => void;
     fillInput?: (text: string) => void;
     onSelectSetting?: (name: string, scope: unknown) => void;
+    onRestartRequest?: () => void;
     availableTerminalHeight?: number;
   } = {},
 ) {
@@ -243,6 +244,7 @@ function mount(
       notify={overrides.notify ?? (() => {})}
       fillInput={overrides.fillInput}
       onSelectSetting={overrides.onSelectSetting}
+      onRestartRequest={overrides.onRestartRequest}
       availableTerminalHeight={overrides.availableTerminalHeight ?? 35}
     />,
   );
@@ -338,6 +340,15 @@ describe('OpenTuiDialogMount routing', () => {
     expect(
       mocks.state.dialogProps['settings']?.['availableTerminalHeight'],
     ).toBe(20);
+  });
+
+  it('forwards settings restart requests to the shell owner', () => {
+    const onRestartRequest = vi.fn();
+    mount({ dialog: 'settings' }, { onRestartRequest });
+
+    dialogProp('settings', 'onRestartRequest')();
+
+    expect(onRestartRequest).toHaveBeenCalledOnce();
   });
 
   it('hands the region height to every region-mounted dialog leg', () => {

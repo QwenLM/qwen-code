@@ -176,11 +176,14 @@ class HostedExtensionsIT {
         // 40-second window.
         waitFor(Duration.ofSeconds(150), () -> {
             String log = Files.readString(temporary.resolve("harness-2.log"));
-            assertThat(log.lines().anyMatch(line -> line.contains("recovery of session " + session)
-                    && line.contains("runtime_broker_execution_unknown"))).isTrue();
             assertThat(log.lines().anyMatch(line -> line.contains("/session/" + session + "/load")
-                    && line.contains("code=hosted_turn_recovery_required") && line.contains("status=409")
-                    && line.contains("reason=takeover_failed"))).isTrue();
+                    && line.contains("status=200"))).isTrue();
+            assertThat(log.lines().anyMatch(line -> line.contains("/session/" + session + "/managed-runtime/cancel")
+                    && line.contains("code=managed_runtime_cancel_failed") && line.contains("status=503")))
+                    .isTrue();
+            assertThat(jdbc.queryForObject("SELECT error_code FROM ma_turn WHERE tenant_id = ?"
+                    + " AND session_id = ? AND turn_id = ?", String.class, tenant, session, original))
+                    .isEqualTo("hosted_runtime_recovery_blocked");
         });
         assertThat(turnStatus(session, original)).isEqualTo("RUNNING");
         JsonNode retry = api("POST", "/v1/agents/sessions/" + session + "/events",

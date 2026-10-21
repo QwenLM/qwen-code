@@ -50,8 +50,8 @@ describe('SDK Java self-hosted workflow guards', () => {
       );
       const verify = steps.findIndex(
         (s) =>
-          (s['working-directory'] === 'packages/managed-agent-server' ||
-            s.run?.includes('-f packages/managed-agent-server/pom.xml')) &&
+          (s.run?.includes('-f packages/managed-agent-server/pom.xml') ||
+            s.run?.includes('cd packages/managed-agent-server')) &&
           s.run?.includes('clean verify'),
       );
       expect(install, name).toBeGreaterThan(-1);
@@ -90,18 +90,41 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
+  it('keeps the daemon E2E install from rebuilding what its next steps build', () => {
+    // prepare would build and bundle the tree during install, then the two
+    // explicit steps below repeat both. #14861 failed inside that install-path
+    // build, so the install stays an install and the build steps below stay
+    // the only place this job compiles.
+    const steps = parse(workflow).jobs['daemon-e2e'].steps;
+    const install = steps.find(
+      (s) => s.name === 'Install Node.js dependencies',
+    );
+    expect(install.env?.QWEN_SKIP_PREPARE).toBe('1');
+    const names = steps.map((s) => s.name);
+    expect(names.indexOf('Build Qwen Code')).toBeGreaterThan(
+      names.indexOf('Install Node.js dependencies'),
+    );
+    expect(names.indexOf('Bundle Qwen Code')).toBeGreaterThan(
+      names.indexOf('Build Qwen Code'),
+    );
+  });
+
   it('serializes latency-sensitive tests on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
       'if: "${{ runner.environment == \'self-hosted\' }}"',
     );
+    // The ticketed queue makes the wake order deterministic, so the pin
+    // is the sourced helper and its wait budget, not a bare flock --wait.
     expect(block).toContain(
-      'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
+      'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
+    expect(block).toContain('sdk_java_lock_acquire 5400');
+    // release-sdk-java.yml resumes an existing tag by checking out that
+    // immutable commit, which may predate this helper; the guarded bare-lock
+    // fallback keeps acquisition independent of the checkout's ref.
     expect(block).toContain('flock --wait 5400 9');
-    expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 90 minutes',
-    );
+    expect(block).toContain('::error::sdk-java host lock not acquired within');
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -263,7 +286,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       "settings-path: '${{ runner.temp }}/setup-java-m2'",
     );
     // Two tail-anchored forms, no prefix match: mysql-integration appends
-    // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
+    // a job-local -Dmaven.repo.local to its single Maven-bearing step
     // (pinned by the 'installs and verifies against one job-local Maven
     // repository' test), the EventTransport lanes to both of theirs; the
     // other jobs must carry no suffix at all — an appended -DskipTests
@@ -277,7 +300,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
       {
         test: 6,
-        'mysql-integration': 2,
+        'mysql-integration': 1,
         'daemon-e2e': 1,
         'event-transport-broker': 2,
         'event-transport-multi-node': 2,
@@ -690,68 +713,76 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     );
   });
 
-  it('holds the per-host sdk-java lock around every Maven run', () => {
-    // Derived from the parsed steps, not a string count: every Maven-bearing
-    // step must open the test job's per-host lock — the shared path pinned
-    // for the test job above is what makes the two jobs mutually exclusive
-    // on one ECS host — and wait on it with the pinned literal.
+  it('holds the per-host sdk-java lock once around both Maven runs', () => {
+    // Derived from the parsed steps, not a string count: the install and
+    // verify commands share one acquisition — the shared path pinned for the
+    // test job above is what makes the two jobs mutually exclusive on one ECS
+    // host — and wait on it with the pinned literal. Run 39353663670's second
+    // acquisition lost the queue between the two steps and exhausted the wait
+    // without starting Maven.
     const parsed = parse(workflow);
     const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
       (s) => typeof s.run === 'string' && s.run.includes('mvn '),
     );
     expect(mavenSteps.map((s) => s.name)).toEqual([
-      'Install Managed Agent dependencies',
-      'Run Managed Agent tests, Checkstyle, and MySQL integration',
+      'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
     ]);
-    const lockWaits = mavenSteps.map((s) => {
-      expect(s.run, s.name).toContain(
-        'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
-      );
-      const seconds = Number(s.run.match(/flock --wait (\d+) 9/)?.[1]);
-      // The fast tier owns the same lock and waits behind these two steps, so
-      // one acquisition budget applies to every lane; run 39229303984 died at
-      // the old 60-minute wait before Maven started.
-      expect(seconds, s.name).toBe(90 * 60);
-      return seconds;
-    });
-    // The ceiling must absorb one full lock wait per acquisition — this job
-    // takes the lock once per Maven step — plus the ~50 minutes of measured
-    // Maven work and ~30 minutes of uncapped setup. Derive it from the step
-    // count so another locked step cannot silently overdraw it.
+    const [step] = mavenSteps;
+    expect(step.run).toContain(
+      'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
+    );
+    // Same ref-independence guard as the test job: a resumed release tag may
+    // predate the helper, so this site must also keep the bare-lock arm.
+    expect(step.run).toContain('flock --wait 5400 9');
+    expect(step.run).toContain(
+      '::error::sdk-java host lock not acquired within',
+    );
+    const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
+    // The fast tier owns the same lock and waits behind this job, so one
+    // acquisition budget applies to every lane; run 39229303984 died at the
+    // old 60-minute wait before Maven started.
+    expect(seconds).toBe(90 * 60);
+    const lockWait = step.run.match(/sdk_java_lock_acquire \d+/)?.[0];
+    expect(lockWait).toBeDefined();
+    const lockAt = step.run.indexOf(lockWait);
+    const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
+    // The deleted `working-directory:` applied to the whole step; its `cd`
+    // replacement only applies from where it sits, so pin it between the two
+    // Maven runs: above the install it breaks the SDK `-f` path, below the
+    // verify it runs `clean verify` in the wrong module.
+    const cdAt = step.run.indexOf('cd packages/managed-agent-server');
+    const verifyAt = step.run.indexOf('-Pmysql-integration');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(installAt).toBeGreaterThan(lockAt);
+    expect(cdAt).toBeGreaterThan(installAt);
+    expect(verifyAt).toBeGreaterThan(cdAt);
+    // The ceiling must absorb one full lock wait plus the ~60 minutes of
+    // measured Maven work and ~30 minutes of uncapped setup.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
-    ).toBeGreaterThanOrEqual(
-      lockWaits.reduce((total, seconds) => total + seconds, 0) +
-        50 * 60 +
-        30 * 60,
-    );
+    ).toBeGreaterThanOrEqual(seconds + 60 * 60 + 30 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus its own measured hold (the sdk-java suite plus
     // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      lockWaits[0] + 925 + 11 * 60,
+      seconds + 925 + 11 * 60,
     );
   });
 
   it('installs and verifies against one job-local Maven repository', () => {
-    // The per-step lock releases at each step boundary, so the fixed
-    // 0.1.0-alpha release coordinates must not round-trip through the
-    // host-shared ~/.m2: the install step and the verify step resolve from
-    // the same job-local repo, seeded from the shared cache inside the lock.
+    // The fixed 0.1.0-alpha release coordinates must not resolve from the
+    // host-shared ~/.m2: the job-local repo is seeded from that cache, and
+    // both Maven runs resolve from the same copy.
     const steps = parse(workflow).jobs['mysql-integration'].steps;
-    const install = steps.find(
-      (s) => s.name === 'Install Managed Agent dependencies',
-    );
-    const verify = steps.find(
+    const step = steps.find(
       (s) =>
-        s.name === 'Run Managed Agent tests, Checkstyle, and MySQL integration',
+        s.name ===
+        'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
     );
-    for (const s of [install, verify]) {
-      expect(s?.env?.MAVEN_ARGS, s?.name).toContain(
-        '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
-      );
-    }
-    expect(install.run).toContain(
+    expect(step?.env?.MAVEN_ARGS).toContain(
+      '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
+    );
+    expect(step.run).toContain(
       'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
     );
     // The write-back closes the host-shared ~/.m2 loop — the seed above only
@@ -763,17 +794,29 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     // warning arm keeps a copy failure from reddening the gate after mvn
     // has already passed, and pipefail keeps a failing left-hand tar from
     // being masked by the extractor's exit 0.
-    expect(verify.run).toContain('set -o pipefail');
-    expect(verify.run).toContain('mkdir -p "${HOME}/.m2/repository"');
-    expect(verify.run).toContain(
+    expect(step.run).toContain('set -o pipefail');
+    expect(step.run).toContain('mkdir -p "${HOME}/.m2/repository"');
+    expect(step.run).toContain(
       'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
     );
-    expect(verify.run).toContain(
+    expect(step.run).toContain(
       'tar -C "${HOME}/.m2/repository" --skip-old-files -xf -',
     );
-    expect(verify.run).toContain(
+    expect(step.run).toContain(
       '|| echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
     );
+    // One body replaced the two-step split, so only these positions still
+    // order the phases: the write-back runs against a directory the seed has
+    // not created yet if hoisted above it, and its warning arm swallows the
+    // failure instead of reddening the gate.
+    const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository"');
+    const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
+    const verifyAt = step.run.indexOf('-Pmysql-integration');
+    const writeBackAt = step.run.indexOf('tar -C "${RUNNER_TEMP}/m2-repo"');
+    expect(seedAt).toBeGreaterThan(-1);
+    expect(installAt).toBeGreaterThan(seedAt);
+    expect(verifyAt).toBeGreaterThan(installAt);
+    expect(writeBackAt).toBeGreaterThan(verifyAt);
   });
 });
 

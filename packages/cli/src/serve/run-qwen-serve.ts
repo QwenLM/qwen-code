@@ -6477,6 +6477,13 @@ async function runQwenServeImpl(
       persistSettings: persistSettingsFn,
       preheatAcpChild: () => bridge.preheat(),
       reloadDaemonEnv: reloadPrimaryDaemonEnv,
+      reloadModelProvidersDaemonEnv: (workspace, assertGenerationOpen) =>
+        reloadRuntimeOverlaySnapshotForModelProviders(
+          workspace,
+          trustedWorkspace,
+          { metadata: primaryRuntimeEnv, replace: replaceRuntimeEffectiveEnv },
+          assertGenerationOpen,
+        ),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -6614,7 +6621,10 @@ async function runQwenServeImpl(
     const reloadRuntimeOverlaySnapshotForModelProviders = (
       workspace: string,
       trusted: boolean,
-      env: ReturnType<typeof createRuntimeEnvMetadata>,
+      env: Pick<
+        ReturnType<typeof createRuntimeEnvMetadata>,
+        'metadata' | 'replace'
+      >,
       assertGenerationOpen?: () => void,
     ) =>
       withSettingsLock(workspace, async () => {
@@ -7886,20 +7896,13 @@ async function runQwenServeImpl(
                 return { ...result, runtimeEnvironmentApplied };
               }
             }),
-          ...(buildOptions?.primary === true
-            ? {}
-            : {
-                reloadModelProvidersDaemonEnv: (
-                  workspace: string,
-                  assertGenerationOpen?: () => void,
-                ) =>
-                  reloadRuntimeOverlaySnapshotForModelProviders(
-                    workspace,
-                    trusted,
-                    wsEnv,
-                    assertGenerationOpen,
-                  ),
-              }),
+          reloadModelProvidersDaemonEnv: (workspace, assertGenerationOpen) =>
+            reloadRuntimeOverlaySnapshotForModelProviders(
+              workspace,
+              trusted,
+              wsEnv,
+              assertGenerationOpen,
+            ),
           queryWorkspaceStatus: (method, idle) =>
             wsBridge.queryWorkspaceStatus(method, idle),
           invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -10747,10 +10750,15 @@ async function runQwenServeImpl(
           hostname: opts.hostname,
           url: daemonDiscoveryUrl(url),
           workspaces: workspaceInputs.map((workspace) => workspace.cwd),
+          startupWorkspaces: workspaceInputs
+            .filter((workspace) => !workspace.removable)
+            .map((workspace) => workspace.cwd),
           primaryWorkspace: boundWorkspace,
           startedAt: new Date().toISOString(),
           auth: token ? 'bearer' : 'none',
           ...(generatedToken ? { tokenGenerated: true } : {}),
+          web: opts.serveWebShell !== false,
+          requireAuth: opts.requireAuth === true,
           ...(discoveryLogPath ? { logPath: discoveryLogPath } : {}),
           pidNamespace: currentPidNamespace(),
         });

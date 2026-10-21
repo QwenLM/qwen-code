@@ -11,7 +11,14 @@
 // them fails the gate only on CI, after a broker boot, or not at all.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -121,6 +128,7 @@ describe('EventTransport broker gates CI', () => {
       order.indexOf('Start the RocketMQ LiteTopic cluster'),
     );
     const dir = mkdtempSync(join(tmpdir(), 'rmq-ports-'));
+    let holderDir;
     try {
       const envFile = join(dir, 'github_env');
       writeFileSync(envFile, '');
@@ -135,14 +143,42 @@ describe('EventTransport broker gates CI', () => {
           .split('\n')
           .map((line) => line.split('=')),
       );
-      expect(Object.keys(chosen).sort()).toEqual([...names].sort());
-      const ports = Object.values(chosen).map(Number);
+      expect(Object.keys(chosen).sort()).toEqual(
+        [...names, 'RMQ_HOLDER_DIR'].sort(),
+      );
+      const ports = names.map((name) => Number(chosen[name]));
       expect(new Set(ports).size).toBe(names.length);
       // The broker also binds listenPort - 2 (fast channel) and + 1 (HA).
       const broker = Number(chosen.RMQ_BROKER_PORT);
       expect(ports).not.toContain(broker - 2);
       expect(ports).not.toContain(broker + 1);
+      // Every chosen port (and the broker companions) stays parked behind a
+      // live holder process until the broker script takes it over, so a
+      // sibling job cannot steal the port in between.
+      holderDir = chosen.RMQ_HOLDER_DIR;
+      const held = readdirSync(holderDir).sort();
+      expect(held).toHaveLength(6);
+      for (const file of held) {
+        const pid = Number(readFileSync(join(holderDir, file), 'utf8'));
+        try {
+          process.kill(pid, 0);
+        } catch {
+          throw new Error(
+            `holder ${pid} for port ${file} is not alive (dir ${holderDir})`,
+          );
+        }
+      }
     } finally {
+      if (holderDir && existsSync(holderDir)) {
+        for (const file of readdirSync(holderDir)) {
+          try {
+            process.kill(Number(readFileSync(join(holderDir, file), 'utf8')));
+          } catch {
+            // Holder already gone.
+          }
+        }
+        rmSync(holderDir, { recursive: true, force: true });
+      }
       rmSync(dir, { recursive: true, force: true });
     }
     const verify = step('Verify the EventTransport broker gates').run;
@@ -157,17 +193,41 @@ describe('EventTransport broker gates CI', () => {
 
   it('reselects a broker port when its HA companion exceeds the TCP range', () => {
     const dir = mkdtempSync(join(tmpdir(), 'rmq-port-boundary-'));
+    let holderDir;
     try {
       const preload = join(dir, 'boundary.mjs');
       const observed = join(dir, 'observed');
       writeFileSync(
         preload,
         `import net from 'node:net';
+import childProcess from 'node:child_process';
 import { writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 const createServer = net.createServer;
 const candidates = [41000, 42000, 43000, 65535, 44000];
 const allocated = [];
 const held = new Set();
+const holders = new Map();
+const attempts = [];
+let nextPid = 1_000_000;
+childProcess.spawn = (executable, args) => {
+  const port = Number(args[2]);
+  const pid = ++nextPid;
+  attempts.push(port);
+  if (port >= 1 && port <= 65535 && !held.has(port)) {
+    held.add(port);
+    holders.set(pid, port);
+    writeFileSync(args[3], String(pid) + '\\n');
+  }
+  return { pid, unref() {} };
+};
+process.kill = (pid) => {
+  if (!holders.has(pid)) throw new Error('Unknown fixture holder');
+  held.delete(holders.get(pid));
+  holders.delete(pid);
+  return true;
+};
+syncBuiltinESMExports();
 net.createServer = (...args) => {
   const server = createServer(...args);
   const listen = server.listen;
@@ -192,7 +252,7 @@ net.createServer = (...args) => {
   };
   return server;
 };
-process.on('exit', () => writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ allocated, held: [...held] })));
+process.on('exit', () => writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ allocated, attempts, held: [...held] })));
 `,
       );
       const result = spawnSync(
@@ -204,27 +264,37 @@ process.on('exit', () => writeFileSync(${JSON.stringify(observed)}, JSON.stringi
         ],
         { encoding: 'utf8', timeout: 10_000 },
       );
-      expect(result.status, result.stderr).toBe(0);
-      const reservation = JSON.parse(readFileSync(observed, 'utf8'));
-      expect(reservation.allocated).toEqual([
-        41000, 42000, 43000, 65535, 44000,
-      ]);
-      expect(reservation.held).toEqual([]);
       const chosen = Object.fromEntries(
         result.stdout
           .trim()
           .split('\n')
           .map((line) => line.split('=')),
       );
+      holderDir = chosen.RMQ_HOLDER_DIR;
+      expect(result.status, result.stderr).toBe(0);
+      const reservation = JSON.parse(readFileSync(observed, 'utf8'));
+      expect(reservation.allocated).toEqual([
+        41000, 42000, 43000, 65535, 44000,
+      ]);
+      expect(reservation.attempts).not.toContain(65536);
+      expect(reservation.held.sort((a, b) => a - b)).toEqual([
+        41000, 42000, 43000, 43998, 44000, 44001,
+      ]);
       expect(Object.keys(chosen).sort()).toEqual(
         [
+          'RMQ_HOLDER_DIR',
           'RMQ_NAMESRV_PORT',
           'RMQ_BROKER_PORT',
           'RMQ_PROXY_GRPC_PORT',
           'RMQ_PROXY_REMOTING_PORT',
         ].sort(),
       );
-      const ports = Object.values(chosen).map(Number);
+      const ports = [
+        'RMQ_NAMESRV_PORT',
+        'RMQ_BROKER_PORT',
+        'RMQ_PROXY_GRPC_PORT',
+        'RMQ_PROXY_REMOTING_PORT',
+      ].map((name) => Number(chosen[name]));
       expect(new Set(ports).size).toBe(4);
       for (const port of ports) {
         expect(Number.isInteger(port)).toBe(true);
@@ -238,6 +308,7 @@ process.on('exit', () => writeFileSync(${JSON.stringify(observed)}, JSON.stringi
       expect(ports).not.toContain(broker - 2);
       expect(ports).not.toContain(broker + 1);
     } finally {
+      if (holderDir) rmSync(holderDir, { recursive: true, force: true });
       rmSync(dir, { recursive: true, force: true });
     }
   });

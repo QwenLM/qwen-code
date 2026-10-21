@@ -284,6 +284,13 @@ import {
 } from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
+import {
+  BUNDLED_GENERATED_UI_SERVER,
+  BUNDLED_GENERATED_UI_TOOL,
+  type BundledGeneratedUiConfig,
+  type BundledGeneratedUiStatus,
+} from './generated-ui.js';
+import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import type { FileFilteringOptions } from '../utils/file-filtering-options.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
@@ -1277,6 +1284,7 @@ export interface ConfigParameters {
    * same way boot did. See `assembleMcpServers`.
    */
   topTierMcpServers?: Record<string, MCPServerConfig>;
+  bundledGeneratedUi?: BundledGeneratedUiConfig;
   lsp?: {
     enabled?: boolean;
   };
@@ -2273,6 +2281,7 @@ export interface ConfigInitializeOptions {
    * AND closes the 2N subprocess leak.
    */
   skipMcpDiscovery?: boolean;
+  disableBundledGeneratedUi?: boolean;
   /**
    * Skip hook system and hook MessageBus initialization. Read-only replay
    * helpers use this to avoid loading or subscribing user/workspace hooks.
@@ -2856,6 +2865,13 @@ export class Config {
   private fileReadCache: FileReadCache = new FileReadCache();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
+  private readonly bundledGeneratedUi: Readonly<BundledGeneratedUiConfig>;
+  private bundledGeneratedUiActive = false;
+  private bundledGeneratedUiStatus: BundledGeneratedUiStatus = {
+    version: 1,
+    enabled: false,
+    reason: 'setting-disabled',
+  };
   private permissionManager: PermissionManager | null = null;
   private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
   private readonly workflowAncestorTrustProvider:
@@ -3440,6 +3456,10 @@ export class Config {
     this.mcpServerCommand = params.mcpServerCommand;
     this.mcpServers = params.mcpServers;
     this.topTierMcpServers = params.topTierMcpServers;
+    this.bundledGeneratedUi = Object.freeze({
+      ...params.bundledGeneratedUi,
+      enabled: params.bundledGeneratedUi?.enabled === true,
+    });
     this.lspEnabled = params.lsp?.enabled ?? false;
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
@@ -4566,6 +4586,7 @@ export class Config {
     options?.signal?.throwIfAborted();
 
     this.subagentManager = new SubagentManager(this);
+    this.initializeBundledGeneratedUi(options);
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
       if (
@@ -8393,6 +8414,13 @@ export class Config {
     // workspace extension-skill store both key on the authored spelling, so
     // that is what the ownership lookup and the stored state are asked for.
     // `authoredName` is absent whenever the two spellings are the same.
+    if (
+      skill.level === 'bundled' &&
+      skill.name === 'generated-ui' &&
+      !this.getBundledGeneratedUiStatus().enabled
+    ) {
+      return false;
+    }
     const registryName = skill.name.trim().toLowerCase();
     const authoredName = authoredSkillName(skill).trim().toLowerCase();
     const extension =
@@ -8584,7 +8612,9 @@ export class Config {
    * (used to classify why a server is unavailable — see
    * {@link getMcpServerUnavailableReason}).
    */
-  private getMergedMcpServers(): Record<string, MCPServerConfig> {
+  private getMergedMcpServers(
+    includeBundledGeneratedUi = true,
+  ): Record<string, MCPServerConfig> {
     const mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
     for (const extension of extensions) {
@@ -8604,7 +8634,121 @@ export class Config {
       mcpServers[name] = cfg;
     }
 
+    if (
+      includeBundledGeneratedUi &&
+      this.bundledGeneratedUiActive &&
+      this.bundledGeneratedUi.server
+    ) {
+      mcpServers[BUNDLED_GENERATED_UI_SERVER] = this.bundledGeneratedUi.server;
+    }
     return mcpServers;
+  }
+
+  private generatedUiUnavailableReason(): BundledGeneratedUiStatus['reason'] {
+    if (!this.bundledGeneratedUi.enabled) return 'setting-disabled';
+    if (
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      this.sandbox ||
+      this.shellExecutionSandbox ||
+      this.executionEnvironment ||
+      this.sessionExecutionEngine === 'managed' ||
+      this.provisionalWorkspace ||
+      this.getSessionSourceType() === 'agent-host'
+    ) {
+      return 'unsupported-runtime';
+    }
+    if (!this.isTrustedFolder()) return 'workspace-untrusted';
+    if (this.bundledGeneratedUi.unavailableReason) {
+      return this.bundledGeneratedUi.unavailableReason;
+    }
+    if (!this.bundledGeneratedUi.server || !this.bundledGeneratedUi.skillsDir) {
+      return 'assets-missing';
+    }
+    if (
+      this.topTierMcpServers?.[BUNDLED_GENERATED_UI_SERVER] ||
+      this.getMergedMcpServers(false)[BUNDLED_GENERATED_UI_SERVER]
+    ) {
+      return 'provider-conflict';
+    }
+    const qualified = `mcp__${BUNDLED_GENERATED_UI_SERVER}__${BUNDLED_GENERATED_UI_TOOL}`;
+    if (
+      (this.allowedMcpServers &&
+        !matchesAnyServerPattern(
+          BUNDLED_GENERATED_UI_SERVER,
+          this.allowedMcpServers,
+        )) ||
+      this.isMcpServerDisabled(BUNDLED_GENERATED_UI_SERVER) ||
+      this.isMcpServerPendingApproval(BUNDLED_GENERATED_UI_SERVER) ||
+      [...this.disabledTools].some(
+        (name) =>
+          name === BUNDLED_GENERATED_UI_TOOL ||
+          name === qualified ||
+          normalizeMcpToolName(name) === qualified,
+      )
+    ) {
+      return 'policy-disabled';
+    }
+    return undefined;
+  }
+
+  private initializeBundledGeneratedUi(
+    options?: ConfigInitializeOptions,
+  ): void {
+    const reason =
+      options?.disableBundledGeneratedUi || options?.skipSkillManager
+        ? this.bundledGeneratedUi.enabled
+          ? 'unsupported-runtime'
+          : 'setting-disabled'
+        : this.generatedUiUnavailableReason();
+    this.bundledGeneratedUiActive = reason === undefined;
+    this.bundledGeneratedUiStatus = {
+      version: 1,
+      enabled: this.bundledGeneratedUiActive,
+      ...(reason ? { reason } : {}),
+    };
+    if (reason && reason !== 'setting-disabled') {
+      const warning = `Bundled Generated UI is unavailable (${reason}). Restart the owning session after resolving it.`;
+      this.warnings.push(warning);
+      this.debugLogger.warn(warning);
+    }
+  }
+
+  getBundledGeneratedUiStatus(): BundledGeneratedUiStatus {
+    if (!this.bundledGeneratedUiActive) {
+      return { ...this.bundledGeneratedUiStatus };
+    }
+    const reason = this.generatedUiUnavailableReason();
+    return reason
+      ? { version: 1, enabled: false, reason }
+      : { version: 1, enabled: true };
+  }
+
+  getBundledGeneratedUiSkillsDir(): string | undefined {
+    return this.getBundledGeneratedUiStatus().enabled
+      ? this.bundledGeneratedUi.skillsDir
+      : undefined;
+  }
+
+  isBundledGeneratedUiServer(serverName: string): boolean {
+    return (
+      serverName === BUNDLED_GENERATED_UI_SERVER &&
+      this.bundledGeneratedUiActive &&
+      this.getMergedMcpServers()[serverName] === this.bundledGeneratedUi.server
+    );
+  }
+
+  assertGeneratedUiServerNotReplaced(
+    servers: Record<string, MCPServerConfig> | undefined,
+  ): void {
+    if (
+      this.bundledGeneratedUiActive &&
+      servers?.[BUNDLED_GENERATED_UI_SERVER]
+    ) {
+      throw new Error(
+        'Generated UI is already active as a bundled provider. Restart the owning session to configure a manual generated-ui server.',
+      );
+    }
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
@@ -8627,6 +8771,12 @@ export class Config {
       ? { ...this.topTierMcpServers }
       : this.getMergedMcpServers();
 
+    if (
+      this.bundledGeneratedUiActive &&
+      !this.getBundledGeneratedUiStatus().enabled
+    ) {
+      delete mcpServers[BUNDLED_GENERATED_UI_SERVER];
+    }
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
         Object.entries(mcpServers).filter(([key]) =>
@@ -8703,6 +8853,7 @@ export class Config {
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
+    this.assertGeneratedUiServerNotReplaced(servers);
     if (this.shellExecutionSandbox && Object.keys(servers).length)
       throw new Error('Tool execution sandbox does not support MCP servers.');
     if (this.initialized) {
@@ -8719,6 +8870,7 @@ export class Config {
    * {@link getMcpServers} still layers them on top. See sub-task 3.
    */
   setMcpServers(servers: Record<string, MCPServerConfig> | undefined): void {
+    this.assertGeneratedUiServerNotReplaced(servers);
     if (this.shellExecutionSandbox && Object.keys(servers ?? {}).length)
       throw new Error('Tool execution sandbox does not support MCP servers.');
     this.mcpServers = servers;
@@ -8941,6 +9093,7 @@ export class Config {
    * of the settings layer (Task 5).
    */
   addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
+    this.assertGeneratedUiServerNotReplaced({ [name]: config });
     if (this.shellExecutionSandbox)
       throw new Error('Tool execution sandbox does not support MCP servers.');
     this.runtimeMcpServers.set(name, config);
