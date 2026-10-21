@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import { ideContextStore } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { parseJsoncObject } from '../utils/jsonc-editor.js';
+import { stripUtf8Bom } from './execution-sandbox-settings.js';
 import {
   getSystemDefaultsPath,
   getSystemSettingsPath,
@@ -185,7 +186,7 @@ async function readJsonObjectOnce(
   }
 
   try {
-    const raw = (await fs.readFile(filePath, 'utf8')).replace(/^\uFEFF/, '');
+    const raw = stripUtf8Bom(await fs.readFile(filePath, 'utf8'));
     const parsed: unknown = allowTrailingComma
       ? parseJsoncObject(raw)
       : JSON.parse(stripJsonComments(raw));
