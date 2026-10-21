@@ -25,6 +25,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { extractCommandRules } from '../utils/shellAstParser.js';
 import type { CronJob } from './cronScheduler.js';
 
@@ -99,17 +100,23 @@ async function unattendedVerdict(
   };
 }
 
-/** The `Monitor(...)` rule(s) that would let the gate run unattended. */
+/**
+ * The `Monitor(...)` rule(s) that would let the gate run unattended. Derived
+ * from the same normalized command the `cron_create` dialog offers and the
+ * permission manager matches against, so a rule saved from this hint matches:
+ * for `bash -c "./probe.sh"` that is `./probe.sh`, not the wrapper.
+ */
 export async function suggestedGateRule(gate: string): Promise<string> {
+  const command = normalizeMonitorCommand(gate).safetyCommand;
   try {
-    const rules = await extractCommandRules(gate);
+    const rules = await extractCommandRules(command);
     if (rules.length > 0) {
       return rules.map((rule) => `Monitor(${rule})`).join(', ');
     }
   } catch (error) {
     debugLogger.warn('Failed to extract gate command rules:', error);
   }
-  return `Monitor(${gate})`;
+  return `Monitor(${command})`;
 }
 
 /**

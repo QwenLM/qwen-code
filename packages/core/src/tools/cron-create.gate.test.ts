@@ -156,6 +156,14 @@ describe('CronCreateTool gate', () => {
     );
   });
 
+  it('rejects a gate on a one-shot task, which a quiet gate would consume', async () => {
+    const result = await tool
+      .build({ ...params, cron: '30 14 28 2 *', recurring: false })
+      .execute(signal());
+    expect(result.error?.message).toContain('A gate needs a recurring task');
+    expect(config._scheduler.list()).toHaveLength(0);
+  });
+
   it.each(['', '   ', 'sleep 5 &', 'sleep 5 & echo done'])(
     'rejects the gate %j at validation',
     (gate) => {

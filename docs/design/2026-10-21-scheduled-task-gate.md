@@ -124,9 +124,12 @@ gate: "qwen review watch-repo --gate QwenLM/qwen-code --review-requested"
 prompt: "For each pull request event in the gate output, run /qreview <number>."
 ```
 
-`gate` is accepted with every existing combination of `recurring`, `durable`
-and `sessionMode`. The tool result names the gate, and `cron_list` prints the
-gate and its last outcome after the prompt:
+`gate` needs a recurring task: a one-shot has no next slot, so a quiet gate
+would consume it with nothing delivered and no trace, and `cron_create`
+refuses the combination. It is accepted with `durable` and with the unbound
+session mode (`sessionMode: "current"` comes with the daemon follow-up). The
+tool result names the gate, and `cron_list` prints the gate and its last
+outcome after the prompt:
 
 ```text
 ab12cd34 — every 2 minutes (recurring) [session-only]: The gate output lists…

@@ -200,6 +200,19 @@ describe('createCronGateRunner', () => {
       expect(mockRuntimeShell).not.toHaveBeenCalled();
     });
 
+    it('names a rule for the normalized command, not the wrapper, so it matches', async () => {
+      const result = await createCronGateRunner(makeConfig())(
+        'bash -c "./probe.sh --gate"',
+        { signal: signal(), approvedInProcess: false },
+      );
+      // The raw wrapper would have given `Monitor(bash *)`, which the
+      // permission manager never matches for this gate.
+      expect(result).toMatchObject({
+        kind: 'blocked',
+        rule: 'Monitor(./probe.sh *)',
+      });
+    });
+
     it('runs in default mode when the gate was confirmed in this process', async () => {
       expect((await run(makeConfig(), true)).kind).toBe('output');
     });

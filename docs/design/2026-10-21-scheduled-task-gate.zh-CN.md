@@ -86,7 +86,7 @@ gate: "qwen review watch-repo --gate QwenLM/qwen-code --review-requested"
 prompt: "For each pull request event in the gate output, run /qreview <number>."
 ```
 
-`gate` 可以与现有的 `recurring`、`durable`、`sessionMode` 任意组合使用。工具结果会写明闸门，`cron_list` 在提示词之后打印闸门及其最近结果：
+`gate` 需要循环任务：一次性任务没有下一个时间槽，安静的闸门会把它消耗掉而什么都不投递、不留痕迹，`cron_create` 拒绝这种组合。它可以与 `durable` 以及未绑定的会话模式一起使用（`sessionMode: "current"` 随 daemon 后续 PR 提供）。工具结果会写明闸门，`cron_list` 在提示词之后打印闸门及其最近结果：
 
 ```text
 ab12cd34 — every 2 minutes (recurring) [session-only]: The gate output lists…
