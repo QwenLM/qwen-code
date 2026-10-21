@@ -765,15 +765,17 @@ describe('Hosted real-process gates', () => {
       // the step to 188 minutes; the FG12d cancel-before-dispatch cell adds
       // 18 s (2x its measured 9.1 s), so the fork moves to 10639; the FG11d
       // retry-reuse cell adds 11 s (2x its measured 5.3 s), moving the fork to
-      // 10650 and the step stays 188 minutes; the FG13a result store ack-loss
-      // cell adds 150 s, moving the fork to 10800 and the step to 190
-      // minutes; the FG13a dispatch ack-loss cell adds 150 s, moving the fork
-      // to 10950 and the step to 193 minutes):
+      // 10650 and the step stays 188 minutes; the FG12d Spring-restart
+      // owner-release cell adds 24 s (2x its measured 11.9 s), moving the fork
+      // to 10674; the FG13a result store ack-loss cell adds 150 s, moving the
+      // fork to 10824 and the step to 191 minutes; the FG13a dispatch
+      // ack-loss cell adds 150 s, moving the fork to 10974 and the step to
+      // 193 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10950);
+        expect(forkSeconds).toBe(10974);
       }
     },
   );
@@ -858,14 +860,15 @@ describe('Hosted real-process gates', () => {
   // FG13f MessageDisplay reload cell adds 150s, so it becomes 10021s; the
   // FG12d cancel-before-dispatch cell adds 18s (2x its measured 9.1s), so it
   // becomes 10039s; the retry-reuse cell adds 11s (2x its measured 5.3s), so it
-  // becomes 10050s; the FG13a result store ack-loss cell adds 150s, so it
-  // becomes 10200s; the FG13a dispatch ack-loss cell adds 150s, so it becomes
-  // 10350s. The largest
+  // becomes 10050s; the FG12d Spring-restart owner-release cell adds 24s (2x
+  // its measured 11.9s), so it becomes 10074s; the FG13a result store ack-loss
+  // cell adds 150s, so it becomes 10224s; the FG13a dispatch ack-loss cell
+  // adds 150s, so it becomes 10374s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10350;
+  const hostedForkHealthySeconds = 10374;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')

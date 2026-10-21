@@ -577,12 +577,15 @@
                                  10039 s, fork 10639 s, Verify 188 minutes. The
                                  FG11d retry-reuse cell adds 11 s (2x its
                                  measured 5.3 s): healthy 10050 s, fork 10650 s,
-                                 Verify 188 minutes. The FG13a result store
-                                 ack-loss cell adds 150 s: healthy 10200 s, fork
-                                 10800 s, Verify 190 minutes. The FG13a dispatch
-                                 ack-loss cell adds 150 s: healthy 10350 s, fork
-                                 10950 s, Verify 193 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10950</forkedProcessTimeoutInSeconds>
+                                 Verify 188 minutes. The FG12d Spring-restart
+                                 owner-release cell adds 24 s (2x its measured
+                                 11.9 s): healthy 10074 s, fork 10674 s. The
+                                 FG13a result store ack-loss cell adds 150 s:
+                                 healthy 10224 s, fork 10824 s, Verify 191
+                                 minutes. The FG13a dispatch ack-loss cell adds
+                                 150 s: healthy 10374 s, fork 10974 s, Verify
+                                 193 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10974</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
