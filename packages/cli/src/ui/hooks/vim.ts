@@ -337,7 +337,11 @@ function findCharInLineReverse(
 
 // ── Hook ──
 
-export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
+export function useVim(
+  buffer: TextBuffer,
+  onSubmit?: (value: string) => void,
+  onPaste?: () => void,
+) {
   const { vimEnabled, vimMode } = useVimModeState();
   const { setVimMode } = useVimModeActions();
   const [state, dispatch] = useReducer(vimReducer, initialVimState);
@@ -1748,6 +1752,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               isLinewise = text.includes('\n');
             }
             if (text) {
+              onPaste?.();
               const [row, col] = buffer.cursor;
               const line = buffer.lines[row] ?? '';
               if (isLinewise) {
@@ -1796,6 +1801,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               isLinewise = text.includes('\n');
             }
             if (text) {
+              onPaste?.();
               const [row, col] = buffer.cursor;
               if (isLinewise) {
                 const repeated = preparePasteText(text, repeatCount);
@@ -1908,6 +1914,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       updateMode,
       executeFind,
       onSubmit,
+      onPaste,
     ],
   );
 

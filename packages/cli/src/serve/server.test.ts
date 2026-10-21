@@ -805,7 +805,12 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'workspace_skills_config_runtime'];
     }
     if (feature === 'session_artifacts') {
-      return [feature, 'session_artifacts_persistence', 'session_sources'];
+      return [
+        feature,
+        'session_artifacts_persistence',
+        'session_artifact_library',
+        'session_sources',
+      ];
     }
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
@@ -3712,6 +3717,7 @@ describe('createServeApp', () => {
         }
         if (
           feature === 'session_artifacts_persistence' ||
+          feature === 'session_artifact_library' ||
           feature === 'session_sources'
         ) {
           expect(
