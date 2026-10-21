@@ -18,7 +18,7 @@ qwen daemon token --remove [--port <port>]
 
 ## 存储
 
-- 路径：runtime discovery 目录下的 `daemon-<port>.token`，与 `daemon-<port>.json` 同级。
+- 路径：runtime discovery 目录下的 `daemon-<port>-<pid>.token`，与 `daemon-<port>.json` 同级；pid 将 sidecar 绑定到单个 daemon 实例。
 - 目录 `0700`，文件 `0600`（POSIX）。
 - 仅在显式 `--save-token` 且提供了 bearer token 时写入。
 - `daemon stop` 随 discovery record 一起删除 sidecar；`daemon token --remove` 显式删除。

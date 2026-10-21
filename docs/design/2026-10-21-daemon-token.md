@@ -18,7 +18,7 @@ qwen daemon token --remove [--port <port>]
 
 ## Storage
 
-- Path: `daemon-<port>.token` beside `daemon-<port>.json` in the runtime discovery directory.
+- Path: `daemon-<port>-<pid>.token` beside `daemon-<port>.json` in the runtime discovery directory; the pid scopes the sidecar to one daemon instance.
 - Directory `0700`, file `0600` on POSIX.
 - The file is written only when `--save-token` is explicit and a bearer token was supplied.
 - `daemon stop` removes the sidecar together with the discovery record; `daemon token --remove` removes it explicitly.
