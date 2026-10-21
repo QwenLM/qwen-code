@@ -1477,7 +1477,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
-    if (showing && (navigationUp || navigationDown)) {
+    if (suggestions.length > 1 && (navigationUp || navigationDown)) {
       key.preventDefault();
       // Navigation marks the dropdown as user-driven: with a perfect command
       // match, Enter then accepts the highlighted suggestion instead of

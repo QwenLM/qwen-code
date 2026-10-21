@@ -2934,6 +2934,22 @@ describe('composer admission and attachment ownership', () => {
     },
   );
 
+  it('allows attachment selection with one completion candidate', async () => {
+    const visible = vi.fn();
+    const submit = vi.fn(() => true);
+    mocks.state.slashCommands = [
+      { name: 'model', description: 'Only command', kind: 'built-in' },
+    ];
+    renderPrompt({ onSubmit: submit, onSuggestionsVisibilityChange: visible });
+    await press('v', true);
+    await typeText('/mod');
+    expect(visible).toHaveBeenLastCalledWith(true);
+    await press('up');
+    expect(screen.getByText('> clipboard-test.png')).toBeTruthy();
+    expect(currentEditor().plainText).toBe('/mod');
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it('selects an attachment without completion and Enter only deselects it', async () => {
     const submit = vi.fn(() => true);
     renderPrompt({ onSubmit: submit });
