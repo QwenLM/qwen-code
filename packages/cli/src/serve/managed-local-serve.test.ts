@@ -35,8 +35,10 @@ vi.mock('./managed-local-state.js', () => ({
   openManagedLocalState: mocks.openState,
 }));
 vi.mock('./managed-local-web.js', () => ({
-  startManagedLocalWeb: mocks.startWeb,
   signedManagedHeaders: () => ({}),
+}));
+vi.mock('./run-qwen-serve.js', () => ({
+  runQwenServe: mocks.startWeb,
 }));
 vi.mock('./web-shell-resolver.js', () => ({
   resolveWebShellDir: () => '/package/web-shell',
@@ -81,6 +83,9 @@ describe('Managed local service environment', () => {
     expect(environment['SPRING_PROFILES_ACTIVE']).toBe('managed-local');
     expect(environment['QWEN_MANAGED_AGENT_AUTH_MODE']).toBe('signed');
     expect(environment['QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY']).toBe('signing');
+    expect(
+      environment['QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED'],
+    ).toBe('true');
     expect(environment['QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY']).toBe(
       'writer',
     );
@@ -163,7 +168,11 @@ describe('Managed local startup supervision', () => {
         } else {
           process.emit('SIGTERM');
         }
-        return { url: 'http://127.0.0.1:9000', close };
+        return {
+          url: 'http://127.0.0.1:9000',
+          server: new EventEmitter(),
+          close,
+        };
       });
       try {
         await expect(runManagedLocalServe({ port: 0 })).rejects.toThrow(
@@ -171,6 +180,22 @@ describe('Managed local startup supervision', () => {
         );
         expect(close).toHaveBeenCalled();
         expect(release).toHaveBeenCalledOnce();
+        expect(mocks.startWeb).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspace: process.cwd(),
+            requireAuth: true,
+            token: state.publicToken,
+            requireWebShell: true,
+          }),
+          expect.objectContaining({
+            installSignalHandlers: false,
+            preheatBridge: false,
+            managedLocalWeb: expect.objectContaining({
+              javaUrl: 'http://127.0.0.1:5011',
+              productScope: 'local:installation',
+            }),
+          }),
+        );
         expect(children[0].kill).toHaveBeenCalledWith('SIGTERM');
         expect(mocks.stdout.mock.calls.flat().join('\n')).not.toContain(
           'WebShell:',

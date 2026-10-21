@@ -87,8 +87,8 @@ import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
-import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { WebShellNavigationBoundary } from './navigation';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -96,11 +96,21 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
   return {
     ManagedSessionsPage: (props: {
       sessionId?: string;
-      onSelectSession: (id: string | undefined) => void;
+      onSelectSession: (id: string | undefined, workspaceId?: string) => void;
+      onOpenSession?: (id: string, workspaceId?: string) => void;
+      workspaceId?: string;
+      onSelectWorkspace?: (workspaceId: string) => void;
+      onSessionWorkspaceChange?: (workspaceId: string | null) => void;
+      navigationActive?: boolean;
+      navigationSearch?: string;
       navigationTarget?: HTMLElement | null;
       interactive?: boolean;
       onManageSkills?: () => void;
       creationSkills?: { workspaceCwd: string };
+      workspaceCreationOpen?: boolean;
+      onWorkspaceCreationOpenChange?: (open: boolean) => void;
+      onOpenLocalWorkspace?: () => void;
+      onWorkspaceCreated?: (workspaceId: string) => void;
     }) => {
       const [draft, setDraft] = React.useState('');
       return (
@@ -109,6 +119,9 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
           data-session={props.sessionId ?? 'new'}
           data-interactive={props.interactive}
           data-skills-workspace={props.creationSkills?.workspaceCwd}
+          data-workspace={props.workspaceId}
+          data-search={props.navigationSearch}
+          data-workspace-creation-open={Boolean(props.workspaceCreationOpen)}
         >
           <button
             data-testid="managed-manage-skills"
@@ -121,13 +134,70 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
           />
+          <button onClick={() => props.onWorkspaceCreationOpenChange?.(false)}>
+            Close workspace creation
+          </button>
+          <button
+            onClick={() => {
+              props.onWorkspaceCreationOpenChange?.(false);
+              props.onOpenLocalWorkspace?.();
+            }}
+          >
+            Select Local workspace creation
+          </button>
+          <button
+            onClick={() => {
+              props.onWorkspaceCreated?.('created-workspace');
+              props.onWorkspaceCreationOpenChange?.(false);
+            }}
+          >
+            Complete Managed workspace creation
+          </button>
+          <button
+            onClick={() =>
+              props.onSessionWorkspaceChange?.('resolved-workspace')
+            }
+          >
+            Resolve Managed workspace
+          </button>
+          <button onClick={() => props.onSessionWorkspaceChange?.(null)}>
+            Resolve unbound Managed workspace
+          </button>
+          <button onClick={() => props.onSelectSession(props.sessionId)}>
+            Complete Managed submission
+          </button>
+          <button
+            onClick={() =>
+              props.sessionId && props.onOpenSession?.(props.sessionId)
+            }
+          >
+            Reopen selected Managed session
+          </button>
+          <button
+            data-testid="complete-managed-creation"
+            onClick={() =>
+              props.onSelectSession('managed-created', 'created-workspace')
+            }
+          >
+            Complete Managed creation
+          </button>
           {props.navigationTarget &&
             createPortal(
               <nav aria-label="Managed sessions">
                 <button
-                  onClick={() => props.onSelectSession('managed-history')}
+                  onClick={() =>
+                    (props.onOpenSession ?? props.onSelectSession)(
+                      'managed-history',
+                      'managed-workspace',
+                    )
+                  }
                 >
                   Managed history
+                </button>
+                <button
+                  onClick={() => props.onSelectWorkspace?.('managed-workspace')}
+                >
+                  New Managed workspace task
                 </button>
               </nav>,
               props.navigationTarget,
@@ -322,6 +392,8 @@ type ChatEditorTestProps = {
 };
 
 type AddWorkspaceDialogTestProps = {
+  executionMode?: 'daemon' | 'managed';
+  onExecutionModeChange?: (mode: 'daemon' | 'managed') => void;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   onSuggest?: (prefix: string) => Promise<unknown>;
@@ -1763,6 +1835,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       canOpenSplitView?: boolean;
       sessionContent?: ReactNode;
       sessionHeader?: ReactNode;
+      managedWorkspaces?: ReactNode;
+      onSearchQueryChange?: (query: string) => void;
+      currentSessionActive?: boolean;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
@@ -1780,6 +1855,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           'data-has-open-agents': String(Boolean(props.onOpenAgents)),
           'data-has-git-diff': String(Boolean(props.onOpenGitDiff)),
           'data-has-commit': String(Boolean(props.onOpenCommit)),
+          'data-current-session-active': String(props.currentSessionActive),
           'data-can-open-sessions-overview': String(
             Boolean(props.canOpenSessionsOverview),
           ),
@@ -1787,6 +1863,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
         },
         props.sessionHeader,
         props.sessionContent,
+        props.managedWorkspaces,
         React.createElement(
           'button',
           {
@@ -48680,6 +48757,248 @@ describe('approval mode allowlist', () => {
 });
 
 describe('Managed home integration', () => {
+  function providerWithWorkspaceCreation(): ManagedAgentProvider {
+    return {
+      ...managedProvider(),
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn(),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+        createWorkspace: vi.fn(),
+      },
+    };
+  }
+
+  it('switches Local workspace creation to Managed without changing the current conversation until success', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: providerWithWorkspaceCreation(),
+      language: 'en',
+    });
+    await flush();
+    const sidebar = container.querySelector('[data-testid="sidebar"]')!;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')!
+        .click(),
+    );
+    expect(testState.latestAddWorkspaceDialogProps?.executionMode).toBe(
+      'daemon',
+    );
+    await act(async () =>
+      testState.latestAddWorkspaceDialogProps?.onExecutionModeChange?.(
+        'managed',
+      ),
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    expect(managed.getAttribute('data-workspace-creation-open')).toBe('true');
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('true');
+    expect(
+      container.querySelector('[data-testid="add-workspace-dialog"]'),
+    ).toBeNull();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find(
+          (node) => node.textContent === 'Complete Managed workspace creation',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('false');
+    expect(managed.getAttribute('data-workspace')).toBe('created-workspace');
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(mockWorkspaceActions.addWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('defaults creation to Managed and preserves its history session when canceled or switched to Local', async () => {
+    window.history.replaceState(null, '', '/?managed=1&managedSession=history');
+    mockWorkspace.capabilities = {
+      features: ['dynamic_workspace_registration'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp({
+      managedAgentProvider: providerWithWorkspaceCreation(),
+      language: 'en',
+    });
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    const open = container.querySelector<HTMLButtonElement>(
+      '[data-testid="open-add-workspace"]',
+    )!;
+    await act(async () => open.click());
+    await flush();
+    expect(managed.getAttribute('data-workspace-creation-open')).toBe('true');
+    expect(managed.getAttribute('data-session')).toBe('history');
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Close workspace creation')!
+        .click(),
+    );
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe('history');
+    await act(async () => open.click());
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Select Local workspace creation')!
+        .click(),
+    );
+    await flush();
+    expect(testState.latestAddWorkspaceDialogProps?.executionMode).toBe(
+      'daemon',
+    );
+    expect(managed.getAttribute('data-session')).toBe('history');
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('does not activate a late workspace completion after its dialog has been dismissed', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: providerWithWorkspaceCreation(),
+      language: 'en',
+    });
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')!
+        .click(),
+    );
+    await act(async () =>
+      testState.latestAddWorkspaceDialogProps?.onExecutionModeChange?.(
+        'managed',
+      ),
+    );
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Close workspace creation')!
+        .click(),
+    );
+    await flush();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find(
+          (node) => node.textContent === 'Complete Managed workspace creation',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')!
+        .getAttribute('data-current-session-active'),
+    ).toBe('true');
+  });
+  it('waits for a different history session workspace and retains a confirmed workspace on same-session history replay', async () => {
+    window.history.replaceState(null, '', '/?managed=1&managedSession=first');
+    const { container } = renderApp(
+      {
+        managedAgentProvider: {
+          ...managedProvider(),
+          workspaceBinding: {
+            agentId: 'agent',
+            list: vi.fn(),
+            get: vi.fn(),
+            createEmpty: vi.fn(),
+          },
+        },
+        language: 'en',
+      },
+      undefined,
+      false,
+      true,
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    const newTask = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+    const resolveWorkspace = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Resolve Managed workspace',
+    )!;
+    await act(async () => resolveWorkspace.click());
+    await flush();
+    expect(managed.getAttribute('data-workspace')).toBe('resolved-workspace');
+
+    window.history.pushState(
+      null,
+      '',
+      '/?managed=1&managedSession=second-in-another-workspace',
+    );
+    await act(async () => window.dispatchEvent(new PopStateEvent('popstate')));
+    await flush();
+    await act(async () => newTask.click());
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe(
+      'second-in-another-workspace',
+    );
+    expect(managed.getAttribute('data-workspace')).toBeNull();
+
+    await act(async () => resolveWorkspace.click());
+    await flush();
+    window.history.pushState(
+      null,
+      '',
+      '/?managed=1&managedSession=second-in-another-workspace',
+    );
+    await act(async () => window.dispatchEvent(new PopStateEvent('popstate')));
+    await flush();
+    await act(async () => newTask.click());
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-workspace')).toBe('resolved-workspace');
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('allows New task after resolving and reopening an unbound session and completing another prompt', async () => {
+    window.history.replaceState(null, '', '/?managed=1&managedSession=legacy');
+    const { container } = renderApp({
+      managedAgentProvider: {
+        ...managedProvider(),
+        workspaceBinding: {
+          agentId: 'agent',
+          list: vi.fn(),
+          get: vi.fn(),
+          createEmpty: vi.fn(),
+        },
+      },
+      language: 'en',
+    });
+    await flush();
+    for (const label of [
+      'Resolve unbound Managed workspace',
+      'Reopen selected Managed session',
+      'Complete Managed submission',
+    ]) {
+      await act(async () =>
+        [...container.querySelectorAll('button')]
+          .find((node) => node.textContent === label)!
+          .click(),
+      );
+      await flush();
+    }
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-workspace')).toBeNull();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
   function autoApprovableLocalPermission() {
     return makePendingPermissionBlock({
       options: [
@@ -48712,17 +49031,179 @@ describe('Managed home integration', () => {
   }
 
   async function chooseBackend(container: HTMLElement, label: string) {
-    const tab = [
-      ...container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-    ].find((node) => node.textContent === label);
-    expect(tab).toBeTruthy();
-    await act(async () =>
-      tab!.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      ),
-    );
+    const target =
+      label === 'Local'
+        ? container.querySelector<HTMLButtonElement>(
+            '[data-testid="select-current-session"]',
+          )
+        : [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+            (node) => node.textContent === 'Managed history',
+          );
+    expect(target).toBeTruthy();
+    await act(async () => target!.click());
     await flush();
   }
+
+  it('keeps Managed workspace navigation available beside Local sessions without execution tabs', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    const sidebar = container.querySelector('[data-testid="sidebar"]')!;
+    expect(sidebar.querySelector('[role="tablist"]')).toBeNull();
+    expect(
+      sidebar.querySelector('nav[aria-label="Managed sessions"]'),
+    ).not.toBeNull();
+    expect(
+      sidebar.querySelector('[data-testid="load-session"]'),
+    ).not.toBeNull();
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('true');
+
+    await chooseBackend(container, 'Managed');
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('false');
+    expect(
+      sidebar.querySelector('[data-testid="load-session"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+
+    await chooseBackend(container, 'Local');
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('true');
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('inherits the selected Managed history workspace for New task', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    await chooseBackend(container, 'Managed');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-workspace')).toBe('managed-workspace');
+    expect(managed.getAttribute('data-interactive')).toBe('true');
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('waits for a deep-linked Managed session workspace before opening a new task', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=deep-link',
+    );
+    const { container } = renderApp({
+      managedAgentProvider: {
+        ...managedProvider(),
+        workspaceBinding: {
+          agentId: 'agent',
+          list: vi.fn(),
+          get: vi.fn(),
+          createEmpty: vi.fn(),
+        },
+      },
+      language: 'en',
+    });
+    await flush();
+    const newTask = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    await act(async () => newTask.click());
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe('deep-link');
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Resolve Managed workspace')!
+        .click(),
+    );
+    await act(async () => newTask.click());
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-workspace')).toBe('resolved-workspace');
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('records a background Managed creation without leaving the selected Local conversation', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="complete-managed-creation"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-session'),
+    ).toBe('managed-created');
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('opens a Managed workspace draft from Local and a Local workspace draft from Managed', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'New Managed workspace task')!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-workspace'),
+    ).toBe('managed-workspace');
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-primary-workspace"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
+  });
 
   it('keeps the Local approval-mode dialog usable in Local', async () => {
     window.history.replaceState(null, '', '/?managed=0');
@@ -48948,15 +49429,11 @@ describe('Managed home integration', () => {
       if (toolName) expect(hiddenApprovalKeyboardActive).toBe(false);
 
       await chooseBackend(container, 'Local');
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
       if (toolName) {
-        expect(
-          container.querySelector('[data-testid="inline-panel"]'),
-        ).toBeNull();
         expect(keyboardActive()).toBe(true);
-      } else {
-        expect(
-          container.querySelector('[data-testid="inline-panel"]'),
-        ).not.toBeNull();
       }
       expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
       expect(mockSessionActions.respondToPermission).not.toHaveBeenCalled();
@@ -49013,7 +49490,7 @@ describe('Managed home integration', () => {
     ).not.toBeNull();
     expect(
       container.querySelector('[data-testid="sidebar"] [role="tablist"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     expect(
       container.querySelector(
         '[data-testid="chat-pane-container"] [role="tablist"]',
@@ -49105,7 +49582,9 @@ describe('Managed home integration', () => {
         .querySelector('[data-testid="managed-conversation"]')
         ?.getAttribute('data-interactive'),
     ).toBe('false');
-    expect(container.querySelector('[data-testid="sidebar"] nav')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="sidebar"] nav'),
+    ).not.toBeNull();
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!

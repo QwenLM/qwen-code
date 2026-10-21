@@ -11,9 +11,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import express from 'express';
+import { createServeApp } from './server.js';
+import { getServeAppLifecycle } from './serve-app-lifecycle.js';
 import {
   signedManagedHeaders,
-  startManagedLocalWeb,
+  mountManagedLocalWeb,
 } from './managed-local-web.js';
 
 const SIGNING_KEY = '0123456789abcdef0123456789abcdef';
@@ -47,7 +50,7 @@ describe('signedManagedHeaders', () => {
 describe('Managed local front door', () => {
   let directory: string;
   let java: ReturnType<typeof createServer>;
-  let web: Awaited<ReturnType<typeof startManagedLocalWeb>> | undefined;
+  let web: { url: string; close(): Promise<void> } | undefined;
   let handler: (request: IncomingMessage, response: ServerResponse) => void;
   const calls: Array<{
     method?: string;
@@ -86,20 +89,45 @@ describe('Managed local front door', () => {
     if (typeof address !== 'object' || !address)
       throw new Error('Missing port');
     javaUrl = `http://127.0.0.1:${address.port}`;
-    web = await startManagedLocalWeb(options());
+    let port = 0;
+    const app = createServeApp(
+      {
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        port,
+        workspace: directory,
+        token: 'browser-token',
+        requireAuth: true,
+      },
+      () => port,
+      { webShellDir: directory, managedLocalWeb: options() },
+    );
+    const server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const publicAddress = server.address();
+    if (!publicAddress || typeof publicAddress === 'string')
+      throw new Error('Missing public port');
+    port = publicAddress.port;
+    web = {
+      url: `http://127.0.0.1:${port}`,
+      async close() {
+        await getServeAppLifecycle(app)?.close();
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      },
+    };
   });
 
   function options() {
     return {
-      port: 0,
-      token: 'browser-token',
       javaUrl,
       signingKey: SIGNING_KEY,
       tenantId: 'local',
       actorId: 'owner',
       productScope: 'local:installation-1',
       agentId: 'qwen-code',
-      webShellDir: directory,
     };
   }
 
@@ -150,9 +178,10 @@ describe('Managed local front door', () => {
       agentId: 'qwen-code',
       enableWorkspaceBinding: true,
     });
-    expect(await (await get('/capabilities')).json()).toEqual({
-      mode: 'managed',
-    });
+    const capabilities = await (await get('/capabilities')).json();
+    expect(capabilities).toHaveProperty('workspaces');
+    expect(capabilities).toHaveProperty('features');
+    expect(calls).toHaveLength(0);
   });
 
   it('preserves exact raw bytes and query while replacing browser identity and private headers', async () => {
@@ -199,6 +228,19 @@ describe('Managed local front door', () => {
     expect(call.headers['x-qwen-signature']).toBe(
       `v1=${createHmac('sha256', SIGNING_KEY).update(canonical).digest('hex')}`,
     );
+  });
+
+  it('keeps ordinary health reads and JSON request handling in the daemon', async () => {
+    const response = await get('/health');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    const malformed = await get('/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{',
+    });
+    expect(malformed.status).toBe(400);
+    expect(calls).toHaveLength(0);
   });
 
   it('allows only exact artifact content reads and preserves range validators', async () => {
@@ -316,21 +358,12 @@ describe('Managed local front door', () => {
     await vi.waitFor(() => expect(disconnected).toBe(true));
   });
 
-  it('refuses missing assets, empty authentication and non-loopback Java targets', async () => {
-    await expect(
-      startManagedLocalWeb({
-        ...options(),
-        webShellDir: path.join(directory, 'missing'),
-      }),
-    ).rejects.toThrow('built Web Shell');
-    await expect(
-      startManagedLocalWeb({ ...options(), token: '' }),
-    ).rejects.toThrow('bearer token');
-    await expect(
-      startManagedLocalWeb({
+  it('refuses non-loopback Java targets', () => {
+    expect(() =>
+      mountManagedLocalWeb(express(), {
         ...options(),
         javaUrl: 'http://attacker.example',
       }),
-    ).rejects.toThrow('loopback');
+    ).toThrow('loopback');
   });
 });

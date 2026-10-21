@@ -405,11 +405,13 @@ export function mountWebShellSpaFallback(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
   desktopRelayEnabled = false,
+  managedApp = false,
 ): void {
   const sendIndex = createSendIndex(
     webShellDir,
     frameAncestors,
     desktopRelayEnabled,
+    managedApp,
   );
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();

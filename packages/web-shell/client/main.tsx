@@ -248,7 +248,13 @@ function FocusedDaemonWorkspaceProvider({
   );
 }
 
-export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
+export function StandaloneApp({
+  daemonToken,
+  managedAgentProvider: providedManagedAgentProvider,
+}: {
+  daemonToken?: string;
+  managedAgentProvider?: ManagedAgentProvider;
+}) {
   const macosOverlayTitlebar = hasMacOSOverlayTitlebar();
   // The entry's own opinion — an explicit URL param or a stored in-app
   // choice. Passed down as the `theme`/`language` host props; `undefined`
@@ -273,9 +279,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [navigationBasePath] = useState(() =>
     inferStandaloneBasePath(window.location.pathname),
   );
-  const [managedAgentProvider] = useState(() =>
-    getDevelopmentManagedAgentProvider(),
+  const [developmentManagedAgentProvider] = useState(() =>
+    providedManagedAgentProvider
+      ? undefined
+      : getDevelopmentManagedAgentProvider(),
   );
+  const managedAgentProvider =
+    providedManagedAgentProvider ?? developmentManagedAgentProvider;
   // One-shot ?theme=/?language=/?lang= params are consumed by the useState
   // initializers above; strip them once mounted so a bookmarked URL cannot
   // keep overriding stored preferences on later loads. (The reload retry
@@ -535,8 +545,14 @@ async function main() {
               language={
                 getInitialLanguage() ?? normalizeLanguage(navigator.language)
               }
-              theme={getInitialTheme()}
-            />
+            >
+              {(managedAgentProvider) => (
+                <StandaloneApp
+                  daemonToken={token}
+                  managedAgentProvider={managedAgentProvider}
+                />
+              )}
+            </ManagedStandaloneApp>
           ) : (
             <StandaloneApp daemonToken={token} />
           )

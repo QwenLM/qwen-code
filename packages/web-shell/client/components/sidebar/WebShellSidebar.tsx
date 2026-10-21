@@ -523,6 +523,10 @@ interface WebShellSidebarProps {
   /** Replace daemon history with navigation owned by an external session provider. */
   sessionContent?: ReactNode;
   sessionHeader?: ReactNode;
+  managedWorkspaces?: ReactNode;
+  onSearchQueryChange?: (query: string) => void;
+  /** Selection styling only; the attached session still owns its actions. */
+  currentSessionActive?: boolean;
   /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
   showSessionSourceSwitch?: boolean;
   /** Show Live conversations and, in rail layout, the Live entry. Defaults to false. */
@@ -1115,6 +1119,9 @@ export function WebShellSidebar({
   primaryNav: primaryNavOptions,
   sessionContent,
   sessionHeader,
+  managedWorkspaces,
+  onSearchQueryChange,
+  currentSessionActive = true,
   showSessionSourceSwitch = true,
   showLive = false,
   hideProjectHeader,
@@ -1746,6 +1753,9 @@ export function WebShellSidebar({
     };
   }, []);
   const [searchQuery, setSearchQuery] = useState('');
+  useEffect(() => {
+    onSearchQueryChange?.(searchQuery);
+  }, [onSearchQueryChange, searchQuery]);
   // Order-insensitive membership key: poll-driven catalog updates change
   // it only when the session-id set actually changes, so externally
   // deleted/archived sessions invalidate content-search hits the same way
@@ -4932,7 +4942,7 @@ export function WebShellSidebar({
         <div
           className={cx(
             styles.sessionRow,
-            isCurrent && styles.currentSession,
+            currentSessionActive && isCurrent && styles.currentSession,
             session.isPinned && styles.pinnedSession,
             running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
@@ -4943,7 +4953,7 @@ export function WebShellSidebar({
           onFocus={(event) => measureSessionTitleScroll(event.currentTarget)}
           role="button"
           tabIndex={0}
-          aria-current={isCurrent ? 'page' : undefined}
+          aria-current={currentSessionActive && isCurrent ? 'page' : undefined}
           onClick={() =>
             standalone
               ? standalone.onOpen()
@@ -5329,6 +5339,7 @@ export function WebShellSidebar({
       handleUnarchive,
       isCurrentSession,
       openGroupMenuFromAnchor,
+      currentSessionActive,
       saveRename,
       searchQuery,
       sessionActionItems,
@@ -6636,7 +6647,18 @@ export function WebShellSidebar({
                   <SquarePenIcon size={16} strokeWidth={1.2} />
                 </span>
                 {(!collapsed || homePreviewOpen) && (
-                  <span>{t('sidebar.newTask')}</span>
+                  <span>
+                    {t('sidebar.newTask')}
+                    {managedWorkspaces !== undefined && (
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        {t(
+                          currentSessionActive
+                            ? 'managed.localMode'
+                            : 'managed.managedMode',
+                        )}
+                      </span>
+                    )}
+                  </span>
                 )}
               </button>
             </div>
@@ -6859,6 +6881,7 @@ export function WebShellSidebar({
                   >
                     <span>{t('sidebar.project')}</span>
                     {workspaceOverviewEnabled &&
+                      managedWorkspaces === undefined &&
                       projectWorkspaces.length > 1 && (
                         <span
                           className={styles.projectsHeaderCount}
@@ -6959,6 +6982,7 @@ export function WebShellSidebar({
                   {!hideProjectHeader && <WorkspaceHostHeading />}
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
+                      {!channelView && managedWorkspaces}
                       {standaloneSessionsVisible &&
                         onLoadStandaloneSession &&
                         onStandaloneNotice && (
@@ -7007,6 +7031,11 @@ export function WebShellSidebar({
                         <Fragment key={ws.id}>
                           <WorkspaceSection
                             workspace={ws}
+                            executionLabel={
+                              managedWorkspaces !== undefined
+                                ? t('managed.localMode')
+                                : undefined
+                            }
                             remote={!isPageOriginDaemon(workspace.baseUrl)}
                             renderHeader={
                               lockedWorkspaceCwd &&

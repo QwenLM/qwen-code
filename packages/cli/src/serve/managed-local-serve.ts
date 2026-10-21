@@ -18,10 +18,8 @@ import {
   openManagedLocalState,
   type ManagedLocalState,
 } from './managed-local-state.js';
-import {
-  signedManagedHeaders,
-  startManagedLocalWeb,
-} from './managed-local-web.js';
+import { signedManagedHeaders } from './managed-local-web.js';
+import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 
 export interface ManagedLocalServeOptions {
@@ -51,6 +49,7 @@ export function managedLocalJavaEnvironment(
     QWEN_MANAGED_AGENT_AUTH_MODE: 'signed',
     QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY: state.signingKey,
     QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: '',
+    QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED: 'true',
     QWEN_MANAGED_AGENT_SERVER_ADDRESS: '127.0.0.1',
     QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
     QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: `http://127.0.0.1:${state.javaPort}`,
@@ -141,7 +140,7 @@ export async function runManagedLocalServe(
     process: ChildProcess;
     group: boolean;
   }> = [];
-  let frontDoor: Awaited<ReturnType<typeof startManagedLocalWeb>> | undefined;
+  let frontDoor: RunHandle | undefined;
   let ready = false;
   let failure: Error | undefined;
   let closing: Promise<void> | undefined;
@@ -347,16 +346,35 @@ export async function runManagedLocalServe(
     await bootstrap.body?.cancel();
     if (failure) throw failure;
     if (closing) throw new Error('Managed startup interrupted.');
-    frontDoor = await startManagedLocalWeb({
-      port: options.port,
-      token: state.publicToken,
-      javaUrl,
-      signingKey: state.signingKey,
-      tenantId,
-      actorId,
-      productScope: `local:${state.installationId}`,
-      agentId: 'qwen-code',
-      webShellDir,
+    frontDoor = await runQwenServe(
+      {
+        port: options.port,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        token: state.publicToken,
+        requireAuth: true,
+        workspace: process.cwd(),
+        serveWebShell: true,
+        requireWebShell: true,
+      },
+      {
+        installSignalHandlers: false,
+        preheatBridge: false,
+        managedLocalWeb: {
+          javaUrl,
+          signingKey: state.signingKey,
+          tenantId,
+          actorId,
+          productScope: `local:${state.installationId}`,
+          agentId: 'qwen-code',
+        },
+      },
+    );
+    frontDoor.server.once('close', () => {
+      if (!closing) {
+        writeStderrLine('qwen serve --managed: daemon listener closed.');
+        void shutdown(1);
+      }
     });
     ready = true;
     if (failure || closing) {

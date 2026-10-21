@@ -75,14 +75,35 @@ works: extract it and run `./qwen-code/bin/qwen serve --managed --open`.
 
 The application binds to `127.0.0.1:4170`. Use `--port 0` for an available
 port, or select a fixed port. Keep the terminal open; Ctrl+C shuts down the
-front door, Java service, and Harness. systemd is optional for operator-managed
+ordinary daemon, Java service, and Harness. systemd is optional for operator-managed
 deployments and is not used by this command.
+An occupied public port follows the ordinary daemon's bounded nearby-port
+retry; use the browser address printed by the launcher.
+
+This one command starts both the ordinary daemon and Managed Agent. The same
+WebShell lists ordinary and Managed workspaces and sessions together under Projects, with a Managed label on Managed workspaces and no execution-mode tabs. New task follows the selected workspace or conversation. Local sessions use
+the directory where you ran the command, while Managed sessions use their
+application-created Workspaces or explicitly imported local projects. Both use
+the same authenticated browser origin;
+you do not need a second daemon command or browser page.
+
+In **Add workspace**, choose **Local (daemon)** or **Managed (Managed Agent)**
+before submitting. The choice defaults to the current conversation's service.
+Workspace rows and **New task** show that service, and new tasks inherit the
+selected workspace. The daemon's existing SSH workspace support remains
+available; Managed SSH registration is not integrated into this shared dialog.
 
 The terminal prints a browser URL with a token fragment. Treat it as a local
 password. The browser uses the token to authenticate every API request; Java
 signing keys and internal credentials never reach the browser. The listener is
 loopback-only. For a headless machine, omit `--open` and open the printed URL
 on that machine, or use an authenticated tunnel you manage.
+
+The unified application currently supports the local loopback page. The full
+shell's existing Mobile access / Local Control entry is not integrated with
+Managed boot: a paired LAN listener cannot open this unified page. Mobile
+sharing needs a separate integration; the ordinary daemon retains its existing
+Local Control behavior.
 
 The Harness uses normal Qwen model configuration and provider credentials.
 Configure a model using the usual Qwen CLI setup before sending your first
@@ -109,13 +130,21 @@ another application causes startup to fail; choose a different fresh data
 directory or stop the conflicting service rather than editing persisted facts.
 
 Startup creates an application-owned default Workspace and its OWNER grant
-through the existing idempotent Workspace API. The Managed UI can create more
-Workspaces and select project subdirectories. This command does not import the
-directory from which it was run. `--workspace` is rejected in Managed local
-mode: existing external Git checkout import requires a separate registration
-workflow. Keep projects in subdirectories of the created Workspace so the
-`.qwen-managed-storage.json` maintenance marker stays outside Git worktrees.
-Do not edit, delete, stash, or commit that marker.
+through the existing idempotent Workspace API. To use an existing local project,
+open **Workspace → Choose existing directory**, browse or enter its absolute
+path, then add the folder. The service registers its parent and grants OWNER
+access automatically, keeping existing files in place. New tasks start in the
+selected project. You can also create an empty Workspace.
+
+The launch directory remains available to Local sessions and is not imported
+automatically. `--workspace` remains unsupported in Managed local mode; select
+the project in the UI. The `.qwen-managed-storage.json` maintenance marker is
+kept outside Git worktrees; do not edit, delete, stash or commit it. Imported
+project files stay outside the private Managed data directory and require their
+own backup.
+
+Local session history continues to use ordinary Qwen storage. It is separate
+from the Managed data directory and is not included in a Managed-only backup.
 
 Preserve the complete data directory together, including `state.json`,
 `database/`, `runtime/`, `worker-home/`, and `workspaces/`. Settle or cancel

@@ -123,6 +123,7 @@ export interface WorkspaceHeaderActionsContext {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
+  executionLabel?: string;
   /**
    * localStorage seed for the expansion/collapsed-group preferences,
    * defaulting to the workspace id. Multi-host renderers pass an
@@ -245,6 +246,7 @@ interface WorkspaceSectionProps {
 
 export function WorkspaceSection({
   workspace,
+  executionLabel,
   storageKey,
   remote = false,
   renderHeader,
@@ -856,6 +858,9 @@ export function WorkspaceSection({
                 {workspaceLabel(workspace)}
               </span>
             </span>
+            {executionLabel && (
+              <span className={styles.badge}>{executionLabel}</span>
+            )}
             {!workspace.trusted && (
               <span className={styles.badge}>{untrustedLabel}</span>
             )}

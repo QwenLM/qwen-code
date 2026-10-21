@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonProductSessionContext } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { WebShellProps } from './App';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import type { WebShellResolvedBrand } from './brandContext';
 import { extractInlineScript, readIndexHtml } from './test/indexHtmlTestUtils';
@@ -33,9 +34,6 @@ vi.mock('react-dom/client', async (importOriginal) => ({
 }));
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonWorkspaceProvider: ({ children }: { children: ReactNode }) => children,
-}));
-vi.mock('./ManagedAgentWebShell', () => ({
-  ManagedAgentWebShell: () => null,
 }));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: (props: CapturedWorkspaceSessionProps) => {
@@ -473,10 +471,6 @@ describe('StandaloneApp brand', () => {
     expect(stubIcon.href).toBe('data:image/svg+xml,LOGO');
   });
 
-  // The WorkspaceSessionProvider is mocked out in this file, so an ordinary
-  // Runtime session id cannot be observed here; the real restore-suppression
-  // pin belongs with the provider. This check exercises the one behavior in
-  // scope for this mock set: the managedSession param survives StandaloneApp.
   it('keeps the managedSession parameter on a Managed history link', () => {
     window.history.replaceState(
       null,
@@ -487,6 +481,26 @@ describe('StandaloneApp brand', () => {
     expect(
       new URLSearchParams(window.location.search).get('managedSession'),
     ).toBe('gateway-session');
+  });
+
+  it('supplies the authenticated Managed provider to the full shell instead of browser development options', () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managedProvider=java&tenant=attacker',
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: window.location.origin,
+      productScope: 'local:installation-1',
+      agentId: 'local-agent',
+      enableWorkspaceBinding: true,
+    });
+    act(() =>
+      root.render(
+        <StandaloneApp daemonToken="token" managedAgentProvider={provider} />,
+      ),
+    );
+    expect(testState.props?.webShellProps.managedAgentProvider).toBe(provider);
   });
 
   it('injects the Java provider into the full shell in development mode', async () => {
