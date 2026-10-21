@@ -4442,6 +4442,91 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('routes the vim submit through the composer-registered submit path', () => {
+      const mockQueueMessage = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // The composer registers the path that expands large-paste placeholders
+      // and bumps the submit epoch; vim's Enter must use it, not submit the
+      // raw buffer it just cleared.
+      const composerSubmit = vi.fn();
+      const registerSubmit = capturedUIActions.registerPromptSubmit;
+      expect(registerSubmit).toBeDefined();
+      registerSubmit!(composerSubmit);
+      const vimSubmit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+        value: string,
+      ) => void;
+      vimSubmit('[Pasted Content 1200 chars]');
+
+      expect(composerSubmit).toHaveBeenCalledWith(
+        '[Pasted Content 1200 chars]',
+      );
+      expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps a vim composer submit displayed as typed while the model reads the framed paste', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const framed = `<clipboard-paste>\n${body}\n</clipboard-paste>\nattribution`;
+      const queue = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      // What the composer's submit path hands over for a collapsed paste.
+      // Vim drops the submittedPrompt projection, so the transcript, the
+      // session log and a cancel-restore read the display text instead.
+      act(() => {
+        capturedUIActions.handleFinalSubmit(framed, {
+          deferUntilIdle: false,
+          submittedPrompt: placeholder,
+          displayText: placeholder,
+          humanInput: { text: body },
+          pasteExpansions,
+        });
+      });
+      expect(queue).toHaveBeenCalledWith(framed, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
     it('keeps Vim-modified composer text ineligible after Vim is disabled', () => {
       const mockQueueMessage = vi.fn();
       let setVimEnabled: ((enabled: boolean) => void) | undefined;
