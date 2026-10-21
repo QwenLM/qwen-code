@@ -327,8 +327,8 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
 
   it('keeps exit detection while paused output floods past 3 MB', async () => {
     // The raw flood is 3 MB and reaches the master as ~4.5 MB (ONLCR), so the
-    // hold cap is sized explicitly to keep this a pause-hold exercise rather
-    // than a limit-termination exercise.
+    // hold cap is sized explicitly to keep the reads going: a parked pump
+    // would leave the child blocked on write instead of exiting.
     const pty = ownedSpawn(
       '/bin/sh',
       ['-c', 'yes X | head -c 3000000; exit 0'],
@@ -541,12 +541,18 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
       }
     }, 5_000);
 
-  it('terminates with an explicit error when a paused flood passes the per-pty hold cap', async () => {
+  it('parks reads at the per-pty hold cap: the child stays alive and the stream resumes byte-exact', async () => {
     const LIMIT = 128 * 1024;
+    const LINES = 200_000;
     const pty = track(
-      spawn('/bin/sh', ['-c', 'yes X | head -c 2097152; sleep 30'], {
-        limits: { pausedHoldBytes: LIMIT },
-      }),
+      spawn(
+        '/bin/sh',
+        [
+          '-c',
+          `awk 'BEGIN{for(i=0;i<${LINES};i++)print "P" i}'; echo FLOOD_DONE; read x; echo GOT_$x`,
+        ],
+        { limits: { pausedHoldBytes: LIMIT } },
+      ),
     );
     const { errors } = nextError(pty);
     let exits = 0;
@@ -559,38 +565,78 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     });
 
     pty.pause();
-    expect(await waitFor(() => errors.length > 0)).toBe(true);
+    expect(await waitFor(() => pty.stats.readParked)).toBe(true);
+    const held = pty.stats.pausedBytes;
+    expect(held).toBeGreaterThan(0);
+    expect(held).toBeLessThanOrEqual(LIMIT);
+    expect(getPtyBudgetStats().pausedHoldBytes).toBe(held);
 
-    expect(errors.length).toBe(1);
-    const error = errors[0]!;
-    expect(error).toBeInstanceOf(PtyLimitError);
-    expect(error.code).toBe('QWEN_PTY_OUTPUT_LIMIT');
-    expect(error.limitKind).toBe('paused-hold-per-pty');
-    expect(error.limit).toBe(LIMIT);
-    expect(error.acceptedBytes).toBeGreaterThan(0);
-    expect(error.acceptedBytes).toBeLessThanOrEqual(LIMIT);
-    expect(error.hasUndeliveredData).toBe(true);
-
-    const stats = pty.stats;
-    expect(stats.resourceFailed).toBe(true);
-    expect(stats.pausedBytes).toBe(0);
-
-    // onExit stays reserved for real native exits: the product failure is
-    // the error terminal state, never a fabricated exit code.
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    // Parked, not failed: no error, no exit, nothing delivered, the hold no
+    // longer grows, the fd is open and the child is alive — blocked on its
+    // write behind the full kernel buffer, as behind the wrapper's paused
+    // socket.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(pty.stats.readParked).toBe(true);
+    expect(pty.stats.pausedBytes).toBe(held);
+    expect(pty.stats.resourceFailed).toBe(false);
+    expect(errors).toHaveLength(0);
     expect(exits).toBe(0);
+    expect(output).toBe('');
+    fs.fstatSync(fdOf(pty));
+    expect(() => process.kill(pty.pid, 0)).not.toThrow();
 
-    // Full teardown: master fd closed, child tree gone by real ownership.
-    expectFdClosed(pty);
-    expect(await waitForChildGone(pty)).toBe(true);
-
-    // No auto-resume and no replay of the discarded hold.
-    const before = output;
+    // resume() restarts the reads: nothing was dropped, and the child is
+    // still interactive afterwards.
     pty.resume();
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(output).toBe(before);
+    expect(pty.stats.readParked).toBe(false);
+    expect(await waitFor(() => output.includes('FLOOD_DONE'), 20_000)).toBe(
+      true,
+    );
+    const expected =
+      Array.from({ length: LINES }, (_, i) => `P${i}`).join('\r\n') +
+      '\r\nFLOOD_DONE\r\n';
+    expect(output).toBe(expected);
+    pty.write('ok\n');
+    expect(await waitFor(() => output.includes('GOT_ok'))).toBe(true);
+    expect(await waitFor(() => exits === 1)).toBe(true);
+    expect(errors).toHaveLength(0);
+    expect(await waitForFdClosed(pty)).toBe(true);
+    expect(getPtyBudgetStats().pausedHoldBytes).toBe(0);
+  }, 40_000);
 
-    // The process-wide hold ledger is released.
+  it('reports the exit of a child killed while its reads are parked', async () => {
+    // Linux reaps the killed child at once and the parked exit drains on the
+    // fallback timer; macOS finishes the exit of a child with undrained
+    // output only once the master is read again, which is why the shell
+    // tool's cancel resumes before it signals. Either way exactly one real
+    // exit is delivered and every budget is released.
+    const LIMIT = 64 * 1024;
+    const pty = track(
+      spawn('/bin/sh', ['-c', 'yes X | head -c 4194304; sleep 30'], {
+        limits: { pausedHoldBytes: LIMIT },
+      }),
+    );
+    const { errors } = nextError(pty);
+    let exits = 0;
+    let exit: { exitCode: number; signal?: number } | undefined;
+    pty.onExit((e) => {
+      exits += 1;
+      exit = e;
+    });
+    pty.onData(() => {});
+
+    pty.pause();
+    expect(await waitFor(() => pty.stats.readParked)).toBe(true);
+    process.kill(-pty.pid, 'SIGKILL');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    pty.resume();
+
+    expect(await waitFor(() => exits > 0)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(exits).toBe(1);
+    expect(exit!.signal).toBe(9);
+    expect(errors).toHaveLength(0);
+    expect(await waitForFdClosed(pty)).toBe(true);
     expect(getPtyBudgetStats().pausedHoldBytes).toBe(0);
   }, 30_000);
 
@@ -637,14 +683,17 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     expect(getPtyBudgetStats().pausedHoldBytes).toBe(0);
   }, 30_000);
 
-  it('enforces the process-wide hold budget across ptys without touching the first', async () => {
+  it('parks the pty that reaches the process-wide hold budget without failing either', async () => {
     const original = processPtyBudget.totalPausedHoldBytes;
-    processPtyBudget.totalPausedHoldBytes = 160 * 1024;
+    const TOTAL = 160 * 1024;
+    processPtyBudget.totalPausedHoldBytes = TOTAL;
     try {
       expect(getPtyBudgetStats().pausedHoldBytes).toBe(0);
 
       // A floods ~100 KB of master bytes (ONLCR included) and parks there,
       // well under the 160 KB global cap.
+      const aLines = Array.from({ length: 15000 }, (_, i) => `A${i}`);
+      const aExpected = aLines.join('\r\n') + '\r\n';
       const a = track(
         spawn('/bin/sh', [
           '-c',
@@ -658,30 +707,51 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
       });
       a.pause();
       expect(
-        await waitFor(() => getPtyBudgetStats().pausedHoldBytes >= 95_000),
+        await waitFor(
+          () => a.stats.pausedBytes === Buffer.byteLength(aExpected),
+        ),
       ).toBe(true);
 
-      // B floods megabytes: the shared cap, not B's own per-pty cap, ends it.
+      // B floods 3 MiB of master bytes: the shared total, not B's own 4 MiB
+      // cap, parks it — exactly at the total, with no error and no kill.
       const b = track(
-        spawn('/bin/sh', ['-c', 'yes X | head -c 2097152; sleep 30']),
+        spawn('/bin/sh', [
+          '-c',
+          'sleep 0.3; yes X | head -c 2097152; sleep 30',
+        ]),
       );
       const bErrors = nextError(b);
-      b.onData(() => {});
+      let bBytes = 0;
+      b.onData((data) => {
+        bBytes += Buffer.byteLength(data);
+      });
       b.pause();
-      expect(await waitFor(() => bErrors.errors.length > 0, 15_000)).toBe(true);
-      expect(bErrors.errors.length).toBe(1);
-      expect(bErrors.errors[0]!.code).toBe('QWEN_PTY_OUTPUT_LIMIT');
-      expect(bErrors.errors[0]!.limitKind).toBe('paused-hold-process');
-      expect(bErrors.errors[0]!.limit).toBe(160 * 1024);
+      expect(await waitFor(() => b.stats.readParked, 15_000)).toBe(true);
+      expect(getPtyBudgetStats().pausedHoldBytes).toBe(TOTAL);
+      expect(b.stats.pausedBytes).toBe(TOTAL - Buffer.byteLength(aExpected));
+      expect(bErrors.errors).toHaveLength(0);
+      expect(b.stats.resourceFailed).toBe(false);
+      expect(() => process.kill(b.pid, 0)).not.toThrow();
 
-      // Only B was terminated; A keeps its hold, its child, and zero errors.
+      // A keeps its hold, its child and zero errors, and replays byte-exact.
       expect(a.stats.resourceFailed).toBe(false);
-      expect(aErrors.errors.length).toBe(0);
+      expect(aErrors.errors).toHaveLength(0);
       a.resume();
-      expect(await waitFor(() => aOutput.includes('A9999'))).toBe(true);
+      expect(await waitFor(() => aOutput.length === aExpected.length)).toBe(
+        true,
+      );
+      expect(aOutput).toBe(aExpected);
+
+      // B's own resume() restarts its reads and loses nothing.
+      b.resume();
+      expect(await waitFor(() => bBytes === 3 * 1024 * 1024, 15_000)).toBe(
+        true,
+      );
+      expect(bErrors.errors).toHaveLength(0);
       a.kill();
+      b.kill();
       expect(await waitForFdClosed(a)).toBe(true);
-      expectFdClosed(b);
+      expect(await waitForFdClosed(b)).toBe(true);
     } finally {
       processPtyBudget.totalPausedHoldBytes = original;
     }

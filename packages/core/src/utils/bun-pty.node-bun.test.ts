@@ -97,13 +97,15 @@ console.log(
 );
 `;
 
-// The overflow fixture is the Bun-leg regression for the bounded pause hold:
+// The park fixture is the Bun-leg regression for the bounded pause hold:
 // under the real Bun runtime a paused flood past the configured cap must
-// converge through exactly one structured QWEN_PTY_OUTPUT_LIMIT error, keep
-// onExit reserved for real native exits, kill the child tree, release the
-// master fd, replay nothing on resume, and leave the host event loop free to
-// drain (the fixture never calls process.exit on its success path).
-const overflowFixtureSource = `
+// park the reads rather than fail — no error, the child alive and blocked
+// on write, the hold within the cap and no longer growing, nothing
+// delivered while paused — and resume() must deliver the whole stream
+// byte-exact, after which the child exits naturally, the master fd is
+// released, and the host event loop drains (the fixture never calls
+// process.exit on its success path).
+const parkFixtureSource = `
 import * as fs from 'node:fs';
 import { loadPty } from ${JSON.stringify(getPtyModulePath)};
 
@@ -117,10 +119,11 @@ if (result.impl.name !== 'qwen-bun-pty') {
   process.exit(1);
 }
 const LIMIT = 128 * 1024;
+const LINES = 200_000;
 const errors = [];
 const pty = result.impl.module.spawn(
   '/bin/sh',
-  ['-c', 'yes X | head -c 2097152; sleep 30'],
+  ['-c', "awk 'BEGIN{for(i=0;i<" + LINES + ";i++)print \\"P\\" i}'; echo PARK_DONE"],
   {
     cols: 80,
     rows: 24,
@@ -130,14 +133,7 @@ const pty = result.impl.module.spawn(
   },
 );
 pty.on('error', (e) => {
-  errors.push({
-    name: e.name,
-    code: e.code,
-    limitKind: e.limitKind,
-    limit: e.limit,
-    acceptedBytes: e.acceptedBytes,
-    hasUndeliveredData: e.hasUndeliveredData,
-  });
+  errors.push({ name: e.name, code: e.code, message: e.message });
 });
 let output = '';
 let exits = 0;
@@ -145,32 +141,64 @@ pty.onData((data) => { output += data; });
 pty.onExit(() => { exits += 1; });
 pty.pause();
 
-const errorDeadline = Date.now() + 20_000;
-while (errors.length === 0 && Date.now() < errorDeadline) {
+const parkDeadline = Date.now() + 20_000;
+while (!pty.stats.readParked && Date.now() < parkDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 25));
 }
-if (errors.length === 0) {
-  console.error('timed out waiting for the resource-limit error');
+if (!pty.stats.readParked) {
+  console.error('timed out waiting for the paused reads to park');
   process.exit(1);
 }
-if (errors.length !== 1) {
-  console.error('expected exactly one limit error, got ' + errors.length);
-  process.exit(1);
+const heldAtPark = pty.stats.pausedBytes;
+await new Promise((resolve) => setTimeout(resolve, 500));
+let childAlive = true;
+try {
+  process.kill(pty.pid, 0);
+} catch {
+  childAlive = false;
 }
-const failure = errors[0];
+const parked = {
+  errors: errors.length,
+  childAlive,
+  exits,
+  delivered: output.length,
+  heldWithinCap: heldAtPark > 0 && heldAtPark <= LIMIT,
+  heldGrew: pty.stats.pausedBytes !== heldAtPark,
+  stillParked: pty.stats.readParked,
+};
 if (
-  failure.code !== 'QWEN_PTY_OUTPUT_LIMIT' ||
-  failure.limitKind !== 'paused-hold-per-pty' ||
-  failure.limit !== LIMIT ||
-  !(failure.acceptedBytes > 0 && failure.acceptedBytes <= LIMIT) ||
-  failure.hasUndeliveredData !== true
+  parked.errors !== 0 ||
+  !parked.childAlive ||
+  parked.exits !== 0 ||
+  parked.delivered !== 0 ||
+  !parked.heldWithinCap ||
+  parked.heldGrew ||
+  !parked.stillParked
 ) {
-  console.error('unexpected limit error: ' + JSON.stringify(failure));
+  console.error('unexpected parked state: ' + JSON.stringify(parked));
   process.exit(1);
 }
-await new Promise((resolve) => setTimeout(resolve, 900));
-if (exits !== 0) {
-  console.error('onExit must stay reserved for real native exits');
+pty.resume();
+const exitDeadline = Date.now() + 20_000;
+while (exits === 0 && Date.now() < exitDeadline) {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (exits !== 1) {
+  console.error('expected one natural exit after resume, got ' + exits);
+  process.exit(1);
+}
+let expected = '';
+for (let i = 0; i < LINES; i += 1) expected += 'P' + i + '\\r\\n';
+expected += 'PARK_DONE\\r\\n';
+if (output !== expected) {
+  console.error(
+    'resumed stream is not byte-exact: got ' + output.length +
+      ' chars, expected ' + expected.length,
+  );
+  process.exit(1);
+}
+if (errors.length !== 0) {
+  console.error('unexpected error after resume: ' + JSON.stringify(errors));
   process.exit(1);
 }
 let fdState = 'OPEN';
@@ -179,33 +207,8 @@ try {
 } catch (e) {
   fdState = 'closed(' + (e.code || '') + ')';
 }
-if (fdState !== 'closed(EBADF)') {
-  console.error('master fd not released: ' + fdState);
-  process.exit(1);
-}
-let childGone = false;
-const reapDeadline = Date.now() + 20_000;
-while (!childGone && Date.now() < reapDeadline) {
-  try {
-    process.kill(pty.pid, 0);
-  } catch {
-    childGone = true;
-  }
-  if (!childGone) await new Promise((resolve) => setTimeout(resolve, 25));
-}
-if (!childGone) {
-  console.error('timed out waiting for the owned PTY leader to be reaped');
-  process.exit(1);
-}
-const before = output;
-pty.resume();
-await new Promise((resolve) => setTimeout(resolve, 300));
-if (output !== before) {
-  console.error('resume replayed data after the limit termination');
-  process.exit(1);
-}
 console.log(
-  JSON.stringify({ backend: result.impl.name, limitKind: failure.limitKind, exits, childGone, fd: fdState }),
+  JSON.stringify({ backend: result.impl.name, parked, exits, bytes: output.length, fd: fdState }),
 );
 `;
 
@@ -520,9 +523,9 @@ describe.skipIf(!bunAvailable || process.platform === 'win32')(
     let fixturePath: string;
 
     beforeEach(() => {
-      tempRoot = mkdtempSync(path.join(tmpdir(), 'bun-pty-overflow-test-'));
-      fixturePath = path.join(tempRoot, 'pty-overflow-fixture.mjs');
-      writeFileSync(fixturePath, overflowFixtureSource);
+      tempRoot = mkdtempSync(path.join(tmpdir(), 'bun-pty-park-test-'));
+      fixturePath = path.join(tempRoot, 'pty-park-fixture.mjs');
+      writeFileSync(fixturePath, parkFixtureSource);
     });
 
     afterEach(() => {
@@ -530,7 +533,7 @@ describe.skipIf(!bunAvailable || process.platform === 'win32')(
     });
 
     it(
-      'terminates a paused flood past the cap with one explicit structured error',
+      'parks a paused flood at the cap and resumes it byte-exact',
       { timeout: 60_000 },
       () => {
         const result = spawnSync(bunBin, [fixturePath], {
@@ -539,20 +542,22 @@ describe.skipIf(!bunAvailable || process.platform === 'win32')(
         });
         if (result.status !== 0) {
           throw new Error(
-            `overflow fixture failed (code ${result.status}):\n${result.stdout}${result.stderr}`,
+            `park fixture failed (code ${result.status}):\n${result.stdout}${result.stderr}`,
           );
         }
         const parsed = JSON.parse(result.stdout.trim()) as {
           backend: string;
-          limitKind: string;
+          parked: { childAlive: boolean; errors: number; stillParked: boolean };
           exits: number;
-          childGone: boolean;
           fd: string;
         };
         expect(parsed.backend).toBe('qwen-bun-pty');
-        expect(parsed.limitKind).toBe('paused-hold-per-pty');
-        expect(parsed.exits).toBe(0);
-        expect(parsed.childGone).toBe(true);
+        expect(parsed.parked).toMatchObject({
+          childAlive: true,
+          errors: 0,
+          stillParked: true,
+        });
+        expect(parsed.exits).toBe(1);
         expect(parsed.fd).toBe('closed(EBADF)');
         // Reaching a spawnSync result at all proves the host drained: the
         // fixture never calls process.exit on its success path.

@@ -27,24 +27,31 @@
  * master-fd read activity, while a child with nothing pending delivers its
  * callback even at zero reads (control probes, Node and Bun alike). Keeping
  * the pump reading is therefore what makes exits of producing children
- * observable — so the pump never stops for `pause()`, and a paused child's
- * exit still reaches `onExit`, closes the fd, and lets the host drain.
+ * observable — so `pause()` does not stop the pump while the hold has room,
+ * and a paused child's exit still reaches `onExit`, closes the fd, and lets
+ * the host drain.
  *
  * Bounded pause hold: paused output is held in memory for the resume flush
- * inside a hard budget — per-pty bytes (default 4 MiB) and process-wide
- * bytes across every live pty (default 32 MiB). The hold coalesces read
- * chunks into fixed 64 KiB blocks, so the ledger stays in data bytes while
+ * inside a budget — per-pty bytes (default 4 MiB) and process-wide bytes
+ * across every live pty (default 32 MiB). The hold coalesces read chunks
+ * into fixed 64 KiB blocks, so the ledger stays in data bytes while
  * per-Buffer overhead is bounded by one partial block; the fixed read buffer
- * and the string decoder are separate line items. Reaching a cap never
- * drops bytes silently and never auto-resumes: the pty is explicitly
- * terminated — child process tree killed (SIGTERM, then SIGKILL after a 500ms
- * grace), master fd closed, every drain path ended — and a structured
- * `QWEN_PTY_OUTPUT_LIMIT` error is emitted once. `onExit` stays reserved for
- * real native exits: a terminated pty converges through the error terminal
- * state, and a native callback that still arrives is only recorded, never
- * turned into a fabricated exit code. The write queue is budgeted the same
- * way (`QWEN_PTY_WRITE_LIMIT`), as is the number of live ptys in this
- * process.
+ * and the string decoder are separate line items. A full hold parks the
+ * pump: no further master-fd read is issued until `resume()`, so the kernel
+ * pty buffer fills and the child blocks on write — the backpressure the
+ * wrapper's paused socket applies from the first byte. Nothing is dropped,
+ * nothing is killed, and pause is never released automatically. While
+ * parked, exit detection is the wrapper's: a child that dies with output
+ * undrained may only finish exiting once reads resume.
+ *
+ * The write queue is budgeted with an explicit failure instead: queued input
+ * past its cap terminates the pty — child process tree killed (SIGTERM, then
+ * SIGKILL after a 500ms grace), master fd closed, every drain path ended —
+ * and a structured `QWEN_PTY_WRITE_LIMIT` error is emitted once. `onExit`
+ * stays reserved for real native exits: a terminated pty converges through
+ * the error terminal state, and a native callback that still arrives is only
+ * recorded, never turned into a fabricated exit code. The number of live
+ * ptys in this process is capped too (`QWEN_PTY_ACTIVE_LIMIT`).
  *
  * The observable contract mirrors the POSIX `IPty` surface the consumers
  * use: `pid`, `cols`, `rows`, `process`, `handleFlowControl`, `onData`,
@@ -80,7 +87,7 @@ export interface BunPtyForkOptions {
 }
 
 export interface BunPtyLimits {
-  /** Cap on output bytes held while this pty is paused. */
+  /** Output bytes held while this pty is paused before its reads park. */
   pausedHoldBytes?: number;
   /** Cap on queued, not-yet-written input bytes for this pty. */
   writeQueueBytes?: number;
@@ -95,14 +102,9 @@ export interface IDisposable {
   dispose(): void;
 }
 
-export type PtyLimitCode =
-  | 'QWEN_PTY_OUTPUT_LIMIT'
-  | 'QWEN_PTY_WRITE_LIMIT'
-  | 'QWEN_PTY_ACTIVE_LIMIT';
+export type PtyLimitCode = 'QWEN_PTY_WRITE_LIMIT' | 'QWEN_PTY_ACTIVE_LIMIT';
 
 export type PtyLimitKind =
-  | 'paused-hold-per-pty'
-  | 'paused-hold-process'
   | 'write-queue-per-pty'
   | 'write-queue-process'
   | 'active-pty-count';
@@ -137,7 +139,7 @@ export class PtyLimitError extends Error {
             '; the pty was terminated with an explicit failure instead of ' +
             'growing without bound' +
             (details.hasUndeliveredData
-              ? `; undelivered ${details.code === 'QWEN_PTY_WRITE_LIMIT' ? 'input' : 'output'} was discarded`
+              ? '; undelivered input was discarded'
               : '')),
     );
     this.name = 'PtyLimitError';
@@ -164,9 +166,10 @@ export interface PtyBudgetLimits {
  * `maxActivePtys` leaves headroom over the web-terminal admission cap
  * (`MAX_CONCURRENT_WEB_TERMINALS` = 8): a full house of legitimate terminals
  * must not starve the shell tool's spawns. The byte totals are the real
- * process-wide memory ceilings: per-pty caps fire first while up to eight
+ * process-wide memory ceilings: per-pty caps engage first while up to eight
  * ptys are admitted, and once more are, the shared total can engage — the
- * pty whose own growth trips it is the one terminated.
+ * pty whose own growth reaches it is the one that parks its reads (hold) or
+ * is terminated (write queue).
  */
 export const processPtyBudget: PtyBudgetLimits = {
   maxActivePtys: 64,
@@ -199,6 +202,8 @@ export interface BunPtyStats {
   paused: boolean;
   pausedBytes: number;
   pausedSegments: number;
+  /** Reads are parked because the paused hold has no room left. */
+  readParked: boolean;
   writeQueuedBytes: number;
   readInFlight: boolean;
   writeActive: boolean;
@@ -257,9 +262,9 @@ const EXIT_DRAIN_TIMEOUT_MS = 500;
 // Bounded pause hold. While paused the pump keeps reading at full speed (see
 // the header: reading is what makes exits of children with undrained output
 // observable), so paused output accumulates in memory. The hold is capped —
-// per-pty bytes and process-wide bytes. Hitting a cap terminates the pty
-// with an explicit structured error: nothing is dropped silently, and pause
-// is never released automatically.
+// per-pty bytes and process-wide bytes. A full hold parks the pump until
+// resume(), handing backpressure to the kernel: nothing is dropped, the
+// child is not killed, and pause is never released automatically.
 const DEFAULT_PAUSED_HOLD_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_WRITE_QUEUE_BYTES = 1024 * 1024;
 // Paused data is coalesced into fixed-size blocks instead of retaining one
@@ -406,6 +411,7 @@ export class BunPtyProcess extends EventEmitter {
   private readonly pausedBlocks: Buffer[] = [];
   private pausedFill = 0;
   private pausedBytes = 0;
+  private readParked = false;
   private pumpActive = false;
   private readInFlight = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -509,6 +515,7 @@ export class BunPtyProcess extends EventEmitter {
       paused: this.paused,
       pausedBytes: this.pausedBytes,
       pausedSegments: this.pausedBlocks.length,
+      readParked: this.readParked,
       writeQueuedBytes: this.writeQueuedBytes,
       readInFlight: this.readInFlight,
       writeActive: this.writeActive,
@@ -551,7 +558,7 @@ export class BunPtyProcess extends EventEmitter {
     if (buffer.byteLength === 0) return;
     // Input beyond the write budget is an explicit failure, not a silent
     // drop and not a fake backpressure acknowledgement: the pty is
-    // terminated the same way as a hold overflow.
+    // terminated with a structured error.
     if (
       this.writeQueuedBytes + buffer.byteLength >
       this.limits.writeQueueBytes
@@ -689,21 +696,39 @@ export class BunPtyProcess extends EventEmitter {
   }
 
   private pump(): void {
-    // Reads never stop for pause(): the native exit callback only fires
+    // Reads keep going while paused: the native exit callback only fires
     // around master-fd read activity for children that leave output
     // undrained, so a paused pump would never learn about such an exit —
     // no onExit, an open master fd, and a host that cannot drain. Paused
-    // data is held inside the bounded pause hold instead.
+    // data is held inside the bounded pause hold instead, and each paused
+    // read asks for no more than the hold still has room for.
     // One read at a time: every read targets the shared this.readBuffer, so
     // a second overlapping read (e.g. resume() chaining straight into pump())
     // would have its callback observe the other read's bytes.
     if (!this.pumpActive || this.fdClosed || this.readInFlight) return;
+    let readLength = this.readBuffer.length;
+    if (this.paused) {
+      const room = Math.min(
+        this.limits.pausedHoldBytes - this.pausedBytes,
+        processPtyBudget.totalPausedHoldBytes - budget.pausedHoldBytes,
+      );
+      if (room <= 0) {
+        // A full hold parks the pump instead of terminating the pty: the
+        // kernel buffer fills and the child blocks on write, as it would
+        // behind the wrapper's paused socket. resume() restarts the reads;
+        // a pty parked by the shared total stays parked until then too.
+        this.readParked = true;
+        return;
+      }
+      readLength = Math.min(readLength, room);
+    }
+    this.readParked = false;
     this.readInFlight = true;
     fs.read(
       this.fd,
       this.readBuffer,
       0,
-      this.readBuffer.length,
+      readLength,
       null,
       (error, bytesRead) => {
         this.readInFlight = false;
@@ -748,38 +773,12 @@ export class BunPtyProcess extends EventEmitter {
 
   private holdPaused(chunk: Buffer): void {
     // The ledger stays in data bytes, and the hold copies chunks into fixed
-    // blocks, so nothing bypasses the budget however small the reads are. A
-    // cap reached here terminates the pty explicitly; the triggering chunk is
-    // part of the disclosed undelivered data.
-    if (this.pausedBytes + chunk.byteLength > this.limits.pausedHoldBytes) {
-      this.terminateResourceFailure(
-        new PtyLimitError({
-          code: 'QWEN_PTY_OUTPUT_LIMIT',
-          limitKind: 'paused-hold-per-pty',
-          limit: this.limits.pausedHoldBytes,
-          acceptedBytes: this.pausedBytes,
-          hasUndeliveredData: true,
-          pid: this.pid,
-        }),
-      );
-      return;
-    }
-    if (
-      budget.pausedHoldBytes + chunk.byteLength >
-      processPtyBudget.totalPausedHoldBytes
-    ) {
-      this.terminateResourceFailure(
-        new PtyLimitError({
-          code: 'QWEN_PTY_OUTPUT_LIMIT',
-          limitKind: 'paused-hold-process',
-          limit: processPtyBudget.totalPausedHoldBytes,
-          acceptedBytes: budget.pausedHoldBytes,
-          hasUndeliveredData: true,
-          pid: this.pid,
-        }),
-      );
-      return;
-    }
+    // blocks, so nothing bypasses the budget however small the reads are.
+    // pump() sizes paused reads to the remaining room, so a chunk can only
+    // overshoot a cap when its read was already in flight as pause() landed,
+    // or when another pty's paused read landed against the shared total
+    // first — by at most one read. It is held all the same: bytes already
+    // taken from the master are never dropped.
     this.pausedBytes += chunk.byteLength;
     budget.pausedHoldBytes += chunk.byteLength;
     let src = chunk;
@@ -837,6 +836,7 @@ export class BunPtyProcess extends EventEmitter {
 
   private endPump(): void {
     this.pumpActive = false;
+    this.readParked = false;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -856,20 +856,21 @@ export class BunPtyProcess extends EventEmitter {
   }
 
   /**
-   * Explicit resource-failure termination (bounded hold or write queue
-   * exhausted). Runs once: stops the pump and every timer, discards the hold
-   * and the queued writes with their budget releases, terminates the child
-   * process tree by real ownership, closes the master fd, ends every drain
-   * path, and only then reports the structured error as the product-visible
-   * terminal event. Never gated on `paused` — a paused pty is terminated the
-   * same way, without auto-resuming or replaying anything — and never fires
-   * `onExit`: the exit event stays reserved for real native exits, and the
-   * error terminal state is what consumers converge on.
+   * Explicit resource-failure termination (write queue exhausted). Runs
+   * once: stops the pump and every timer, discards the hold and the queued
+   * writes with their budget releases, terminates the child process tree by
+   * real ownership, closes the master fd, ends every drain path, and only
+   * then reports the structured error as the product-visible terminal event.
+   * Never gated on `paused` — a paused pty is terminated the same way,
+   * without auto-resuming or replaying anything — and never fires `onExit`:
+   * the exit event stays reserved for real native exits, and the error
+   * terminal state is what consumers converge on.
    */
   private terminateResourceFailure(error: PtyLimitError): void {
     if (this.resourceFailed) return;
     this.resourceFailed = true;
     this.pumpActive = false;
+    this.readParked = false;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;

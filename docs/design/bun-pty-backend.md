@@ -65,8 +65,8 @@ New backend `packages/core/src/utils/bun-pty.ts`, selected only under Bun:
   around master-fd read activity, while a child with nothing pending
   delivers its callback even at zero reads (same on Node and Bun). Keeping
   the pump reading is therefore what makes exits of producing children
-  observable — the pump runs from the constructor and never stops for
-  `pause()` (see below).
+  observable — the pump runs from the constructor and keeps reading through
+  `pause()` until the hold is full (see below).
 - Writes go through an async `fs.write` queue with `EAGAIN` retry, mirroring
   the wrapper's `CustomWriteStream` (string writes use the configured
   encoding).
@@ -96,22 +96,21 @@ New backend `packages/core/src/utils/bun-pty.ts`, selected only under Bun:
   `WINDOWID`, `TERMCAP`, `COLUMNS`, `LINES`); `PWD` is set to the resolved
   cwd and `TERM` to `options.name || env.TERM || 'xterm'`.
 
-## Pause keeps reading; the hold is bounded
+## Pause keeps reading until the hold is full, then parks
 
-`pause()` cannot stop the pump without losing exit detection for producing
-children (see the "Exit detection rides on the pump" bullet above): probe
-evidence — with zero master-fd reads for 3 s after a child exited leaving
-output undrained, the native exit callback never fired (identically on Node
-and Bun). Without that callback the addon does not reap the leader either
-(it still answers `kill(pid, 0)`, and `ps` lists it in exiting state), so
-no liveness probe can substitute for the reads. `onExit` is never
-delivered, the master fd stays open, and the host cannot drain —
+`pause()` cannot stop the pump outright without losing exit detection for
+producing children (see the "Exit detection rides on the pump" bullet
+above): probe evidence — with zero master-fd reads for 3 s after a child
+exited leaving output undrained, the native exit callback never fired
+(identically on Node and Bun). Without that callback the addon does not reap
+the leader either (it still answers `kill(pid, 0)`, and `ps` lists it in
+exiting state), so no liveness probe can substitute for the reads. `onExit`
+is never delivered, the master fd stays open, and the host cannot drain —
 reproduced pre-fix on Bun 1.3.14 (pause → child exits → no exit event, fd
 open, natural-drain probe timed out) and matched by the XOFF-then-cancel
 FD-residue report, since `handleFlowControl: true` makes XOFF a `pause()`.
 
-So `pause()` holds output instead of stopping reads — **inside a hard
-budget** (the review decision on the earlier unbounded hold):
+So `pause()` keeps reading into a hold — **inside a budget**:
 
 - **Per-pty `pausedHoldBytes`** (default 4 MiB) and **process-wide
   `totalPausedHoldBytes`** (default 32 MiB), charged in data bytes;
@@ -120,44 +119,69 @@ budget** (the review decision on the earlier unbounded hold):
   pty read sizes vary wildly with the producer (~0.5 KB reads for an `awk`
   flood, ~40 B for `yes`, 1 B for a drip), and per-chunk retention would
   let tiny reads multiply object overhead past the byte budget;
-- a **block-count cap** is kept as a structural bound on the queue.
+- each paused read asks for no more than the hold still has room for, so
+  the hold stays within its caps. The only overshoot is a read already in
+  flight when `pause()` landed, or another pty's paused read landing against
+  the shared total first — at most one 64 KiB read.
 
-Everything under the cap is byte-exact: held output is flushed in order by
-`resume()`, pinned by byte/line-exact regressions (a 500-toggle no-gap
-pause/resume storm during a 20 000-line flood, and a ~1.7 MB flood produced
-entirely while paused — both reproduce the stream exactly, and the pump
-still reports the exit of a child that floods while paused and then exits).
+Held output is byte-exact: `resume()` flushes it in order, pinned by
+byte/line-exact regressions (a 500-toggle no-gap pause/resume storm during
+a 20 000-line flood, and a ~1.7 MB flood produced entirely while paused —
+both reproduce the stream exactly, and the pump still reports the exit of a
+child that floods while paused and then exits).
+
+**A full hold parks the pump instead of failing.** Once either cap has no
+room left, no further master-fd read is issued until `resume()`: the kernel
+pty buffer fills and the child blocks on write — the backpressure the
+wrapper's paused socket applies from the first byte. Nothing is dropped,
+nothing is killed, no error is emitted, and pause is never released
+automatically. `resume()` replays the hold and restarts the reads, so the
+stream past the cap stays byte-exact too (`pty.stats.readParked` exposes
+the parked state). A pty parked by the shared total stays parked until its
+own `resume()`.
+
+This replaces an earlier contract that terminated the child tree with
+`QWEN_PTY_OUTPUT_LIMIT` once the paused hold passed its cap. Under the shell
+tool's `handleFlowControl: true` one Ctrl+S (XOFF) byte is a `pause()`, so
+that contract turned a recoverable "stop scrolling" keystroke into the loss
+of the command: during a flood the tree was killed about a second after a
+single XOFF (review R1-33).
+
+While parked, exit detection is the wrapper's: a child that dies with
+output undrained may finish exiting only once reads resume (macOS holds it
+in exiting state; Linux reaps it and the parked exit drains on the 500 ms
+fallback). The shell tool's cancel therefore calls `resume()` before it
+signals the process group — a no-op when the pty is not paused, on either
+backend.
+
 On natural end of life the hold is discarded and the decoder tail is
 skipped while paused, matching the wrapper: `onExit` still arrives exactly
 once, fd closure is requested (physical close waits for in-flight operations),
 and resume-after-exit replays nothing.
 
-Reaching a cap is **never a silent drop and never an auto-resume**: the pty
-is explicitly terminated — the child process tree is killed by real
-ownership (process group and pid, SIGTERM, then SIGKILL after a 500 ms
-grace), the master fd is closed, and every drain path (retry timer, pending
-exit, hold, write queue) is ended. After the failure, `write` and `resize`
-are no-ops (matching the registry guards above them), held bytes still in
-flight from an in-flight read are neither delivered nor re-charged, and a
-`resume()` replay stops at the first data listener that terminates the pty.
-Exactly one structured `PtyLimitError`
-is then emitted on the `error` event, carrying a stable `code`
-(`QWEN_PTY_OUTPUT_LIMIT`, `QWEN_PTY_WRITE_LIMIT` or
-`QWEN_PTY_ACTIVE_LIMIT`), the `limitKind`, the `limit`, the bytes accepted
-so far, and whether undelivered data was discarded. `onExit` stays
-reserved for real native exits: a native callback that still arrives after
-a limit termination is only recorded (`pty.stats.nativeExitRecord`) — never
-delivered as a second terminal event, never turned into a fabricated exit
-code.
-
-The same policy budgets the **write queue**: queued, not-yet-written input
+The **write queue** keeps an explicit failure: queued, not-yet-written input
 beyond 1 MiB per pty or 8 MiB process-wide terminates the pty with
 `QWEN_PTY_WRITE_LIMIT` instead of acknowledging backpressure that does not
-exist. The number of **live ptys** is capped too (default 8): a `spawn`
-past the cap throws `QWEN_PTY_ACTIVE_LIMIT` synchronously.
-`getPtyBudgetStats()` and `pty.stats` expose the held/queued/admitted
-counters for probes and tests; production never mutates
-`processPtyBudget`, tests adjust and restore it.
+exist. Termination kills the child process tree by real ownership (process
+group and pid, SIGTERM, then SIGKILL after a 500 ms grace), closes the
+master fd, and ends every drain path (retry timer, pending exit, hold, write
+queue). After the failure, `write` and `resize` are no-ops (matching the
+registry guards above them), held bytes still in flight from an in-flight
+read are neither delivered nor re-charged, and a `resume()` replay stops at
+the first data listener that terminates the pty. Exactly one structured
+`PtyLimitError` is then emitted on the `error` event, carrying a stable
+`code` (`QWEN_PTY_WRITE_LIMIT`, or `QWEN_PTY_ACTIVE_LIMIT` for admission),
+the `limitKind`, the `limit`, the bytes accepted so far, and whether
+undelivered input was discarded. `onExit` stays reserved for real native
+exits: a native callback that still arrives after a limit termination is
+only recorded (`pty.stats.nativeExitRecord`) — never delivered as a second
+terminal event, never turned into a fabricated exit code.
+
+The number of **live ptys** is capped too (default 64, headroom over the
+web terminal's eight-session admission cap): a `spawn` past the cap throws
+`QWEN_PTY_ACTIVE_LIMIT` synchronously. `getPtyBudgetStats()` and
+`pty.stats` expose the held/queued/admitted counters for probes and tests;
+production never mutates `processPtyBudget`, tests adjust and restore it.
 
 Slowing reads (one read per timer tick past a high-water mark) was probed
 and rejected as the backpressure mechanism: it throttles to ~1 KiB per tick
@@ -167,21 +191,22 @@ bytes eventually. An earlier draft described that probe as kernel-level
 stream corruption; that claim was **withdrawn** — once termios output
 processing (ONLCR) is accounted for, the continuous-drain and drip arms
 produce byte-identical output on Node and Bun, and no corruption mechanism
-was located. The decisive argument for the bounded hold is that it is the
-only option that bounds memory while keeping byte-exactness below the cap,
-with a loud, structured failure past it.
+was located. The bounded hold reads at full speed and stays byte-exact
+below the cap, and parking at the cap bounds memory without dropping a
+byte.
 
 ### Consumer wiring of the failure
 
-- **ShellExecutionService (foreground PTY path)**: a
-  `QWEN_PTY_OUTPUT_LIMIT` / `QWEN_PTY_WRITE_LIMIT` error event settles the
-  execution with `error` set and `exitCode`/`signal` `null` — a visible
-  failure carrying no fabricated native exit code; the tool result is never
-  `success`. Node backends never emit these codes, so Node behaviour is
-  unchanged, and the natural-exit path still resolves from `onExit` only.
-  A spawn rejected by the active-pty cap returns an explicit error with null
-  native exit/signal and execution method `none`; it does not bypass the cap
-  through child_process fallback.
+- **ShellExecutionService (foreground PTY path)**: a `QWEN_PTY_WRITE_LIMIT`
+  error event settles the execution with `error` set and `exitCode`/`signal`
+  `null` — a visible failure carrying no fabricated native exit code; the
+  tool result is never `success`. Node backends never emit these codes, so
+  Node behaviour is unchanged, and the natural-exit path still resolves from
+  `onExit` only. A spawn rejected by the active-pty cap returns an explicit
+  error with null native exit/signal and execution method `none`; it does
+  not bypass the cap through child_process fallback. Cancel resumes the pty
+  before it signals the process group, so a cancel after XOFF still observes
+  the exit.
 - **Web Terminal (`web-terminal-registry` + `serve` route)**: the registry
   subscribes to the backend `error` event, marks the session failed, and
   releases the PTY without signalling the already-killed tree again. The
@@ -208,8 +233,8 @@ Reference behaviour pinned by probe (Node wrapper, pause → child exits with
 code 7): `onExit` exactly once ~200 ms after child death via the
 socket-destroy fallback, fd `EBADF` after, tail output not delivered. The
 backend still matches that contract on both runtimes for a child that dies
-while paused **under the cap**, minus the 200 ms latency (its pump sees
-`EIO` directly).
+while paused **with reads still going** (hold under its cap), minus the
+200 ms latency (its pump sees `EIO` directly).
 
 ## Deliberately out of scope
 
@@ -265,13 +290,15 @@ null`, process title, `clear()`, plus the pause-lifecycle regressions:
   it), a byte/line-exact stream across 500 no-gap pause/resume toggles
   during a 20 000-line flood, a byte-exact resume of a ~1.7 MB flood held
   entirely while paused, and the fd released when an XOFF flow-control
-  pause is followed by `kill()`. The resource-limit suite pins the Plan A
-  contract: a paused flood past the per-pty cap terminates with exactly one
-  `QWEN_PTY_OUTPUT_LIMIT` (all structured fields asserted), no `onExit`,
-  master fd closed, child tree gone, no replay on resume, process ledger
-  released; an under-cap flood stays byte-exact through pause/resume; the
-  process-wide cap terminates only the overflowing pty while the first
-  keeps its hold; the write-queue cap terminates with
+  pause is followed by `kill()`. The resource-limit suite pins the parking
+  contract: a paused flood past the per-pty cap parks the reads with no
+  error, the child alive and the hold within the cap and no longer growing,
+  then `resume()` delivers the whole stream byte-exact and the child stays
+  interactive; a child killed while parked still reports exactly one exit
+  with every budget released; an under-cap flood stays byte-exact through
+  pause/resume; the process-wide cap parks the pty that reaches it, exactly
+  at the total, while neither pty fails and both replay losslessly; the
+  write-queue cap terminates with
   `QWEN_PTY_WRITE_LIMIT` (no fabricated backpressure ack); the active-pty
   cap rejects the next `spawn` with `QWEN_PTY_ACTIVE_LIMIT` and frees the
   slot on close; and the budget counters are observable via
@@ -291,10 +318,10 @@ null`, process title, `clear()`, plus the pause-lifecycle regressions:
   once, fd released, host exits naturally) under **both** Node and Bun; a
   third fixture runs 300 no-gap pause/resume toggles during a 5 000-line
   flood and asserts the stream stays byte-exact and line-complete on
-  **both** runtimes; a fourth fixture drives the bounded-hold overflow
-  under the real Bun runtime (one structured `QWEN_PTY_OUTPUT_LIMIT`, no
-  `onExit`, fd released, child tree gone, no replay, host drains
-  naturally); a fifth fixture drives the write-queue cap under the real Bun
+  **both** runtimes; a fourth fixture drives a paused flood past the hold
+  cap under the real Bun runtime (reads park with no error and the child
+  alive, then `resume()` delivers the stream byte-exact, the child exits
+  naturally, fd released, host drains naturally); a fifth fixture drives the write-queue cap under the real Bun
   runtime (one structured `QWEN_PTY_WRITE_LIMIT`, empty queue, no `onExit`,
   fd released, child tree gone, host drains naturally). Skips when no `bun`
   is available, like the S1 suite.

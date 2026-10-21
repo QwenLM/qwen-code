@@ -45,7 +45,7 @@ export interface WebTerminalSnapshot {
   handlesPrimaryDa?: boolean;
   /**
    * Set when the PTY backend terminated the session itself — a resource
-   * budget was exhausted (bounded pause hold / write queue). The failure is
+   * budget was exhausted (bounded write queue). The failure is
    * the terminal state; `exitCode` is deliberately absent because no native
    * exit status belongs to it.
    */
@@ -123,9 +123,7 @@ const debugLogger = createDebugLogger('WEB_TERMINAL_REGISTRY');
 
 const getPtyLimitMessage = (err: unknown): string | undefined => {
   const code = (err as { code?: unknown }).code;
-  if (code !== 'QWEN_PTY_OUTPUT_LIMIT' && code !== 'QWEN_PTY_WRITE_LIMIT') {
-    return undefined;
-  }
+  if (code !== 'QWEN_PTY_WRITE_LIMIT') return undefined;
   return err instanceof Error ? err.message : String(err);
 };
 

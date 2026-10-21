@@ -556,85 +556,83 @@ describe('WebTerminalRegistry', () => {
     ).resolves.toEqual({ terminalId: 'terminal:bundled-double-fail' });
   });
 
-  it.each(['QWEN_PTY_OUTPUT_LIMIT', 'QWEN_PTY_WRITE_LIMIT'] as const)(
-    'marks the session failed and frees the pty when the backend reports a resource limit (%s)',
-    async (code) => {
-      const errorListeners: Array<(err: Error) => void> = [];
-      const disposeError = vi.fn();
-      const releaseHost = vi.spyOn(conptyHost, 'releaseConPtyHost');
-      spawn.mockReturnValueOnce({
-        pid: 42,
-        write,
-        resize,
-        kill,
-        onData: vi.fn((listener: (data: string) => void) => {
-          onData = listener;
-          return { dispose: disposeData };
-        }),
-        onExit: vi.fn(
-          (listener: (e: { exitCode: number; signal?: number }) => void) => {
-            onExit = listener;
-            return { dispose: disposeExit };
-          },
-        ),
-        on: vi.fn((event: string, listener: (err: Error) => void) => {
-          if (event === 'error') errorListeners.push(listener);
-          return { dispose: disposeError };
-        }),
-      });
-      const registry = await start('terminal:limit');
-      const failures: string[] = [];
-      const throwingClient = vi.fn(() => {
-        throw new Error('injected disconnected client');
-      });
-      registry.addFailureListener('terminal:limit', throwingClient);
-      registry.addFailureListener('terminal:limit', (message) => {
-        failures.push(message);
-      });
-      expect(registry.readSnapshot('terminal:limit')?.failed).toBeUndefined();
+  it('marks the session failed and frees the pty when the backend reports a resource limit', async () => {
+    const code = 'QWEN_PTY_WRITE_LIMIT';
+    const errorListeners: Array<(err: Error) => void> = [];
+    const disposeError = vi.fn();
+    const releaseHost = vi.spyOn(conptyHost, 'releaseConPtyHost');
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: disposeError };
+      }),
+    });
+    const registry = await start('terminal:limit');
+    const failures: string[] = [];
+    const throwingClient = vi.fn(() => {
+      throw new Error('injected disconnected client');
+    });
+    registry.addFailureListener('terminal:limit', throwingClient);
+    registry.addFailureListener('terminal:limit', (message) => {
+      failures.push(message);
+    });
+    expect(registry.readSnapshot('terminal:limit')?.failed).toBeUndefined();
 
-      expect(() =>
-        errorListeners[0]!(
-          Object.assign(new Error('qwen-bun-pty resource limit reached'), {
-            code,
-          }),
-        ),
-      ).not.toThrow();
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(() =>
+      errorListeners[0]!(
+        Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+          code,
+        }),
+      ),
+    ).not.toThrow();
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
-      expect(throwingClient).toHaveBeenCalledTimes(1);
-      expect(failures).toHaveLength(1);
-      for (const dispose of [
-        disposeData,
-        disposeExit,
-        disposeError,
-        releaseHost,
-      ]) {
-        expect(dispose).toHaveBeenCalledTimes(1);
-      }
-      const snapshot = registry.readSnapshot('terminal:limit');
-      expect(snapshot?.failed).toBe(true);
-      expect(snapshot?.failureMessage).toContain('resource limit');
-      // Logical failure rejects new I/O; release must not signal a pid that
-      // may already have exited. Deferred disposal happened BEFORE release.
-      registry.write('terminal:limit', 'nope');
-      registry.resize('terminal:limit', 100, 40);
-      expect(write).not.toHaveBeenCalled();
-      expect(resize).not.toHaveBeenCalled();
-      registry.release('terminal:limit');
-      registry.release('terminal:limit');
-      for (const dispose of [
-        disposeData,
-        disposeExit,
-        disposeError,
-        releaseHost,
-      ]) {
-        expect(dispose).toHaveBeenCalledTimes(1);
-      }
-      expect(kill).not.toHaveBeenCalled();
-      expect(process.kill).not.toHaveBeenCalled();
-    },
-  );
+    expect(throwingClient).toHaveBeenCalledTimes(1);
+    expect(failures).toHaveLength(1);
+    for (const dispose of [
+      disposeData,
+      disposeExit,
+      disposeError,
+      releaseHost,
+    ]) {
+      expect(dispose).toHaveBeenCalledTimes(1);
+    }
+    const snapshot = registry.readSnapshot('terminal:limit');
+    expect(snapshot?.failed).toBe(true);
+    expect(snapshot?.failureMessage).toContain('resource limit');
+    // Logical failure rejects new I/O; release must not signal a pid that
+    // may already have exited. Deferred disposal happened BEFORE release.
+    registry.write('terminal:limit', 'nope');
+    registry.resize('terminal:limit', 100, 40);
+    expect(write).not.toHaveBeenCalled();
+    expect(resize).not.toHaveBeenCalled();
+    registry.release('terminal:limit');
+    registry.release('terminal:limit');
+    for (const dispose of [
+      disposeData,
+      disposeExit,
+      disposeError,
+      releaseHost,
+    ]) {
+      expect(dispose).toHaveBeenCalledTimes(1);
+    }
+    expect(kill).not.toHaveBeenCalled();
+    expect(process.kill).not.toHaveBeenCalled();
+  });
 
   it.each(['failure-first', 'exit-first'])(
     'keeps failure and exit mutually exclusive (%s)',
@@ -813,7 +811,7 @@ describe('WebTerminalRegistry', () => {
     for (const listener of errorListeners) {
       listener(
         Object.assign(new Error('qwen-bun-pty resource limit reached'), {
-          code: 'QWEN_PTY_OUTPUT_LIMIT',
+          code: 'QWEN_PTY_WRITE_LIMIT',
         }),
       );
     }
@@ -855,7 +853,7 @@ describe('WebTerminalRegistry', () => {
     const registry = await start('terminal:failed-release');
     errorListeners[0]!(
       Object.assign(new Error('qwen-bun-pty resource limit reached'), {
-        code: 'QWEN_PTY_OUTPUT_LIMIT',
+        code: 'QWEN_PTY_WRITE_LIMIT',
       }),
     );
     await new Promise<void>((resolve) => setImmediate(resolve));

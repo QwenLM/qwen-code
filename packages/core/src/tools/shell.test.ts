@@ -2151,20 +2151,18 @@ describe('ShellTool', () => {
       expect(result.error?.message).toBe('command failed');
     });
 
-    it.each(['QWEN_PTY_OUTPUT_LIMIT', 'QWEN_PTY_WRITE_LIMIT'])(
-      'keeps bounded captured output in the model-facing %s failure',
-      async (code) => {
-        const result = await runFg('user-command', {
-          error: Object.assign(new Error('resource limit reached'), { code }),
-          exitCode: null,
-          signal: null,
-          output: 'captured-output-marker',
-        });
-        expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
-        expect(result.error?.message).toContain('captured-output-marker');
-        expect(result.error?.message).toBe(result.llmContent);
-      },
-    );
+    it('keeps bounded captured output in the model-facing QWEN_PTY_WRITE_LIMIT failure', async () => {
+      const code = 'QWEN_PTY_WRITE_LIMIT';
+      const result = await runFg('user-command', {
+        error: Object.assign(new Error('resource limit reached'), { code }),
+        exitCode: null,
+        signal: null,
+        output: 'captured-output-marker',
+      });
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+      expect(result.error?.message).toContain('captured-output-marker');
+      expect(result.error?.message).toBe(result.llmContent);
+    });
 
     it('should throw an error for invalid parameters', async () => {
       expect(() => build('')).toThrow('Command cannot be empty.');

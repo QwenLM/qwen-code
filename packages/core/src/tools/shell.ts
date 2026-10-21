@@ -3311,9 +3311,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // boundary they can split on rather than getting ~400 chars of
     // advisory text mixed inline with the original error body.
     const isPtyResourceFailure =
-      isNodeError(result.error) &&
-      (result.error.code === 'QWEN_PTY_OUTPUT_LIMIT' ||
-        result.error.code === 'QWEN_PTY_WRITE_LIMIT');
+      isNodeError(result.error) && result.error.code === 'QWEN_PTY_WRITE_LIMIT';
     const executionError = timeoutSummary
       ? {
           error: {

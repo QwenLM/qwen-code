@@ -54,7 +54,7 @@
   原生 exit 回调只在 master fd 有读取活动时前后触发；而没有待输出内容的
   子进程即使在零读取下也会触发回调（Node 与 Bun 一致）。因此"持续读取"
   正是让"有产出的子进程"的退出可被观察到的条件——泵从构造函数起运行，
-  且不会因 `pause()` 而停止（见下）。
+  `pause()` 后仍持续读取，直到保持区满为止（见下）。
 - 写入走异步 `fs.write` 队列并带 `EAGAIN` 重试，对应 wrapper 的
   `CustomWriteStream`（字符串写入使用配置的编码）。
 - 退出时序：原生 `onexit(code, signal)` 回调可能早于最后一段输出。后端
@@ -78,9 +78,9 @@
   `COLUMNS`、`LINES`）；`PWD` 置为解析后的 cwd，`TERM` 置为
   `options.name || env.TERM || 'xterm'`。
 
-## 暂停期间仍持续读取；保持区是有界的
+## 暂停期间持续读取，保持区满后停读
 
-`pause()` 不能让泵停下来，否则"有产出的子进程"会失去退出检测（见上文
+`pause()` 不能直接让泵停下来，否则"有产出的子进程"会失去退出检测（见上文
 "退出检测依托泵"一条）：探针证据——子进程退出且输出未排空后，3 秒内
 master fd 零读取，原生 exit 回调从未触发（Node 与 Bun 一致）。没有该
 回调，addon 也不会回收主进程（它仍响应 `kill(pid, 0)`，`ps` 中处于
@@ -90,8 +90,7 @@ master fd 保持打开，宿主无法收尾——修复前已在 Bun 1.3.14 复�
 FD 残留报告同源于此，因为 `handleFlowControl: true` 下 XOFF 就是一次
 `pause()`。
 
-因此 `pause()` 改为持有输出而不是停止读取——**并置于硬预算之内**
-（这是评审对早先无界保持的决策）：
+因此 `pause()` 改为继续读取并持有输出——**并置于预算之内**：
 
 - **单 pty `pausedHoldBytes`**（默认 4 MiB）与**进程级
   `totalPausedHoldBytes`**（默认 32 MiB），按数据字节记账；
@@ -99,55 +98,73 @@ FD 残留报告同源于此，因为 `handleFlowControl: true` 下 XOFF 就是�
   每 Buffer 的对象开销都以"一个未填满的块"为界——pty 读块大小随生产者
   剧烈变化（`awk` 洪流约 0.5 KB 一次读，`yes` 约 40 B，滴读 1 B），
   逐 chunk 保留会让微小读取把对象开销放大到字节预算之外；
-- 另有**块数上限**作为队列的结构性边界。
+- 暂停期间每次读取只申请保持区剩余的额度，因此保持区不会超出上限。唯一的
+  超出来自 `pause()` 落下时已在途的那次读取，或另一个 pty 的暂停读取先占用了
+  进程级总额——至多一次 64 KiB 读取。
 
-预算之内的语义是逐字节精确的：保持的输出由 `resume()` 按序冲出，并有
-字节/逐行对照的回归钉住（2 万行洪流中 500 次无间隔 pause/resume 风暴；
-约 1.7 MB 洪流全程在暂停中产生——两者都逐字节复原，且暂停中洪流后退
-出的子进程，其 exit 照常上报）。自然生命终点处保持区被丢弃、暂停中的
-decoder 尾巴被跳过，与 wrapper 对齐：onExit 仍恰好一次、fd 请求关闭
-（物理关闭等待在途操作完成），
+保持的输出是逐字节精确的：由 `resume()` 按序冲出，并有字节/逐行对照的
+回归钉住（2 万行洪流中 500 次无间隔 pause/resume 风暴；约 1.7 MB 洪流
+全程在暂停中产生——两者都逐字节复原，且暂停中洪流后退出的子进程，其
+exit 照常上报）。
+
+**保持区满时停读，而不是失败。**任一上限没有剩余额度后，在 `resume()`
+之前不再发起 master fd 读取：内核 pty 缓冲随之填满，子进程阻塞在写上——
+这正是 wrapper 暂停 socket 从第一个字节起施加的背压。不丢字节、不杀进程、
+不发错误，也绝不自动恢复。`resume()` 重放保持区并重新开始读取，因此超出
+上限的那部分输出同样逐字节完整（`pty.stats.readParked` 暴露停读状态）。
+因进程级总额而停读的 pty，同样要等到它自己的 `resume()` 才恢复读取。
+
+这取代了早先的契约：暂停保持超过上限时以 `QWEN_PTY_OUTPUT_LIMIT` 终止
+子进程树。shell 工具使用 `handleFlowControl: true`，一个 Ctrl+S（XOFF）
+字节就是一次 `pause()`，旧契约会把一个可恢复的"停止滚屏"按键变成命令被
+杀：洪流中单个 XOFF 后约一秒整棵进程树被杀（评审 R1-33）。
+
+停读期间的退出检测与 wrapper 相同：带着未排空输出死亡的子进程，可能要等
+读取恢复后才能完成退出（macOS 会让它停在 exiting 状态；Linux 会回收它，
+挂起的 exit 经 500 ms 兜底投递）。因此 shell 工具的取消路径在向进程组发
+信号之前先调用 `resume()`——未暂停时为 no-op，两种后端皆然。
+
+自然生命终点处保持区被丢弃、暂停中的 decoder 尾巴被跳过，与 wrapper
+对齐：onExit 仍恰好一次、fd 请求关闭（物理关闭等待在途操作完成），
 退出后 resume 不会重放任何内容。
 
-触及上限**绝不是静默丢弃，也绝不会自动恢复**：该 pty 被显式终止——
-按真实归属杀死子进程树（进程组 + pid，先 SIGTERM，500 ms 宽限后
+**写队列**仍是显式失败：排队待写的输入超过单 pty 1 MiB 或进程级 8 MiB
+时，以 `QWEN_PTY_WRITE_LIMIT` 终止该 pty，而不是确认一个并不存在的背压。
+终止时按真实归属杀死子进程树（进程组 + pid，先 SIGTERM，500 ms 宽限后
 SIGKILL），关闭 master fd，终结所有排空路径（重试定时器、挂起的 exit、
 保持区、写队列）。失败之后 `write` 与 `resize` 均为 no-op（与其上层的
 registry 守卫一致），在途读取迟到的字节既不投递也不重新计入（已释放
 的）保持预算，`resume()` 重放会在第一个终止本 pty 的数据监听器处停止。
-随后在 `error` 事件上恰好投递一次结构化
-`PtyLimitError`，带稳定 `code`（`QWEN_PTY_OUTPUT_LIMIT`、
-`QWEN_PTY_WRITE_LIMIT` 或 `QWEN_PTY_ACTIVE_LIMIT`）、`limitKind`、
-`limit`、已接收字节数，以及是否丢弃了未投递数据。`onExit` 仍只为真实
+随后在 `error` 事件上恰好投递一次结构化 `PtyLimitError`，带稳定 `code`
+（`QWEN_PTY_WRITE_LIMIT`；准入为 `QWEN_PTY_ACTIVE_LIMIT`）、`limitKind`、
+`limit`、已接收字节数，以及是否丢弃了未投递的输入。`onExit` 仍只为真实
 原生退出保留：超限终止之后才到达的原生回调只会被记录
 （`pty.stats.nativeExitRecord`）——绝不作为第二个终态事件投递，也绝不
 被伪造成交互退出码。
 
-同一策略也约束**写队列**：排队待写的输入超过单 pty 1 MiB 或进程级
-8 MiB 时，以 `QWEN_PTY_WRITE_LIMIT` 终止该 pty，而不是确认一个并不存在
-的背压。**活跃 pty 数量**同样有上限（默认 8）：超限的 `spawn` 同步抛出
-`QWEN_PTY_ACTIVE_LIMIT`。`getPtyBudgetStats()` 与 `pty.stats` 暴露
-保持/排队/准入计数，供探针与测试使用；生产代码不修改
-`processPtyBudget`，测试调整后会恢复。
+**活跃 pty 数量**同样有上限（默认 64，为 Web Terminal 的 8 个会话准入
+上限留出余量）：超限的 `spawn` 同步抛出 `QWEN_PTY_ACTIVE_LIMIT`。
+`getPtyBudgetStats()` 与 `pty.stats` 暴露保持/排队/准入计数，供探针与
+测试使用；生产代码不修改 `processPtyBudget`，测试调整后会恢复。
 
 "放慢读取"（超过高水位后每个定时周期只读一次）作为背压机制已被探针
 否决：每个周期只能推进约 1 KiB（部分读取时 pty 每次至多给出一个小块），
 洪流要暂停数分钟，而且它最终仍无法在"不丢字节"的前提下给内存设界。早先
 草稿曾把该探针解读为"内核层面的字节流破坏"，该说法已**撤回**——把
 termios 输出处理（ONLCR）计入后，连续排空与滴读两条臂在 Node 和 Bun 上
-产出逐字节一致，并未定位到任何破坏机制。选择有界保持的决定性理由很简单：
-它是唯一既能给内存设界、又能在预算内保持字节精确、且超限时给出"响亮的"
-结构化失败的方案。
+产出逐字节一致，并未定位到任何破坏机制。有界保持在上限之内全速读取且
+逐字节精确，到达上限后停读，在不丢任何字节的前提下给内存设界。
 
 ### 失败在消费者侧的接线
 
-- **ShellExecutionService（前台 PTY 路径）**：`QWEN_PTY_OUTPUT_LIMIT` /
-  `QWEN_PTY_WRITE_LIMIT` 的 error 事件会把执行收敛为 `error` 有值、
+- **ShellExecutionService（前台 PTY 路径）**：`QWEN_PTY_WRITE_LIMIT`
+  的 error 事件会把执行收敛为 `error` 有值、
   `exitCode`/`signal` 为 `null` 的结果——一次可见的失败，不伪造原生
   退出码，工具结果绝不会是 `success`。Node 后端从不产生这些 code，
   Node 行为不变；自然退出路径仍只由 `onExit` 收敛。被活跃 pty 上限
   拒绝的 spawn 返回显式错误，原生 exit/signal 为 null、执行方式为 `none`；
-  不通过 child_process fallback 绕过上限。
+  不通过 child_process fallback 绕过上限。取消时先 `resume()` 再向进程组
+  发信号，因此 XOFF 之后的取消仍能观察到退出。
 - **Web Terminal（`web-terminal-registry` + `serve` 路由）**：registry
   订阅后端 `error` 事件，把会话标记为 failed，并释放 PTY（不再向已被
   杀死的进程树重复发信号）。路由转发显式 `{type: 'error'}` 控制帧
@@ -166,9 +183,9 @@ termios 输出处理（ONLCR）计入后，连续排空与滴读两条臂在 Nod
 
 探针钉住的参考行为（Node wrapper，pause → 子进程以 code 7 退出）：经
 socket-destroy 兜底在子进程死后约 200 ms 恰好触发一次 `onExit`，此后
-fd 报 `EBADF`，尾部输出不投递。对"在预算之内、暂停中死亡"的子进程，
-后端现仍在两个运行时上对齐该契约，只是没有那 200 ms 延迟（泵能直接
-看到 `EIO`）。
+fd 报 `EBADF`，尾部输出不投递。对"暂停中仍在读取（保持区未满）时死亡"
+的子进程，后端现仍在两个运行时上对齐该契约，只是没有那 200 ms 延迟
+（泵能直接看到 `EIO`）。
 
 ## 明确不在本次范围
 
@@ -214,11 +231,11 @@ node-pty 包（"getPty() 在 Bun 下返回 null"）。现在 `bun` flavor 也一
   洪流下退出检测仍存活（为其显式调大保持上限）、2 万行洪流中 500 次
   无间隔 pause/resume 风暴后字节/逐行对照完全一致、约 1.7 MB 洪流全程
   暂停保持后 resume 逐字节复原、XOFF 流控暂停后 `kill()` 释放 fd。
-  资源上限套件钉住 Plan A 契约：暂停洪流超过单 pty 上限时以恰好一次
-  `QWEN_PTY_OUTPUT_LIMIT` 终止（断言全部结构化字段）、无 `onExit`、
-  master fd 关闭、子进程树消失、resume 无重放、进程账本归零；预算内
-  洪流经 pause/resume 后逐字节一致；进程级上限只终止溢出的那个 pty、
-  第一个保持原样；写队列上限以 `QWEN_PTY_WRITE_LIMIT` 终止（不伪造
+  资源上限套件钉住停读契约：暂停洪流超过单 pty 上限时停读、无错误、
+  子进程存活、保持区不超上限且不再增长，随后 `resume()` 逐字节交付全部
+  输出且子进程仍可交互；停读中被杀的子进程仍恰好上报一次退出、全部预算
+  释放；预算内洪流经 pause/resume 后逐字节一致；进程级上限让触及它的
+  pty 恰好在总额处停读，两个 pty 均不失败且都无损重放；写队列上限以 `QWEN_PTY_WRITE_LIMIT` 终止（不伪造
   背压确认）；活跃 pty 上限以 `QWEN_PTY_ACTIVE_LIMIT` 拒绝下一次
   `spawn`，关闭后槽位释放；预算计数可经 `getPtyBudgetStats()` 观察。
   fd 生命周期套件（`defers the fd close while a read is still owned by the
@@ -234,9 +251,9 @@ threadpool`）分别在逻辑关闭时保持一个在途 read 和一个在途 wr
   生命周期（pause → 子进程退出 → `onExit` 恰好一次、fd 释放、宿主自然
   退出），并在 **Node 与 Bun 两个运行时**下运行；第三个 fixture 在
   5000 行洪流中做 300 次无间隔 pause/resume，断言两个运行时下字节流
-  均逐字节且逐行完整；第四个 fixture 在真实 Bun 运行时下驱动有界保持
-  超限（恰好一次 `QWEN_PTY_OUTPUT_LIMIT`、无 `onExit`、fd 释放、
-  子进程树消失、无重放、宿主自然收尾）；第五个 fixture 在真实 Bun
+  均逐字节且逐行完整；第四个 fixture 在真实 Bun 运行时下驱动超过保持
+  上限的暂停洪流（停读、无错误、子进程存活，随后 `resume()` 逐字节交付、
+  子进程自然退出、fd 释放、宿主自然收尾）；第五个 fixture 在真实 Bun
   运行时下驱动写队列上限（恰好一次 `QWEN_PTY_WRITE_LIMIT`、队列清空、
   无 `onExit`、fd 释放、子进程树消失、宿主自然收尾）。无 `bun` 时与
   S1 套件一样跳过。

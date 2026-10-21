@@ -2307,17 +2307,14 @@ export class ShellExecutionService {
             return;
           }
 
-          // The qwen-bun-pty backend terminates a command itself when a
-          // resource budget is exhausted (bounded pause hold / write queue)
-          // and reports a stable structured reason. Converge the execution on
-          // that error — a visible failure carrying no fabricated exit code —
-          // instead of the crash path below; the backend has already killed
+          // The qwen-bun-pty backend terminates a command itself when its
+          // bounded write queue is exhausted and reports a stable structured
+          // reason. Converge the execution on that error — a visible failure
+          // carrying no fabricated exit code — instead of the crash path
+          // below; the backend has already killed
           // the child and closed the master fd, so no onExit will follow.
           const limitCode = getErrnoCode(err);
-          if (
-            limitCode === 'QWEN_PTY_OUTPUT_LIMIT' ||
-            limitCode === 'QWEN_PTY_WRITE_LIMIT'
-          ) {
+          if (limitCode === 'QWEN_PTY_WRITE_LIMIT') {
             settleResult(null, null, err);
             return;
           }
@@ -2996,6 +2993,15 @@ export class ShellExecutionService {
               // finalizer's release must still run.
             }
           } else {
+            try {
+              // A flow-control pause (XOFF) can leave the master unread; on
+              // macOS a child killed with output undrained only finishes
+              // exiting once the master is read again, so `exited` would
+              // never flip. Resume first — a no-op when not paused.
+              ptyProcess.resume();
+            } catch {
+              // Best effort: the kill below must still run.
+            }
             try {
               // Send SIGTERM first to allow graceful shutdown
               process.kill(-ptyProcess.pid, 'SIGTERM');

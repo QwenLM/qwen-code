@@ -240,6 +240,8 @@ const makePty = () =>
     onExit: vi.fn().mockReturnValue({ dispose: vi.fn() }),
     write: vi.fn(),
     resize: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
   });
 
 // Like a live Node ChildProcess, exitCode / signalCode are null: the promote
@@ -966,7 +968,7 @@ describe('ShellExecutionService', () => {
 
     it('converges a qwen-bun-pty resource-limit error into a failed result with no fabricated exit code', async () => {
       const limitError = Object.assign(new Error('resource limit reached'), {
-        code: 'QWEN_PTY_OUTPUT_LIMIT',
+        code: 'QWEN_PTY_WRITE_LIMIT',
       });
       const { result } = await simulateExecution(
         'yes | head -c 100000000',
@@ -1090,6 +1092,21 @@ describe('ShellExecutionService', () => {
     it('should abort a running process and set the aborted flag', async () => {
       // cancelPty checks the aborted flag (the process kill is mocked).
       await cancelPty();
+    });
+
+    it('resumes a flow-control-paused pty before signalling its group', async () => {
+      // XOFF can leave the master unread, and macOS finishes the exit of a
+      // child killed with output undrained only once it is read again.
+      await cancelPty();
+
+      expect(mockPtyProcess.resume).toHaveBeenCalledTimes(1);
+      const sigterm = mockProcessKill.mock.calls.findIndex(
+        ([pid, signal]) => pid === -mockPtyProcess.pid && signal === 'SIGTERM',
+      );
+      expect(sigterm).toBeGreaterThanOrEqual(0);
+      expect(mockPtyProcess.resume.mock.invocationCallOrder[0]).toBeLessThan(
+        mockProcessKill.mock.invocationCallOrder[sigterm]!,
+      );
     });
 
     it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
