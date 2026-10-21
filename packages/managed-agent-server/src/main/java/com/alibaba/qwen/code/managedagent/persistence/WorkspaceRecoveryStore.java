@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -31,6 +33,7 @@ import java.util.UUID;
 /** Offline derived metadata only; no Session writer or authority mutation. */
 public final class WorkspaceRecoveryStore {
     static final ObjectMapper JSON = new ObjectMapper();
+    private static final RequestDigests SKILL_DIGESTS = new RequestDigests();
     private static final int PAGE = 32;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -539,7 +542,7 @@ public final class WorkspaceRecoveryStore {
         check(("qwen-code".equals(row.get("agent_id")) || row.get("agent_definition_digest") != null)
                 && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
                 .contains(row.get("status")), "source_drift");
-        var receipts = WorkspaceOperations.rows(jdbc, "SELECT actor_id, idempotency_key, request_digest, turn_id, gmt_create"
+        var receipts = WorkspaceOperations.rows(jdbc, "SELECT actor_id, idempotency_key, request_digest, turn_id, gmt_create, result_json"
                 + " FROM ma_request_receipt WHERE tenant_key = ? AND session_id = ? AND namespace = 'SESSION_CREATE_ACTOR' AND tenant_id = ?",
                 WorkspaceOperations.hash(tenant), session, tenant);
         check(receipts.size() == 1, "source_drift");
@@ -573,6 +576,16 @@ public final class WorkspaceRecoveryStore {
                 .put("actorIdHex", HexFormat.of().formatHex((byte[]) receipt.get("actor_id")));
         fields(creation, receipt, "idempotencyKey", "idempotency_key", "requestDigest", "request_digest",
                 "turnId", "turn_id", "createdAt", "gmt_create");
+        if (receipt.get("result_json") != null) {
+            try {
+                var skills = ManagedSessionSkills.decode((String) receipt.get("result_json"), JSON, SKILL_DIGESTS);
+                creation.put("skillsDigest", SKILL_DIGESTS.digest(skills));
+            } catch (ManagedAgentException error) {
+                var drift = failure("source_drift");
+                drift.initCause(error);
+                throw drift;
+            }
+        }
         // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
         boolean lockHead = lockSources && count(jdbc,
                 "SELECT COUNT(*) FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
