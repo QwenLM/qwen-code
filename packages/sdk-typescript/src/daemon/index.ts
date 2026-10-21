@@ -792,6 +792,7 @@ export type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceSkillsSnapshot,
   DaemonWorkspaceToolStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,

@@ -14,6 +14,7 @@ public final class CreateHarnessSession {
     private final Long approvalTimeoutMs;
     private final Long captureBytes;
     private final Map<String, Object> agentDefinition;
+    private final Map<String, Object> sessionSkillsRef;
     private final List<Map<String, Object>> mcpServers;
     private final Map<String, Object> hookCatalog;
     private final Map<String, Object> lineage;
@@ -31,6 +32,7 @@ public final class CreateHarnessSession {
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
         this.captureBytes = builder.captureBytes;
         this.agentDefinition = builder.agentDefinition;
+        this.sessionSkillsRef = builder.sessionSkillsRef;
         this.mcpServers = builder.mcpServers;
         this.hookCatalog = builder.hookCatalog;
         this.lineage = builder.lineage;
@@ -73,6 +75,9 @@ public final class CreateHarnessSession {
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
         }
+        if (sessionSkillsRef != null) {
+            result.put("sessionSkillsRef", sessionSkillsRef);
+        }
         if (mcpServers != null) {
             result.put("mcpServers", mcpServers);
         }
@@ -102,6 +107,7 @@ public final class CreateHarnessSession {
         private Long approvalTimeoutMs;
         private Long captureBytes;
         private Map<String, Object> agentDefinition;
+        private Map<String, Object> sessionSkillsRef;
         private List<Map<String, Object>> mcpServers;
         private Map<String, Object> hookCatalog;
         private Map<String, Object> lineage;
@@ -199,6 +205,11 @@ public final class CreateHarnessSession {
 
         public CreateHarnessSession build() {
             return new CreateHarnessSession(this);
+        }
+
+        public Builder sessionSkillsRef(Map<String, Object> value) {
+            this.sessionSkillsRef = value == null ? null : Map.copyOf(value);
+            return this;
         }
 
         public Builder toolProfile(String toolProfile) {

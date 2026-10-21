@@ -14,6 +14,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -603,6 +605,36 @@ class WorkspaceRecoveryStoreTest {
                 .hasMessageContaining("asset_conflict");
         request.put("nodeExecutable", "/different/node");
         assertThatThrownBy(this::capture).hasMessageContaining("operation_conflict");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void corruptSessionSkillsInvalidatesCaptureInsteadOfRetrying(boolean badVersion) throws Exception {
+        String session = session("workspace-a");
+        var digests = new RequestDigests();
+        var skills = List.<Map<String, Object>>of(Map.of("name", "review", "description", "Review",
+                "body", "ORIGINAL"));
+        new ManagedSessionSkills(jdbc, WorkspaceRecoveryStore.JSON, digests,
+                new ManagedAgentDefinitionStore(jdbc, digests)).save("tenant", session, skills);
+        var capture = capture();
+        String value = jdbc.queryForObject("SELECT result_json FROM ma_request_receipt WHERE tenant_id = ?"
+                + " AND session_id = ? AND namespace = 'SESSION_CREATE_ACTOR'", String.class, "tenant", session);
+        ObjectNode snapshot = (ObjectNode) WorkspaceRecoveryStore.JSON.readTree(value);
+        if (badVersion) {
+            snapshot.put("version", 2);
+        } else {
+            ((ObjectNode) snapshot.withArray("skills").get(0)).put("body", "TAMPERED");
+        }
+        jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_CREATE_ACTOR'", snapshot.toString(), "tenant", session);
+        assertThatThrownBy(() -> capture.call("sessionComplete", object().put("sessionId", session).set("summary", object())))
+                .isInstanceOf(WorkspaceRecoveryStore.RecoveryFailure.class).hasMessageContaining("source_drift");
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("source_drift");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation_work WHERE work_kind = 'SESSION' AND session_id = ?",
+                String.class, session)).isEqualTo("PENDING");
+        capture.call("failure", object().put("code", "worker_failed"));
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("source_drift");
     }
 
     @Test
