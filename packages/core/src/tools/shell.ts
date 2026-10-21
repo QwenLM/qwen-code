@@ -3414,7 +3414,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
   private async shouldRemindToRecordArtifact(
     result: ShellExecutionResult,
   ): Promise<boolean> {
-    if (!this.config.isRecordArtifactEnabled()) return false;
+    if (this.config.isRecordArtifactEnabled?.() !== true) return false;
     if (
       result.aborted ||
       result.error ||
