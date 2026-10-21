@@ -38,6 +38,7 @@ import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -53,8 +54,16 @@ class HostedWorkspaceToolTurnIT {
     @Test
     @Timeout(360)
     void packagedHarnessUsesSavedWorkspacesThroughRealBrokerWorkerAndSqlStore() throws Exception {
-        runDriver(List.of("alpha", "beta", "shell", "storage-failure", "raw-reply-loss", "cancel"),
-                "workspace-tool-turn");
+        Process unrelated = new ProcessBuilder(System.getProperty("node.executable"),
+                "-e", "setInterval(() => {}, 60_000)").start();
+        try {
+            runDriver(List.of("alpha", "beta", "shell", "storage-failure", "raw-reply-loss", "cancel"),
+                    "workspace-tool-turn");
+            assertThat(unrelated.isAlive()).as("Unrelated fixture survives Broker shutdown").isTrue();
+        } finally {
+            unrelated.destroyForcibly();
+            assertThat(unrelated.waitFor(5, TimeUnit.SECONDS)).isTrue();
+        }
     }
 
     @Test
@@ -240,7 +249,7 @@ class HostedWorkspaceToolTurnIT {
             // Give initialized roots an unambiguous birth time without a timing-dependent sleep.
             Files.setLastModifiedTime(workspaces.get(index), FileTime.fromMillis(1));
         }
-        boolean verifiedRecovery = "Linux".equals(System.getProperty("os.name"));
+        boolean verifiedRecovery = List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
         if (sseGaps) {
@@ -430,7 +439,19 @@ class HostedWorkspaceToolTurnIT {
                     }
                 }
                 if (!faults && !latency && !operatorRecovery) {
-                    List<ProcessHandle> producers = ProcessHandle.current().descendants().toList();
+                    Object service = ReflectionTestUtils.getField(broker, "service");
+                    Object provisioner = ReflectionTestUtils.getField(service, "provisioner");
+                    Object local = ReflectionTestUtils.getField(provisioner, "delegate");
+                    var runtimes = new ArrayList<Object>(
+                            ((Map<?, ?>) ReflectionTestUtils.getField(local, "owned")).values());
+                    runtimes.addAll((Set<?>) ReflectionTestUtils.getField(local, "starting"));
+                    var producers = new HashSet<ProcessHandle>();
+                    // Other Hosted fixtures can retain workers in the same JVM.
+                    for (Object value : runtimes) {
+                        Process process = (Process) ReflectionTestUtils.getField(value, "process");
+                        producers.add(process.toHandle());
+                        producers.addAll(process.descendants().toList());
+                    }
                     assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
                     broker.close();
                     for (ProcessHandle producer : producers) {
@@ -492,7 +513,7 @@ class HostedWorkspaceToolTurnIT {
         assertThat(Files.readString(Path.of(session.get("directory").toString()).resolve("proof.txt")))
                 .as(fault + " physical effect").isEqualTo(started ? "xx" : "x");
         List<Map<String, Object>> executions = jdbc.queryForList("SELECT execution_call_id, idempotency_key,"
-                + " runtime_session_id, dispatch_generation, execution_state, execution_status"
+                + " binding_id, runtime_generation, runtime_session_id, dispatch_generation, execution_state, execution_status"
                 + " FROM ma_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
         assertThat(executions).as(fault + " reservations").hasSize(List.of("acquire", "arguments").contains(fault) ? 0 : 1);
         for (Map<String, Object> execution : executions) {
@@ -506,31 +527,32 @@ class HostedWorkspaceToolTurnIT {
             }
         }
         String storageId = "storage-" + index;
-        Map<String, Object> owner = jdbc.queryForMap("SELECT o.holder_key, o.runtime_session_id"
-                + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key"
-                + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
+                + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
                 tenant, storageId);
+        assertThat(physical).isNotBlank();
+        Map<String, Object> member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id,"
+                + " session_state, execution_storage_key, execution_exclusive FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
+                tenant, session.get("sessionId"), report.path("promptId").asText());
         boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
         // #13800: a turn that recovery-blocks no longer parks its mount
-        // forever — its handback frees the holder row once nothing is
+        // forever — its handback clears membership once nothing is
         // unproven (every execution SETTLED, no control in flight) and the
         // Runtime Session stays READY for the fleet. The one family whose
         // work genuinely never settles here — the PREPARED prepare-twice
-        // execution — keeps the mount honestly, the gate's busy freeze
-        // while anything is unproven, same as the fleet's.
+        // execution — retains its original membership until its outcome
+        // is known.
         boolean retained = !storeFaults && fault.equals("prepare-twice");
-        if (released) {
-            assertThat(owner.get("holder_key")).as(fault + " released owner").isNull();
-        } else if (retained) {
-            assertThat(owner.get("holder_key")).as(fault + " retained owner").isNotNull();
-            assertThat(owner.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
-        } else {
-            assertThat(owner.get("holder_key")).as(fault + " handed-back owner").isNull();
+        assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
+                .isEqualTo(retained ? physical : null);
+        assertThat(member.get("execution_exclusive")).isEqualTo(false);
+        if (retained) {
+            assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
+            assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));
         }
-        assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
-                + " AND runtime_session_id = ?", String.class, session.get("sessionId"), report.path("promptId").asText()))
-                .isEqualTo(released ? "RELEASED" : "READY");
+        assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
         if (storeFaults) {
             assertStoreJournal(jdbc, tenant, session, report);
         }
