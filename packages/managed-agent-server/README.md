@@ -932,6 +932,13 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+Local-process workers run model-directed tools, so the Broker starts them
+without any environment variable whose name begins, in any letter case, with
+`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
+variable of the server process still reaches the worker and its tools. Keep
+unrelated secrets out of the service environment. This does not isolate files:
+a worker runs as the service account and can read whatever that account can.
+
 After a credential-key rotation, keep each prior key in
 `previous-credential-keys` until no persisted Runtime binding references its
 key ID. The brackets are not decoration: Spring's relaxed binder strips `/`,
