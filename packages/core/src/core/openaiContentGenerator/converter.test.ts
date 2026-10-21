@@ -538,6 +538,44 @@ describe('OpenAIContentConverter', () => {
       expectSanitized(context, 'thinking', 2);
     });
 
+    it('fills toolCallCount for a nonstreaming suffix with no finish reason', () => {
+      // `completedNormally()` maps an absent reason to STOP, so the strip and
+      // the stamp happen without one; a backfill gated on a truthy
+      // `finish_reason` would report 0 beside these two `functionCall` parts.
+      const context = contentOnlyStream();
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          choices: [
+            choice(
+              {
+                content: 'Answer.\n</thinking>',
+                tool_calls: [
+                  {
+                    id: 'call_1',
+                    type: 'function',
+                    function: { name: 'read_file', arguments: '{}' },
+                  },
+                  {
+                    id: 'call_2',
+                    type: 'function',
+                    function: { name: 'list_dir', arguments: '{}' },
+                  },
+                ],
+              },
+              null,
+            ),
+          ],
+        } as OpenAI.Chat.ChatCompletion,
+        context,
+      );
+      expect(partsOf(response)).toEqual([
+        { text: 'Answer.' },
+        { functionCall: { id: 'call_1', name: 'read_file', args: {} } },
+        { functionCall: { id: 'call_2', name: 'list_dir', args: {} } },
+      ]);
+      expectSanitized(context, 'thinking', 2);
+    });
+
     it('keeps a nonstreaming suffix when reasoning carried a thinking tag', () => {
       // The reasoning conjunct of `completedNormally` is the only
       // cross-channel guard on this path: `hasThinkingTagInReasoning` is
