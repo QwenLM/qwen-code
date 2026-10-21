@@ -45,7 +45,7 @@ Harness 保持监听 loopback。记录实际报告的端口；请求端口被占
 
 ## 启动 Java 控制面
 
-在另一个终端配置同一 Harness 与数据库：
+在另一个终端配置同一 Harness、数据库和一个已存在的 Workspace 目录：
 
 ```bash
 export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'
@@ -55,6 +55,7 @@ export QWEN_MANAGED_AGENT_HARNESS_ENABLED='true'
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4170'
 export QWEN_MANAGED_AGENT_HARNESS_TOKEN='<private-random-token>'
 export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='sha256:<64-hex-digest>'
+export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/srv/qwen-workspace'
 
 bin/qwen-managed-agent-server
 ```
@@ -71,6 +72,8 @@ chmod 600 config/application.yml
 ```bash
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
+
+开启 Harness 即开启 Managed Session Store。Store 的 base URL 默认指向本服务的明文 loopback 监听；workspace ID 默认取 Runtime Broker 从 `QWEN_MANAGED_AGENT_WORKSPACE_CWD` 推导出的值，因此开启下文的工具路径后身份保持不变。已经设置过 `QWEN_MANAGED_AGENT_WORKSPACE_ID` 的部署必须保留它：未绑定 Session 从该 ID 解析其 Store 作用域。只有当 Harness 需要通过其他地址访问本服务，或该监听提供 TLS 时，才设置 `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL`。
 
 基础配置支持纯文本 Hosted Session。除非配置签名或认证入口，否则服务只能监听 loopback。完整认证、API 与 capability 配置随包提供于 `docs/server-reference.md`。
 
@@ -100,7 +103,7 @@ bin/qwen-managed-agent-server --check
 
 ## 开启已接受的 local-process 工具路径
 
-工具执行需要既有的 fail-closed Runtime 与 Workspace 配置。至少配置：
+工具执行需要既有的 fail-closed Runtime 与 Workspace 配置。在基础配置之上，至少配置：
 
 ```bash
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
@@ -110,8 +113,6 @@ export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='<base64-encoded-32-byte-key>'
 export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/var/lib/qwen-managed-agent/runtime'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/usr/bin/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/opt/qwen-code/dist/cli.js'
-export QWEN_MANAGED_AGENT_WORKSPACE_ID='reference-workspace'
-export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/srv/qwen-workspace'
 export QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED='true'
 ```
 
