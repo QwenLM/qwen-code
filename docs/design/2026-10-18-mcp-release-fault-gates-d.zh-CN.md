@@ -78,6 +78,6 @@ JDK 21 实测（加入应答 hold 之后）：六格整类在 MySQL 8.0.46 上 3
 
 每个变异都重建进 `dist/cli.js` 并只跑该格；之后重建的未变异对照为绿。
 
-预算：该格在八格整类运行（94.5 s，JDK 21、MySQL 8.4.6、Linux aarch64）中实测 9.1 s，按 2× 计入共享 healthy 18 s（9518 → 9536 s），因此 `hosted-harness-mysql` fork 移到 10136 s，179 分钟的 Verify step 仍能包住（10736 s）。`hosted-mcp-gates` 的 1200 s profile 与 artifact 根 `target/fg12-cases/fg12d/` 不变。
+预算：该格在八格整类运行（94.5 s，JDK 21、MySQL 8.4.6、Linux aarch64）中实测 9.1 s，按 2× 计入共享 healthy 18 s（9712 → 9730 s），因此 `hosted-harness-mysql` fork 移到 10330 s；fork 加包裹共 10930 s，182 分钟已装不下，Verify step 移到 183 分钟，job 上限移到 286（273 + 13）。`hosted-mcp-gates` 的 1200 s profile 与 artifact 根 `target/fg12-cases/fg12d/` 不变。
 
 未覆盖：configuration 的派发前取消（configuration 只在关闭期间由 `reconcileEffects()` 取消）与 MCP 工具调用（工具调用走普通工具生命周期，不经 `mcp_operation`）。

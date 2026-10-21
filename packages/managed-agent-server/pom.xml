@@ -114,6 +114,14 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Drives the activation test through the same JUnit Platform the
+             failsafe fork uses, so service discovery and autodetection are
+             observed rather than asserted as POM text. -->
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>com.networknt</groupId>
             <artifactId>json-schema-validator</artifactId>
@@ -328,6 +336,14 @@
                                 <include>**/Hosted*IT.java</include>
                             </includes>
                             <failIfNoTests>true</failIfNoTests>
+                            <forkCount>1</forkCount>
+                            <properties>
+                                <configurationParameters>
+                                    junit.jupiter.extensions.autodetection.enabled = true
+                                    junit.jupiter.execution.parallel.enabled = false
+                                    qwen.hosted.mysql.isolation = true
+                                </configurationParameters>
+                            </properties>
                             <!-- The Hosted*IT classes share one fork; the file
                                  history control calls roughly doubled the
                                  ToolTurn driver's runtime. The channel fault
@@ -544,13 +560,20 @@
                                  retire-at-intent cell adds 18 s (2x its measured
                                  8.6 s): the healthy sum becomes 9518 s, so the
                                  fork moves to 10118 s and the 179-minute step
-                                 still wraps (10718 s of fork plus wrap). The
-                                 FG12d cancel-before-dispatch cell adds 18 s
-                                 (2x its measured 9.1 s): the healthy sum
-                                 becomes 9536 s, so the fork moves to 10136 s
-                                 and the 179-minute step still wraps (10736 s
-                                 of fork plus wrap). -->
-                            <forkedProcessTimeoutInSeconds>10136</forkedProcessTimeoutInSeconds>
+                                 still wraps (10718 s of fork plus wrap). Class-boundary
+                                 cleanup and its regression add 60 s:
+                                 healthy 9578 s, fork 10178 s, Verify 180
+                                 minutes with margin above the 10778-second
+                                 fork-plus-wrap sum. The FG11d close-queued
+                                 cell adds 134 s (2x its measured 67.2 s):
+                                 healthy 9712 s, fork 10312 s, Verify 182
+                                 minutes with margin above the 10912-second
+                                 fork-plus-wrap sum. The FG12d
+                                 cancel-before-dispatch cell adds 18 s (2x its
+                                 measured 9.1 s): healthy 9730 s, fork 10330 s,
+                                 Verify 183 minutes with margin above the
+                                 10930-second fork-plus-wrap sum. -->
+                            <forkedProcessTimeoutInSeconds>10330</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
