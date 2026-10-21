@@ -256,15 +256,20 @@ vi.mock('./commands-dispatch.js', async (importOriginal) => {
     }
   }
   return {
-    OpenTuiSlashDispatcher: vi.fn().mockImplementation((
-      ...args: ConstructorParameters<typeof actual.OpenTuiSlashDispatcher>
-    ) => {
-      if (!mocks.state.useRealDispatcher) return new StubDispatcher(...args);
-      mocks.state.host = args[0];
-      mocks.state.hosts.push(args[0]);
-      mocks.state.dispatcherConstructions += 1;
-      return new actual.OpenTuiSlashDispatcher(...args);
-    }),
+    OpenTuiSlashDispatcher: vi
+      .fn()
+      .mockImplementation(
+        (
+          ...args: ConstructorParameters<typeof actual.OpenTuiSlashDispatcher>
+        ) => {
+          if (!mocks.state.useRealDispatcher)
+            return new StubDispatcher(...args);
+          mocks.state.host = args[0];
+          mocks.state.hosts.push(args[0]);
+          mocks.state.dispatcherConstructions += 1;
+          return new actual.OpenTuiSlashDispatcher(...args);
+        },
+      ),
   };
 });
 
@@ -1931,15 +1936,18 @@ describe('OpenTuiApp shell wiring', () => {
     const onTranscriptEvent = vi.fn();
     renderApp({ onTranscriptEvent });
     await settle();
-    const host = mocks.state.host as {
-      addItem: (item: unknown, ts: number) => void;
-    };
+    const host = mocks.state.host as OpenTuiAppHost;
     await act(async () => {
       host.addItem({ type: 'info', text: 'Report filed.' }, 1000);
     });
-    expect(onTranscriptEvent).toHaveBeenCalledWith({
+    const history = host.getHistory();
+    expect(history).toEqual([
+      { type: 'info', text: 'Report filed.', id: 1001 },
+    ]);
+    expect(onTranscriptEvent).toHaveBeenCalledExactlyOnceWith({
       type: 'info',
       text: 'Report filed.',
+      historyId: history[0].id,
     });
   });
 
