@@ -311,7 +311,7 @@ import {
   type ChatRecordingFailureListener,
   type ManagedSessionRecordWriter,
 } from '../services/chatRecordingService.js';
-import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { estimateContextTextTokens } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
@@ -5645,16 +5645,33 @@ export class Config {
     });
   }
 
-  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+  private buildMemoryContextWarning(alwaysOnContext: {
+    contextFiles: string;
+    memoryPolicy: string;
+    memoryCatalog: string;
+  }): string | undefined {
     const contextWindowSize =
       this.getContentGeneratorConfig()?.contextWindowSize ??
       this.modelsConfig.getGenerationConfig().contextWindowSize ??
       tokenLimit(this.getModel(), 'input');
-    if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
+    if (!contextWindowSize || contextWindowSize <= 0) {
       return undefined;
     }
 
-    const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
+    const contextFileTokens = estimateContextTextTokens(
+      alwaysOnContext.contextFiles,
+    );
+    const policyTokens = estimateContextTextTokens(
+      alwaysOnContext.memoryPolicy,
+    );
+    const catalogTokens = estimateContextTextTokens(
+      alwaysOnContext.memoryCatalog,
+    );
+    const estimatedTokens = contextFileTokens + policyTokens + catalogTokens;
+    if (estimatedTokens === 0) {
+      return undefined;
+    }
+
     const ratioTokens = Math.floor(
       contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
     );
@@ -5674,11 +5691,25 @@ export class Config {
       thresholdTokens === ratioTokens
         ? windowClause
         : `${MEMORY_CONTEXT_WARNING_MAX_TOKENS.toLocaleString()} tokens — the smaller of that and ${windowClause}`;
+    // Name every non-empty contributor: the catalog is what the index adds to
+    // a large-window session, and it is not trimmed by editing QWEN.md.
+    const contributors = [
+      { label: 'context files', tokens: contextFileTokens },
+      { label: 'auto-memory policy', tokens: policyTokens },
+      { label: 'auto-memory catalog', tokens: catalogTokens },
+    ].filter(({ tokens }) => tokens > 0);
+    const parts = contributors.map(
+      ({ label, tokens }) => `${tokens.toLocaleString()} tokens of ${label}`,
+    );
+    const breakdown =
+      parts.length > 2
+        ? `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`
+        : parts.join(' and ');
     return (
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ${bound}. ` +
-      `Consider trimming long always-loaded context or moving details into ` +
-      `on-demand files.`
+      `Of those, there are ${breakdown}. Consider trimming context files or ` +
+      `pruning stale memories, or moving details into on-demand files.`
     );
   }
 
@@ -6303,15 +6334,11 @@ export class Config {
    */
   getWarnings(): string[] {
     // Include the request-only catalog as well as the system memory policy.
-    const memoryContextWarning = this.buildMemoryContextWarning(
-      [
-        this.getUserMemory(),
-        this.getAutoMemoryPrompt(),
-        this.getAutoMemoryContext(),
-      ]
-        .filter(Boolean)
-        .join('\n\n'),
-    );
+    const memoryContextWarning = this.buildMemoryContextWarning({
+      contextFiles: this.getUserMemory(),
+      memoryPolicy: this.getAutoMemoryPrompt(),
+      memoryCatalog: this.getAutoMemoryContext(),
+    });
     const ruleWarnings = this.ignoredExtensionRules.map(
       (displayPath) =>
         `Extension rule ${displayPath} has no \`paths:\` and was skipped. ` +
