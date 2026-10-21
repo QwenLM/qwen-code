@@ -390,7 +390,7 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
     await press('return', '\r');
     expect(mocks.state.liveTurns[0]?.prompt).toBe(body);
     expect(mocks.state.liveTurns[0]?.options['humanInput']).toEqual({
-      text: placeholder,
+      text: body,
     });
     await act(async () => {
       for (const wake of mocks.state.liveWaiters.splice(0)) wake();
@@ -421,11 +421,13 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
     ['mixed', 'clear'],
     ['known', 'clear'],
     ['unknown', 'remount'],
+    ['known', 'recall'],
   ] as const)(
     'retains the %s source after pop and %s through the actual composer and live queue',
     async (source, action) => {
       const unknown = 'workflow recalled unknown';
-      const known = 'known human';
+      const known =
+        action === 'recall' ? 'workflow known human' : 'known human';
       const config = {} as Config;
       let currentLive: OpenTuiLiveTurn = null!;
       let setComposerVisible: (visible: boolean) => void = () => {};
@@ -441,7 +443,7 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
             onSubmit={(text, images, metadata) => {
               pendingSubmits.push(() => live.submit(text, images, metadata));
             }}
-            userMessages={[unknown]}
+            userMessages={[action === 'recall' ? known : unknown]}
             streaming={live.streaming}
             queueLength={live.messageQueue.length}
             onPopQueue={live.popQueue}
@@ -495,6 +497,10 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
         });
       } else if (action === 'edit' || action === 'repop-edit') {
         await typeText(' append instruction');
+      } else if (action === 'recall') {
+        currentEditor().setCursor(0, 0);
+        await press('up', '\x1b[A');
+        expect(currentEditor().plainText).toBe(popped);
       }
       const submitted = currentEditor().plainText;
       await press('return', '\r');
@@ -503,11 +509,13 @@ describe('OpenTuiInputPrompt queued source restoration', () => {
       });
       expect(mocks.state.liveTurns).toHaveLength(2);
       const expectedHuman =
-        action === 'clear' || action === 'remount' || source === 'known'
-          ? { text: submitted }
-          : action === 'unchanged' && source === 'mixed'
-            ? { text: known }
-            : undefined;
+        action === 'recall'
+          ? undefined
+          : action === 'clear' || action === 'remount' || source === 'known'
+            ? { text: submitted }
+            : action === 'unchanged' && source === 'mixed'
+              ? { text: known }
+              : undefined;
       expect(mocks.state.liveTurns[1]?.prompt).toBe(submitted);
       expect(mocks.state.liveTurns[1]?.options['humanInput']).toEqual(
         expectedHuman,
@@ -1278,20 +1286,111 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
     expect(submitted).toEqual([big.padEnd(1200, ' ')]);
   });
 
-  it('captures human input before expanding a pasted body containing workflow keywords', async () => {
+  it.each([false, true])(
+    'captures expanded human paste text before image context (image: %s)',
+    async (withImage) => {
+      const submitted = vi.fn();
+      render(<OpenTuiInputPrompt onSubmit={submitted} userMessages={[]} />);
+      if (withImage) {
+        await act(async () => {
+          lastKeyboardHandler()(
+            baseKeyEvent({ name: 'v', sequence: '\x16', ctrl: true }),
+          );
+        });
+      }
+      const handler = mocks.state.pasteHandlers.at(-1);
+      if (!handler) throw new Error('no paste handler registered');
+      const body = 'ultracode workflow'.padEnd(1200, ' ');
+      await emitPaste(handler, body);
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(submitted).toHaveBeenCalledWith(
+        body,
+        withImage ? ['/tmp/clipboard-test.png'] : undefined,
+        {
+          displayText: '[Pasted Content 1200 chars]',
+          humanInput: { text: body },
+          pasteExpansions: new Map([['[Pasted Content 1200 chars]', body]]),
+        },
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'keeps a mounted paste draft across session rotation (paste again: %s)',
+    async (pasteAgain) => {
+      let sessionId = 'session-before';
+      const config = {
+        getSessionId: () => sessionId,
+        getTargetDir: () => '/test/workspace',
+      } as Config;
+      const submitted = vi.fn();
+      const renderPrompt = () => (
+        <OpenTuiInputPrompt
+          config={config}
+          onSubmit={submitted}
+          userMessages={[]}
+        />
+      );
+      const view = render(renderPrompt());
+      const handler = mocks.state.pasteHandlers.at(-1);
+      if (!handler) throw new Error('no paste handler registered');
+      const body = 'workflow original body'.padEnd(1200, 'x');
+      const later = 'ultracode later body'.padEnd(1200, 'y');
+      const placeholder = '[Pasted Content 1200 chars]';
+      await emitPaste(handler, body);
+      const editor = currentEditor();
+      expect(editor.plainText).toBe(placeholder);
+      sessionId = 'session-after';
+      view.rerender(renderPrompt());
+      expect(currentEditor()).toBe(editor);
+      expect(editor.plainText).toBe(placeholder);
+      if (pasteAgain) {
+        await typeText(' ');
+        await emitPaste(handler, later);
+        expect(editor.plainText).toBe(`${placeholder} ${placeholder} #2`);
+      }
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(submitted.mock.calls[0]?.[0]).toBe(
+        pasteAgain ? `${body} ${later}` : body,
+      );
+    },
+  );
+
+  it('keeps history input unknown when the mounted editor changes session', async () => {
+    let sessionId = 'session-before';
+    const config = {
+      getSessionId: () => sessionId,
+      getTargetDir: () => '/test/workspace',
+    } as Config;
+    const raw = 'workflow recalled history';
     const submitted = vi.fn();
-    render(<OpenTuiInputPrompt onSubmit={submitted} userMessages={[]} />);
-    const handler = mocks.state.pasteHandlers.at(-1);
-    if (!handler) throw new Error('no paste handler registered');
-    const body = 'ultracode workflow'.padEnd(1200, ' ');
-    await emitPaste(handler, body);
+    const renderPrompt = () => (
+      <OpenTuiInputPrompt
+        config={config}
+        onSubmit={submitted}
+        userMessages={[raw]}
+      />
+    );
+    const view = render(renderPrompt());
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'up', sequence: '\x1b[A' }));
+    });
+    const editor = currentEditor();
+    expect(editor.plainText).toBe(raw);
+    sessionId = 'session-after';
+    view.rerender(renderPrompt());
+    expect(currentEditor()).toBe(editor);
+    expect(editor.plainText).toBe(raw);
     await act(async () => {
       lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
-    expect(submitted).toHaveBeenCalledWith(body, undefined, {
-      displayText: '[Pasted Content 1200 chars]',
-      humanInput: { text: '[Pasted Content 1200 chars]' },
-      pasteExpansions: new Map([['[Pasted Content 1200 chars]', body]]),
+    expect(submitted).toHaveBeenCalledWith(raw, undefined, {
+      displayText: raw,
+      humanInput: undefined,
     });
   });
 
@@ -1349,7 +1448,9 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
       undefined,
       {
         displayText: edited,
-        humanInput: { text: edited },
+        humanInput: {
+          text: `${literal}\n${queuedBody}\n${draftBody} append instruction ${laterBody}`,
+        },
         pasteExpansions: new Map([
           [placeholder, draftBody],
           [`${placeholder} #2`, queuedBody],

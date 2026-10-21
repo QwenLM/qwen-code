@@ -5115,7 +5115,7 @@ describe('InputPrompt', () => {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
           displayText: '[Pasted Content 1001 chars]',
-          humanInput: { text: '[Pasted Content 1001 chars]' },
+          humanInput: { text: largeContent },
           pasteExpansions: new Map([
             ['[Pasted Content 1001 chars]', largeContent],
           ]),
@@ -5168,7 +5168,9 @@ describe('InputPrompt', () => {
             deferUntilIdle: false,
             submittedPrompt: edited,
             displayText: edited,
-            humanInput: { text: edited },
+            humanInput: {
+              text: `${literal}\n${originalBody}\nappend instruction ${nextBody}`,
+            },
             pasteExpansions: new Map([
               [placeholder, originalBody],
               [`${placeholder} #2`, nextBody],
@@ -5223,7 +5225,7 @@ describe('InputPrompt', () => {
             displayText:
               '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
             humanInput: {
-              text: '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
+              text: `${secondPaste}\n${firstPaste}`,
             },
             pasteExpansions: new Map([
               ['[Pasted Content 1001 chars]', firstPaste],
@@ -5271,7 +5273,7 @@ describe('InputPrompt', () => {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
           displayText: '[Pasted Content 1001 chars]',
-          humanInput: { text: '[Pasted Content 1001 chars]' },
+          humanInput: { text: largeContent },
           pasteExpansions: new Map([
             ['[Pasted Content 1001 chars]', largeContent],
           ]),

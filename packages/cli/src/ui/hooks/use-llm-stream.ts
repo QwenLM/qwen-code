@@ -2942,7 +2942,11 @@ export const useLlmStream = (
                 event.value,
                 userMessageTimestamp,
                 submitType,
-                trackInteractionOwner,
+                trackInteractionOwner &&
+                  toolContinuationOwner?.foregroundAbortController !==
+                    undefined &&
+                  abortControllerRef.current ===
+                    toolContinuationOwner.foregroundAbortController,
               );
               break;
             case ServerLlmEventType.ChatCompressed:

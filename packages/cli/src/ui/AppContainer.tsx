@@ -1590,9 +1590,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
     new Map(),
   );
-  useEffect(() => {
-    setPendingPastes(new Map());
-  }, [config, sessionStats.sessionId]);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   const humanInputProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
@@ -1614,7 +1611,6 @@ export const AppContainer = (props: AppContainerProps) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = false;
       humanInputProvenanceUnavailableRef.current = false;
-      setPendingPastes(new Map());
       return;
     }
     if (
@@ -3579,6 +3575,7 @@ export const AppContainer = (props: AppContainerProps) => {
           submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
             submittedPrompt,
             displayText,
+            ...(pasteExpansions?.size ? { pasteExpansions } : {}),
           }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit slash command', error);
@@ -3922,9 +3919,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const submitVimPrompt = useCallback(
     (text: string) => {
-      handleFinalSubmit(text, { displayText: text, humanInput: { text } });
+      handleFinalSubmit(text, {
+        displayText: text,
+        humanInput: {
+          text: expandPendingPastePlaceholders(text, pendingPastes),
+        },
+      });
     },
-    [handleFinalSubmit],
+    [handleFinalSubmit, pendingPastes],
   );
   const { handleInput: vimHandleInput } = useVim(
     buffer,

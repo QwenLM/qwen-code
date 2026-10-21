@@ -12,6 +12,8 @@ Terminal input in Ink and OpenTUI, IDE composer input, and Web Shell composer
 input support this reminder. It is added to the model request separately from
 your displayed message. The next ordinary submission does not inherit it.
 Tool continuations and automatic retries do not add it again.
+Text pasted into the composer counts as human input; attachment expansions
+and Hook-added context do not.
 
 Recalled history and Ink Vim register pastes remain unknown input, including
 after clearing the buffer or disabling Vim. Fresh Vim insert-mode input can

@@ -975,55 +975,83 @@ describe('useLlmStream', () => {
     expect(result.current.workflowKeywordActive).toBe(false);
   });
 
-  it('keeps the main workflow indicator active when a concurrent side query errors', async () => {
-    let releaseMain!: () => void;
-    const pending = new Promise<void>((resolve) => {
-      releaseMain = resolve;
-    });
-    mockHandleSlashCommand.mockResolvedValue(false);
-    mockSendMessageStream
-      .mockImplementationOnce(() =>
-        (async function* () {
-          yield { type: ServerLlmEventType.Content, value: 'main content' };
-          await pending;
-        })(),
-      )
-      .mockImplementationOnce(() =>
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.Error,
-            value: { error: { message: 'side error' } },
-          };
-        })(),
-      );
-    const { result } = renderTestHook();
-    let main!: Promise<void>;
-    await act(async () => {
-      main = result.current.submitQuery(
-        'ultracode main',
-        SendMessageType.UserQuery,
-        undefined,
-        { humanInput: { text: 'ultracode main' } },
-      );
-    });
-    const options = mockSendMessageStream.mock.calls[0]?.[3] as {
-      onWorkflowIntentApplied?: (trigger: 'ultracode') => void;
-    };
-    act(() => options.onWorkflowIntentApplied?.('ultracode'));
-    expect(result.current.workflowKeywordActive).toBe(true);
-    try {
-      await act(async () => {
-        await result.current.submitQuery('?btw side question');
+  it.each(['side query', 'detached tool continuation'])(
+    'keeps the main workflow indicator active when a concurrent %s errors',
+    async (lane) => {
+      let releaseMain!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        releaseMain = resolve;
       });
-      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      mockHandleSlashCommand.mockResolvedValue(false);
+      mockSendMessageStream
+        .mockImplementationOnce(() =>
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'main content' };
+            await pending;
+          })(),
+        )
+        .mockImplementationOnce(() =>
+          (async function* () {
+            yield {
+              type: ServerLlmEventType.Error,
+              value: { error: { message: 'side error' } },
+            };
+          })(),
+        );
+      const { result } = renderTestHook();
+      let main!: Promise<void>;
+      await act(async () => {
+        main = result.current.submitQuery(
+          'ultracode main',
+          SendMessageType.UserQuery,
+          undefined,
+          { humanInput: { text: 'ultracode main' } },
+        );
+      });
+      const options = mockSendMessageStream.mock.calls[0]?.[3] as {
+        onWorkflowIntentApplied?: (trigger: 'ultracode') => void;
+      };
+      act(() => options.onWorkflowIntentApplied?.('ultracode'));
       expect(result.current.workflowKeywordActive).toBe(true);
-    } finally {
-      releaseMain();
-      await act(async () => {
-        await main;
-      });
-    }
-  });
+      try {
+        await act(async () => {
+          if (lane === 'side query') {
+            await result.current.submitQuery('?btw side question');
+          } else {
+            const controller = new AbortController();
+            await result.current.submitQuery(
+              [
+                {
+                  functionResponse: {
+                    id: 'side-tool',
+                    name: 'read_file',
+                    response: { output: 'side result' },
+                  },
+                },
+              ],
+              SendMessageType.ToolResult,
+              'side-prompt',
+              {
+                toolContinuationOwner: {
+                  promptId: 'side-prompt',
+                  signal: controller.signal,
+                  survivesGenerationChange: true,
+                  detachedAbortController: controller,
+                },
+              },
+            );
+          }
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(result.current.workflowKeywordActive).toBe(true);
+      } finally {
+        releaseMain();
+        await act(async () => {
+          await main;
+        });
+      }
+    },
+  );
 
   it.each([
     SendMessageType.Retry,

@@ -667,6 +667,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         setPendingPastes(new Map());
         activePlaceholderIds.current.clear();
       }
+      const humanInput = { text: finalValue };
       if (shellModeActive) {
         shellHistory.addCommandToHistory(finalValue);
       }
@@ -687,7 +688,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         deferUntilIdle,
         submittedPrompt,
         displayText: submittedValue,
-        humanInput: { text: submittedValue },
+        humanInput,
         ...(pasteExpansions ? { pasteExpansions } : {}),
       });
 

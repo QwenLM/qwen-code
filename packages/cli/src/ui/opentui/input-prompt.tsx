@@ -359,17 +359,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // submit (ink pendingPastes).
   const pendingPastesRef = useRef<Map<string, string>>(new Map());
   const activePlaceholderIdsRef = useRef<Map<number, Set<number>>>(new Map());
-  const pasteSessionId = config?.getSessionId?.();
-  useLayoutEffect(() => {
-    pendingPastesRef.current.clear();
-    activePlaceholderIdsRef.current.clear();
-    restoredQueueDraftRef.current?.release();
-    restoredQueueDraftRef.current = null;
-    return () => {
+  useLayoutEffect(
+    () => () => {
       restoredQueueDraftRef.current?.release();
       restoredQueueDraftRef.current = null;
-    };
-  }, [config, pasteSessionId]);
+    },
+    [],
+  );
 
   // U-7: follow-up suggestion lifecycle, shared with ink via the
   // renderer-neutral controller hook. Acceptance inserts into the composer
@@ -641,9 +637,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         // everything — an accepted completion must not leave placeholders or
         // chips behind.
         const rawText = applied.submitNow;
-        const humanInput = unknownHistoryInputRef.current
-          ? undefined
-          : { text: rawText };
         const pasteExpansions =
           pendingPastesRef.current.size > 0
             ? new Map(pendingPastesRef.current)
@@ -657,6 +650,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           pendingPastesRef.current.clear();
           activePlaceholderIdsRef.current.clear();
         }
+        const humanInput = unknownHistoryInputRef.current
+          ? undefined
+          : { text: finalText };
         const images = attachments.map((a) => a.path);
         const restoredDraft = restoredQueueDraftRef.current?.draft;
         restoredQueueDraftRef.current?.release();
@@ -919,9 +915,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
 
       const rawText = decision.text.trim();
-      const humanInput = unknownHistoryInputRef.current
-        ? undefined
-        : { text: rawText };
       const pasteExpansions =
         pendingPastesRef.current.size > 0
           ? new Map(pendingPastesRef.current)
@@ -935,6 +928,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         pendingPastesRef.current.clear();
         activePlaceholderIdsRef.current.clear();
       }
+      const humanInput = unknownHistoryInputRef.current
+        ? undefined
+        : { text: finalText };
       const images = attachments.map((a) => a.path);
       const restoredDraft = restoredQueueDraftRef.current?.draft;
       restoredQueueDraftRef.current?.release();
@@ -1227,6 +1223,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.setCursor(0, 0);
         return;
       }
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
       historyRestoredTextRef.current = decision.text;
       unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
@@ -1254,6 +1252,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         el.gotoLineEnd();
         return;
       }
+      restoredQueueDraftRef.current?.release();
+      restoredQueueDraftRef.current = null;
       historyRestoredTextRef.current = decision.text;
       unknownHistoryInputRef.current = decision.text.length > 0;
       el.setText(decision.text);
