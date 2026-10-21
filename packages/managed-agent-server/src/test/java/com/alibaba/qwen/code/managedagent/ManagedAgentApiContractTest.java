@@ -1535,6 +1535,23 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void localPathContractRequiresExplicitImportCapability() throws Exception {
+        String tenant = "contract-local-import-" + UUID.randomUUID();
+        Map<String, String> drift = new TreeMap<>();
+        assertThat(json(exchange(drift, "webShellCreateWorkspace", 409,
+                post(WEB_SHELL + "/workspaces/create").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"displayName\":\"Project\",\"idempotencyKey\":\"local\",\"localPath\":\"/not-admitted\"}"))
+                .at("/error/code").asText()).isEqualTo("workspace_creation_unavailable");
+        assertThat(json(exchange(drift, "queryWebShellWorkspaceDirectories", 409,
+                post(WEB_SHELL + "/workspaces/directories/query").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"localPath\":\"\"}"))
+                .at("/error/code").asText()).isEqualTo("workspace_creation_unavailable");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(drift).isEmpty();
+    }
+
+    @Test
     void localWorkspaceCreationRejectsRemotePayloadsBeforeAdmission() throws Exception {
         String tenant = "contract-local-remote-boundary-" + UUID.randomUUID();
         Map<String, String> drift = new TreeMap<>();
