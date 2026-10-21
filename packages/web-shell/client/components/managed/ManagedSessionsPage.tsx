@@ -41,6 +41,7 @@ import { useManagedCwdChange } from './use-managed-cwd-change';
 import { useManagedModelChange } from './use-managed-model-change';
 import { useManagedApprovalChange } from './use-managed-approval-change';
 import { useManagedSkills } from './use-managed-skills';
+import { useManagedMcp } from './use-managed-mcp';
 import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
@@ -185,6 +186,21 @@ function ManagedSessionsContent({
     sessionId,
   );
   const skills = useManagedSkills(provider, clientId, sessionId);
+  const mcp = useManagedMcp(provider, clientId, sessionId);
+  const referenceActions = useMemo(
+    () =>
+      fileReferences.actions || mcp
+        ? {
+            ...fileReferences.actions,
+            ...mcp,
+            scopeKey: JSON.stringify([
+              fileReferences.actions?.scopeKey,
+              mcp?.scopeKey,
+            ]),
+          }
+        : undefined,
+    [fileReferences.actions, mcp],
+  );
   const pageRef = useRef<HTMLDivElement>(null);
   const taskTriggerRef = useRef<HTMLButtonElement>(null);
   const [wideTasks, setWideTasks] = useState(false);
@@ -983,9 +999,14 @@ function ManagedSessionsContent({
               data-managed-workspace-binding
             >
               {home && (
-                <summary className="cursor-pointer text-muted-foreground">
-                  {summary.workspace.workspaceId} ·{' '}
-                  {summary.workspace.cwdRelative}
+                <summary
+                  className="cursor-pointer text-muted-foreground"
+                  title={summary.workspace.workspaceId}
+                >
+                  <span className="inline-block max-w-[34ch] truncate align-bottom">
+                    {summary.workspace.workspaceId}
+                  </span>{' '}
+                  · {summary.workspace.cwdRelative}
                   {displayedModel && (
                     <span data-managed-model> · {displayedModel}</span>
                   )}
@@ -993,13 +1014,18 @@ function ManagedSessionsContent({
                   {t(`managed.runtime.${summary.runtimeState}`)}
                 </summary>
               )}
-              <p>
-                {t('managed.workspaceBound')}: {summary.workspace.workspaceId}
-              </p>
-              <p>
-                {t('managed.workspaceDirectory')}:{' '}
-                {summary.workspace.cwdRelative}
-              </p>
+              {!home && (
+                <>
+                  <p>
+                    {t('managed.workspaceBound')}:{' '}
+                    {summary.workspace.workspaceId}
+                  </p>
+                  <p>
+                    {t('managed.workspaceDirectory')}:{' '}
+                    {summary.workspace.cwdRelative}
+                  </p>
+                </>
+              )}
               {interactive && (
                 <ManagedSessionCwdControl
                   key={`${provider.storageKey}:${summary.sessionId}`}
@@ -1282,7 +1308,7 @@ function ManagedSessionsContent({
                 skillsLoadError={skills.error}
                 skillsLoaded={skills.loaded}
                 workspaceFeaturesEnabled={false}
-                fileReferenceActions={fileReferences.actions}
+                fileReferenceActions={referenceActions}
                 persistFileReferences
                 attachmentsEnabled={
                   summary?.capabilities.inputAttachments === true
@@ -1291,7 +1317,7 @@ function ManagedSessionsContent({
                   interactive
                     ? [
                         ...(summary?.capabilities.inputAttachments ||
-                        fileReferences.actions ||
+                        referenceActions ||
                         summary?.planModeSupported ||
                         skills.supported
                           ? ['addMenu' as const]
@@ -1361,6 +1387,21 @@ function ManagedSessionsContent({
                 contextUsageAlwaysVisible={Boolean(sessionId)}
                 currentMode={summary?.approvalMode ?? ''}
                 planMode={summary?.planMode === true}
+                planControlsDisabled={
+                  !interactive ||
+                  !approvalChange.supported ||
+                  !approvalChange.options?.supported ||
+                  approvalChange.optionsLoading ||
+                  approvalChange.isBlocked() ||
+                  busy ||
+                  Boolean(active) ||
+                  Boolean(pendingApproval) ||
+                  Boolean(pending) ||
+                  cwd.blocked ||
+                  modelChange.isBlocked() ||
+                  approvalChange.options.approvalRevision !==
+                    (summary?.approvalRevision ?? 0)
+                }
                 onTogglePlan={
                   summary?.planModeSupported && summary.approvalMode
                     ? () => {
@@ -1392,8 +1433,9 @@ function ManagedSessionsContent({
                   approvalChange.busy ||
                   approvalChange.blocked ||
                   busy ||
-                  Boolean(active) ||
-                  Boolean(pendingApproval) ||
+                  ((Boolean(active) || Boolean(pendingApproval)) &&
+                    !approvalChange.options.liveSupported) ||
+                  summary?.phase === 'cancelling' ||
                   Boolean(pending) ||
                   cwd.blocked ||
                   modelChange.blocked ||
@@ -1409,8 +1451,9 @@ function ManagedSessionsContent({
                           busy ||
                           encoding.current ||
                           pendingRef.current ||
-                          active ||
-                          pendingApproval ||
+                          ((active || pendingApproval) &&
+                            !approvalChange.options?.liveSupported) ||
+                          summary?.phase === 'cancelling' ||
                           cwd.isBlocked() ||
                           modelChange.isBlocked()
                         )
@@ -1530,7 +1573,9 @@ function ManagedSessionsContent({
                               ? 'managed.approvalChange.loading'
                               : approvalChange.optionsError
                                 ? 'managed.approvalChange.optionsError'
-                                : 'managed.approvalChange.nextTurn',
+                                : approvalChange.options?.liveSupported
+                                  ? 'managed.approvalChange.live'
+                                  : 'managed.approvalChange.nextTurn',
                       )}
                     </span>
                     {approvalChange.pending && (

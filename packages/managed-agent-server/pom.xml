@@ -114,6 +114,14 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Drives the activation test through the same JUnit Platform the
+             failsafe fork uses, so service discovery and autodetection are
+             observed rather than asserted as POM text. -->
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>com.networknt</groupId>
             <artifactId>json-schema-validator</artifactId>
@@ -328,6 +336,14 @@
                                 <include>**/Hosted*IT.java</include>
                             </includes>
                             <failIfNoTests>true</failIfNoTests>
+                            <forkCount>1</forkCount>
+                            <properties>
+                                <configurationParameters>
+                                    junit.jupiter.extensions.autodetection.enabled = true
+                                    junit.jupiter.execution.parallel.enabled = false
+                                    qwen.hosted.mysql.isolation = true
+                                </configurationParameters>
+                            </properties>
                             <!-- The Hosted*IT classes share one fork; the file
                                  history control calls roughly doubled the
                                  ToolTurn driver's runtime. The channel fault
@@ -520,8 +536,41 @@
                                  to 9411 s and the Verify step to 167 minutes;
                                  the FG11f publication cell adds 82 s, so the
                                  fork moves to 9493 s and the Verify step to
-                                 169 minutes. -->
-                            <forkedProcessTimeoutInSeconds>9523</forkedProcessTimeoutInSeconds>
+                                 169 minutes; the FG12f delivery cell adds
+                                 30 s, so the fork moves to 9523 s and Verify
+                                 stays 169 minutes; the FG11f refusing-arms
+                                 cells add 242 s, so the fork moves to 9765 s
+                                 and the Verify step to 173 minutes. The
+                                 FG13b Hook result store-rejection cell adds
+                                 150 s: the healthy sum becomes 9315 s, so
+                                 the fork moves to 9915 s and the Verify step
+                                 to 176 minutes. The FG13b Hook plan-result
+                                 store-rejection cell adds 150 s: the healthy
+                                 sum becomes 9465 s, so the fork moves to
+                                 10065 s and the Verify step to 178 minutes;
+                                 the FG11d cancel cell adds 15 s (2x its
+                                 measured 7.4 s), so the fork moves to 10080 s
+                                 and the Verify step to 179 minutes: 10680 s of
+                                 fork plus wrap is exactly 178, so 179 is what
+                                 keeps the margin. The FG12f delivery entry
+                                 moves from 30 s to 50 s at 2x (four cases,
+                                 24.16 s measured): the healthy sum becomes
+                                 9500 s, so the fork moves to 10100 s and the
+                                 179-minute step still wraps (10700 s of fork
+                                 plus wrap). The FG11d retire-at-intent cell
+                                 adds 18 s (2x its measured 8.6 s): the
+                                 healthy sum becomes 9518 s, so the fork moves
+                                 to 10118 s. Class-boundary cleanup and its
+                                 regression add 60 s: healthy 9578 s, fork
+                                 10178 s, Verify 180 minutes. The FG13e Hook
+                                 stream-gap cell adds 150 s: healthy 9728 s,
+                                 fork 10328 s, Verify 183 minutes. The FG11d
+                                 close-queued cell adds 134 s (2x its measured
+                                 67.2 s): healthy 9862 s, fork 10462 s, Verify
+                                 185 minutes. The FG11d close-in-flight refusal
+                                 cell adds 9 s (2x its measured 4.5 s): healthy
+                                 9871 s, fork 10471 s, Verify 185 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10471</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

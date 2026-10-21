@@ -25,6 +25,7 @@ const editorMocks = vi.hoisted(() => ({
 
 vi.mock('../ChatEditor', async () => {
   const { forwardRef, useImperativeHandle } = await import('react');
+  const { WorkspaceSelector } = await import('../WorkspaceSelector');
   return {
     ChatEditor: forwardRef<
       EditorHandle,
@@ -39,7 +40,25 @@ vi.mock('../ChatEditor', async () => {
             setText: editorMocks.setText,
           }) as EditorHandle,
       );
-      return <div data-testid="shared-editor" />;
+      return (
+        <div data-testid="shared-editor">
+          <WorkspaceSelector
+            workspaces={props.workspaces ?? []}
+            selectedWorkspaceCwd={props.selectedWorkspaceCwd}
+            alwaysVisible={props.workspaceSelectorAlwaysVisible}
+            disabled={props.workspaceSelectionDisabled}
+            busy={props.workspaceMutationBusy}
+            scratchSupported={props.scratchWorkspaceSupported ?? false}
+            existingFolderSupported={
+              props.existingFolderWorkspaceSupported ?? false
+            }
+            onSelectWorkspace={props.onSelectWorkspace ?? (() => {})}
+            onCreateScratch={props.onCreateScratchWorkspace ?? (() => {})}
+            onOpenExistingFolder={props.onOpenExistingWorkspace ?? (() => {})}
+            menuItems={props.workspaceMenuItems}
+          />
+        </div>
+      );
     }),
   };
 });
@@ -105,6 +124,32 @@ describe('WorkspaceBindingCreator', () => {
     ].find((item) => item.textContent === label);
     expect(option).toBeDefined();
     await act(async () => option!.click());
+  }
+
+  async function workspaceAction(label: string) {
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('button[aria-label="Workspace"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    const item = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((entry) => entry.textContent === label);
+    expect(item).toBeDefined();
+    await act(async () => {
+      item!.click();
+      await flush();
+    });
+  }
+
+  async function expectWorkingDirectory(value: string) {
+    await workspaceAction('Working directory');
+    expect(
+      document.querySelector<HTMLInputElement>('#managed-workspace-cwd')?.value,
+    ).toBe(value);
+    await click('cancel');
   }
 
   beforeEach(() => {
@@ -250,7 +295,9 @@ describe('WorkspaceBindingCreator', () => {
       defaultCwdRelative: 'remote-project',
     });
     await render();
+    await workspaceAction('Working directory');
     await typeInput('managed-workspace-cwd', 'local-project');
+    await click('save');
     expect(editorMocks.props!.existingFolderWorkspaceSupported).toBe(true);
     await openRegistration(true);
     expect(registration.checkDirectory).toHaveBeenCalledWith(
@@ -271,10 +318,7 @@ describe('WorkspaceBindingCreator', () => {
       expect.objectContaining({ clientId: 'client-a' }),
     );
     expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-remote');
-    expect(
-      (document.getElementById('managed-workspace-cwd') as HTMLInputElement)
-        .value,
-    ).toBe('remote-project');
+    await expectWorkingDirectory('remote-project');
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(createSession).not.toHaveBeenCalled();
     expect(createEmpty).not.toHaveBeenCalled();
@@ -1292,6 +1336,145 @@ describe('WorkspaceBindingCreator', () => {
     ).toBeNull();
   });
 
+  it('imports a local project without an authorized parent Workspace', async () => {
+    const createWorkspace = workspaceCreation().mockResolvedValue({
+      ...workspace,
+      workspaceId: 'ws-imported',
+      displayName: 'project',
+      defaultCwdRelative: 'project',
+    });
+    const directories = vi.fn().mockResolvedValue({
+      root: '/Users/local',
+      cwdRelative: '.',
+      directories: [{ name: 'project', cwdRelative: 'project' }],
+      truncated: false,
+    });
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      directories,
+      list: vi.fn().mockResolvedValue({
+        data: [],
+        supported: true,
+        canImportLocalDirectory: true,
+      }),
+    };
+    await render();
+    await openWorkspaceCreation();
+    expect(document.querySelector('#managed-directory-root-label')).toBeNull();
+    await submitDirectory('/Users/local/project');
+    expect(directories).toHaveBeenCalledWith(
+      { localPath: '' },
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(createWorkspace).toHaveBeenCalledWith(
+      { displayName: 'project', localPath: '/Users/local/project' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-imported');
+    await expectWorkingDirectory('project');
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('retries a frozen local import after reload with the same path and key', async () => {
+    const createWorkspace = workspaceCreation();
+    vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+      data: [],
+      supported: true,
+      canImportLocalDirectory: true,
+    });
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Project',
+        localPath: '/Users/local/project',
+        idempotencyKey: 'frozen-local-import',
+      }),
+    );
+    await render();
+    expect(document.body.textContent).toContain('/Users/local/project');
+    await click('Retry the same request');
+    expect(createWorkspace).toHaveBeenCalledWith(
+      { displayName: 'Project', localPath: '/Users/local/project' },
+      expect.objectContaining({ idempotencyKey: 'frozen-local-import' }),
+    );
+  });
+
+  it('does not retry a local import when the host no longer advertises it', async () => {
+    const createWorkspace = workspaceCreation();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Project',
+        localPath: '/Users/local/project',
+        idempotencyKey: 'local-import-disabled',
+      }),
+    );
+    await render();
+    await click('Retry the same request');
+    expect(createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('shows a local browsing failure from the Workspace menu', async () => {
+    workspaceCreation();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      directories: vi
+        .fn()
+        .mockRejectedValue(new Error('Local browsing unavailable')),
+      list: vi.fn().mockResolvedValue({
+        data: [],
+        supported: true,
+        canImportLocalDirectory: true,
+      }),
+    };
+    await render();
+    await workspaceAction('Choose existing directory');
+    expect(
+      document.querySelector('[role="dialog"] [role="alert"]')?.textContent,
+    ).toBe('Local browsing unavailable');
+  });
+
+  it('keeps an uncertain local import frozen when its confirmation dialog is closed', async () => {
+    workspaceCreation();
+    const directories = vi.fn();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      directories,
+      list: vi.fn().mockResolvedValue({
+        data: [],
+        supported: true,
+        canImportLocalDirectory: true,
+      }),
+    };
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Project',
+        localPath: '/Users/local/project',
+        idempotencyKey: 'local-import-pending',
+      }),
+    );
+    await render();
+    await click('Close');
+    await workspaceAction('Choose existing directory');
+    const entry = [...document.querySelectorAll('[role="menuitem"]')].find(
+      (item) => item.textContent === 'Choose existing directory',
+    );
+    expect(entry?.getAttribute('aria-disabled')).toBe('true');
+    expect(directories).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        sessionStorage.getItem(
+          `qwen-managed-workspace-registration:${provider.storageKey}`,
+        )!,
+      ),
+    ).toMatchObject({
+      localPath: '/Users/local/project',
+      idempotencyKey: 'local-import-pending',
+    });
+  });
+
   it('selects an existing Linux project and restores its directory after reload', async () => {
     const created = {
       ...workspace,
@@ -1347,10 +1530,7 @@ describe('WorkspaceBindingCreator', () => {
       },
       expect.objectContaining({ idempotencyKey: expect.any(String) }),
     );
-    expect(
-      container.querySelector<HTMLInputElement>('#managed-workspace-cwd')
-        ?.value,
-    ).toBe('project');
+    await expectWorkingDirectory('project');
     expect(editorMocks.clear).not.toHaveBeenCalled();
     await act(async () => root.render(null));
     await render();
@@ -1358,10 +1538,7 @@ describe('WorkspaceBindingCreator', () => {
       'ws-project',
       expect.any(Object),
     );
-    expect(
-      container.querySelector<HTMLInputElement>('#managed-workspace-cwd')
-        ?.value,
-    ).toBe('project');
+    await expectWorkingDirectory('project');
   });
 
   it('retries a persisted existing-directory creation without changing source or path', async () => {
@@ -1394,10 +1571,7 @@ describe('WorkspaceBindingCreator', () => {
       },
       expect.objectContaining({ idempotencyKey: 'frozen-directory-key' }),
     );
-    expect(
-      container.querySelector<HTMLInputElement>('#managed-workspace-cwd')
-        ?.value,
-    ).toBe('old/project');
+    await expectWorkingDirectory('old/project');
   });
 
   it.each([false, true])(
@@ -1761,6 +1935,113 @@ describe('WorkspaceBindingCreator', () => {
     expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
   });
 
+  it('uses the Workspace default without showing separate directory controls', async () => {
+    const createSession = directCreation();
+    const project = { ...workspace, defaultCwdRelative: 'qwen-code' };
+    vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+      data: [project],
+      defaultWorkspace: project,
+      supported: true,
+    });
+    await render();
+    expect(container.querySelector('details')).toBeNull();
+    expect(document.getElementById('managed-workspace-cwd')).toBeNull();
+    expect(container.textContent).not.toContain('Relative directory');
+    expect(container.textContent).not.toContain(
+      'Sessions in the same Workspace',
+    );
+    expect(container.textContent).not.toContain('Refresh');
+    await sendInitial('Read README');
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: 'ws-a',
+        cwdRelative: 'qwen-code',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('cancels directory edits and saves an override without resetting the composer', async () => {
+    const createSession = directCreation();
+    await render();
+    const scope = editorMocks.props!.composerScopeKey;
+    await workspaceAction('Working directory');
+    expect(editorMocks.props!.dialogOpen).toBe(true);
+    await typeInput('managed-workspace-cwd', 'discarded');
+    await click('cancel');
+    await workspaceAction('Working directory');
+    expect(
+      document.querySelector<HTMLInputElement>('#managed-workspace-cwd')!.value,
+    ).toBe('.');
+    await typeInput('managed-workspace-cwd', 'services/api');
+    await click('save');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(editorMocks.props!.dialogOpen).toBe(false);
+    expect(editorMocks.props!.composerScopeKey).toBe(scope);
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(editorMocks.setText).not.toHaveBeenCalled();
+    await sendInitial('Keep this draft');
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwdRelative: 'services/api',
+        text: 'Keep this draft',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('keeps Refresh in the Workspace menu after discovery fails', async () => {
+    const createSession = directCreation();
+    vi.mocked(provider.workspaceBinding!.list)
+      .mockRejectedValueOnce(new Error('Discovery failed'))
+      .mockResolvedValue({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        supported: true,
+      });
+    await render();
+    expect(container.textContent).toContain('Discovery failed');
+    expect(editorMocks.props!.workspaceSelectionDisabled).toBe(false);
+    await workspaceAction('Refresh');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await sendInitial('Read');
+    expect(createSession).toHaveBeenCalledOnce();
+  });
+
+  it('loads another Workspace page from the menu and confirms a directory override before switching', async () => {
+    directCreation();
+    const other = {
+      ...workspace,
+      workspaceId: 'ws-b',
+      displayName: 'B',
+      defaultCwdRelative: 'other-project',
+    };
+    vi.mocked(provider.workspaceBinding!.list)
+      .mockResolvedValueOnce({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        nextCursor: 'next-page',
+        supported: true,
+      })
+      .mockResolvedValueOnce({ data: [other], supported: true });
+    await render();
+    await workspaceAction('Load more');
+    expect(provider.workspaceBinding!.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cursor: 'next-page' }),
+    );
+    await workspaceAction('Working directory');
+    await typeInput('managed-workspace-cwd', 'services/api');
+    await click('save');
+    await act(async () => editorMocks.props!.onSelectWorkspace!('ws-b'));
+    expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+    await click('Keep selection');
+    await expectWorkingDirectory('services/api');
+    await act(async () => editorMocks.props!.onSelectWorkspace!('ws-b'));
+    await click('Switch');
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-b');
+    await expectWorkingDirectory('other-project');
+  });
+
   it('freezes the initial prompt and choices, then retries only read-back after creation', async () => {
     const createSession = directCreation();
     createSession.mockRejectedValueOnce(new TypeError('Lost response'));
@@ -1803,18 +2084,17 @@ describe('WorkspaceBindingCreator', () => {
     expect(createSession).toHaveBeenCalledOnce();
   });
 
-  it('shows a rejected directory above the collapsed controls without committing the draft', async () => {
+  it('shows a rejected directory without committing the draft', async () => {
     const createSession = directCreation();
     createSession.mockRejectedValue(
       new JavaManagedAgentHttpError(400, 'invalid_cwd', 'Invalid directory'),
     );
     await render();
     const commit = await sendInitial('Keep this input');
-    expect(container.querySelector('details')?.open).toBe(false);
+    expect(container.querySelector('details')).toBeNull();
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
       'Invalid directory',
     );
-    expect(container.querySelector('details [role="alert"]')).toBeNull();
     expect(commit).not.toHaveBeenCalled();
     expect(editorMocks.clear).not.toHaveBeenCalled();
   });
@@ -1868,6 +2148,44 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.clear).not.toHaveBeenCalled();
     expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
   });
+
+  it.each([
+    { configuredAgent: 'agent-a', selectedAgent: 'agent-a' },
+    { configuredAgent: 'server-default', selectedAgent: 'agent-b' },
+  ])(
+    'creates with a named model when the configured default is $configuredAgent',
+    async ({ configuredAgent, selectedAgent }) => {
+      const createSession = directCreation();
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        agentId: configuredAgent,
+        modelPresets: [
+          { agentId: 'agent-b', label: 'Model B' },
+          { agentId: 'agent-a', label: 'Model A' },
+        ],
+      };
+      getSession.mockResolvedValue({
+        sessionId: 'session-a',
+        agentId: selectedAgent,
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await render();
+      expect(editorMocks.props!.availableModels).toEqual([
+        { id: 'agent-b', label: 'Model B' },
+        { id: 'agent-a', label: 'Model A' },
+      ]);
+      expect(editorMocks.props!.currentModel).toBe(selectedAgent);
+      await sendInitial('Read README');
+      expect(createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          agentId: selectedAgent,
+          text: 'Read README',
+        }),
+        expect.any(Object),
+      );
+      expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
+    },
+  );
 
   it('freezes the selected model across an unconfirmed create and checks the returned Agent identity', async () => {
     provider = {
