@@ -218,6 +218,15 @@ const EN: Messages = {
   'managed.result.close': 'Close output',
   'managed.result.refresh': 'Refresh output',
   'managed.phase.created': 'Created',
+  'managed.creationSkillsFromSettings':
+    'Enabled Skills on the Skills page are added to new Managed sessions. Existing sessions keep their original Skills.',
+  'managed.creationSkillsManage': 'Manage Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `${v?.count ?? 0} Skills are saved with this creation request.`,
+  'managed.creationSkillsSourceChanged':
+    'The Skills source changed. Retry with the selected source.',
+  'managed.creationSkillsUnavailable':
+    'Enabled Skills could not be loaded for this Managed session.',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
   'managed.modelPreset': 'Model / Agent preset',
@@ -226,6 +235,9 @@ const EN: Messages = {
     'Choose the initial model and Agent preset. Supported conversations can change model while idle.',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
+  'managed.workspaceWorkingDirectory': 'Working directory',
+  'managed.workspaceWorkingDirectoryDescription':
+    'Choose where this session starts within the Workspace. Use . for the Workspace root.',
   'managed.cwd.change': 'Change directory',
   'managed.cwd.path': 'Directory relative to Workspace root',
   'managed.cwd.description':
@@ -268,6 +280,8 @@ const EN: Messages = {
   'managed.approvalChange.reload': 'Reload policies',
   'managed.approvalChange.nextTurn':
     'Approval policy changes apply to the next turn.',
+  'managed.approvalChange.live':
+    'Approval policy changes apply to subsequent tool calls in this turn.',
   'managed.approvalChange.changing': 'Changing approval policy…',
   'managed.approvalChange.unconfirmed':
     'Approval change is not confirmed. Continue confirming the original request.',
@@ -305,9 +319,11 @@ const EN: Messages = {
     'This session does not support changing its approval policy.',
   'managed.newWorkspaceDescription':
     'Choose an existing project directory, or name a new empty workspace.',
-  'managed.workspaceDirectoryRoot': 'Authorized Linux directories',
+  'managed.workspaceDirectoryRoot': 'Authorized directories',
+  'managed.localDirectoryHint':
+    'Choose an existing project on this computer. Workspace setup is automatic.',
   'managed.workspaceDirectoryHint':
-    'Choose an existing project on the Linux execution host within this authorized root.',
+    'Choose an existing project on the execution host within this authorized root.',
   'managed.workspaceChooseDirectory': 'Choose existing directory',
   'managed.workspaceDirectoryScope':
     'Choose a directory inside the selected root.',
@@ -4629,6 +4645,15 @@ const ZH: Messages = {
   'managed.result.close': '关闭输出',
   'managed.result.refresh': '刷新输出',
   'managed.phase.created': '已创建',
+  'managed.creationSkillsFromSettings':
+    '技能页面中已启用的 Skills 会用于新建 Managed 会话。已有会话保留创建时的 Skills。',
+  'managed.creationSkillsManage': '管理 Skills',
+  'managed.creationSkillsPinned': (v) =>
+    `本次创建请求已保存 ${v?.count ?? 0} 个 Skills。`,
+  'managed.creationSkillsSourceChanged':
+    'Skills 来源已变化，请按当前选择重试。',
+  'managed.creationSkillsUnavailable':
+    '无法为此 Managed 会话加载已启用的 Skills。',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',
   'managed.modelPreset': '模型 / Agent 预设',
@@ -4637,6 +4662,9 @@ const ZH: Messages = {
     '选择初始模型和 Agent 预设；支持的会话可在空闲时切换模型。',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
+  'managed.workspaceWorkingDirectory': '工作目录',
+  'managed.workspaceWorkingDirectoryDescription':
+    '选择此会话在工作区内的起始目录，使用 . 表示工作区根目录。',
   'managed.cwd.change': '切换目录',
   'managed.cwd.path': '相对于 Workspace 根目录的路径',
   'managed.cwd.description':
@@ -4670,6 +4698,7 @@ const ZH: Messages = {
   'managed.approvalChange.optionsError': '加载审批策略失败。',
   'managed.approvalChange.reload': '重新加载策略',
   'managed.approvalChange.nextTurn': '审批策略变更从下一轮生效。',
+  'managed.approvalChange.live': '审批策略变更对当前轮后续工具调用生效。',
   'managed.approvalChange.changing': '正在切换审批策略…',
   'managed.approvalChange.unconfirmed':
     '审批策略切换尚未确认，请继续确认原请求。',
@@ -4699,9 +4728,11 @@ const ZH: Messages = {
   'managed.approvalFixed': '当前会话不支持更改审批策略。',
   'managed.newWorkspaceDescription':
     '选择已有项目目录，或输入名称创建空工作区。',
-  'managed.workspaceDirectoryRoot': '已授权的 Linux 目录',
+  'managed.workspaceDirectoryRoot': '已授权的目录',
+  'managed.localDirectoryHint':
+    '选择这台电脑上已有的项目目录，工作区登记和授权会自动完成。',
   'managed.workspaceDirectoryHint':
-    '选择此授权根目录内、位于 Linux 执行机器上的已有项目。',
+    '选择此授权根目录内、位于执行机器上的已有项目。',
   'managed.workspaceChooseDirectory': '选择已有目录',
   'managed.workspaceDirectoryScope': '请选择已选根目录中的目录。',
   'managed.newWorkspaceName': '工作区名称',

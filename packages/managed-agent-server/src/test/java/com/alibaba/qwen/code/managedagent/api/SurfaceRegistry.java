@@ -208,6 +208,9 @@ public enum SurfaceRegistry {
     WEBSHELL_SESSION_GET(Method.POST, "/api/agent/web-shell/v1/sessions/get",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.SESSION_GET)),
+    WEBSHELL_SESSION_RENAME(Method.POST, "/api/agent/web-shell/v1/sessions/rename",
+            Surface.WEBSHELL, RuleClass.OPERATOR,
+            EnumSet.of(Capability.SESSION_RENAME)),
     WEBSHELL_TRANSCRIPT(Method.POST,
             "/api/agent/web-shell/v1/transcript/query",
             Surface.WEBSHELL, RuleClass.READER,
@@ -342,6 +345,10 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.OWNER,
             EnumSet.of(Capability.SESSION_APPROVAL_CHANGE)),
     // ManagedSessionStoreController: internal writer routes.
+    INTERNAL_APPROVAL_QUERY(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_APPROVAL_QUERY)),
     INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/execution:authorize",
@@ -611,6 +618,7 @@ public enum SurfaceRegistry {
         AUTOMATION_RETIRE,
         AUTOMATION_RUN,
         AUTOMATION_RUN_LIST,
+        STORE_APPROVAL_QUERY,
         STORE_EXECUTION_AUTHORIZE,
         STORE_LIFECYCLE_AUTHORIZE,
         STORE_WRITER_ACQUIRE,
