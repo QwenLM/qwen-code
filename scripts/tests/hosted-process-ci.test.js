@@ -265,11 +265,20 @@ describe('Hosted real-process gates', () => {
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
+    // The non-Hosted slice runs once per engine, so the Hosted lane stays the
+    // only place Hosted*IT executes while MariaDB keeps a real leg (#14971).
+    const nonHostedLane = java.jobs['mysql-integration'];
+    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
+      expect.objectContaining({ image: 'mysql:8.4.6' }),
+    );
+    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
+      expect.objectContaining({ image: 'mariadb:10.11.18' }),
+    );
     expect(
-      java.jobs['mysql-integration'].steps.find(
-        (step) => step.name === 'Start MySQL without native AIO',
+      nonHostedLane.steps.find(
+        (step) => step.name === 'Start the database without native AIO',
       ).run,
-    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0');
+    ).toContain('"${DATABASE_IMAGE}" "${engine_args[@]}"');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
@@ -354,8 +363,9 @@ describe('Hosted real-process gates', () => {
     );
     expect(mysqlRun.run).toContain('-Pmysql-integration');
     expect(mysqlRun.run).not.toContain('-Dit.test');
-    // The H2 unit suite runs once, in the non-Hosted MySQL job: the Hosted job's three
-    // Maven steps would each repeat it, and the non-Hosted MySQL job must keep it.
+    // The H2 unit suite belongs to the non-Hosted profile: the Hosted job's
+    // three Maven steps would each repeat it. Both engine legs run it, so this
+    // lane pays that suite twice — the accepted cost of keeping MariaDB covered.
     const profile = (id) =>
       pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
     const skipsUnits =

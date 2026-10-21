@@ -431,15 +431,34 @@ jobs:
         run: 'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode'
 
   mysql-integration:
-    name: 'Runtime Broker and Managed Agent MySQL / Java 21'
+    name: 'Runtime Broker and Managed Agent ${{ matrix.label }} / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     # Pool routing per the flyway job (#13245): hosted queue starvation fails
     # a zero-step job outright (#13623), the pool does not. The job is
-    # pool-safe: the database is a per-job container on a random host
-    # port, and every Maven run holds the test job's per-host sdk-java lock.
+    # pool-safe: the database is a per-leg container on a random host port,
+    # and every Maven run holds the test job's per-host sdk-java lock.
+    # Both legs run the same non-Hosted *IT family, as before #14936 removed
+    # the MariaDB service. The MariaDB leg is what keeps the published
+    # MariaDB-only V12 repair (RTRIM, error 1901) and the schema catalog's
+    # MariaDB branches falsifiable in CI (#14971).
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # On the pool this job takes the per-host sdk-java lock once, around the
-    # single step that runs both Maven commands. Run 39353663670's verify
+    strategy:
+      # One engine's failure must not cancel the other leg's evidence.
+      fail-fast: false
+      matrix:
+        include:
+          - database: 'mysql'
+            label: 'MySQL'
+            image: 'mysql:8.4.6'
+            client: 'mysql'
+            engine_args: '--innodb-use-native-aio=0 --skip-log-bin'
+          - database: 'mariadb'
+            label: 'MariaDB'
+            image: 'mariadb:10.11.18'
+            client: 'mariadb'
+            engine_args: '--innodb-use-native-aio=0'
+    # Each leg takes the per-host sdk-java lock once, around the single step
+    # that runs both Maven commands. Run 39353663670's verify
     # acquisition waited the full 90 minutes after the install step released
     # the lock, so a per-step lock let this job lose its place in the host
     # queue between installing and verifying. The ceiling absorbs that wait,
@@ -448,7 +467,10 @@ jobs:
     # and inherit this ceiling as a bound, not as an expected duration.
     timeout-minutes: 200
     env:
-      MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
+      MYSQL_CONTAINER: 'qwen-code-sdk-java-${{ matrix.database }}-${{ github.run_id }}-${{ github.run_attempt }}'
+      DATABASE_IMAGE: '${{ matrix.image }}'
+      DATABASE_CLIENT: '${{ matrix.client }}'
+      DATABASE_ENGINE_ARGS: '${{ matrix.engine_args }}'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -595,22 +617,33 @@ jobs:
       # Pool hosts share one host-wide fs.aio-nr budget across concurrent
       # jobs, and a mysqld that reserves native AIO contexts can exhaust it
       # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
-      # Service containers cannot take a command, so MySQL starts here
-      # instead, with native AIO disabled and its datadir on tmpfs. MySQL 8
-      # also binary-logs by default into that uncapped tmpfs, and this
+      # Service containers cannot take a command, so the database starts here
+      # instead, with native AIO disabled and its datadir on tmpfs. The MySQL
+      # leg also binary-logs by default into that uncapped tmpfs, and this
       # disposable container has no replica and nothing reads the log.
       # The only schema is the one the JDBC URL creates on first connect.
-      - name: 'Start MySQL without native AIO'
+      - name: 'Start the database without native AIO'
         shell: 'bash'
         run: |-
           set -euo pipefail
+          engine_args=()
+          if [[ -n "${DATABASE_ENGINE_ARGS}" ]]; then
+            read -r -a engine_args <<< "${DATABASE_ENGINE_ARGS}"
+          fi
           docker run --detach --name "${MYSQL_CONTAINER}" \
             --publish '127.0.0.1::3306' \
             --mount type=tmpfs,destination=/var/lib/mysql \
             --env MYSQL_ROOT_PASSWORD='runtime-broker' \
-            mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin
+            "${DATABASE_IMAGE}" "${engine_args[@]}"
+          # MariaDB ships healthcheck.sh; the MySQL image does not, so each
+          # leg waits on the readiness signal its own image provides.
+          if [[ "${DATABASE_CLIENT}" == 'mariadb' ]]; then
+            health=(docker exec "${MYSQL_CONTAINER}" healthcheck.sh --connect --innodb_initialized)
+          else
+            health=(docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent)
+          fi
           for attempt in {1..60}; do
-            if docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent >/dev/null 2>&1; then
+            if "${health[@]}" >/dev/null 2>&1; then
               break
             fi
             if ! docker inspect --format '{{.State.Running}}' "${MYSQL_CONTAINER}" | grep -qx true; then
@@ -625,13 +658,13 @@ jobs:
           done
           MYSQL_PORT="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${MYSQL_CONTAINER}")"
           echo "MYSQL_PORT=${MYSQL_PORT}" >> "${GITHUB_ENV}"
-      - name: 'Configure MySQL packet budget for large-object tests'
+      - name: 'Configure the database packet budget for large-object tests'
         run: |-
           # Connector/J hex-encodes the 32 MiB LONGBLOB fixture into a ~67 MiB
           # query, so the budget must sit above it: the inventory's byte-limit
           # gate, not the server packet limit, is what the test exercises.
           # Set this job's disposable container before its first JDBC connection.
-          docker exec "${MYSQL_CONTAINER}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
+          docker exec "${MYSQL_CONTAINER}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" '"${DATABASE_CLIENT}"' --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -716,8 +749,8 @@ jobs:
 
       # The host's docker cleanup service fires once a day and reaps qwen-code-*
       # containers only past a strict 24h age gate, so a cancelled job can strand
-      # a running mysqld on the shared pool for up to ~48h.
-      - name: 'Remove the MySQL container'
+      # a running database server on the shared pool for up to ~48h.
+      - name: 'Remove the database container'
         if: '${{ always() }}'
         shell: 'bash'
         run: |-
