@@ -274,6 +274,14 @@ describe('applyReplacementPreservingLineEndings', () => {
     expect(splice('a\nb\r\nc\nb\r\n', 'b', 'B')).toBe('a\nB\r\nc\nB\r\n');
   });
 
+  it('resumes after the matched span rather than one character later', () => {
+    // `old_string` can match at overlapping positions. The splice has to advance
+    // to the end of the match (`searchFrom = matchEnd`), the same way
+    // `String.prototype.replaceAll` does; advancing by one instead would rewrite
+    // the second half of the first match and delete a break outside the span.
+    expect(splice('a\r\n\r\n\r\nb\r\n', '\n\n', 'X')).toBe('aX\r\nb\r\n');
+  });
+
   it('uses the preceding ending when an end-of-file match has no following break', () => {
     expect(splice('\r\n\na', 'a', '\n')).toBe('\r\n\n\n');
   });
@@ -389,13 +397,21 @@ describe('applyReplacementPreservingLineEndings', () => {
       // to a break, and both of those find an ending without a fallback.
       ['const a', 'const A\nextra = 0;'],
       ['const a = 1;', 'const A = 1;\nconst b = 0;'],
+      // The single-line and multi-line fixtures used to contribute zero
+      // comparisons because no entry matched them.
+      ['x = 1', 'x = 2'],
+      ['d', 'D'],
     ];
 
+    let comparisons = 0;
     for (const file of [...uniform, ...uniformCrlf]) {
+      let fileComparisons = 0;
       for (const [oldString, newString] of edits) {
         if (!normalized(file).includes(oldString)) {
           continue;
         }
+        fileComparisons++;
+        comparisons++;
         expect(
           applyReplacementPreservingLineEndings(
             file,
@@ -405,15 +421,23 @@ describe('applyReplacementPreservingLineEndings', () => {
           ),
         ).toBe(previous(file, oldString, newString));
       }
+      // A fixture whose entries no longer match must fail rather than silently
+      // become decoration, and the exact total below catches a pruned edit.
+      expect(fileComparisons).toBeGreaterThan(0);
     }
+    expect(comparisons).toBe(24);
   });
 
   it('returns the file unchanged when the old string is absent', () => {
     expect(splice('one\ntwo\n', 'three', 'THREE')).toBe('one\ntwo\n');
+    // The early return has to hand back the raw bytes; an LF-normalized copy
+    // would quietly strip every CR from a file the edit did not touch.
+    expect(splice('one\r\ntwo\r\n', 'three', 'THREE')).toBe('one\r\ntwo\r\n');
   });
 
   it('returns the file unchanged for an empty old string', () => {
     expect(splice('one\ntwo\n', '', 'inserted')).toBe('one\ntwo\n');
+    expect(splice('one\r\ntwo\r\n', '', 'inserted')).toBe('one\r\ntwo\r\n');
   });
 
   it('deletes a line without gluing it to the next one', () => {
@@ -501,6 +525,21 @@ describe('applyReplacementPreservingLineEndings', () => {
   // rather than an accident, and to keep the "nothing outside the span moves"
   // half of it honest.
   describe('a span that itself mixes endings', () => {
+    it('prefers the break the span starts on over the one it ends on', () => {
+      // Both `matchedLeadingEnding` (LF) and `spanTrailingLineEnding` (CRLF)
+      // exist. The documented priority is leading first; swapping those two
+      // terms changes the bytes inserted into a mixed file.
+      expect(splice('a\nb\r\nc\n', '\nb\n', 'X\nY')).toBe('aX\nYc\n');
+    });
+
+    it('prefers the break the span ends on over the break after it', () => {
+      // The span does not start on a break, so `matchedLeadingEnding` is null.
+      // It ends on a CRLF while the untouched tail opens with a bare LF;
+      // joining the replacement with the following break would silently turn
+      // the inserted CRLF into an LF.
+      expect(splice('a\r\nb\r\n\nc', 'b\n', 'X\nY')).toBe('a\r\nX\r\nY\nc');
+    });
+
     it('re-joins the span with the ending that follows it', () => {
       expect(splice('a\nb\r\nc\nd\r\n', 'a\nb', 'a\nb')).toBe(
         'a\r\nb\r\nc\nd\r\n',
@@ -559,6 +598,16 @@ describe('applyReplacementPreservingLineEndings', () => {
         expect(out.endsWith('three\r\n')).toBe(true);
       }
       expect(splice(crlf, 'two', 'two')).toBe(crlf);
+    });
+
+    it('keeps replacement dollar patterns literal on the LF-only fast path', () => {
+      // This lane is a literal replace, not `String.prototype.replaceAll`: a
+      // model-supplied `$&`, `` $` ``, `$'` or `$$` must reach the file as
+      // characters, not as match/prefix/suffix substitutions.
+      const replacement = "$& $` $' $$ $1";
+      expect(splice('one\ntwo\nthree\n', 'two', replacement)).toBe(
+        `one\n${replacement}\nthree\n`,
+      );
     });
 
     it('leaves the previous path to decide a CRLF in an LF file, as it always did', () => {
