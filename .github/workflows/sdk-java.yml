@@ -776,15 +776,16 @@ jobs:
     # cancel-before-dispatch cell adds 18 s, moving the fork to 10639 s; the
     # FG11d retry-reuse cell adds 11 s, moving the fork to 10650 s; the FG12d
     # Spring-restart owner-release cell adds 24 s, moving the fork to 10674 s;
-    # the FG13a result store ack-loss cell adds 150 s, moving the fork to
-    # 10824 s and Verify to 191 minutes; the FG13a dispatch ack-loss cell adds
-    # 150 s, moving the fork to 10974 s and Verify to 193 minutes, wrapping
-    # fork + 600 s plus margin (11574 s of fork plus wrap);
+    # the FG11d settled-outcome cell adds 9 s, moving the fork to 10683 s; the
+    # FG13a result store ack-loss cell adds 150 s, moving the fork to 10833 s
+    # and Verify to 191 minutes; the FG13a dispatch ack-loss cell adds 150 s,
+    # moving the fork to 10983 s and Verify to 194 minutes, wrapping fork +
+    # 600 s plus margin (11583 s of fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 283 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 296
+    # checks): 284 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 297
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -884,8 +885,8 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 10974 s, so the step wraps to fork + 600 s plus margin (193 min).
-        timeout-minutes: 193
+        # 10983 s, so the step wraps to fork + 600 s plus margin (194 min).
+        timeout-minutes: 194
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -1663,8 +1664,10 @@ jobs:
           RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
         run: 'scripts/rocketmq-lite-broker.sh stop'
       # The host's docker cleanup service reaps qwen-code-* containers only
-      # after a 24h age gate, so a cancelled job would strand a running mysqld
-      # on the shared pool for up to a day.
+      # after a strict >24h age gate. It fires once a day, and its 30m jitter
+      # spaces consecutive fires 23.5-24.5h apart, so a container the gate
+      # skips at one fire waits for a later one: a cancelled job can strand a
+      # running mysqld for up to ~48.5h.
       - name: 'Remove the MySQL container'
         if: '${{ always() }}'
         shell: 'bash'
@@ -1672,7 +1675,7 @@ jobs:
           set -uo pipefail
           if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
             docker rm --force "${MYSQL_CONTAINER}" ||
-              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it after 24h"
+              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it within ~48.5h"
           fi
 
   daemon-e2e:
