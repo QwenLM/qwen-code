@@ -159,8 +159,10 @@ function OpenTuiEntryApp({
   const userMessages = useMemo(
     () =>
       live.items.flatMap((item) =>
-        item.kind === 'user' && item.sentToModel !== false && item.text.trim()
-          ? [item.text]
+        item.kind === 'user' &&
+        item.sentToModel !== false &&
+        (item.recallText ?? item.text).trim()
+          ? [item.recallText ?? item.text]
           : [],
       ),
     [live.items],
@@ -223,9 +225,13 @@ function OpenTuiEntryApp({
   const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   const vimEditor = useRef<TextareaRenderable | null>(null);
   const vimBuffer = useMemo(() => createVimBuffer(() => vimEditor.current), []);
-  const { handleInput: handleVimInput } = useVim(vimBuffer, (text) => {
-    void composerHandle.current?.submitDraft?.(text);
-  });
+  const { handleInput: handleVimInput } = useVim(
+    vimBuffer,
+    (text) => {
+      void composerHandle.current?.submitDraft?.(text);
+    },
+    () => composerHandle.current?.invalidateImportedInput?.(),
+  );
   useEffect(
     () => armCapturedInputInjection(() => composerHandle.current, capturedText),
     [capturedText],

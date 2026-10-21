@@ -3295,9 +3295,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // hint to error.message too so the advisory survives whichever
     // branch the scheduler takes.
     //
-    // Note on reach: `ShellExecutionResult.error` is reserved for
-    // SPAWN / setup failures (per the field's doc comment in
-    // shellExecutionService.ts); non-zero exits leave it null. Real
+    // Note on reach: `ShellExecutionResult.error` includes PTY resource
+    // failures as well as SPAWN / setup failures; non-zero exits leave it
+    // null. Resource failures retain the bounded output body below. Real
     // spawn failures (ENOENT, permission denied) typically resolve in
     // <1s, so the elapsed >= threshold + spawn-error combination is
     // rare. The preservation is here for the slow-spawn edge cases
@@ -3310,6 +3310,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // SIEM alerting, hook-side error parsers) have an unambiguous
     // boundary they can split on rather than getting ~400 chars of
     // advisory text mixed inline with the original error body.
+    const isPtyResourceFailure =
+      isNodeError(result.error) && result.error.code === 'QWEN_PTY_WRITE_LIMIT';
     const executionError = timeoutSummary
       ? {
           error: {
@@ -3320,9 +3322,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       : result.error
         ? {
             error: {
-              message:
-                result.error.message +
-                (longRunHint ? `\n\n---\n${longRunHint}` : ''),
+              message: isPtyResourceFailure
+                ? typeof llmContent === 'string'
+                  ? llmContent
+                  : returnDisplayMessage
+                : result.error.message +
+                  (longRunHint ? `\n\n---\n${longRunHint}` : ''),
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }

@@ -4,12 +4,14 @@
 
 ## 状态与基线
 
-本文是同一交互与实时输出后继批次的输入部分，唯一基底为统一 UI 提交
-`7415c4e02609ce735fdd9fcfb2f97898d3ba60b5`。本批整合冻结 B v3 和
+本文是同一交互与实时输出后继批次的输入部分，通过 normal merge 合入统一 UI 提交
+`70794177c203dfbb9e39e2ad797cf28382fae991`，保留 B 提交
+`e5143ba8e4cb431ef48f390f59922216544849fd`。本批整合冻结 B v3 和
 [dual-output v6](2026-10-21-opentui-dual-output.zh-CN.md) 草案，不分别交付。
 原 A 基底设计与证据保留作来源。输入接纳、附件、取消与 native undo 沿用既有
 所有者。完整整合候选的安装、构建、typecheck 和动态验证均为 **NOT_RUN**；旧候选
-结果不能证明本树。OpenTUI 保持 `0.5.10`，Bun 保持 `1.3.14`。
+结果不能证明本树。合入的 package 与 lock 输入要求验证前重新执行 frozen setup。
+OpenTUI 保持 `0.5.10`，Bun 保持 `1.3.14`。
 
 父提交的 reset discard 结果只释放取消锁，不取回队列或恢复旧草稿；本批保留此
 合同，以及旧 generation 不得触碰后继输入的保护。
@@ -68,6 +70,13 @@ INSERT 复用现有纯 TextBuffer 键分派及九个编辑回调，不再进入 
 当前按键 matcher；仅在实际 host-history/session 变化时刷新 logger 快照，丢弃旧
 响应，并合并当前普通用户消息，不在每个 token 重读。shell 历史/搜索和 Escape
 快照遵循当前 Ink。
+
+历史取回优先使用 `recallText`，并保留 non-steer 过滤。反向搜索选中的历史项即使与
+当前草稿文字相同，也属于导入输入，必须在接纳前丢弃恢复来源身份。查询被编辑或
+清空后，Esc 恢复原文字、光标、known/unknown 来源、restored draft，以及粘贴内容
+和占位 ID 映射；选中的历史行不得复用已放弃草稿的映射。Vim 既有的非空粘贴回调
+接到当前 composer，并将导入输入标为 unknown；空剪贴板粘贴保留来源。Ink 同时
+保留真实提交 metadata 与此回调。合并边界不改变 native undo 或 parser 命令族。
 
 搜索与 Ink 共享无 renderer 依赖的 label 计算：150 个 UTF-16 单元、相同匹配窗口/
 高亮，以及 active 长候选上的 `→`/`←`。保留 149/150/151、inactive 行、首/中/尾

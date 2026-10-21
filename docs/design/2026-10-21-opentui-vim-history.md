@@ -5,13 +5,15 @@
 ## Status and baseline
 
 This is the input half of one interaction and live-output successor based on
-unified UI commit `7415c4e02609ce735fdd9fcfb2f97898d3ba60b5`. It integrates the
+unified UI commit `70794177c203dfbb9e39e2ad797cf28382fae991` by normal merge,
+preserving B commit `e5143ba8e4cb431ef48f390f59922216544849fd`. It integrates the
 frozen B v3 and [dual-output v6](2026-10-21-opentui-dual-output.md) drafts;
 they are not separate deliveries. The earlier A-based designs and evidence are
 preserved as provenance. Input admission, attachments, cancellation and native
 undo keep their existing owners. The complete combined candidate remains
 **NOT_RUN** for install, build, typecheck and runtime validation; no earlier
-candidate result certifies this tree. OpenTUI stays `0.5.10`, Bun `1.3.14`.
+candidate result certifies this tree. The merged package and lock inputs require a
+new frozen setup before validation. OpenTUI stays `0.5.10`, Bun `1.3.14`.
 
 The parent reset discard outcome releases only the cancellation latch, without
 popping queues or restoring old drafts. This batch retains that contract and
@@ -83,6 +85,17 @@ candidate. Reuse the history/search hooks and current key matchers. Refresh the
 logger snapshot on actual host-history/session changes, discard stale responses,
 and combine current ordinary user messages without rereading on every token.
 Keep shell recall/search and Escape snapshots consistent with current Ink.
+
+History recall uses `recallText` when present and retains the non-steer filter.
+Selecting a reverse-search history entry is imported input even when its text
+matches the current draft: discard the restored source identity before admission.
+Escape restores the original text, cursor, known/unknown source, restored draft,
+and paste payload/ID mappings after an edited or cleared query. A selected history
+row cannot reuse the abandoned draft's paste mappings. Vim's existing nonempty
+paste callback reaches the current composer and marks imported input unknown;
+empty clipboard paste leaves the draft's source unchanged. Ink keeps its real
+submission metadata and the same callback. No native undo or parser family changes
+are required for these merge boundaries.
 
 Search shares a renderer-free label calculation with Ink: 150 UTF-16 units,
 the same match window/highlight, and `→`/`←` on the active long candidate. Preserve

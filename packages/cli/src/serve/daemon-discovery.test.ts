@@ -78,6 +78,35 @@ describe('daemon discovery records', () => {
     ]);
   });
 
+  it('validates the restart fields while keeping them optional', () => {
+    const restartable = record({
+      startupWorkspaces: ['/tmp/project'],
+      web: false,
+      requireAuth: true,
+    });
+    writeDaemonDiscovery(restartable, dir);
+    fs.writeFileSync(
+      path.join(dir, 'daemon-4171.json'),
+      JSON.stringify({ ...record(), port: 4171, startupWorkspaces: [''] }),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'daemon-4172.json'),
+      JSON.stringify({ ...record(), port: 4172, web: 'yes' }),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'daemon-4173.json'),
+      JSON.stringify({ ...record(), port: 4173, requireAuth: 1 }),
+    );
+
+    const { entries, invalid } = readDaemonDiscoveries(dir);
+    expect(entries.map((entry) => entry.record)).toEqual([restartable]);
+    expect(invalid.map((item) => path.basename(item.path))).toEqual([
+      'daemon-4171.json',
+      'daemon-4172.json',
+      'daemon-4173.json',
+    ]);
+  });
+
   it('removes a record only for the expected process', () => {
     const written = writeDaemonDiscovery(record(), dir);
     expect(

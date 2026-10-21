@@ -14,9 +14,11 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as childProcess from 'node:child_process';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { InputPromptProps } from './input-prompt.js';
 import type { TextareaRenderable } from '@opentui/core';
+import type { LiveHistoryItem } from './live-session-model.js';
 import { createInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   ModSession,
@@ -67,17 +69,19 @@ const mocks = vi.hoisted(() => {
     keyboard: [] as Array<
       (key: { name: string; ctrl: boolean; eventType?: string }) => void
     >,
+    items: [] as LiveHistoryItem[],
     appProps: null as {
+      userMessages?: readonly string[];
       renderMain?: () => unknown;
       onToggleVim?: () => Promise<boolean>;
       vimMode?: string;
       vim?: InputPromptProps['vim'];
-      userMessages?: readonly string[];
       composerHandle?: {
         current: {
           getText: () => string;
           setText: (text: string) => void;
           submitDraft?: (text: string) => Promise<void>;
+          invalidateImportedInput?: () => void;
         } | null;
       };
     } | null,
@@ -362,6 +366,61 @@ describe('startOpenTuiUI fallback contract', () => {
     });
   });
 
+  it('connects actual Vim paste import decisions to the current composer', async () => {
+    const clipboard = vi
+      .spyOn(childProcess, 'execFileSync')
+      .mockReturnValue('X');
+    try {
+      await withEntryApp(async () => {
+        await act(async () => mocks.state.appProps!.onToggleVim!());
+        const invalidateImportedInput = vi.fn();
+        let text = 'owned';
+        let col = 0;
+        mocks.state.appProps!.composerHandle!.current = {
+          getText: () => text,
+          setText: () => {},
+          invalidateImportedInput,
+        };
+        mocks.state.appProps!.vim!.editor.current = {
+          get plainText() {
+            return text;
+          },
+          get logicalCursor() {
+            return { row: 0, col };
+          },
+          replaceText(value: string) {
+            text = value;
+          },
+          setCursor(_row: number, value: number) {
+            col = value;
+          },
+        } as TextareaRenderable;
+        const paste = () =>
+          mocks.state.appProps!.vim!.handleInput({
+            name: 'p',
+            sequence: 'p',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+          });
+        await act(async () => {
+          expect(paste()).toBe(true);
+        });
+        expect(text).toBe('oXwned');
+        expect(invalidateImportedInput).toHaveBeenCalledTimes(1);
+        clipboard.mockReturnValue('');
+        await act(async () => {
+          expect(paste()).toBe(true);
+        });
+        expect(text).toBe('oXwned');
+        expect(invalidateImportedInput).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      clipboard.mockRestore();
+    }
+  });
+
   it('passes the runtime bridge to the actual rendered live hook', async () => {
     await withEntryApp(() => {
       expect(mocks.state.liveOptions).toMatchObject({
@@ -557,6 +616,18 @@ describe('startOpenTuiUI fallback contract', () => {
   // here reads that tree's elements without executing them.
   it('threads the parked call and the args setting into the transcript', async () => {
     mocks.state.waitingCalls = [{ callId: 'q1' }, { callId: 'q2' }];
+    const raw = '<system-reminder>literal user text</system-reminder> workflow';
+    const recalledPaste = `${raw}\npasted body`;
+    mocks.state.items = [
+      { kind: 'user', id: 'user', text: raw },
+      {
+        kind: 'user',
+        id: 'pasted-user',
+        text: '[Pasted Content 1200 chars]',
+        recallText: recalledPaste,
+      },
+      { kind: 'info', id: 'info', text: 'machine context' },
+    ];
     const started = await startOpenTuiUI(
       buildConfig(),
       {
@@ -591,6 +662,7 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(props?.['awaitingCallId']).toBe('q1');
     expect(props?.['showToolCallArgs']).toBe(true);
     expect(props?.['mouseTracking']).toBe(false);
+    expect(mocks.state.appProps?.userMessages).toEqual([raw, recalledPaste]);
     // The renderer takes no pointer events when the setting is off.
     expect(createCliRenderer).toHaveBeenLastCalledWith(
       expect.objectContaining({ useMouse: false }),
