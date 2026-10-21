@@ -94,6 +94,11 @@ param(
 # `-NoAutoStart` is the explicit opt-out and takes precedence over
 # the default-true `-AutoStart`.
 if ($NoAutoStart) { $AutoStart = $false }
+$AutoStartRequested = [bool]$AutoStart -and
+    (Test-Path variable:PSBoundParameters) -and
+    $PSBoundParameters.ContainsKey('AutoStart')
+$SkipIsolatedAutostart = [bool]($env:CUA_DRIVER_RS_INSTALL_DIR -or $env:CUA_DRIVER_RS_HOME) -and
+    -not $AutoStartRequested
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -118,7 +123,7 @@ $ThemeBinaryName = "cua-cursor-theme.exe"
 # where the baked line hasn't been updated yet.
 #
 # ~~~ BAKED_VERSION: must match the release version in this change ~~~
-$Script:CuaDriverRsBakedVersion = "0.20.11"
+$Script:CuaDriverRsBakedVersion = "0.26.0"
 # ~~~ END_BAKED_VERSION ~~~
 $CursorThemeRequiredFrom = [version]"0.12.7"
 $LegacyUiaRequiredFrom = [version]"0.2.8"
@@ -538,8 +543,8 @@ function Test-IsElevated {
 }
 
 # Stop-CuaDriverDaemons + Show-CuaDriverDaemonSurvivors live in the
-# sibling _install-common.psm1 module so install-local.ps1 and this
-# script share the daemon-cleanup logic. Two load paths:
+# sibling _install-common.psm1 module, shared by regular and legacy
+# cleanup. Two load paths:
 #   * checked-out tree: the .psm1 sits next to install.ps1 on disk;
 #     Import-Module from $PSScriptRoot works directly.
 #   * `irm | iex` install: no file on disk, $PSScriptRoot is empty.
@@ -1209,23 +1214,6 @@ Write-Step "cua-driver-rs installer (Windows)"
 Write-Step "  install dir : $VisibleBinDir"
 Write-Step "  package home: $HomeDir"
 
-function Get-AncestorProcessIds {
-    # PIDs of this process and its ancestors, so cleanup never kills the caller.
-    # `qwen-cua-driver update --apply` runs the installer as a child of
-    # qwen-cua-driver.exe.
-    $ids = @()
-    $seen = @{}
-    $currentPid = $PID
-    while ($currentPid -and -not $seen.ContainsKey([int]$currentPid)) {
-        $seen[[int]$currentPid] = $true
-        $ids += $currentPid
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction SilentlyContinue
-        if (-not $proc -or -not $proc.ParentProcessId) { break }
-        $currentPid = $proc.ParentProcessId
-    }
-    return $ids
-}
-
 function Remove-LegacyInstall {
     # Best-effort cleanup of v0.2.13-and-earlier install paths. Runs before
     # any new install when default paths are in use (so users who override
@@ -1248,55 +1236,9 @@ function Remove-LegacyInstall {
 
     Write-Step "detected legacy Qwen install layout; migrating to Qwen\qwen-cua-driver"
 
-    # 1. End the running daemon. Order matters:
-    #
-    #    a. `schtasks /End` first — Task Scheduler runs as SYSTEM and can
-    #       terminate elevated (RunLevel=Highest, High IL) processes that a
-    #       Medium-IL Stop-Process from the user's shell cannot. This is
-    #       the case any time the legacy daemon was spawned via the
-    #       AtLogon trigger of the v0.2.13 autostart task on a non-RID-500
-    #       admin account (e.g. cuademo). Without this, Step 4 below fails
-    #       with "Access to the path 'cua-driver.exe' is denied" because
-    #       the legacy binary is held open by an unkillable elevated
-    #       process. Discovered during the cuademo v0.2.13 → v0.2.14
-    #       migration dogfood.
-    #    b. taskkill /F /IM as a backstop for any qwen-cua-driver process that
-    #       wasn't task-attached (manual `qwen-cua-driver serve`, legacy uia
-    #       worker, etc.). taskkill is more permissive than Stop-Process
-    #       for cross-IL termination.
-    #    c. Stop-Process last — catches anything taskkill missed.
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    # Never kill the process tree we are running inside: when the installer is
-    # launched by `qwen-cua-driver update --apply`, our own parent IS a
-    # qwen-cua-driver.exe, and an unfiltered kill terminates the update mid-flight
-    # (the script dies right after the step banner above). Both cleanup passes
-    # below skip these.
-    $ancestorPids = @(Get-AncestorProcessIds)
-    try {
-        # Ends the running task instance. Returns non-zero when the task
-        # isn't running or doesn't exist, both of which we swallow.
-        & schtasks.exe /End /TN "qwen-cua-driver-serve" 2>$null | Out-Null
-        Start-Sleep -Milliseconds 250
-        # Force-kill via taskkill — handles High-IL processes that
-        # Stop-Process can't touch from a Medium-IL caller.
-        $selfFilters = @()
-        foreach ($ancestorPid in $ancestorPids) {
-            $selfFilters += '/FI'
-            $selfFilters += "PID ne $ancestorPid"
-        }
-        & taskkill.exe /F /IM "qwen-cua-driver.exe" /T @selfFilters 2>$null | Out-Null
-        & taskkill.exe /F /IM "qwen-cua-driver-uia.exe" /T @selfFilters 2>$null | Out-Null
-    } finally {
-        $ErrorActionPreference = $prevEAP
-    }
-    $procs = Get-Process -Name "qwen-cua-driver","qwen-cua-driver-uia" -ErrorAction SilentlyContinue
-    if ($procs) {
-        foreach ($p in $procs) {
-            if ($ancestorPids -contains $p.Id) { continue }
-            try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
-        }
-    }
+    # The shared cleanup protects the updater and this installer in both
+    # legacy migration and the normal post-install restart path.
+    $null = Stop-CuaDriverDaemons
     Start-Sleep -Milliseconds 500
 
     # 2. Unregister the autostart Scheduled Task if present. Idempotent —
@@ -1387,8 +1329,8 @@ Write-Step "  target      : $target"
 $Script:CuaDriverRsSelectedChannel = Resolve-SelectedChannel
 $version = Resolve-Version
 $versionedDir = Join-Path $ReleasesDir "$version-$target"
-$requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom
-$requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and -not $requiresSignedUia
+$requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom -and ([version]$version -lt [version]"0.26.0" -or $env:CUA_DRIVER_USE_UIACCESS -eq "1")
+$requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and [version]$version -lt $SignedUiaRequiredFrom
 
 # If the per-version dir is already populated, skip the download — the
 # binary is immutable per version, so a repeat install is a no-op apart
@@ -1422,8 +1364,8 @@ if (-not $skipDownload) {
         if ($asset.Version -ne $version) {
             $version = $asset.Version
             $versionedDir = Join-Path $ReleasesDir "$version-$target"
-            $requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom
-            $requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and -not $requiresSignedUia
+            $requiresSignedUia = [version]$version -ge $SignedUiaRequiredFrom -and ([version]$version -lt [version]"0.26.0" -or $env:CUA_DRIVER_USE_UIACCESS -eq "1")
+            $requiresLegacyUia = [version]$version -ge $LegacyUiaRequiredFrom -and [version]$version -lt $SignedUiaRequiredFrom
             $uiaSecureDir = Join-Path $env:ProgramFiles "Qwen\CuaDriver\$version"
             $uiaSecurePath = Join-Path $uiaSecureDir 'qwen-cua-driver-uia.exe'
         }
@@ -1448,7 +1390,7 @@ if (-not $skipDownload) {
             }
             Write-Step "installed $versionedDir\$BinaryName (version $version, target $target)"
         }
-        if (-not $requiresSignedUia) {
+        if ($requiresLegacyUia) {
             foreach ($legacyUiaName in @('qwen-cua-driver-uia.exe', 'cua-driver-uia.exe')) {
                 $legacyUiaStage = Join-Path $stageDir $legacyUiaName
                 if (Test-Path -LiteralPath $legacyUiaStage) {
@@ -1459,9 +1401,9 @@ if (-not $skipDownload) {
             }
         }
         if ($requiresSignedUia) {
-            # The UIAccess worker is required for foreground acquisition and
-            # input delivery. Windows only grants uiAccess to a signed binary
-            # installed under a secure system path.
+            # Historical releases require UIAccess. Current releases use it
+            # only after explicit opt-in; Windows still requires a trusted
+            # signature and the secure Program Files path.
             $uiaStage = Join-Path $stageDir 'qwen-cua-driver-uia.exe'
             if (-not (Test-Path -LiteralPath $uiaStage)) {
                 throw "release archive is missing required qwen-cua-driver-uia.exe"
@@ -1705,20 +1647,22 @@ else {
 # there" because the user's in-memory code is pre-fix. Best-effort:
 # High-IL daemons from the RunLevel=Highest autostart task survive a
 # Medium-IL kill and get reported via Show-CuaDriverDaemonSurvivors.
-Write-Host ""
+if (-not $SkipIsolatedAutostart) {
+    Write-Host ""
     Write-Host "Stopping any previous qwen-cua-driver processes (best-effort; High-IL needs admin)..." -ForegroundColor Cyan
-# Repair- handles the wedged-daemon case: detect stale (process alive
-# but pipe dead), prompt the user, and on consent self-elevate via
-# UAC to kill the High-IL pids + restart the scheduled task. On UAC
-# cancel / failure it falls back to printing the manual recovery
-# instructions, same as the previous behavior.
-$null = Repair-CuaDriverStaleDaemon
+    $null = Repair-CuaDriverStaleDaemon
+}
 
-if ($AutoStart) {
+$AutoStartRegistered = $false
+if ($SkipIsolatedAutostart) {
+    Write-Host "Isolated install: leaving the shared daemon and autostart task unchanged." -ForegroundColor Yellow
+    Write-Host "  Pass -AutoStart explicitly to point the shared task at this installation."
+} elseif ($AutoStart) {
     Write-Host ""
     Write-Host "Registering auto-start (qwen-cua-driver autostart enable)..." -ForegroundColor Cyan
     try {
         Register-CuaDriverAutostart -InstalledBinary $installedBinary
+        $AutoStartRegistered = $true
         Write-Host "  qwen-cua-driver serve will auto-start at every interactive logon (RunLevel=Highest)." -ForegroundColor Green
     }
     catch {
@@ -1746,6 +1690,7 @@ if ($AutoStart) {
         Write-Host "Existing 'qwen-cua-driver-serve' autostart task detected - re-registering against the fresh binary..." -ForegroundColor Cyan
         try {
             Register-CuaDriverAutostart -InstalledBinary $installedBinary
+            $AutoStartRegistered = $true
             Write-Host "  Re-registered. Task action now uses this build's hidden-console wrapper." -ForegroundColor Green
         }
         catch {
@@ -1774,13 +1719,15 @@ catch {
 
 # Windows-specific autostart hint (kept inline; OS-natural location).
 Write-Host ""
-if ($AutoStart) {
+if ($SkipIsolatedAutostart) {
+    Write-Host "Auto-start: unchanged for this isolated installation." -ForegroundColor Cyan
+} elseif ($AutoStartRegistered) {
     Write-Host "Auto-start: 'qwen-cua-driver-serve' is registered at RunLevel=Highest." -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver autostart status    (inspect)" -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver autostart disable   (remove)" -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver autostart kick      (start now without re-logging)" -ForegroundColor Cyan
 } else {
-    Write-Host "Auto-start at logon (NOT enabled - re-run without -NoAutoStart to register, or:):" -ForegroundColor Cyan
+    Write-Host "Auto-start for this installation was not confirmed. To register:" -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver autostart enable    (Scheduled Task at RunLevel=Highest)" -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver autostart kick      (start now without re-logging)" -ForegroundColor Cyan
     Write-Host "  qwen-cua-driver autostart status    (inspect)" -ForegroundColor Cyan

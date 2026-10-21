@@ -168,6 +168,29 @@ export function semanticInputDigest(value: object): string {
     .digest('hex');
 }
 
+export function recordedToolHookFields(
+  plan: { input: Record<string, unknown>; refusedInputDigest?: string },
+  fields: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const modes = plan.refusedInputDigest
+    ? ['default', 'auto-edit', 'yolo']
+    : [plan.input['permission_mode']];
+  for (const mode of modes) {
+    if (
+      typeof mode !== 'string' ||
+      !['default', 'auto-edit', 'yolo'].includes(mode)
+    )
+      continue;
+    const candidate = { ...fields, permission_mode: mode };
+    if (
+      (plan.refusedInputDigest ?? semanticInputDigest(plan.input)) ===
+      semanticInputDigest(candidate)
+    )
+      return candidate;
+  }
+  return undefined;
+}
+
 /** Whether a saved plan was made for these event fields. */
 function plannedFor(plan: HookPlan, fields: object): boolean {
   return plan.refusedInputDigest

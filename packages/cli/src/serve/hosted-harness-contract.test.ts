@@ -51,9 +51,12 @@ describe('Hosted Harness private contract', () => {
         'hosted_model_round_recovery_v1',
         'model-selection/1',
         'approval-selection/1',
+        'live-approval-selection/1',
         'agent-definition-approval-selection/1',
         'plan-mode/1',
         'input-attachments/1',
+        'session-skills/1',
+        'session-skills/2',
         'event-keepalive/1',
       ],
     });

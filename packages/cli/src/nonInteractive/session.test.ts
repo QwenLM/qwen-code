@@ -444,6 +444,32 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
+  it('forwards only per-message declared human input to the execution loop', async () => {
+    const human = createUserMessage('workflow declared');
+    human.origin = { kind: 'human' };
+    mockInputReader.read = async function* () {
+      yield createUserMessage('workflow unknown before');
+      await vi.waitFor(() =>
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(1),
+      );
+      yield human;
+      await vi.waitFor(() =>
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(2),
+      );
+      yield createUserMessage('workflow unknown after');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(3);
+    expect(
+      runNonInteractiveMock.mock.calls.map((call) => call[4].humanInput),
+    ).toEqual([undefined, { text: 'workflow declared' }, undefined]);
+    for (const call of runNonInteractiveMock.mock.calls) {
+      expect(call[4]).not.toHaveProperty('userMessage');
+    }
+  });
+
   it('seeds the promptId counter past turns the resumed transcript claims', async () => {
     // A resumed headless chain reuses the session id, so restarting the
     // counter at 1 would re-mint ids the previous run already persisted —
@@ -532,6 +558,29 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
+    expect(continueResults).toEqual([
+      { accepted: false, interruption: 'none' },
+    ]);
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects continuation using classifiable history before the bounded pre-check', async () => {
+    const { continueResults } = installContinueDispatch();
+    const { llmClient } = createInitializedLlmClient([
+      { role: 'user', parts: [{ text: 'restored context' }] },
+    ]);
+    const getHistoryForRecovery = vi.fn(() => [
+      { role: 'model', parts: [{ text: 'Done.' }] },
+    ]);
+    Object.assign(llmClient.getChat(), { getHistoryForRecovery });
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+      yield createContinueRequest();
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(getHistoryForRecovery).toHaveBeenCalledWith(50);
     expect(continueResults).toEqual([
       { accepted: false, interruption: 'none' },
     ]);
