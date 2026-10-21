@@ -171,9 +171,14 @@ final class HostedProviderControlProbe implements AutoCloseable {
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
                 tenant, storage);
+        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_key"
+                + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session.get("sessionId"));
+        member.put("physicalOwner", physical);
+        return member;
     }
 
     private String sessionState(Map<String, Object> session, String runtimeId) {
@@ -200,7 +205,7 @@ final class HostedProviderControlProbe implements AutoCloseable {
             assertThat(phase).isEqualTo("prepared");
             owners.put(id, owner(session));
             references.put(id, reference);
-            assertThat(owner(session).get("holder_key")).isNotNull();
+            assertThat(owner(session).get("execution_storage_key")).isNotNull();
             assertThat(owner(session).get("runtime_session_id")).isEqualTo(runtimeId);
             assertThat(reference.size()).isEqualTo(raw ? 5 : 7);
             assertThat(reference.has("toolName")).isFalse();
@@ -223,7 +228,7 @@ final class HostedProviderControlProbe implements AutoCloseable {
         if (released) {
             assertThat(releases.getOrDefault(runtimeId, 0)).as("worker closures forwarded")
                     .isEqualTo(session.get("fault").equals("release-reply") ? dropped + 1 : 1);
-            assertThat(owner(session).get("holder_key")).isNull();
+            assertThat(owner(session).get("execution_storage_key")).isNull();
             assertThat(deactivations.getOrDefault(runtimeId, 0)).isEqualTo(1);
             assertThat(sessionState(session, runtimeId)).isEqualTo("RELEASED");
         } else {
