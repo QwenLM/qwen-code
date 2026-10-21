@@ -30,8 +30,8 @@ function makeManager(): NodeReplKernelManager {
   return manager;
 }
 
-afterEach(() => {
-  while (managers.length > 0) managers.pop()?.dispose();
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map((manager) => manager.dispose()));
 });
 
 /** First `<cellfile>:<line>:<col>` frame from the error stack. */
