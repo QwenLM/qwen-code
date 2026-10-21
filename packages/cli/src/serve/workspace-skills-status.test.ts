@@ -40,6 +40,81 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     mockWriteStderrLine.mockClear();
   });
 
+  it('exports only enabled instructions with invocation policy and fresh configuration', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-export-'),
+    );
+    try {
+      for (const [name, flags] of [
+        ['enabled', 'disable-model-invocation: true'],
+        ['disabled', ''],
+        ['hidden', 'user-invocable: false'],
+      ]) {
+        const directory = path.join(workspace, '.qwen', 'skills', name!);
+        await fsp.mkdir(directory, { recursive: true });
+        await fsp.writeFile(
+          path.join(directory, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: Test ${name}\n${flags}\n---\nBODY_${name}`,
+        );
+      }
+      const settings = path.join(workspace, '.qwen', 'settings.json');
+      await fsp.writeFile(
+        settings,
+        JSON.stringify({
+          skills: {
+            disabledLevels: ['user', 'bundled'],
+            disabled: ['disabled'],
+          },
+        }),
+      );
+      const provider = createWorkspaceSkillsStatusProvider();
+      const snapshot = await provider.snapshot(workspace);
+      expect(snapshot).toEqual({
+        workspaceCwd: workspace,
+        skills: [
+          {
+            name: 'enabled',
+            description: 'Test enabled',
+            body: 'BODY_enabled',
+            model_invocable: false,
+          },
+          {
+            name: 'hidden',
+            description: 'Test hidden',
+            body: 'BODY_hidden',
+            user_invocable: false,
+          },
+        ],
+      });
+      expect(JSON.stringify(await provider(workspace))).not.toContain('BODY_');
+      await fsp.writeFile(
+        settings,
+        JSON.stringify({
+          skills: {
+            disabledLevels: ['user', 'bundled'],
+            disabled: ['enabled'],
+          },
+        }),
+      );
+      expect(
+        (await provider.snapshot(workspace)).skills.map((skill) => skill.name),
+      ).toEqual(['disabled', 'hidden']);
+      vi.spyOn(SkillManager.prototype, 'hasDiscoveryErrors').mockReturnValue(
+        true,
+      );
+      await expect(provider.snapshot(workspace)).rejects.toThrow(
+        'completely discovered',
+      );
+      await expect(
+        createWorkspaceSkillsStatusProvider({
+          workspaceTrusted: false,
+        }).snapshot(workspace),
+      ).rejects.toThrow('trusted');
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('enumerates bundled skills (including /review) without an ACP child', async () => {
     const provider = createWorkspaceSkillsStatusProvider();
 

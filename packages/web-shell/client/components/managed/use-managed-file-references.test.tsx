@@ -104,6 +104,72 @@ describe('Managed file reference snapshots', () => {
     expect(current.error).toBeUndefined();
   });
 
+  it('treats an unsupported file-access capability as absent actions, not an error', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(
+        new Error('Workspace file access requires an updated CLI.'),
+        { status: 409, code: 'workspace_files_unsupported' },
+      ),
+    );
+    await render();
+    // The composer simply has no file actions; the refusal must not become a
+    // standing alert above the editor.
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBeUndefined();
+  });
+
+  it('still reports a Workspace probe failure that is not a capability refusal', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(new Error('Workspace storage is unavailable.'), {
+        status: 503,
+        code: 'workspace_files_busy',
+      }),
+    );
+    await render();
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBe('Workspace storage is unavailable.');
+  });
+
+  it('still reports a 409 probe failure whose code is not the capability refusal', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(new Error('Workspace file is unavailable.'), {
+        status: 409,
+        code: 'workspace_file_unavailable',
+      }),
+    );
+    await render();
+    // The suppression keys on the code, not the status: a fenced or draining
+    // Workspace answers this same probe with 409 too, and must still surface.
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBe('Workspace file is unavailable.');
+  });
+
+  it('still surfaces an unsupported refusal after the mount probe succeeded', async () => {
+    await render();
+    vi.mocked(provider.workspaceFiles!.read).mockRejectedValueOnce(
+      Object.assign(
+        new Error('Workspace file access requires an updated CLI.'),
+        { status: 409, code: 'workspace_files_unsupported' },
+      ),
+    );
+    await act(async () => {
+      await expect(
+        current.actions!.prepareFileReference!({
+          id: 'file:src/a.ts',
+          kind: 'file',
+          value: 'src/a.ts',
+          serialized: '@src/a.ts',
+          metadata: { fileKind: 'file', filePath: 'src/a.ts' },
+        }),
+      ).rejects.toThrow('Workspace file access requires an updated CLI.');
+    });
+    // The same code can mean the broker failed mid-request, so only the mount
+    // probe may treat it as an absent capability.
+    expect(current.error).toBe(
+      'Workspace file access requires an updated CLI.',
+    );
+  });
+
   it('stores exact contents in the chip, survives JSON draft persistence and submits without rereading', async () => {
     await render();
     const saved = JSON.parse(

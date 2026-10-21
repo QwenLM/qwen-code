@@ -47,6 +47,7 @@ import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
+import type { ManagedCreationSkillsSource } from './managed-creation-skills';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
@@ -123,6 +124,8 @@ export function ManagedSessionsPage({
   managedAgentProvider,
   navigationTarget,
   interactive = true,
+  creationSkills,
+  onManageSkills,
 }: {
   sessionId?: string;
   onSelectSession: (sessionId: string | undefined) => void;
@@ -131,6 +134,8 @@ export function ManagedSessionsPage({
   /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
   navigationTarget?: HTMLElement | null;
   interactive?: boolean;
+  creationSkills?: ManagedCreationSkillsSource;
+  onManageSkills?: () => void;
 }) {
   const { t } = useI18n();
   if (managedAgentProvider) {
@@ -144,6 +149,8 @@ export function ManagedSessionsPage({
         cancellationEnabled={managedAgentProvider.canCancel}
         navigationTarget={navigationTarget}
         interactive={interactive}
+        creationSkills={creationSkills}
+        onManageSkills={onManageSkills}
       />
     );
   }
@@ -158,6 +165,8 @@ function ManagedSessionsContent({
   cancellationEnabled,
   navigationTarget,
   interactive,
+  creationSkills,
+  onManageSkills,
 }: {
   sessionId?: string;
   onSelectSession: (sessionId: string | undefined) => void;
@@ -166,6 +175,8 @@ function ManagedSessionsContent({
   cancellationEnabled: boolean;
   navigationTarget?: HTMLElement | null;
   interactive: boolean;
+  creationSkills?: ManagedCreationSkillsSource;
+  onManageSkills?: () => void;
 }) {
   const { t } = useI18n();
   const home = navigationTarget !== undefined;
@@ -999,9 +1010,14 @@ function ManagedSessionsContent({
               data-managed-workspace-binding
             >
               {home && (
-                <summary className="cursor-pointer text-muted-foreground">
-                  {summary.workspace.workspaceId} ·{' '}
-                  {summary.workspace.cwdRelative}
+                <summary
+                  className="cursor-pointer text-muted-foreground"
+                  title={summary.workspace.workspaceId}
+                >
+                  <span className="inline-block max-w-[34ch] truncate align-bottom">
+                    {summary.workspace.workspaceId}
+                  </span>{' '}
+                  · {summary.workspace.cwdRelative}
                   {displayedModel && (
                     <span data-managed-model> · {displayedModel}</span>
                   )}
@@ -1009,13 +1025,18 @@ function ManagedSessionsContent({
                   {t(`managed.runtime.${summary.runtimeState}`)}
                 </summary>
               )}
-              <p>
-                {t('managed.workspaceBound')}: {summary.workspace.workspaceId}
-              </p>
-              <p>
-                {t('managed.workspaceDirectory')}:{' '}
-                {summary.workspace.cwdRelative}
-              </p>
+              {!home && (
+                <>
+                  <p>
+                    {t('managed.workspaceBound')}:{' '}
+                    {summary.workspace.workspaceId}
+                  </p>
+                  <p>
+                    {t('managed.workspaceDirectory')}:{' '}
+                    {summary.workspace.cwdRelative}
+                  </p>
+                </>
+              )}
               {interactive && (
                 <ManagedSessionCwdControl
                   key={`${provider.storageKey}:${summary.sessionId}`}
@@ -1063,6 +1084,8 @@ function ManagedSessionsContent({
               provider={provider}
               clientId={clientId}
               interactive={interactive}
+              creationSkills={creationSkills}
+              onManageSkills={onManageSkills}
               onCreated={(createdId) => {
                 setListRevision((current) => current + 1);
                 onSelectSession(createdId);
@@ -1289,7 +1312,7 @@ function ManagedSessionsContent({
                   void submit(value, commit, images, files, metadata);
                   return false;
                 }}
-                commands={[]}
+                commands={skills.commands}
                 skills={skills.skills}
                 onSkillsOpenChange={
                   skills.supported ? skills.onOpenChange : undefined
