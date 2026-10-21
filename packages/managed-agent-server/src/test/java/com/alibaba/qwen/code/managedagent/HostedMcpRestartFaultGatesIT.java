@@ -62,6 +62,8 @@ import static org.awaitility.Awaitility.await;
 // FG12d adds the release-state cell deferred by FG12c: the Harness dies
 // after `releaseState: releasing`, and the replacement finishes the
 // original `${configurationId}:release` operation instead of minting one.
+// Its pre-dispatch cancel cell parks the owner acquire between `intent` and
+// `dispatch_started` instead of killing a process.
 class HostedMcpRestartFaultGatesIT {
     private static final String PROFILE = "hosted-workspace-mcp/1";
     // Per-case evidence letter: FG12c keeps its directory, FG12d's release
@@ -78,7 +80,8 @@ class HostedMcpRestartFaultGatesIT {
             "harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql",
             "fg12d",
             "firstReleaseRefusedBeforeForwardingResumesUnderTheSameId",
-            "fg12d");
+            "fg12d",
+            "cancelBeforeDispatchIsNotStartedProvenOnMySql", "fg12d");
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
@@ -104,6 +107,14 @@ class HostedMcpRestartFaultGatesIT {
     private volatile CountDownLatch replyParked;
     private volatile String refuseNextKind;
     private final java.util.concurrent.atomic.AtomicBoolean refuseArmed =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile String acquireHoldSession;
+    private volatile String acquireHoldOperation;
+    private volatile CountDownLatch acquireHold;
+    private volatile CountDownLatch acquireParked;
+    private volatile int acquireParkedSeq;
+    private volatile Throwable acquireProbeFailure;
+    private final java.util.concurrent.atomic.AtomicBoolean acquireArmed =
             new java.util.concurrent.atomic.AtomicBoolean();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
@@ -703,6 +714,41 @@ class HostedMcpRestartFaultGatesIT {
         replyHold = new CountDownLatch(1);
     }
 
+    // invoke() commits `intent`, acquires the owner and only then commits
+    // `dispatch_started`. Parking the first acquire that arrives while the
+    // durable record is still `intent` opens the pre-dispatch window without
+    // seeding a row; later acquires pass, so a cancel that needs the Broker
+    // still reaches it.
+    private void holdAcquireAtIntent(SessionRef session, String operationId) {
+        acquireHoldSession = session.id();
+        acquireHoldOperation = operationId;
+        acquireParked = new CountDownLatch(1);
+        acquireHold = new CountDownLatch(1);
+        acquireArmed.set(true);
+    }
+
+    private void releaseAcquire() {
+        acquireArmed.set(false);
+        CountDownLatch latch = acquireHold;
+        if (latch != null) {
+            latch.countDown();
+        }
+    }
+
+    private boolean operationAtIntent(String session, String operationId) {
+        try {
+            return operations(session).stream().anyMatch(record ->
+                    operationId.equals(record.path("operationId").asText())
+                            && "intent".equals(record.path("run")
+                                    .path("execution").asText()));
+        } catch (RuntimeException | AssertionError unreadable) {
+            // A missing record reads as an empty list, so a throw here is a
+            // broken read; keep it for the park assertion's message.
+            acquireProbeFailure = unreadable;
+            return false;
+        }
+    }
+
     private void releaseReply() {
         CountDownLatch latch = replyHold;
         replyHold = null;
@@ -801,6 +847,97 @@ class HostedMcpRestartFaultGatesIT {
                 .isEqualTo("released");
         assertThat(controls("mcp-configure")).isEmpty();
         assertThat(controls("mcp-invoke")).isEmpty();
+    }
+
+    // FG12d (issue #14447, #14880 item 2): a cancel that lands before the raw
+    // operation is dispatched. The proxy parks invoke()'s owner acquire, so
+    // the durable record is still `intent` when the cancel arrives through
+    // the supported Harness route. The cancel proves the operation never
+    // started; the resumed invoke and a same-id retry read that proof, and
+    // nothing after the parked acquire reaches the Broker as an MCP control.
+    @Test
+    @Timeout(600)
+    void cancelBeforeDispatchIsNotStartedProvenOnMySql() throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        String operation = uuid();
+        String invoke = json.writeValueAsString(Map.of("operationId",
+                operation, "serverId", "fixture", "request", Map.of("kind",
+                        "resource_read", "uri", "ext://proof")));
+        holdAcquireAtIntent(session, operation);
+        Future<HttpResponse<String>> pending = caseExecutor.submit(
+                () -> rawRequest("POST", "/session/" + session.id()
+                        + "/mcp/operations", invoke, session.clientId()));
+        assertThat(acquireParked.await(60, TimeUnit.SECONDS))
+                .as("the owner acquire after the intent commit is parked"
+                        + " (last record read failure: %s)",
+                        acquireProbeFailure)
+                .isTrue();
+        JsonNode intent = operations(session.id()).getLast();
+        assertThat(intent.path("operationId").asText()).isEqualTo(operation);
+        assertThat(intent.path("run").path("execution").asText())
+                .isEqualTo("intent");
+        assertThat(intent.path("cancelRequested").asBoolean()).isFalse();
+        assertThat(pending.isDone())
+                .as("the invoke waits on the parked acquire").isFalse();
+
+        JsonNode cancelled = privateRequest("POST", "/session/" + session.id()
+                + "/mcp/operations/" + operation + "/cancel", Map.of(),
+                session, 202);
+        assertThat(cancelled.path("state").asText()).isEqualTo("settled");
+        assertThat(cancelled.path("error").path("code").asText())
+                .isEqualTo("managed_mcp_cancelled");
+        JsonNode proven = operations(session.id()).getLast();
+        assertThat(proven.path("run").path("state").asText())
+                .isEqualTo("cancelled");
+        assertThat(proven.path("run").path("execution").asText())
+                .isEqualTo("not_started_proven");
+        assertThat(proven.path("cancelRequested").asBoolean()).isTrue();
+        assertThat(proven.path("resultRef").isNull()).isTrue();
+        assertThat(pending.isDone())
+                .as("the cancel did not need the parked acquire").isFalse();
+
+        releaseAcquire();
+        HttpResponse<String> resumed = pending.get(60, TimeUnit.SECONDS);
+        assertThat(resumed.statusCode()).as(resumed.body()).isEqualTo(202);
+        JsonNode resumedView = json.readTree(resumed.body());
+        assertThat(resumedView.path("state").asText()).isEqualTo("settled");
+        assertThat(resumedView.path("error").path("code").asText())
+                .as("the resumed invoke reads the proof, not the Runtime")
+                .isEqualTo("managed_mcp_cancelled");
+        HttpResponse<String> retried = rawRequest("POST", "/session/"
+                + session.id() + "/mcp/operations", invoke,
+                session.clientId());
+        assertThat(retried.statusCode()).as(retried.body()).isEqualTo(202);
+        assertThat(json.readTree(retried.body()).path("error").path("code")
+                .asText()).isEqualTo("managed_mcp_cancelled");
+        HttpResponse<String> status = rawStatus(session, operation);
+        assertThat(status.statusCode()).as(status.body()).isEqualTo(200);
+        assertThat(json.readTree(status.body()).path("error").path("code")
+                .asText()).isEqualTo("managed_mcp_cancelled");
+
+        JsonNode settled = operations(session.id()).getLast();
+        assertThat(settled.path("run").path("state").asText())
+                .isEqualTo("cancelled");
+        assertThat(settled.path("run").path("execution").asText())
+                .isEqualTo("not_started_proven");
+        assertThat(settled.path("resultRef").isNull()).isTrue();
+        int parkedSeq = acquireParkedSeq;
+        assertThat(proxyCalls).filteredOn(call -> call.seq() == parkedSeq)
+                .singleElement()
+                .satisfies(call -> assertThat(call.status()).isEqualTo(200));
+        assertThat(proxyCalls.stream().filter(call -> call.seq() > parkedSeq)
+                .filter(call -> call.kind() != null).toList())
+                .as("no MCP control reaches the Broker after the parked"
+                        + " acquire")
+                .isEmpty();
+        assertThat(controls("mcp-invoke")).isEmpty();
+        assertThat(controls("mcp-cancel"))
+                .as("an undispatched operation needs no native cancel")
+                .isEmpty();
+        assertThat(effects("resource_read")).isEmpty();
+        assertThat(fixtureEvents("mcp.start"))
+                .as("baseline rev 1 only").hasSize(1);
     }
 
     private void baseline(SessionRef session) throws Exception {
@@ -1370,6 +1507,21 @@ class HostedMcpRestartFaultGatesIT {
             exchange.close();
             return;
         }
+        // The owner acquire carries no control kind, so it is matched by
+        // path; the durable record decides which acquire is the one invoke()
+        // issues between its `intent` and `dispatch_started` commits.
+        if (path.endsWith("/tool-sessions:acquire") && acquireArmed.get()
+                && operationAtIntent(acquireHoldSession,
+                        acquireHoldOperation)
+                && acquireArmed.compareAndSet(true, false)) {
+            acquireParkedSeq = call.seq();
+            acquireParked.countDown();
+            try {
+                acquireHold.await(120, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
         CountDownLatch hold = controlHold;
         if (hold != null && controlHoldKind != null
                 && controlHoldKind.equals(kind)) {
@@ -1520,6 +1672,9 @@ class HostedMcpRestartFaultGatesIT {
 
     @AfterEach
     void stop() {
+        // A case that fails while the owner acquire is parked would otherwise
+        // leave its pending invoke waiting, and caseExecutor.close() with it.
+        releaseAcquire();
         try {
             caseExecutor.close();
         } catch (Exception ignored) {
