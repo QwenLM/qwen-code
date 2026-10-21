@@ -210,6 +210,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()
+                                && !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
                                 && runtimeBroker.getSsh().getNodes().isEmpty()))
                         || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
@@ -239,7 +240,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
             throw new IllegalStateException("Session-create warm requires Workspace-isolated"
                     + " bound Sessions and no SSH nodes");
         }
-        if (!runtimeBroker.getWorkspaceCreationRoot().isBlank()
+        if ((!runtimeBroker.getWorkspaceCreationRoot().isBlank() || runtimeBroker.isLocalDirectoryImportEnabled())
                 && (!harness.isWorkspaceFilesEnabled()
                         || !runtimeBroker.isDurableLocalProcess()
                         || !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled())) {
@@ -1003,6 +1004,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private String residentKubernetesTokenFile = "";
         private String residentKubernetesCaFile = "";
         private String workspaceCreationRoot = "";
+        private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
         private boolean sessionCreateWarm;
@@ -1175,6 +1177,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setWorkspaceCreationRoot(String workspaceCreationRoot) {
             this.workspaceCreationRoot = workspaceCreationRoot;
+        }
+
+        public boolean isLocalDirectoryImportEnabled() {
+            return localDirectoryImportEnabled;
+        }
+
+        public void setLocalDirectoryImportEnabled(boolean localDirectoryImportEnabled) {
+            this.localDirectoryImportEnabled = localDirectoryImportEnabled;
         }
 
         public record WorkspaceMount(String tenantId, String storageId, String root) {
