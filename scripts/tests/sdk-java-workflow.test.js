@@ -902,10 +902,13 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
               exec)
                 if [[ "$3" == "$READINESS" ]]; then
                   attempts=$((attempts + 1))
-                  [[ "$MODE" == ready && "$attempts" -eq 3 ]]
-                else
-                  [[ "$3" == sh && "$5" == *'SET GLOBAL max_allowed_packet=134217728'* ]]
-                fi ;;
+                  if [[ "$MODE" == ready && "$attempts" -eq 3 ]]; then
+                    return 0
+                  fi
+                  echo 'PROBE_SAYS_NO' >&2
+                  return 1
+                fi
+                [[ "$3" == sh && "$5" == *'SET GLOBAL max_allowed_packet=134217728'* ]] ;;
               inspect)
                 if [[ "$3" == *State.Running* ]]; then
                   [[ "$MODE" == dead ]] && echo false || echo true
@@ -938,6 +941,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
               DATABASE_CLIENT: client,
               DATABASE_ENGINE_ARGS: engineArgs,
               GITHUB_ENV: join(dir, 'env'),
+              RUNNER_TEMP: dir,
               TRACE: join(dir, 'trace'),
             },
           },
@@ -964,9 +968,13 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
             'MAVEN<-Dmysql.url=jdbc:mysql://127.0.0.1:43219/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false>',
           );
           expect(result.stdout).not.toContain('MYSQL_FAILURE_LOG');
+          expect(result.stdout).not.toContain('PROBE_SAYS_NO');
         } else {
           expect(result.status, result.stderr).toBe(1);
           expect(result.stdout).toContain('MYSQL_FAILURE_LOG');
+          // The probe's own output must reach the log: a broken probe is
+          // otherwise indistinguishable from a server still starting.
+          expect(result.stdout).toContain('PROBE_SAYS_NO');
           expect(existsSync(join(dir, 'env'))).toBe(false);
           expect(
             trace.match(new RegExp(`exec \\S+ ${readiness}`, 'g')),

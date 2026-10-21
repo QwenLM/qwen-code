@@ -651,16 +651,21 @@ jobs:
           else
             health=(docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent)
           fi
+          # A probe that is itself broken (image bump, renamed healthcheck.sh)
+          # is otherwise indistinguishable from a server still starting.
+          probe_out="${RUNNER_TEMP:-/tmp}/readiness-probe.out"
           for attempt in {1..60}; do
-            if "${health[@]}" >/dev/null 2>&1; then
+            if "${health[@]}" >"${probe_out}" 2>&1; then
               break
             fi
             if ! docker inspect --format '{{.State.Running}}' "${MYSQL_CONTAINER}" | grep -qx true; then
               docker logs "${MYSQL_CONTAINER}" || true
+              echo "::error::${DATABASE_IMAGE} container stopped during startup; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
               exit 1
             fi
             if [[ "${attempt}" == '60' ]]; then
               docker logs "${MYSQL_CONTAINER}" || true
+              echo "::error::${DATABASE_IMAGE} not ready after 60 probes; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
               exit 1
             fi
             sleep 2
