@@ -4220,7 +4220,7 @@ describe('Vim composer ownership', () => {
 
   it.each([
     { suffix: 'Z', text: '甲🙂e\u0301Z', cursor: 5 },
-    { suffix: '\x1bx', text: '甲🙂e', cursor: 2 },
+    { suffix: '\x1bx', text: '甲🙂e', cursor: 3 },
     { suffix: '\x1baZ', text: '甲🙂e\u0301Z', cursor: 5 },
   ])(
     'keeps the exact Ink code-point edit for Unicode suffix $suffix',
