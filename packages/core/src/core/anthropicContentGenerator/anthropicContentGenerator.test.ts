@@ -755,16 +755,23 @@ describe('AnthropicContentGenerator', () => {
         [THINKING_BETA, EFFORT_BETA],
       ],
       // No reasoning config: thinking defaults to enabled, no effort.
+      // No cache-scope beta either — `scope: 'global'` needs the explicit
+      // `forceGlobalCacheScope` opt-in on every baseURL (issue #15039).
       [
         'sends only interleaved-thinking when effort is not set',
         {},
-        [THINKING_BETA, SCOPE_BETA],
+        [THINKING_BETA],
+        [SCOPE_BETA],
       ],
       // Reasoning flags still ride; only cache-scope is gated off, as the body
-      // has no cache_control to pair it with.
+      // has no cache_control to pair it with — even under an explicit opt-in.
       [
         'drops only the cache-scope beta when enableCacheControl is false but reasoning is on',
-        { reasoning: { effort: 'medium' }, enableCacheControl: false },
+        {
+          reasoning: { effort: 'medium' },
+          enableCacheControl: false,
+          forceGlobalCacheScope: true,
+        },
         [THINKING_BETA, EFFORT_BETA],
         [SCOPE_BETA],
       ],
@@ -774,7 +781,8 @@ describe('AnthropicContentGenerator', () => {
           reasoning: false,
           customHeaders: { 'anthropic-beta': 'experimental-x' },
         },
-        ['experimental-x', SCOPE_BETA],
+        ['experimental-x'],
+        [SCOPE_BETA],
       ],
       [
         'sends extended-cache-ttl-2025-04-11 when cacheRetention is "1h"',
@@ -783,8 +791,8 @@ describe('AnthropicContentGenerator', () => {
       ],
       [
         'omits extended-cache-ttl-2025-04-11 when cacheRetention is unset (ephemeral default)',
-        { reasoning: false },
-        [],
+        { reasoning: false, forceGlobalCacheScope: true },
+        [SCOPE_BETA],
         [TTL_BETA],
       ],
     ])('%s', async (_title, overrides, present, absent = []) => {
@@ -798,15 +806,20 @@ describe('AnthropicContentGenerator', () => {
     >([
       [
         'sends only prompt-caching-scope when reasoning is disabled (no thinking, no effort)',
-        { reasoning: false },
+        { reasoning: false, forceGlobalCacheScope: true },
         undefined,
         SCOPE_BETA,
       ],
       // Without body cache_control the cache-scope beta is dead weight (and
-      // risks 4xx); with reasoning off too, no header is sent at all.
+      // risks 4xx); with reasoning off too, no header is sent at all — even
+      // under an explicit global-scope opt-in.
       [
         'drops the prompt-caching-scope beta when enableCacheControl is false',
-        { reasoning: false, enableCacheControl: false },
+        {
+          reasoning: false,
+          enableCacheControl: false,
+          forceGlobalCacheScope: true,
+        },
         undefined,
         undefined,
       ],
@@ -814,7 +827,7 @@ describe('AnthropicContentGenerator', () => {
       // their beta flags go too despite the global effort.
       [
         'sends only prompt-caching-scope when per-request thinkingConfig.includeThoughts=false',
-        { reasoning: { effort: 'medium' } },
+        { reasoning: { effort: 'medium' }, forceGlobalCacheScope: true },
         { thinkingConfig: { includeThoughts: false } },
         SCOPE_BETA,
       ],
@@ -827,7 +840,9 @@ describe('AnthropicContentGenerator', () => {
       // `Config.setModel()` mutates `enableCacheControl` in place; a cached
       // constructor value would let the body's cache_control (system, last
       // user message, last tool) and the cache-scope beta drift apart.
-      const config = base({ reasoning: false });
+      // Opted in to global scope so the beta header is observable on the
+      // first request and gone on the second.
+      const config = base({ reasoning: false, forceGlobalCacheScope: true });
       const request = sysAndTools();
 
       // Cache on (default).
@@ -857,18 +872,24 @@ describe('AnthropicContentGenerator', () => {
     it('suppresses the cache-scope beta when the body has no scope field (empty system + no tools)', async () => {
       // The gate body-scans system/tools for a scope:'global' entry instead
       // of re-reading `useGlobalCacheScope()`, which is true here.
-      const { headers } = await send(base({ reasoning: false }), {
-        contents: 'Hi',
-      });
+      const { headers } = await send(
+        base({ reasoning: false, forceGlobalCacheScope: true }),
+        {
+          contents: 'Hi',
+        },
+      );
       expect(headers['anthropic-beta']).toBeUndefined();
     });
 
     it('ships the cache-scope beta when only tools (no systemInstruction) carry scope:"global"', async () => {
       // scope:'global' on the last tool alone fires the body-scan.
-      const { headers } = await send(base({ reasoning: false }), {
-        contents: 'Hi',
-        config: { tools: weatherTools() },
-      });
+      const { headers } = await send(
+        base({ reasoning: false, forceGlobalCacheScope: true }),
+        {
+          contents: 'Hi',
+          config: { tools: weatherTools() },
+        },
+      );
       expect(headers['anthropic-beta']).toBe(SCOPE_BETA);
     });
 
@@ -885,6 +906,42 @@ describe('AnthropicContentGenerator', () => {
         { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
       ]);
       expect(req.tools?.[0]?.cache_control).toEqual({ type: 'ephemeral' });
+    });
+
+    it('keeps a multi-tool request on api.anthropic.com free of scope:"global" (#15039)', async () => {
+      // The API rejects a global breakpoint unless every preceding block is
+      // globally scoped too. With two or more tools the last-tool marker is
+      // preceded by tool definitions carrying no cache_control, and the
+      // four-breakpoint-per-request cap rules out giving each of them one —
+      // so the mixed shape 400s on the first prompt of every session. Native
+      // therefore ships the per-session shape like any other baseURL, and
+      // prompt caching stays on. One tool was the single shape the API
+      // accepted, which is why this pins two.
+      const twoTools = () => [
+        {
+          functionDeclarations: [{ name: 'read_file', description: 'Read' }],
+        },
+        {
+          functionDeclarations: [{ name: 'run_shell', description: 'Run' }],
+        },
+      ];
+      const { req, headers } = await send(base({ reasoning: false }), {
+        contents: 'Hi',
+        config: { systemInstruction: 'sys', tools: twoTools() },
+      });
+      expect(req.tools).toHaveLength(2);
+      expect(req.tools?.[0]).not.toHaveProperty('cache_control');
+      expect(req.tools?.[1]?.cache_control).toEqual({ type: 'ephemeral' });
+      expect(req.system).toEqual([
+        { type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } },
+      ]);
+      expect(req.messages[0].content[0].cache_control).toEqual({
+        type: 'ephemeral',
+      });
+      // Whole-body sweep: no anchor may carry the scope field, and with no
+      // scope on the wire the body-scan gate ships no beta.
+      expect(JSON.stringify(req)).not.toContain('"global"');
+      expect(headers['anthropic-beta']).toBeUndefined();
     });
 
     it('emits scope:"global" on non-Anthropic baseURLs when forceGlobalCacheScope is true (#6642)', async () => {
@@ -906,23 +963,29 @@ describe('AnthropicContentGenerator', () => {
 
     it('splits the system prompt at the Config-recorded static prefix (4-breakpoint layout)', async () => {
       // `LlmClient` records the gitStatus-free base on Config and the
-      // converter splits there: a global prefix and a per-session suffix,
-      // which with the last-tool and last-message markers fill 4 breakpoints.
+      // converter splits there: a stable prefix and a volatile suffix, each
+      // with its own breakpoint, which with the last-tool and last-message
+      // markers fill 4 breakpoints. Both are per-session by default —
+      // `scope: 'global'` needs the opt-in (issue #15039).
       vi.mocked(mockConfig.getStaticSystemPrefix).mockReturnValue('sys-base');
       const { req, headers } = await send(base({ reasoning: false }), {
         contents: 'Hi',
         config: { systemInstruction: 'sys-base\n\n# Git Status\nbranch: main' },
       });
       expect(req.system).toEqual([
-        { type: 'text', text: 'sys-base', cache_control: GLOBAL_CACHE },
+        {
+          type: 'text',
+          text: 'sys-base',
+          cache_control: { type: 'ephemeral' },
+        },
         {
           type: 'text',
           text: '\n\n# Git Status\nbranch: main',
           cache_control: { type: 'ephemeral' },
         },
       ]);
-      // The prefix block's scope alone fires the body-scan gate.
-      expect(headers['anthropic-beta']).toContain(SCOPE_BETA);
+      // No scope field on the wire, so the body-scan gate ships no beta.
+      expect(headers['anthropic-beta']).toBeUndefined();
     });
 
     it('suppresses scope:"global" when enableCacheControl is false even with forceGlobalCacheScope', async () => {
@@ -1006,7 +1069,7 @@ describe('AnthropicContentGenerator', () => {
       expect(reqHeaders['User-Agent']).toBeUndefined();
       expect(reqHeaders['X-Custom']).toBeUndefined();
       expect(reqHeaders['anthropic-beta']).toContain(THINKING_BETA);
-      expect(reqHeaders['anthropic-beta']).toContain(SCOPE_BETA);
+      expect(reqHeaders['anthropic-beta']).toContain(EFFORT_BETA);
     });
 
     it('also sends the computed beta header on streaming requests', async () => {
@@ -1015,9 +1078,13 @@ describe('AnthropicContentGenerator', () => {
       createImpl.mockResolvedValue(streamOf(messageDelta('end_turn', 1)));
       const telemetryAttempt = {};
       mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
-      // systemInstruction: the body-scan gate needs a scope:'global' field.
+      // systemInstruction + the global-scope opt-in: the body-scan gate needs
+      // a scope:'global' field to pair the cache-scope beta with.
       const stream = await openStream(
-        base({ reasoning: { effort: 'medium' } }),
+        base({
+          reasoning: { effort: 'medium' },
+          forceGlobalCacheScope: true,
+        }),
         {
           contents: 'Hi',
           config: { systemInstruction: 'sys' },
@@ -1434,8 +1501,8 @@ describe('AnthropicContentGenerator', () => {
 
       it('still ships adaptive (no output_config, no effort beta) when reasoning is undefined on a 4.6+ model', async () => {
         // No `reasoning` key (unlike `reasoning: false`): no effort to emit,
-        // while cache-scope rides on the default enableCacheControl (the
-        // systemInstruction supplies its scope field). If Anthropic ever
+        // and no cache-scope beta either, since `scope: 'global'` needs the
+        // explicit opt-in on every baseURL (issue #15039). If Anthropic ever
         // requires `output_config.effort` with adaptive thinking, this
         // surfaces here instead of as a 400.
         const { req, headers } = await send(nativeCfg('claude-opus-4-7'), {
@@ -1447,7 +1514,7 @@ describe('AnthropicContentGenerator', () => {
         );
         expect(headers['anthropic-beta']).toContain(THINKING_BETA);
         expect(headers['anthropic-beta']).not.toContain(EFFORT_BETA);
-        expect(headers['anthropic-beta']).toContain(SCOPE_BETA);
+        expect(headers['anthropic-beta']).not.toContain(SCOPE_BETA);
       });
     });
 
