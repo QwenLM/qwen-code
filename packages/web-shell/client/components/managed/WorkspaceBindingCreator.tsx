@@ -219,14 +219,16 @@ export function WorkspaceBindingCreator({
   selectedRef.current = selected;
   const [cwdRelative, setCwdRelative] = useState('.');
   const cwdEdited = useRef(false);
-  const [agentId, setAgentId] = useState(binding.agentId);
   const modelPresets = binding.modelPresets ?? [];
-  const availableModels = [
-    ...(!modelPresets.some((item) => item.agentId === binding.agentId)
-      ? [{ agentId: binding.agentId, label: t('managed.modelDefault') }]
-      : []),
-    ...modelPresets,
-  ];
+  const [agentId, setAgentId] = useState(
+    modelPresets.find((item) => item.agentId === binding.agentId)?.agentId ??
+      modelPresets[0]?.agentId ??
+      binding.agentId,
+  );
+  const availableModels =
+    modelPresets.length > 0
+      ? modelPresets
+      : [{ agentId: binding.agentId, label: t('managed.modelDefault') }];
   const [nextCursor, setNextCursor] = useState<string>();
   const [supported, setSupported] = useState(false);
   const [loading, setLoading] = useState(true);
