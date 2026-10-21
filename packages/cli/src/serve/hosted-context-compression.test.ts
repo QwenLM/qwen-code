@@ -234,6 +234,32 @@ describe('Hosted context compression', () => {
     expect(summarize).not.toHaveBeenCalled();
   });
 
+  it('persists generation before a hook can leave compression blocked', async () => {
+    const summarize = engine();
+    summarize.mockImplementationOnce(async () => {
+      expect(session.authority.activeHistoryMaintenance).toMatchObject({
+        phase: 'generating',
+        attempt: 1,
+        candidateRef: null,
+        run: { state: 'running' },
+      });
+      pendingHooks = true;
+      throw new Error('PreCompact outcome unknown');
+    });
+    const request = intent();
+    await compression.admit(request);
+    await compression.wait();
+    expect(compression.status(request.operationId)?.status).toBe(
+      'recovery_blocked',
+    );
+    expect(session.authority.activeHistoryMaintenance).toMatchObject({
+      phase: 'generating',
+      candidateRef: null,
+      run: { state: 'recovery_blocked' },
+    });
+    expect(compression.busy).toBe(true);
+  });
+
   it('reads the terminal evidence after a lost final reply without committing history twice', async () => {
     const summarize = engine();
     const commit = session.authority.commitHistoryMaintenance.bind(
