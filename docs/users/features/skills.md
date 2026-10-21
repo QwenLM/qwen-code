@@ -280,7 +280,7 @@ When two Skills share a name, the first one found wins: project, then personal (
 
 If you also use another agent, you can keep a single skills folder instead of copying Skills into `~/.qwen/skills/`:
 
-- Add the other agent's folder to `skills.directories`, for example `["~/.claude/skills"]`. Use an absolute or `~`-prefixed path: a relative path resolves against the working directory, not the project root.
+- Add the other agent's folder to `skills.directories`, for example `["~/.claude/skills"]`. Use an absolute or `~`-prefixed path: a relative path resolves against the working directory, not the project root. These Skills load as personal Skills, so their `allowedTools` and hooks apply without the folder-trust check that gates project Skills: only point this at folders you control.
 - Or keep shared Skills in `~/.agents/skills/` or `.agents/skills/`, which Qwen Code reads without any configuration. Symlinked Skill folders are followed, and their target can live anywhere on disk.
 
 Qwen Code reads the `allowedTools` frontmatter field. An `allowed-tools` field written for another agent is ignored.
