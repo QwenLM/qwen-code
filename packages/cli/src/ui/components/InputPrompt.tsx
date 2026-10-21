@@ -2229,8 +2229,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // persistent suggestion panel as if the user had cycled.
       if (key.ctrl && key.name === 'u') {
         exportCompletion.reset();
-        // BaseTextInput empties the buffer on this key; a clipboard read
-        // started before the clear must not land in it afterwards.
+      }
+
+      // Keys BaseTextInput answers by killing a line or replacing the buffer
+      // wholesale (the external editor, the buffer's own undo/redo): a
+      // clipboard read started before them must not land in the result.
+      if (
+        keyMatchers[Command.KILL_LINE_LEFT](key) ||
+        keyMatchers[Command.KILL_LINE_RIGHT](key) ||
+        keyMatchers[Command.OPEN_EXTERNAL_EDITOR](key) ||
+        (key.ctrl && key.name === 'z')
+      ) {
         submitEpochRef.current += 1;
       }
 
