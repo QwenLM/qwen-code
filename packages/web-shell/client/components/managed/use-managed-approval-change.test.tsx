@@ -128,6 +128,59 @@ describe('useManagedApprovalChange', () => {
     expect(sessionStorage.getItem(key)).toBeNull();
   });
 
+  it('persists an independent Plan toggle with the same execution mode and confirms both fields', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      planModeSupported: true,
+      planMode: false,
+    });
+    vi.mocked(provider.approvalChange!.submit).mockResolvedValue({
+      ...result,
+      approvalMode: 'default',
+      planMode: true,
+    });
+    refresh.mockResolvedValue({
+      ...summary,
+      approvalRevision: 1,
+      planMode: true,
+    });
+    await render();
+    await act(async () => {
+      await current.submit('default', true);
+    });
+    expect(provider.approvalChange!.submit).toHaveBeenCalledWith(
+      's1',
+      { approvalMode: 'default', expectedRevision: 0, planMode: true },
+      expect.anything(),
+    );
+    expect(current.blocked).toBe(false);
+    expect(sessionStorage.getItem(key)).toBeNull();
+  });
+
+  it('keeps a Plan receipt unconfirmed if readback reports only the mode and revision', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      planModeSupported: true,
+    });
+    vi.mocked(provider.approvalChange!.submit).mockResolvedValue({
+      ...result,
+      approvalMode: 'default',
+      planMode: true,
+    });
+    refresh.mockResolvedValue({
+      ...summary,
+      approvalRevision: 1,
+      planMode: false,
+    });
+    await render();
+    await act(async () => {
+      await current.submit('default', true);
+    });
+    expect(current.blocked).toBe(true);
+    expect(current.pending?.planMode).toBe(true);
+    expect(current.errorCode).toBe('unconfirmed');
+  });
+
   it('restores a lost ACK after refresh and retries the exact frozen request only on confirmation', async () => {
     vi.mocked(provider.approvalChange!.submit).mockRejectedValueOnce(
       new TypeError('lost response'),
@@ -289,6 +342,42 @@ describe('useManagedApprovalChange', () => {
       supported: false,
     });
     await act(async () => current.reloadOptions());
+    await act(async () => {
+      await current.submit('yolo');
+    });
+    expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(['agent_running', 'tool_running', 'waiting_runtime'] as const)(
+    'changes the execution policy during %s only with live support and keeps Plan idle-only',
+    async (phase) => {
+      vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+        ...options,
+        liveSupported: true,
+        planModeSupported: true,
+      });
+      await render({ ...summary, phase });
+      await act(async () => {
+        await current.submit('default', true);
+      });
+      expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
+      await act(async () => {
+        await current.submit('yolo');
+      });
+      expect(provider.approvalChange!.submit).toHaveBeenCalledWith(
+        's1',
+        { approvalMode: 'yolo', expectedRevision: 0 },
+        expect.objectContaining({ clientId: 'client' }),
+      );
+    },
+  );
+
+  it('refuses a new live selection while the Turn is cancelling', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      liveSupported: true,
+    });
+    await render({ ...summary, phase: 'cancelling' });
     await act(async () => {
       await current.submit('yolo');
     });

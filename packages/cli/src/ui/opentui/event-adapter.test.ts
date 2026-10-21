@@ -474,6 +474,27 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('maps a loop_detected with a known cause to the headless explanation', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'loop_detected',
+        value: {
+          loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        {
+          type: 'info',
+          text: expect.stringContaining(
+            'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+          ),
+        },
+      ]);
+    });
+
     it('maps user_cancelled to a retry clear + info notice', () => {
       const map = createEventMapper();
       const out = map({ type: 'user_cancelled' } as unknown as AnyEv);

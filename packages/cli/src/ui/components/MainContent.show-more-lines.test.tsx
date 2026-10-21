@@ -279,9 +279,8 @@ const renderMainContent = (
 ) => renderWithProviders(appTree(uiState), { config: mockConfig, ...options });
 
 // Live shell output always arrives renderOutputAsMarkdown:false
-// (ShellTool's isOutputMarkdown=false); resumed sessions omit the flag and
-// hit ToolMessage's default true. Model both shapes explicitly instead of
-// silently rendering every fixture with the resumed-session default.
+// (ShellTool's isOutputMarkdown=false); legacy displays can omit the flag.
+// Model both shapes explicitly.
 const toolCall = (
   name: string,
   output: string,
@@ -420,32 +419,30 @@ describe('ctrl+s hint honesty for capped shell output (#10640)', () => {
     expect(frame).not.toContain(HINT);
   });
 
-  it('keeps resumed-session shell output capped when ctrl+s lifts the height budget', async () => {
-    // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
-    // (ToolMessage default true). Pressing ctrl+s then drops the height
-    // budget (constrainHeight=false), but the ui.shellOutputMaxLines cap must
-    // still bind — the output must not escape through the markdown branch,
-    // which MaxSizedBox does not contain (#10640).
-    const output = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join(
-      '\n',
-    );
-    // renderOutputAsMarkdown omitted on purpose: the resumed-session shape.
-    const { lastFrame } = renderMainContent(
-      createUIState({
-        history: turnWithToolOutput('Shell', output),
-        constrainHeight: false,
-      }),
-    );
-    await vi.waitFor(() => {
-      const current = lastFrame() ?? '';
-      expect(current).toContain('... first 5 lines hidden ...');
-      expect(current).toContain('line 10');
-    }, WAIT_FOR_OPTIONS);
-    const frame = lastFrame() ?? '';
-    expect(frame).toContain('... first 5 lines hidden ...');
-    expect(frame).not.toContain('line 1\n');
-    expect(frame).not.toContain(HINT);
-  });
+  it.each([undefined, true])(
+    'keeps shell output capped when ctrl+s lifts the height budget with Markdown=%s',
+    async (markdown) => {
+      // The shell cap must also bind when a caller explicitly requests Markdown.
+      const output = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join(
+        '\n',
+      );
+      const { lastFrame } = renderMainContent(
+        createUIState({
+          history: turnWithToolOutput('Shell', output, markdown),
+          constrainHeight: false,
+        }),
+      );
+      await vi.waitFor(() => {
+        const current = lastFrame() ?? '';
+        expect(current).toContain('... first 5 lines hidden ...');
+        expect(current).toContain('line 10');
+      }, WAIT_FOR_OPTIONS);
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('... first 5 lines hidden ...');
+      expect(frame).not.toContain('line 1\n');
+      expect(frame).not.toContain(HINT);
+    },
+  );
 
   it('keeps the hint when the height budget binds tighter than the shell cap', async () => {
     // ui.shellOutputMaxLines=50 with a small per-item height budget: the

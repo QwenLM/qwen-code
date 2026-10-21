@@ -103,7 +103,10 @@ describe('executeToolCall', () => {
 
     expect(mockToolRegistry.getTool).toHaveBeenCalledWith('testTool');
     expect(executeFn).toHaveBeenCalledWith(request.args);
-    expect(response).toStrictEqual({
+    expect({
+      ...response,
+      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
+    }).toStrictEqual({
       callId: 'call1',
       error: undefined,
       errorType: undefined,
@@ -174,6 +177,8 @@ describe('executeToolCall', () => {
     ['mod', true, true],
     ['synthetic', true, false],
     ['error', true, false],
+    ['withheld', true, false],
+    ['mod-error', true, false],
   ] as const)(
     'records the display mode for %s output with Markdown=%s',
     async (mode, isOutputMarkdown, expected) => {
@@ -206,11 +211,26 @@ describe('executeToolCall', () => {
         abortController.signal,
         {
           modToolCall:
-            mode === 'mod' || mode === 'synthetic'
-              ? async (event, next, signal) =>
-                  mode === 'synthetic'
-                    ? { result: { output: '# result' } }
-                    : next(event, signal, async (_event, verdict) => verdict)
+            mode === 'mod' ||
+            mode === 'synthetic' ||
+            mode === 'withheld' ||
+            mode === 'mod-error'
+              ? async (event, next, signal) => {
+                  if (mode === 'synthetic')
+                    return { result: { output: '# result' } };
+                  const result = await next(
+                    event,
+                    signal,
+                    async (_event, verdict) => verdict,
+                  );
+                  if (mode === 'withheld') return { deny: '# withheld result' };
+                  if (mode === 'mod-error')
+                    return {
+                      result: { error: '# replaced failure' },
+                      isError: true,
+                    };
+                  return result;
+                }
               : undefined,
         },
       );
@@ -278,7 +298,10 @@ describe('executeToolCall', () => {
 
     const expectedErrorMessage =
       'Tool "nonexistentTool" not found in registry. Tools must use the exact names that are registered. Did you mean one of: "testTool", "anotherTool"?';
-    expect(response).toStrictEqual({
+    expect({
+      ...response,
+      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
+    }).toStrictEqual({
       callId: 'call2',
       error: new Error(expectedErrorMessage),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
@@ -317,7 +340,10 @@ describe('executeToolCall', () => {
       request,
       abortController.signal,
     );
-    expect(response).toStrictEqual({
+    expect({
+      ...response,
+      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
+    }).toStrictEqual({
       callId: 'call3',
       error: new Error('Invalid parameters'),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
@@ -362,7 +388,10 @@ describe('executeToolCall', () => {
       request,
       abortController.signal,
     );
-    expect(response).toStrictEqual({
+    expect({
+      ...response,
+      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
+    }).toStrictEqual({
       callId: 'call4',
       error: new Error('Execution failed'),
       errorType: ToolErrorType.EXECUTION_FAILED,
@@ -400,7 +429,10 @@ describe('executeToolCall', () => {
       abortController.signal,
     );
 
-    expect(response).toStrictEqual({
+    expect({
+      ...response,
+      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
+    }).toStrictEqual({
       callId: 'call5',
       error: new Error('Something went very wrong'),
       errorType: ToolErrorType.UNHANDLED_EXCEPTION,
@@ -443,7 +475,10 @@ describe('executeToolCall', () => {
       abortController.signal,
     );
 
-    expect(response).toStrictEqual({
+    expect({
+      ...response,
+      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
+    }).toStrictEqual({
       callId: 'call6',
       error: undefined,
       errorType: undefined,

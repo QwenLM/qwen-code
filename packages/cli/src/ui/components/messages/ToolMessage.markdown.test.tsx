@@ -66,7 +66,8 @@ describe('tool result Markdown with a real renderer', () => {
         resultWithOverflow({
           ...baseProps,
           isPending,
-          availableTerminalHeight: 9,
+          status: isPending ? ToolCallStatus.Executing : ToolCallStatus.Success,
+          availableTerminalHeight: isPending ? 11 : 9,
           resultDisplay: {
             type: 'ask_user_question_answers',
             text: 'User has provided the following answers:\n\n**Color**: Blue',

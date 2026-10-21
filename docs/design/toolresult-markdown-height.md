@@ -19,6 +19,9 @@ change configuration, dependencies, model messages, or tool execution.
   registered tool's declaration; missing tools and standalone previews without
   a recorded declaration default to plain text. Ordinary errors and synthetic
   results remain plain text, preserving the live renderer's Advisor exception.
+  Legacy cancelled records without a display declaration also fall back to plain
+  text. Mod recording uses the returned response's error state, even when its
+  native invocation completed successfully before the result was withheld.
   Do not infer a display mode from the tool name.
 - Shell output defaults to plain text, even when force-shown, focused, or
   uncapped. Explicit Markdown is honored only when the shell cap is inactive.
@@ -54,6 +57,9 @@ change configuration, dependencies, model messages, or tool execution.
   showLineNumbers at every fitPendingSlice caller: the shared Markdown renderer,
   streaming commit loop, and tool-result full-fit probe.
   Non-code tabs bypass the printable-width shortcut and use wrap-ansi's tab stops.
+  Budgeted line charges skip exact wrapping when a conservative width lower bound
+  already exceeds the remaining rows. Uncapped calls retain exact counts, and
+  the bound allows double-width glyphs in a one-column viewport.
   Pending Mermaid previews count the header's wrapped height and one truncated
   row per source line, without code gutters, source wrapping, or a visible closing
   fence. Completed bounded Mermaid source keeps ordinary code-block accounting.
@@ -62,6 +68,9 @@ change configuration, dependencies, model messages, or tool execution.
   horizontal/vertical layout decisions. Before layout, reject tables whose
   minimum height (one row per data row, respecting clamps, plus margins) already
   exceeds the remaining budget, avoiding full layout of huge tool results.
+  When the data-row count guarantees a finite clamp will engage, use the exact
+  clamped cost without layout, including completed-layout and closing-line
+  charges; preserve the tiny-clamp cue-only behavior.
   A pending slice can turn a closed table
   into the frontier. If only the streaming layout fits, keep the table as the
   frontier and defer following text; otherwise account for the larger layout
@@ -128,6 +137,9 @@ finalization. The closed-table boundary fix does not scan beyond the height walk
   is missing or its current declaration differs. Cover legacy registered tools,
   unknown tools, standalone previews, ordinary errors, synthetic Mod output,
   and duplicate-call responses.
+  Assert that oversized lines and necessarily clamped tables avoid the layout
+  helpers, and that removing each shortcut fails those assertions. Cover legacy
+  cancelled records and Mod denials/errors after successful native execution.
   The resumed LSP heading/list/table fixture must stay literal, while a declared
   Markdown result still formats. Reverting the renderer fallback must fail the
   unknown-mode regression.

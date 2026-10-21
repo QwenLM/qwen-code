@@ -14,6 +14,8 @@ export const LIST_ITEM_PREFIX_PADDING = 1;
 export const BLOCKQUOTE_PREFIX_PADDING = 1;
 export const BLOCKQUOTE_PREFIX = '│ ';
 export const PENDING_MERMAID_HEADER = 'Mermaid diagram is being written...';
+export const MIN_PENDING_CONTENT_LINES = 1;
+export const PENDING_MARKDOWN_HEADROOM_ROWS = 2;
 
 /**
  * Shared rendered-height accounting for bounding the live (pending) markdown
@@ -99,8 +101,12 @@ export function splitMarkdownTableRow(row: string): string[] {
   return cells;
 }
 
-/** Estimated terminal rows a non-table line occupies once wrapped to `width`. */
-export function estimateWrappedRows(line: string, width: number): number {
+/** Exact wrapped rows unless a lower bound already exceeds `maxRows`. */
+export function estimateWrappedRows(
+  line: string,
+  width: number,
+  maxRows = Number.MAX_SAFE_INTEGER,
+): number {
   if (
     width <= 0 ||
     (!line.includes('\n') &&
@@ -108,6 +114,10 @@ export function estimateWrappedRows(line: string, width: number): number {
       getCachedStringWidth(line) <= width)
   )
     return 1;
+  // A double-width grapheme can occupy a row even when width is only one.
+  const rowWidth = Math.max(2, width);
+  const measured = getCachedStringWidth(line);
+  if (measured > rowWidth * maxRows) return Math.ceil(measured / rowWidth);
   return wrapAnsi(line, width, { trim: false, hard: true }).split('\n').length;
 }
 
@@ -192,6 +202,9 @@ export function fitPendingSlice(
   let tableCost = 0;
   let completedTableBoundary: number | undefined;
   const layoutRows = (isStreaming: boolean) => {
+    if (tableRows.length >= tableClampRows) {
+      return (tableClampRows <= 2 ? 1 : tableClampRows) + TABLE_MARGIN_ROWS;
+    }
     const renderedRows = renderTableText({
       headers: tableHeaders,
       rows: tableRows,
@@ -225,7 +238,7 @@ export function fitPendingSlice(
           continue;
         }
       }
-      rendered += estimateWrappedRows(line, contentWidth);
+      rendered += estimateWrappedRows(line, contentWidth, budget - rendered);
       if (rendered > budget) {
         kept = i;
         break;
@@ -248,7 +261,11 @@ export function fitPendingSlice(
         ? codeFence
           ? 1
           : 0
-        : estimateWrappedRows(line.replace(/\t/g, '    '), codeContentWidth);
+        : estimateWrappedRows(
+            line.replace(/\t/g, '    '),
+            codeContentWidth,
+            budget - rendered,
+          );
       if (rendered > budget) {
         kept = i;
         break;
@@ -302,8 +319,9 @@ export function fitPendingSlice(
         ? estimateWrappedRows(
             PENDING_MERMAID_HEADER,
             Math.max(1, contentWidth - 1),
+            budget - rendered,
           )
-        : estimateWrappedRows(line, contentWidth);
+        : estimateWrappedRows(line, contentWidth, budget - rendered);
       if (rendered > budget) {
         kept = i;
         break;
@@ -404,7 +422,9 @@ export function fitPendingSlice(
           completedTableBoundary = i;
         }
         // The renderer consumes a table's closing text line as inline text.
-        rendered += isBlank ? 0 : estimateWrappedRows(line, contentWidth);
+        rendered += isBlank
+          ? 0
+          : estimateWrappedRows(line, contentWidth, budget - rendered);
         afterTable = false;
         lastLineEmpty = false;
       } else if (isBlank) {
@@ -425,6 +445,7 @@ export function fitPendingSlice(
         rendered += estimateWrappedRows(
           taskItem ? taskItem[2]! : listItem[4]!,
           itemWidth,
+          budget - rendered,
         );
       } else {
         const quote = renderVisualBlocks ? /^ *> ?(.*)$/.exec(line) : null;
@@ -438,6 +459,7 @@ export function fitPendingSlice(
                   getCachedStringWidth(BLOCKQUOTE_PREFIX),
               )
             : contentWidth,
+          budget - rendered,
         );
       }
       if (rendered > budget) {

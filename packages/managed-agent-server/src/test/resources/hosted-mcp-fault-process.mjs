@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, openSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, openSync, writeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const [mode, evidence, revision] = process.argv.slice(2);
@@ -22,11 +22,24 @@ function record(event, fields = {}) {
   });
 }
 
+function respond(id, result) {
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
+}
+
+// Only a promise that never settles suspends the branch. A bare keep-alive
+// timer would let the handler fall through and answer the held request.
+async function waitForRelease(file) {
+  for (;;) {
+    if (existsSync(file)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 if (mode !== 'mcp') throw new Error(`Unknown fixture mode: ${mode}`);
 
 record('mcp.start');
 const lines = createInterface({ input: process.stdin });
-lines.on('line', (line) => {
+lines.on('line', async (line) => {
   const request = JSON.parse(line);
   record('mcp.request', { method: request.method, requestId: request.id });
   if (request.id === undefined) return;
@@ -56,23 +69,88 @@ lines.on('line', (line) => {
       };
       break;
     case 'resources/list':
-      result = { resources: [{ uri: 'ext://proof', name: 'proof' }] };
+      result = {
+        resources: [
+          { uri: 'ext://proof', name: 'proof' },
+          { uri: 'ext://hold', name: 'hold' },
+          { uri: 'ext://big', name: 'big' },
+          { uri: 'ext://notify', name: 'notify' },
+          { uri: 'ext://late', name: 'late' },
+        ],
+      };
       break;
-    case 'resources/read':
-      record('mcp.effect', {
-        kind: 'resource_read',
-        value: request.params.uri,
-      });
+    case 'resources/read': {
+      const uri = request.params.uri;
+      if (uri === 'ext://big') {
+        record('mcp.effect', { kind: 'resource_read', value: uri });
+        result = {
+          contents: [
+            {
+              uri,
+              mimeType: 'text/plain',
+              text: 'x'.repeat(61 * 1024),
+            },
+          ],
+        };
+        break;
+      }
+      if (uri === 'ext://late') {
+        // The first answer is deliberately unparseable: the Runtime records
+        // outcome_unknown while the request stays in its pending map. The
+        // second answer, same id, then settles the original exactly once.
+        record('mcp.effect', { kind: 'resource_read', value: uri });
+        respond(request.id, { contents: 'not-an-array' });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        respond(request.id, {
+          contents: [
+            { uri, mimeType: 'text/plain', text: `EXT_RESOURCE_${revision}` },
+          ],
+        });
+        return;
+      }
+      if (uri === 'ext://notify') {
+        // The catalog change is announced while the read is still open: the
+        // delivery gate needs the notification and the in-flight call in the
+        // same connection window.
+        record('mcp.effect', { kind: 'resource_read', value: uri });
+        process.stdout.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'notifications/tools/list_changed',
+          }) + '\n',
+        );
+        result = {
+          contents: [
+            {
+              uri,
+              mimeType: 'text/plain',
+              text: `EXT_RESOURCE_${revision}`,
+            },
+          ],
+        };
+        break;
+      }
+      if (uri === 'ext://hold') {
+        record('mcp.hold', { value: uri });
+        await waitForRelease(`${evidence}.release`);
+        record('mcp.effect', { kind: 'resource_read', value: uri });
+        result = {
+          contents: [{ uri, mimeType: 'text/plain', text: 'EXT_HELD' }],
+        };
+        break;
+      }
+      record('mcp.effect', { kind: 'resource_read', value: uri });
       result = {
         contents: [
           {
-            uri: request.params.uri,
+            uri,
             mimeType: 'text/plain',
             text: `EXT_RESOURCE_${revision}`,
           },
         ],
       };
       break;
+    }
     case 'prompts/list':
       result = {
         prompts: [{ name: 'proof', description: 'Release proof prompt.' }],
@@ -112,8 +190,9 @@ lines.on('line', (line) => {
       );
       return;
   }
-  process.stdout.write(
-    JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n',
-  );
+  respond(request.id, result);
 });
-lines.on('close', () => process.exit(0));
+lines.on('close', () => {
+  record('mcp.exit');
+  process.exit(0);
+});

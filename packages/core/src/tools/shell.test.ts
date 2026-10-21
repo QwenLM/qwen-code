@@ -55,7 +55,10 @@ vi.mock('../utils/debugLogger.js', () => ({
 }));
 vi.mock('fs');
 vi.mock('os');
-vi.mock('crypto');
+vi.mock('crypto', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:crypto')>()),
+  randomBytes: vi.fn(),
+}));
 vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<
     typeof import('../services/session-pr-service.js')
@@ -1365,6 +1368,22 @@ describe('ShellTool', () => {
       return () => captured;
     };
 
+    it('declares the raw size unknown when the capture bound discarded output', async () => {
+      const output = 'o'.repeat(5_000);
+      const clipped = await runFg('yes', {
+        output,
+        outputCaptureLimitExceeded: true,
+      });
+      expect(clipped.rawOutputSize).toBeNull();
+      expect(clipped.truncatedByProducer).toBe(true);
+
+      // Control: the same body without a discard is still measured, so the
+      // null above is the capture bound and not "shell never declares".
+      const whole = await runFg('yes', { output });
+      expect(whole.rawOutputSize).not.toBeNull();
+      expect(whole.truncatedByProducer).toBeUndefined();
+    });
+
     describe('simulated sed edit', () => {
       const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');
       const SED = "sed -i 's/foo/bar/' file.txt";
@@ -2130,6 +2149,19 @@ describe('ShellTool', () => {
       expect(result.error).toBeDefined();
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
       expect(result.error?.message).toBe('command failed');
+    });
+
+    it('keeps bounded captured output in the model-facing QWEN_PTY_WRITE_LIMIT failure', async () => {
+      const code = 'QWEN_PTY_WRITE_LIMIT';
+      const result = await runFg('user-command', {
+        error: Object.assign(new Error('resource limit reached'), { code }),
+        exitCode: null,
+        signal: null,
+        output: 'captured-output-marker',
+      });
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+      expect(result.error?.message).toContain('captured-output-marker');
+      expect(result.error?.message).toBe(result.llmContent);
     });
 
     it('should throw an error for invalid parameters', async () => {

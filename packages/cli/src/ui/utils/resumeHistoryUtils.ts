@@ -609,7 +609,7 @@ function convertToHistoryItems(
             if (typeof recordedMarkdown === 'boolean') {
               toolCall.renderOutputAsMarkdown = recordedMarkdown;
             } else if (
-              rawStatus === 'error' &&
+              (rawStatus === 'error' || rawStatus === 'cancelled') &&
               pendingToolCalls.get(toolCall.callId)?.name !== ToolNames.ADVISOR
             ) {
               toolCall.renderOutputAsMarkdown = false;

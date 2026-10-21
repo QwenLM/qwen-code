@@ -48,7 +48,11 @@ import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import { useRenderMode } from '../../contexts/RenderModeContext.js';
-import { fitPendingSlice } from '../../utils/pending-rendered-height.js';
+import {
+  fitPendingSlice,
+  MIN_PENDING_CONTENT_LINES,
+  PENDING_MARKDOWN_HEADROOM_ROWS,
+} from '../../utils/pending-rendered-height.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
 import {
@@ -648,16 +652,16 @@ const StringResultRenderer: React.FC<{
     availableHeight === undefined
       ? undefined
       : isPending
-        ? Math.max(1, availableHeight - 2)
+        ? Math.max(
+            MIN_PENDING_CONTENT_LINES,
+            availableHeight - PENDING_MARKDOWN_HEADROOM_ROWS,
+          )
         : availableHeight;
-  const resultLines = (isPending ? displayData.trimEnd() : displayData).split(
-    /\r?\n/,
-  );
   const useMarkdown =
     renderAsMarkdown &&
     (markdownBudget === undefined ||
       !fitPendingSlice(
-        resultLines,
+        (isPending ? displayData.trimEnd() : displayData).split(/\r?\n/),
         childWidth,
         markdownBudget,
         Number.MAX_SAFE_INTEGER,
@@ -964,9 +968,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the
-  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
-  // markdown-suppression guard above doesn't catch this because fullDetail
-  // lifts the height cap (availableTerminalHeight is undefined in transcript).
+  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists, even when
+  // the tool declares its summary as Markdown.
   if (usingDetailedDisplay) {
     renderOutputAsMarkdown = false;
   }

@@ -629,6 +629,10 @@ describe('resumeHistoryUtils', () => {
     [true, undefined, true, 'success', true],
     [undefined, undefined, true, 'success', false],
     [undefined, true, false, 'error', false],
+    [undefined, true, false, 'cancelled', false],
+    [undefined, true, true, 'cancelled', false],
+    [true, false, false, 'cancelled', true],
+    [false, true, false, 'cancelled', false],
   ] as const)(
     'restores Markdown=%s with registered=%s, preview=%s, status=%s as %s',
     (recorded, registered, preview, status, expected) => {

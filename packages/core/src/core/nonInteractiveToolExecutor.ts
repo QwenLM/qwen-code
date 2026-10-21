@@ -72,8 +72,7 @@ export async function executeToolCall(
           status: completed?.status ?? (response.error ? 'error' : 'success'),
           renderOutputAsMarkdown:
             completed?.invocation !== undefined &&
-            (completed.status !== 'error' ||
-              completed.request.name === ToolNames.ADVISOR) &&
+            (!response.error || completed.request.name === ToolNames.ADVISOR) &&
             (completed.tool?.isOutputMarkdown ?? false),
         });
     return response;

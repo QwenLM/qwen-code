@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,6 +16,7 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
@@ -149,7 +150,7 @@ class HostedExtensionsIT {
     }
 
     @Test
-    @Timeout(180)
+    @Timeout(300)
     void disconnectedMcpEffectIsNotReplayedAfterHarnessReplacementOnMySql() throws Exception {
         boot();
         Map<String, Object> mcpOnly = new java.util.LinkedHashMap<>(definition(1));
@@ -157,7 +158,7 @@ class HostedExtensionsIT {
         String agent = api("POST", "/v1/agents", mcpOnly, "definition", 202).path("id").asText();
         String session = createSession(agent, "unknown");
         String original = submit(session, "EXT_UNKNOWN");
-        waitFor(() -> {
+        waitFor(Duration.ofSeconds(90), () -> {
             assertEffects("EXT_UNKNOWN");
             assertThat(running(events("mcp.start").getFirst())).isFalse();
             assertThat(execution(session, original).path("execution_state").asText()).isEqualTo("UNKNOWN");
@@ -170,14 +171,15 @@ class HostedExtensionsIT {
         assertThat(running(worker)).isTrue();
         int requests = modelRequests.size();
         replaceHarness();
-        waitFor(() -> {
-            String log = Files.readString(temporary.resolve("harness-2.log"));
-            assertThat(log.lines().anyMatch(line -> line.contains("recovery of session " + session)
-                    && line.contains("runtime_broker_execution_unknown"))).isTrue();
-            assertThat(log.lines().anyMatch(line -> line.contains("/session/" + session + "/load")
-                    && line.contains("code=hosted_turn_recovery_required") && line.contains("status=409")
-                    && line.contains("reason=takeover_failed"))).isTrue();
-        });
+        // D7-2 parks a Turn whose parked Runtime execution stays unknown
+        // instead of re-driving the takeover load on every backoff, and its
+        // recheck is five minutes away, so the daemon no longer logs a
+        // refusal inside this window. The durable park marker is what proves
+        // the unknown-execution gate ran.
+        waitFor(Duration.ofSeconds(150), () -> assertThat(jdbc.queryForObject(
+                "SELECT error_code FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                String.class, tenant, session, original))
+                .isEqualTo("hosted_runtime_recovery_blocked"));
         assertThat(turnStatus(session, original)).isEqualTo("RUNNING");
         JsonNode retry = api("POST", "/v1/agents/sessions/" + session + "/events",
                 Map.of("type", "agent.session.input.message", "input", List.of(Map.of("type", "input_text", "text", "EXT_RETRY_UNKNOWN"))),
@@ -468,7 +470,11 @@ class HostedExtensionsIT {
         assertThat(running(worker)).isTrue();
         assertThat(running(mcp)).isTrue();
         String operation = api("POST", "/v1/agents/sessions/" + session + "/close", null, "close-" + session, 202).path("id").asText();
-        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+        // A close the daemon answers with its recovery refusal is re-driven
+        // on the dispatch backoff, whose cap is 60s; the default 40s window
+        // ends mid-backoff and reads the still-recovering operation as a
+        // failure.
+        waitFor(Duration.ofSeconds(150), () -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
                 null, null, 200).path("status").asText()).isEqualTo("completed"));
         assertThat(running(worker)).isFalse();
         assertThat(running(mcp)).isFalse();
@@ -480,7 +486,7 @@ class HostedExtensionsIT {
                 String.class, binding)).isNotBlank();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ?"
                 + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE binding_id = ? AND holder_key IS NOT NULL",
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE binding_id = ? AND execution_storage_key IS NOT NULL",
                 Integer.class, binding)).isZero();
         assertThat(canary.isAlive()).isTrue();
     }
@@ -566,11 +572,20 @@ class HostedExtensionsIT {
     }
 
     private void waitFor(org.junit.jupiter.api.function.Executable assertion) {
-        await().atMost(Duration.ofSeconds(40)).ignoreException(java.net.ConnectException.class).failFast(() -> {
-            if (modelFailure.get() != null) {
-                throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
-            }
-        }).untilAsserted(assertion::execute);
+        waitFor(Duration.ofSeconds(40), assertion);
+    }
+
+    private void waitFor(Duration timeout,
+            org.junit.jupiter.api.function.Executable assertion) {
+        await().atMost(timeout)
+                .ignoreExceptionsMatching(e -> e instanceof java.net.ConnectException
+                        || e instanceof CannotAcquireLockException)
+                .failFast(() -> {
+                    if (modelFailure.get() != null) {
+                        throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
+                    }
+                })
+                .untilAsserted(assertion::execute);
     }
 
     private static String quote(String text) {

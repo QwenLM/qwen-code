@@ -4,13 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
+import wrapAnsi from 'wrap-ansi';
+import * as tableRenderer from './TableRenderer.js';
 import {
   estimateWrappedRows,
   isTableStart,
   fitPendingSlice,
   splitMarkdownTableRow,
 } from './pending-rendered-height.js';
+
+vi.mock('wrap-ansi', async (importOriginal) => {
+  const { default: wrap } = await importOriginal<typeof import('wrap-ansi')>();
+  return { default: vi.fn(wrap) };
+});
+
+beforeEach(() => vi.clearAllMocks());
+afterEach(() => vi.restoreAllMocks());
 
 describe('splitMarkdownTableRow', () => {
   it('splits a simple row into trimmed cells', () => {
@@ -81,6 +91,10 @@ describe('estimateWrappedRows', () => {
   it('counts CJK double-width characters when wrapping', () => {
     // 10 CJK chars = 20 display cols; at width 10 → 2 rows.
     expect(estimateWrappedRows('一二三四五六七八九十', 10)).toBe(2);
+  });
+
+  it('keeps exact wrapping for fitting double-width glyphs at width one', () => {
+    expect(estimateWrappedRows('一'.repeat(10), 1, 12)).toBe(11);
   });
 
   it('falls back to 1 row when width is zero or negative', () => {
@@ -530,14 +544,81 @@ describe('fitPendingSlice', () => {
   it.each([false, true])(
     'rejects a huge unclamped tool table without full layout with pending=%s',
     (isPending) => {
+      const layout = vi.spyOn(tableRenderer, 'renderTableText');
       const lines = ['| A |', '| --- |', ...Array<string>(70000).fill('| x |')];
       expect(
         fitPendingSlice(lines, 80, 5, Number.MAX_SAFE_INTEGER, isPending, {
           keepFirstTable: false,
         }),
       ).toEqual({ keptLines: 0, clipped: true });
+      expect(layout).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ['plain', ['x'.repeat(1_000_000)]],
+    ['code', ['```text', 'x'.repeat(1_000_000), '```']],
+    ['list', ['- ' + 'x'.repeat(1_000_000)]],
+    ['quote', ['> ' + 'x'.repeat(1_000_000)]],
+    ['math', ['$$', 'x'.repeat(1_000_000), '$$']],
+  ])(
+    'rejects an oversized %s line without wrapping its contents',
+    (_kind, lines) => {
+      expect(fitPendingSlice(lines, 80, 5, CLAMP)).toMatchObject({
+        clipped: true,
+      });
+      expect(
+        vi.mocked(wrapAnsi).mock.calls.some(([line]) => line.length > 1000),
+      ).toBe(false);
+    },
+  );
+
+  it.each([false, true])(
+    'keeps a leading clamped table without full layout with pending=%s',
+    (isPending) => {
+      const layout = vi.spyOn(tableRenderer, 'renderTableText');
+      const lines = ['| A |', '| --- |', ...Array<string>(70000).fill('| x |')];
+      expect(fitPendingSlice(lines, 80, 40, 38, isPending)).toEqual({
+        keptLines: lines.length,
+        clipped: false,
+      });
+      expect(layout).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([1, 2, 3, 38])(
+    'skips streaming and completed layouts when a closed table engages clamp %s',
+    (clamp) => {
+      const layout = vi.spyOn(tableRenderer, 'renderTableText');
+      const table = ['| A |', '| --- |', ...Array<string>(100).fill('| x |')];
+      const lines = [...table, 'after'];
+      const budget = clamp <= 2 ? 3 : clamp + 2;
+      expect(fitPendingSlice(lines, 80, budget, clamp)).toEqual({
+        keptLines: table.length,
+        clipped: true,
+        completedTableBoundary: table.length,
+      });
+      expect(layout).not.toHaveBeenCalled();
+    },
+  );
+
+  it('skips the completed-layout top-up after an interrupted clamped table', () => {
+    const layout = vi.spyOn(tableRenderer, 'renderTableText');
+    const lines = [
+      '| A |',
+      '| --- |',
+      ...Array<string>(100).fill('| x |'),
+      '```text',
+      'x',
+      '```',
+      'after',
+    ];
+    expect(fitPendingSlice(lines, 80, 12, 3)).toEqual({
+      keptLines: lines.length,
+      clipped: false,
+    });
+    expect(layout).not.toHaveBeenCalled();
+  });
 
   it('rejects an oversized first table when checking a completed result', () => {
     const lines = ['| A | B |', '| --- | --- |', '| x | y |'];

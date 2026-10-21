@@ -15,6 +15,22 @@ class BrokerSecurityTest {
             "0123456789abcdef0123456789abcdef";
 
     @Test
+    void localDirectoryImportRequiresExplicitTrustedLoopbackAuthority() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setLocalDirectoryImportEnabled(true);
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .hasMessageContaining("trusted actor header");
+        properties.setTrustedActorHeader("X-Qwen-Actor-Id");
+        assertThatCode(() -> security(properties, "127.0.0.1")).doesNotThrowAnyException();
+        properties.getAuth().setAllowInsecureBind(true);
+        assertThatThrownBy(() -> security(properties, "0.0.0.0")).hasMessageContaining("single-user");
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey("test-signing-key-at-least-32-characters");
+        properties.setTrustedActorHeader("");
+        assertThatThrownBy(() -> security(properties, "127.0.0.1")).hasMessageContaining("single-user");
+    }
+
+    @Test
     void autoResolvesOpenOnLoopback() throws Exception {
         BrokerSecurity security = security(new ManagedAgentProperties(),
                 "127.0.0.1");

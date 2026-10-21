@@ -332,7 +332,7 @@ describe('<MarkdownDisplay />', () => {
   it.each([
     '| A | B |\n| --- | --- |\n| x | y |\n| z | w |\n| p | q |',
     '$$\n| A | B |\n| --- | --- |\n| x | y |\n$$',
-  ])('keeps fitting bounded raw source and the following step', (block) => {
+  ])('keeps fitting bounded raw source %s and the following step', (block) => {
     const { lastFrame } = renderWithProviders(
       <RenderModeProvider value={{ renderMode: 'raw', setRenderMode: vi.fn() }}>
         <Box width={80} flexDirection="column">

@@ -34,6 +34,7 @@ import {
   ApprovalMode,
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
+  LoopReason,
   LoopType,
   getToolCallFingerprint,
   CronScheduler,
@@ -3362,18 +3363,14 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    // The consecutive guard is always-on, so the headless message must flag it
-    // as always-on and must NOT suggest the skipLoopDetection escape hatch,
-    // which cannot disable it.
+    // The consecutive guard runs before the skipLoopDetection gate, so the
+    // headless message must point at model.loopProtection, which governs it,
+    // and must NOT suggest skipLoopDetection, which cannot disable it.
     expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
-      ),
+      expect.stringContaining('Set `model.loopProtection` to "warn"'),
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
+      expect.stringContaining('`model.skipLoopDetection`'),
     );
   });
 
@@ -3485,6 +3482,77 @@ describe('runNonInteractive', () => {
       expect.stringContaining(
         'Set the `model.skipLoopDetection` setting to true',
       ),
+    );
+  });
+
+  it('names the cause when the stop carries its loop reason', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Partial work' },
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Long turn',
+      'prompt-id-turn-cap-reason',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+      ),
+    );
+    // The reason replaces the hedged hint that lists every cause.
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('A per-turn tool-call cap was reached'),
+    );
+  });
+
+  it('offers the skipLoopDetection escape for the heuristic global duplicate', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.REPEATED_CALL,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Repeat',
+      'prompt-id-global-dup-reason',
+    );
+
+    // The heuristic detector runs only with skipLoopDetection: false, so the
+    // always-on hint the provider-id breaker gets would be wrong here.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '`model.skipLoopDetection` to true to disable this check',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('always-on guard'),
     );
   });
 
@@ -3680,6 +3748,7 @@ describe('runNonInteractive', () => {
       mockSettings,
       'Use a tool',
       'prompt-id-2',
+      { humanInput: { text: 'ultracode use a tool' } },
     );
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
@@ -3701,6 +3770,7 @@ describe('runNonInteractive', () => {
         type: SendMessageType.UserQuery,
         modelOverride: undefined,
         submittedPrompt: 'Use a tool',
+        humanInput: { text: 'ultracode use a tool' },
       },
     );
     // Verify second call (after tool execution) has type: ToolResult
@@ -5074,6 +5144,11 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
+        'the provider replayed a tool call id that had already run',
+      ),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
         'always-on guard and cannot be disabled via `model.skipLoopDetection`',
       ),
     );
@@ -5304,130 +5379,140 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
-  it.each([false, true])('deduplicates ids (%s)', async (markdown) => {
-    setupMetricsMock();
-    const recordToolResult = vi.fn();
-    (
-      mockConfig as Config & {
-        getChatRecordingService: () => {
-          recordToolResult: typeof recordToolResult;
-          finalize: ReturnType<typeof vi.fn>;
-          flush: ReturnType<typeof vi.fn>;
-        };
-      }
-    ).getChatRecordingService = () => ({
-      recordToolResult,
-      finalize: vi.fn(),
-      flush: vi.fn().mockResolvedValue(undefined),
-    });
-    vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
-    const firstToolCall: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        providerCallId: 'tool-1',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-same-batch-dup',
-      },
-    };
-    const duplicateToolCall: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        providerCallId: 'tool-1',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-same-batch-dup',
-      },
-    };
-    mockCoreExecuteToolCall.mockImplementation(
-      async (
-        _config: unknown,
-        request: ToolCallRequestInfo,
-        _signal: AbortSignal,
-        options: {
-          onAllToolCallsComplete?: (
-            calls: Array<{
-              request: ToolCallRequestInfo;
-              response: ToolCallResponseInfo;
-              status: 'success';
-              tool: { isOutputMarkdown: boolean };
-              invocation: object;
-            }>,
-          ) => Promise<void>;
+  it.each([
+    { markdown: false, responseError: false },
+    { markdown: true, responseError: false },
+    { markdown: true, responseError: true },
+  ])(
+    'deduplicates ids with Markdown=$markdown and responseError=$responseError',
+    async ({ markdown, responseError }) => {
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+      const firstToolCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-1',
+          providerCallId: 'tool-1',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-same-batch-dup',
         },
-      ) => {
-        const response: ToolCallResponseInfo = {
-          callId: request.callId,
-          responseParts: [{ text: 'Tool response' }],
-          resultDisplay: 'Tool response',
-          error: undefined,
-          errorType: undefined,
-          executionStatus: 'success',
-        };
-        await options.onAllToolCallsComplete?.([
-          {
-            request,
-            response,
-            status: 'success',
-            tool: { isOutputMarkdown: markdown },
-            invocation: {},
+      };
+      const duplicateToolCall: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-1',
+          providerCallId: 'tool-1',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-same-batch-dup',
+        },
+      };
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: ToolCallRequestInfo,
+          _signal: AbortSignal,
+          options: {
+            onAllToolCallsComplete?: (
+              calls: Array<{
+                request: ToolCallRequestInfo;
+                response: ToolCallResponseInfo;
+                status: 'success';
+                tool: { isOutputMarkdown: boolean };
+                invocation: object;
+              }>,
+            ) => Promise<void>;
           },
-        ]);
-        return response;
-      },
-    );
-
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([firstToolCall, duplicateToolCall]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Final answer' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 10 },
+        ) => {
+          const response: ToolCallResponseInfo = {
+            callId: request.callId,
+            responseParts: [{ text: 'Tool response' }],
+            resultDisplay: 'Tool response',
+            error: responseError
+              ? new Error('Mod withheld the result')
+              : undefined,
+            errorType: undefined,
+            executionStatus: 'success',
+          };
+          await options.onAllToolCallsComplete?.([
+            {
+              request,
+              response,
+              status: 'success',
+              tool: { isOutputMarkdown: markdown },
+              invocation: {},
             },
-          },
-        ]),
+          ]);
+          return response;
+        },
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use a tool',
-      'prompt-id-same-batch-dup',
-    );
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([firstToolCall, duplicateToolCall]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Final answer' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 10 },
+              },
+            },
+          ]),
+        );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
-    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use a tool',
+        'prompt-id-same-batch-dup',
+      );
 
-    const toolResultParts = mockLlmClient.sendMessageStream.mock.calls[1][0];
-    expect(toolResultParts).toHaveLength(2);
-    expect(toolResultParts[0]).toEqual({ text: 'Tool response' });
-    expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
-      'Duplicate provider tool call id "tool-1"',
-    );
-    expect(recordToolResult).toHaveBeenCalledTimes(2);
-    expect(
-      recordToolResult.mock.calls.map((call) => call[1].renderOutputAsMarkdown),
-    ).toEqual([markdown, false]);
-    expect(recordToolResult.mock.calls.map((call) => call[1].status)).toEqual([
-      'success',
-      'error',
-    ]);
-    expect(
-      recordToolResult.mock.calls.map((call) => call[1].executionStatus),
-    ).toEqual(['success', 'not_started']);
-    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
-  });
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+
+      const toolResultParts = mockLlmClient.sendMessageStream.mock.calls[1][0];
+      expect(toolResultParts).toHaveLength(2);
+      expect(toolResultParts[0]).toEqual({ text: 'Tool response' });
+      expect(
+        toolResultParts[1].functionResponse?.response?.['error'],
+      ).toContain('Duplicate provider tool call id "tool-1"');
+      expect(recordToolResult).toHaveBeenCalledTimes(2);
+      expect(
+        recordToolResult.mock.calls.map(
+          (call) => call[1].renderOutputAsMarkdown,
+        ),
+      ).toEqual([markdown && !responseError, false]);
+      expect(recordToolResult.mock.calls.map((call) => call[1].status)).toEqual(
+        ['success', 'error'],
+      );
+      expect(
+        recordToolResult.mock.calls.map((call) => call[1].executionStatus),
+      ).toEqual(['success', 'not_started']);
+      expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+    },
+  );
 
   it('should handle error during tool execution and should send error back to the model', async () => {
     setupMetricsMock();

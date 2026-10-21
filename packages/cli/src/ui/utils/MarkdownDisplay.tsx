@@ -31,10 +31,9 @@ import {
   BLOCKQUOTE_PREFIX_PADDING,
   BLOCKQUOTE_PREFIX,
   PENDING_MERMAID_HEADER,
+  MIN_PENDING_CONTENT_LINES,
+  PENDING_MARKDOWN_HEADROOM_ROWS,
 } from './pending-rendered-height.js';
-// Minimum content lines to keep in a clipped live preview (own constant — not
-// coupled to MaxSizedBox's floor).
-const MIN_PENDING_CONTENT_LINES = 1;
 
 interface MarkdownDisplayProps {
   text: string;
@@ -173,7 +172,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // content is pre-sliced the same way, avoiding silent bottom-clipping.
   const pendingRenderedBudget =
     (isPending || enforceHeightBudget) && availableTerminalHeight !== undefined
-      ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
+      ? Math.max(
+          MIN_PENDING_CONTENT_LINES,
+          availableTerminalHeight - PENDING_MARKDOWN_HEADROOM_ROWS,
+        )
       : undefined;
   // Bounded complete plans keep diagram source; source height cannot bound visuals.
   const renderDiagrams =
