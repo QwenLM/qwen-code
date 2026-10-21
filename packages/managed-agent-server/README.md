@@ -1350,6 +1350,23 @@ nested classes, and context restarts inside one class. See the
 [isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
 ([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
 
+## Local MCP reuse and close acceptance
+
+`HostedMcpStreamGapIT#publishedMcpReusesTheLocalRuntimeAndClosesOnMySql` exercises the public AgentDefinition and Session APIs with a real local stdio MCP server, packaged Harness, durable worker and disposable MySQL 8.4. Two distinct turns must reuse the original worker and MCP connection, persist their exact tool results and effects, and expose matching public and WebShell catalogs. Public close must release the original ownership and stop both processes before fixture teardown. This MCP-only case has no Hook/cgroup prerequisite and can run on native macOS as well as Linux with source-matched Java, Core and CLI artifacts.
+
+After building the root bundle and installing the sibling Java SDK, run from this module with an exclusively test-owned MySQL database:
+
+```bash
+mvn -Phosted-mcp-gates \
+  -Dit.test=HostedMcpStreamGapIT#publishedMcpReusesTheLocalRuntimeAndClosesOnMySql \
+  -Dnode.executable=/absolute/path/to/node \
+  -Dqwen.cli.entry="$PWD/../../dist/cli.js" \
+  -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_mcp_acceptance' \
+  -Dmysql.user=root -Dmysql.password= verify
+```
+
+Evidence is saved under `target/fg12-cases/fg12f/`, including physical MCP requests, model requests and `local-acceptance.json` with process identities and committed results. The deterministic loopback model does not establish upstream-model behavior, HTTP/SSE transport, SSH MCP or dedicated resident file-profile support.
+
 ## Linux extension process acceptance
 
 `HostedExtensionsIT` is collected by the existing `hosted-harness-mysql` profile. It uses the public AgentDefinition and Session APIs, real MySQL, the packaged Harness and durable native worker, a stdio MCP process, and command Hooks in a delegated cgroup v2 subtree. It verifies static Skill bytes, extension revision pinning across Harness replacement, Hook allow/deny, cancellation of a Hook and its descendant, safe continuation, and physical close. A separate MCP fault case writes and fsyncs an effect before disconnecting, then verifies that a replacement Harness refuses recovery without replaying the effect or reporting successful close.

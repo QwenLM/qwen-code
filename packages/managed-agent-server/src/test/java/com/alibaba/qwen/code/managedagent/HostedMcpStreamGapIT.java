@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -148,6 +149,169 @@ class HostedMcpStreamGapIT {
         model.start();
         startSpring();
         startHarness();
+    }
+
+    @Test
+    @Timeout(240)
+    void publishedMcpReusesTheLocalRuntimeAndClosesOnMySql()
+            throws Exception {
+        String agent = api("POST", "/v1/agents", definition(1), "definition",
+                202).path("id").asText();
+        String session = createSession(agent, "reuse");
+        String first = submit(session, "EXT_FIRST");
+        awaitCompleted(session, first);
+        JsonNode original = configuration(session);
+        JsonNode registration = workerRegistration(original);
+        ProcessHandle worker = ProcessHandle.of(registration.path("pid")
+                .asLong()).orElseThrow();
+        JsonNode started = events("mcp.start").getFirst();
+        ProcessHandle server = ProcessHandle.of(started.path("pid").asLong())
+                .orElseThrow();
+        assertThat(worker.isAlive()).isTrue();
+        assertThat(server.isAlive()).isTrue();
+
+        String second = submit(session, "EXT_SECOND");
+        awaitCompleted(session, second);
+        JsonNode reused = configuration(session);
+        for (String field : List.of("configurationId", "runtimeSessionId",
+                "serverRevision", "configRevision", "catalogRevision",
+                "connectionGeneration", "catalogRef", "run")) {
+            assertThat(original.path(field).isMissingNode()).as(field)
+                    .isFalse();
+            assertThat(original.path(field).isNull()).as(field).isFalse();
+            assertThat(reused.path(field)).as("reused %s", field)
+                    .isEqualTo(original.path(field));
+        }
+        assertThat(workerRegistration(reused)).isEqualTo(registration);
+        assertThat(events("mcp.start")).containsExactly(started);
+        List<JsonNode> requests = events("mcp.request");
+        assertThat(requests.stream().filter(event -> "initialize".equals(
+                event.path("method").asText())).toList()).hasSize(1);
+        assertThat(requests.stream().filter(event -> "tools/call".equals(
+                event.path("method").asText())).toList())
+                .hasSize(2).allSatisfy(event -> assertThat(event.path("pid"))
+                        .isEqualTo(started.path("pid")));
+        assertThat(events("mcp.effect").stream().map(event ->
+                event.path("value").asText()).toList())
+                .containsExactly("EXT_FIRST", "EXT_SECOND");
+        List<JsonNode> proof = new ArrayList<>();
+        for (String line : Files.readAllLines(
+                workspace.resolve("mcp-proof.jsonl"))) {
+            proof.add(json.readTree(line));
+        }
+        assertThat(proof.stream().map(row -> row.path("value").asText())
+                .toList()).containsExactly("EXT_FIRST", "EXT_SECOND");
+        assertThat(temporary.resolve("decoy/mcp-proof.jsonl"))
+                .doesNotExist();
+        assertExecution(session, first, original, "EXT_FIRST");
+        assertExecution(session, second, original, "EXT_SECOND");
+        assertThat(api("GET", "/v1/agents/sessions/" + session + "/events",
+                null, null, 200).toString())
+                .contains("FG12F_DONE_EXT_FIRST", "FG12F_DONE_EXT_SECOND");
+
+        JsonNode catalog = api("GET", "/v1/agents/sessions/" + session
+                + "/mcp-catalog", null, null, 200);
+        assertThat(api("POST", "/api/agent/web-shell/v1/session-mcp/query",
+                Map.of("sessionId", session), null, 200)).isEqualTo(catalog);
+        assertThat(catalog.path("servers")).hasSize(1);
+        assertThat(catalog.at("/servers/0/server_id").asText())
+                .isEqualTo("fixture");
+        assertThat(catalog.at("/servers/0/tools/0/name").asText())
+                .isEqualTo("append");
+        assertThat(catalog.at("/servers/0/discovery/tools").asText())
+                .isEqualTo("complete");
+        assertThat(catalog.toString()).doesNotContain(TOKEN,
+                temporary.toString(), "definitionDigest", "runtimeSessionId");
+        assertThat(events("mcp.request")).isEqualTo(requests);
+
+        assertThat(worker.isAlive()).isTrue();
+        assertThat(server.isAlive()).isTrue();
+        String close = api("POST", "/v1/agents/sessions/" + session
+                + "/close", null, "close", 202).path("id").asText();
+        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/"
+                + session + "/operations/" + close, null, null, 200)
+                .path("status").asText()).isEqualTo("completed"));
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class,
+                tenant, session)).isEqualTo("CLOSED");
+        assertThat(configuration(session).path("releaseState").asText())
+                .isEqualTo("released");
+        String binding = original.at("/run/runtime/runtimeBindingId").asText();
+        assertThat(jdbc.queryForObject("SELECT binding_state FROM"
+                + " ma_runtime_binding WHERE binding_id = ?", String.class,
+                binding)).isEqualTo("RELEASED");
+        assertThat(jdbc.queryForObject("SELECT drain_receipt_json FROM"
+                + " ma_runtime_binding WHERE binding_id = ?", String.class,
+                binding)).isNotBlank();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session"
+                + " WHERE binding_id = ? AND session_state NOT IN"
+                + " ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
+        var owner = jdbc.queryForMap("SELECT holder_key, binding_id,"
+                + " runtime_generation, runtime_session_id FROM ma_storage_owner"
+                + " WHERE tenant_id = ? AND storage_id = ?", tenant, "storage");
+        for (String field : List.of("holder_key", "binding_id",
+                "runtime_generation", "runtime_session_id")) {
+            assertThat(owner.get(field)).as("released %s", field).isNull();
+        }
+        assertThat(worker.isAlive()).isFalse();
+        assertThat(server.isAlive()).isFalse();
+        assertThat(modelFailure.get()).isNull();
+        json.writeValue(temporary.resolve("local-acceptance.json").toFile(),
+                Map.of("session_id", session, "configuration_before", original,
+                        "configuration_after", configuration(session), "worker",
+                        registration, "mcp_start", started,
+                        "processes_after_close", Map.of("worker_alive",
+                                worker.isAlive(), "mcp_alive", server.isAlive()),
+                        "catalog", catalog, "requests", requests,
+                        "effects", events("mcp.effect"), "executions",
+                        jdbc.queryForList("SELECT runtime_session_id, binding_id,"
+                                + " runtime_generation, execution_state,"
+                                + " execution_status, result_json FROM"
+                                + " ma_tool_execution WHERE harness_session_id = ?",
+                                session)));
+    }
+
+    private JsonNode configuration(String session) {
+        List<JsonNode> records = spring.getBean(
+                ManagedExtensionRecordStore.class)
+                .listRecords(tenant, session, "mcp_configuration");
+        assertThat(records).hasSize(1);
+        return records.getFirst();
+    }
+
+    private JsonNode workerRegistration(JsonNode configuration)
+            throws Exception {
+        JsonNode handle = json.readTree(jdbc.queryForObject(
+                "SELECT resource_handle_json FROM ma_runtime_binding"
+                        + " WHERE binding_id = ? AND runtime_generation = ?",
+                String.class,
+                configuration.at("/run/runtime/runtimeBindingId").asText(),
+                configuration.at("/run/runtime/generation").asLong()));
+        return json.readTree(Files.readString(temporary.resolve("broker")
+                .resolve(handle.path("resourceId").asText() + ".json")));
+    }
+
+    private void assertExecution(String session, String turn,
+            JsonNode configuration, String value) {
+        var rows = jdbc.queryForList("SELECT e.runtime_session_id, e.binding_id,"
+                + " e.runtime_generation, e.execution_state, e.execution_status,"
+                + " e.result_json FROM ma_tool_execution e JOIN ma_turn t"
+                + " ON t.session_id = e.harness_session_id AND t.prompt_id = e.turn_id"
+                + " WHERE t.tenant_id = ? AND t.session_id = ? AND t.turn_id = ?",
+                tenant, session, turn);
+        assertThat(rows).hasSize(1);
+        var row = rows.getFirst();
+        assertThat(row.get("execution_state")).isEqualTo("SETTLED");
+        assertThat(row.get("execution_status")).isEqualTo("success");
+        assertThat(row.get("runtime_session_id"))
+                .isEqualTo(configuration.path("runtimeSessionId").asText());
+        assertThat(row.get("binding_id")).isEqualTo(
+                configuration.at("/run/runtime/runtimeBindingId").asText());
+        assertThat(((Number) row.get("runtime_generation")).longValue())
+                .isEqualTo(configuration.at("/run/runtime/generation")
+                        .asLong());
+        assertThat(row.get("result_json").toString())
+                .contains("EXT_MCP_1_" + value);
     }
 
     @Test
@@ -797,6 +961,13 @@ class HostedMcpStreamGapIT {
                             tenant));
             json.writeValue(destination.resolve("model-requests.json")
                     .toFile(), modelRequests);
+            for (String name : List.of("processes.jsonl",
+                    "local-acceptance.json")) {
+                Path source = temporary.resolve(name);
+                if (Files.exists(source)) {
+                    Files.copy(source, destination.resolve(name));
+                }
+            }
         } catch (IOException ignored) {
             // Evidence is best effort; the assertions already reported.
         }
