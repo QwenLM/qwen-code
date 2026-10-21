@@ -76,8 +76,8 @@ interface StopArgs {
 interface RestartArgs {
   port?: number;
   token?: string;
-  web: boolean;
-  'require-auth': boolean;
+  web?: boolean;
+  'require-auth'?: boolean;
   force?: boolean;
 }
 
@@ -180,6 +180,57 @@ export function processCommand(pid: number): string | undefined {
     return undefined;
   }
   return result.stdout.trim() || undefined;
+}
+
+/**
+ * Every process's parent from one snapshot: `ps` on POSIX, CIM on Windows.
+ * undefined means the table could not be read.
+ */
+export function processParentTable(): Map<number, number> | undefined {
+  const result =
+    process.platform === 'win32'
+      ? spawnSync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
+          ],
+          { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
+        )
+      : spawnSync('ps', ['-A', '-o', 'pid=,ppid='], {
+          encoding: 'utf8',
+          maxBuffer: 8 * 1024 * 1024,
+          env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+        });
+  if (result.status !== 0 || typeof result.stdout !== 'string') {
+    return undefined;
+  }
+  const parents = new Map<number, number>();
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const [pid, parent] = line.trim().split(/\s+/).map(Number);
+    if (Number.isInteger(pid) && Number.isInteger(parent)) {
+      parents.set(pid!, parent!);
+    }
+  }
+  return parents;
+}
+
+/** Whether `ancestor` is on `pid`'s parent chain. */
+export function isProcessAncestor(
+  ancestor: number,
+  pid: number,
+  parents: ReadonlyMap<number, number>,
+): boolean {
+  const seen = new Set<number>();
+  let current = parents.get(pid);
+  while (current !== undefined && current > 0 && !seen.has(current)) {
+    if (current === ancestor) return true;
+    seen.add(current);
+    current = parents.get(current);
+  }
+  return false;
 }
 
 /**
@@ -1190,9 +1241,12 @@ async function handleStop(argv: StopArgs): Promise<void> {
 
 export interface DaemonRestartPlan {
   error?: string;
+  /** Lines printed before the stop leg. */
+  notices?: string[];
   command?: string;
   stopArgs?: string[];
   startArgs?: string[];
+  workspaces?: string[];
   env?: NodeJS.ProcessEnv;
 }
 
@@ -1200,8 +1254,8 @@ export function buildDaemonRestartPlan(
   record: DaemonDiscoveryRecord,
   options: {
     token?: string;
-    web: boolean;
-    requireAuth: boolean;
+    web?: boolean;
+    requireAuth?: boolean;
     force?: boolean;
   },
   entry: string,
@@ -1221,21 +1275,72 @@ export function buildDaemonRestartPlan(
     };
   }
 
-  const requireAuth = options.requireAuth || record.auth === 'bearer';
-  const token =
-    options.token?.trim() || baseEnv['QWEN_SERVER_TOKEN']?.trim() || undefined;
-  if (requireAuth && !token) {
+  // `workspaces` also holds the registrations restored at boot. Replaying
+  // those as `--workspace` would turn a forgettable registration into a
+  // startup workspace, so an older record is replayable only when it cannot
+  // contain one.
+  const workspaces = record.startupWorkspaces?.length
+    ? record.startupWorkspaces
+    : record.workspaces.length <= 1
+      ? [record.primaryWorkspace]
+      : undefined;
+  if (!workspaces) {
     return {
       error:
-        'restarting a bearer daemon requires --token or QWEN_SERVER_TOKEN.',
+        `the daemon on port ${record.port} was started by an older qwen that did not record its startup workspaces; ` +
+        `stop it and start it again with \`qwen daemon start --port ${record.port} --workspace <path>\`.`,
     };
+  }
+
+  const notices: string[] = [];
+  const web = options.web ?? record.web;
+  if (web === undefined) {
+    notices.push(
+      'the record does not say whether the Web Shell was enabled; restarting with it (pass --no-web for API-only).',
+    );
+  }
+  const requireAuth =
+    options.requireAuth ?? record.requireAuth ?? record.auth === 'bearer';
+  if (
+    options.requireAuth === undefined &&
+    record.requireAuth === undefined &&
+    record.auth === 'bearer'
+  ) {
+    notices.push(
+      'the record does not say whether --require-auth was set; restarting with it (pass --no-require-auth to keep /health open on loopback).',
+    );
+  }
+
+  const explicitToken = options.token?.trim() || undefined;
+  const token =
+    explicitToken ?? (baseEnv['QWEN_SERVER_TOKEN']?.trim() || undefined);
+  // An explicit --token configures bearer auth, as it does for `daemon start`;
+  // an inherited QWEN_SERVER_TOKEN must not add auth to an auth-none daemon.
+  const bearer =
+    record.auth === 'bearer' || requireAuth || explicitToken !== undefined;
+  if (bearer && !token) {
+    return {
+      error:
+        record.auth !== 'bearer'
+          ? '--require-auth requires --token or QWEN_SERVER_TOKEN.'
+          : record.tokenGenerated === true
+            ? `the daemon on port ${record.port} uses a token generated at startup, which is not recorded; ` +
+              'pass that token with --token or QWEN_SERVER_TOKEN, or stop the daemon and run `qwen serve` again.'
+            : 'restarting a bearer daemon requires --token or QWEN_SERVER_TOKEN; ' +
+              'a token in a workspace .env or settings file is not read here.',
+    };
+  }
+  if (options.token) {
+    notices.push(
+      '--token is visible in this shell process list; prefer QWEN_SERVER_TOKEN.',
+    );
   }
 
   const javaScriptEntry = isJavaScriptEntry(entry);
   const command = javaScriptEntry ? process.execPath : entry;
   const prefix = javaScriptEntry ? [...execArgv, entry] : [];
   const env = { ...baseEnv };
-  if (requireAuth) {
+  if (bearer) {
     env['QWEN_SERVER_TOKEN'] = token!;
   } else {
     delete env['QWEN_SERVER_TOKEN'];
@@ -1254,33 +1359,200 @@ export function buildDaemonRestartPlan(
     record.hostname,
     '--wait',
   ];
-  const workspaces =
-    record.workspaces.length > 0
-      ? record.workspaces
-      : [record.primaryWorkspace];
   for (const workspace of workspaces) {
     startArgs.push('--workspace', workspace);
   }
-  if (!options.web) startArgs.push('--no-web');
+  if (web === false) startArgs.push('--no-web');
   if (requireAuth) startArgs.push('--require-auth');
 
-  return { command, stopArgs, startArgs, env };
+  return { notices, command, stopArgs, startArgs, workspaces, env };
+}
+
+/**
+ * Restart addresses one daemon, so it does not borrow `stop`'s `--all`
+ * advice.
+ */
+export function selectRestartTarget(
+  entries: readonly DaemonDiscoveryEntry[],
+  port: number | undefined,
+): { entry?: DaemonDiscoveryEntry; error?: string } {
+  if (port !== undefined) {
+    const entry = entries.find((candidate) => candidate.record.port === port);
+    return entry
+      ? { entry }
+      : { error: `No daemon is registered on port ${port}.` };
+  }
+  if (entries.length === 0) {
+    return { error: 'no daemon is registered. Start one with `qwen serve`.' };
+  }
+  if (entries.length > 1) {
+    return {
+      error: `${entries.length} daemons are registered; pass --port <port> to choose one.`,
+    };
+  }
+  return { entry: entries[0]! };
+}
+
+/**
+ * Whether a running bearer daemon rejects `token`. Only a verified listener
+ * is sent the credential, and only a 401 proves a mismatch.
+ */
+export async function daemonRejectsToken(
+  record: DaemonDiscoveryRecord,
+  token: string,
+  allowToken: boolean = listenerIdentityVerified(record),
+): Promise<boolean> {
+  if (!allowToken) return false;
+  try {
+    const response = await fetch(
+      new URL('/daemon/status?detail=summary', record.url),
+      {
+        signal: AbortSignal.timeout(DETAIL_TIMEOUT_MS),
+        redirect: 'manual',
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
+    return response.status === 401;
+  } catch {
+    return false;
+  }
+}
+
+export interface DaemonRestartDeps {
+  run(
+    command: string,
+    args: readonly string[],
+    env: NodeJS.ProcessEnv,
+  ): { status: number | null; error?: Error };
+  entries(): readonly DaemonDiscoveryEntry[];
+  hostedBy(pid: number): boolean;
+  validateWorkspaces(workspaces: readonly string[]): Promise<unknown>;
+  rejectsToken(record: DaemonDiscoveryRecord, token: string): Promise<boolean>;
+}
+
+const defaultRestartDeps: DaemonRestartDeps = {
+  run: (command, args, env) =>
+    spawnSync(command, [...args], { stdio: 'inherit', env }),
+  entries: () => readDaemonDiscoveries().entries,
+  hostedBy: (pid) => {
+    const parents = processParentTable();
+    return (
+      parents !== undefined && isProcessAncestor(pid, process.pid, parents)
+    );
+  },
+  validateWorkspaces: canonicalizeStartWorkspaces,
+  rejectsToken: (record, token) => daemonRejectsToken(record, token),
+};
+
+/**
+ * Run the stop and start legs of a restart and return the exit code. Every
+ * refusal that can be decided while the daemon still runs is decided before
+ * the stop leg.
+ */
+export async function runDaemonRestart(
+  record: DaemonDiscoveryRecord,
+  plan: DaemonRestartPlan,
+  deps: DaemonRestartDeps = defaultRestartDeps,
+): Promise<number> {
+  if (plan.error) {
+    writeStderrLine(`qwen daemon: ${plan.error}`);
+    return 1;
+  }
+  for (const notice of plan.notices ?? []) {
+    writeStderrLine(`qwen daemon: ${notice}`);
+  }
+  // Stopping the daemon tears down the shells it hosts (Web Shell terminals
+  // and agent shell tools), and this command with them, before the start leg.
+  if (
+    pidResolvableHere(record, currentPidNamespace()) &&
+    deps.hostedBy(record.pid)
+  ) {
+    writeStderrLine(
+      `qwen daemon: refusing to restart port ${record.port} from a process that daemon hosts, such as its Web Shell terminal; ` +
+        'stopping it would end this command before the new daemon starts. Run restart from a shell outside the daemon.',
+    );
+    return 1;
+  }
+  try {
+    await deps.validateWorkspaces(plan.workspaces!);
+  } catch (error) {
+    writeStderrLine(
+      `qwen daemon: cannot restart: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return 1;
+  }
+  const token = plan.env?.['QWEN_SERVER_TOKEN'];
+  if (
+    record.auth === 'bearer' &&
+    token &&
+    (await deps.rejectsToken(record, token))
+  ) {
+    writeStderrLine(
+      `qwen daemon: the daemon on port ${record.port} rejected the supplied token. ` +
+        'Restart keeps the daemon credential; pass its current token, or stop it and start it with the new one.',
+    );
+    return 1;
+  }
+
+  const stopped = deps.run(plan.command!, plan.stopArgs!, plan.env!);
+  if (stopped.error) {
+    writeStderrLine(
+      `qwen daemon: could not run daemon stop: ${stopped.error.message}`,
+    );
+    return 1;
+  }
+  if (stopped.status !== 0) {
+    // Every stop refusal leaves the record in place. A missing record means
+    // the daemon exited on its own while the stop leg started.
+    if (deps.entries().some((entry) => entry.record.port === record.port)) {
+      return 1;
+    }
+    writeStdoutLine(
+      `qwen daemon: the daemon on port ${record.port} already exited; starting it again.`,
+    );
+  }
+
+  const started = deps.run(plan.command!, plan.startArgs!, plan.env!);
+  if (started.error) {
+    writeStderrLine(
+      `qwen daemon: could not run daemon start: ${started.error.message}`,
+    );
+    writeStderrLine(
+      `qwen daemon: the daemon on port ${record.port} is stopped.`,
+    );
+    return 1;
+  }
+  if (started.status !== 0) return 1;
+
+  // serve moves to the next free port when the recorded one is taken, and
+  // the start leg succeeds wherever it landed.
+  const restarted = deps
+    .entries()
+    .some(
+      (entry) =>
+        entry.record.port === record.port &&
+        (entry.record.pid !== record.pid ||
+          entry.record.startedAt !== record.startedAt),
+    );
+  if (!restarted) {
+    writeStderrLine(
+      `qwen daemon: the restarted daemon is not on port ${record.port}; the port may be in use. Run \`qwen daemon status\` to find it.`,
+    );
+    return 1;
+  }
+  return 0;
 }
 
 async function handleRestart(argv: RestartArgs): Promise<void> {
   ignoreBrokenPipe();
-  const { entries } = readDaemonDiscoveries();
-  const error = selectionError(entries, { port: argv.port });
-  if (error) {
-    writeStderrLine(`qwen daemon: ${error}`);
-    process.exitCode = 1;
-    return;
-  }
-  const selected = selectDaemonEntries(entries, { port: argv.port });
-  if (selected.length !== 1) {
-    writeStderrLine(
-      'qwen daemon: restart needs exactly one registered daemon; pass --port.',
-    );
+  const target = selectRestartTarget(
+    readDaemonDiscoveries().entries,
+    argv.port,
+  );
+  if (!target.entry) {
+    writeStderrLine(`qwen daemon: ${target.error}`);
     process.exitCode = 1;
     return;
   }
@@ -1294,8 +1566,9 @@ async function handleRestart(argv: RestartArgs): Promise<void> {
     return;
   }
 
+  const { record } = target.entry;
   const plan = buildDaemonRestartPlan(
-    selected[0]!.record,
+    record,
     {
       token: argv.token,
       web: argv.web,
@@ -1304,26 +1577,7 @@ async function handleRestart(argv: RestartArgs): Promise<void> {
     },
     entry,
   );
-  if (plan.error) {
-    writeStderrLine(`qwen daemon: ${plan.error}`);
-    process.exitCode = 1;
-    return;
-  }
-
-  const stopped = spawnSync(plan.command!, plan.stopArgs!, {
-    stdio: 'inherit',
-    env: plan.env,
-  });
-  if (stopped.status !== 0) {
-    process.exitCode = 1;
-    return;
-  }
-
-  const started = spawnSync(plan.command!, plan.startArgs!, {
-    stdio: 'inherit',
-    env: plan.env,
-  });
-  if (started.status !== 0) process.exitCode = 1;
+  if ((await runDaemonRestart(record, plan)) !== 0) process.exitCode = 1;
 }
 
 const startCommand: CommandModule<unknown, StartArgs> = {
@@ -1454,7 +1708,8 @@ const stopCommand: CommandModule<unknown, StopArgs> = {
 
 const restartCommand: CommandModule<unknown, RestartArgs> = {
   command: 'restart',
-  describe: 'Restart a local qwen serve daemon with its recorded settings',
+  describe:
+    'Restart a local qwen serve daemon on its recorded port and workspaces',
   builder: (yargs: Argv) =>
     yargs
       .option('port', {
@@ -1464,22 +1719,23 @@ const restartCommand: CommandModule<unknown, RestartArgs> = {
       .option('token', {
         type: 'string',
         describe:
-          'Bearer token for a restarted daemon; prefer QWEN_SERVER_TOKEN',
+          'Bearer token for the restarted daemon; a running bearer daemon must accept it. Prefer QWEN_SERVER_TOKEN',
       })
       .option('web', {
         type: 'boolean',
-        default: true,
-        describe: 'Serve the Web Shell; use --no-web for API-only',
+        describe:
+          'Serve the Web Shell; defaults to the recorded mode, use --no-web for API-only',
       })
       .option('require-auth', {
         type: 'boolean',
-        default: false,
-        describe: 'Require the bearer token even on loopback',
+        describe:
+          'Require the bearer token even on loopback; defaults to the recorded setting',
       })
       .option('force', {
         type: 'boolean',
         default: false,
-        describe: 'Pass --force to daemon stop (Windows hard kill)',
+        describe:
+          'Pass --force to daemon stop: confirm the Windows hard kill, or SIGKILL a POSIX daemon that does not exit after SIGTERM',
       }),
   handler: async (argv) => {
     await handleRestart(argv);
