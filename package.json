@@ -9,6 +9,7 @@
   "type": "module",
   "workspaces": [
     "packages/*",
+    "packages/cua-driver/typescript",
     "packages/channels/base",
     "packages/channels/telegram",
     "packages/channels/weixin",
@@ -58,7 +59,9 @@
     "test:ci": "npm run test:ci:workspaces && npm run test:scripts",
     "test:release": "npm run test:release:workspaces && npm run test:scripts",
     "test:release:workspaces": "cross-env NODE_OPTIONS=\"--max-old-space-size=3072\" npm run test:ci --workspaces --if-present -- --coverage.enabled=false",
-    "test:scripts": "vitest run --config ./scripts/tests/vitest.config.ts",
+    "test:standalone:runtimes": "node scripts/test-standalone-runtimes.mjs",
+    "test:standalone:runtimes:ci": "node scripts/test-standalone-runtimes.mjs --ci",
+    "test:scripts": "npm run test:standalone:runtimes:ci && vitest run --config ./scripts/tests/vitest.config.ts",
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
     "test:e2e:managed-agent-server": "tsx scripts/run-managed-agent-server-e2e.ts",
     "test:e2e:managed-session-failover": "tsx scripts/run-managed-agent-server-e2e.ts --session-failover",

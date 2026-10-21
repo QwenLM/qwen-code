@@ -1568,7 +1568,7 @@ final class WorkspaceCsiApplicationInventory {
                 if (!instructions) {
                     JsonNode skills = publicJson(raw);
                     requireEncoded(skills.isArray());
-                    AgentDefinitionExtensions.skills(PUBLIC_ARTIFACTS.convertValue(skills, Object.class), true);
+                    AgentDefinitionExtensions.sessionSkills(PUBLIC_ARTIFACTS.convertValue(skills, Object.class));
                 }
             } catch (IOException malformed) {
                 throw new IllegalArgumentException("Invalid agent instructions", malformed);
