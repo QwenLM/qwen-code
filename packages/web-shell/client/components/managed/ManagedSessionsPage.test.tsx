@@ -3878,6 +3878,39 @@ describe('ManagedSessionsPage', () => {
     }
   });
 
+  it.each([false, true])(
+    'announces a list failure once when interactive is %s',
+    async (interactive) => {
+      mocks.client.listSessions.mockRejectedValue(
+        new Error('History unavailable'),
+      );
+      await render('s1', 'en', provider, undefined, interactive);
+      expect(
+        [...container.querySelectorAll('[role="alert"]')].map(
+          (element) => element.textContent,
+        ),
+      ).toEqual(['History unavailable']);
+    },
+  );
+
+  it.each(['History unavailable', 'Not found'])(
+    'keeps distinct detail errors alongside an inactive navigation alert: %s',
+    async (detailError) => {
+      mocks.client.listSessions.mockRejectedValue(
+        new Error('History unavailable'),
+      );
+      mocks.client.getSession.mockRejectedValue(
+        new JavaManagedAgentHttpError(404, 'session_not_found', detailError),
+      );
+      await render('s1', 'en', provider, undefined, false);
+      expect(
+        [...container.querySelectorAll('[role="alert"]')]
+          .map((element) => element.textContent)
+          .sort(),
+      ).toEqual([...new Set(['History unavailable', detailError])].sort());
+    },
+  );
+
   it('shows a fresh action error alongside a sticky terminal stop', async () => {
     vi.useFakeTimers();
     mocks.client.getSession

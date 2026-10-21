@@ -1269,7 +1269,8 @@ function ManagedSessionsContent({
       {[
         ...new Set(
           [detail.stoppedReason, detail.error, error].filter(
-            (message): message is string => Boolean(message),
+            (message): message is string =>
+              Boolean(message) && (interactive || message !== error),
           ),
         ),
       ].map((message) => (

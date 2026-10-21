@@ -299,6 +299,7 @@ export default defineConfig(({ mode }) => ({
           'react/jsx-dev-runtime',
           'react-dom',
           'react-dom/client',
+          'react-dom/server',
           'radix-ui',
           'lucide-react',
           'class-variance-authority',
