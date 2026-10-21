@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   APP_URI,
+  BUNDLED_APP_URI,
   MAX_RESULT_BYTES,
   MAX_RESULT_CHARS,
   META_KEY,
@@ -77,55 +78,107 @@ afterEach(async () => {
 });
 
 describe('built generated UI MCP artifact', () => {
-  it('advertises one model-only show tool and the fixed local App resource', async () => {
-    const client = await connect(await temporary());
-    const { tools } = await client.listTools();
-    expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({
-      name: 'generated_ui_show',
-      inputSchema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          title: { type: 'string', minLength: 1, maxLength: 120 },
-          summary: { type: 'string', minLength: 1, maxLength: 2000 },
-          html: { type: 'string', minLength: 1, maxLength: 12_000 },
-          css: { type: 'string', maxLength: 6000 },
-          javascript: { type: 'string', maxLength: 12_000 },
+  it.each([
+    { entry: 'main.js', appUri: APP_URI },
+    { entry: 'bundled-main.js', appUri: BUNDLED_APP_URI },
+  ])(
+    'advertises the fixed local App resource for $entry',
+    async ({ entry, appUri }) => {
+      const client = await connect(
+        await temporary(),
+        join(packageRoot, 'dist', entry),
+      );
+      const { tools } = await client.listTools();
+      expect(tools).toHaveLength(1);
+      expect(tools[0]).toMatchObject({
+        name: 'generated_ui_show',
+        inputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            title: { type: 'string', minLength: 1, maxLength: 120 },
+            summary: { type: 'string', minLength: 1, maxLength: 2000 },
+            html: { type: 'string', minLength: 1, maxLength: 12_000 },
+            css: { type: 'string', maxLength: 6000 },
+            javascript: { type: 'string', maxLength: 12_000 },
+          },
+          required: ['title', 'summary', 'html', 'css', 'javascript'],
         },
-        required: ['title', 'summary', 'html', 'css', 'javascript'],
-      },
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        openWorldHint: false,
-      },
-      _meta: { ui: { resourceUri: APP_URI, visibility: ['model'] } },
-    });
-    const { resources } = await client.listResources();
-    expect(resources).toHaveLength(1);
-    expect(resources[0]).toMatchObject({
-      uri: APP_URI,
-      mimeType: 'text/html;profile=mcp-app',
-    });
-    const resource = (await client.readResource({ uri: APP_URI })).contents[0];
-    expect(resource).toMatchObject({
-      uri: APP_URI,
-      mimeType: 'text/html;profile=mcp-app',
-      _meta: {
-        ui: {
-          csp: {
-            connectDomains: [],
-            resourceDomains: [],
-            frameDomains: [],
-            baseUriDomains: [],
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          openWorldHint: false,
+        },
+        _meta: { ui: { resourceUri: appUri, visibility: ['model'] } },
+      });
+      const { resources } = await client.listResources();
+      expect(resources).toHaveLength(1);
+      expect(resources[0]).toMatchObject({
+        uri: appUri,
+        mimeType: 'text/html;profile=mcp-app',
+      });
+      const resource = (await client.readResource({ uri: appUri })).contents[0];
+      expect(resource).toMatchObject({
+        uri: appUri,
+        mimeType: 'text/html;profile=mcp-app',
+        _meta: {
+          ui: {
+            csp: {
+              connectDomains: [],
+              resourceDomains: [],
+              frameDomains: [],
+              baseUriDomains: [],
+            },
           },
         },
-      },
-    });
-    if (!('text' in resource)) throw new Error('Expected an HTML resource.');
-    expect(typeof resource.text).toBe('string');
-    expect(Buffer.byteLength(resource.text)).toBeLessThanOrEqual(1024 * 1024);
+      });
+      if (!('text' in resource)) throw new Error('Expected an HTML resource.');
+      expect(typeof resource.text).toBe('string');
+      expect(Buffer.byteLength(resource.text)).toBeLessThanOrEqual(1024 * 1024);
+      expect(parseToolResult(await show(client, input))).toMatchObject(input);
+      await expect(
+        client.readResource({
+          uri: appUri === APP_URI ? BUNDLED_APP_URI : APP_URI,
+        }),
+      ).rejects.toThrow();
+    },
+  );
+
+  it('runs the built-in assets from a relocated directory without node_modules', async () => {
+    const output = join(
+      await temporary(),
+      '安装目录 with spaces',
+      'generated-ui',
+    );
+    await mkdir(output, { recursive: true });
+    for (const [source, destination] of [
+      ['bundled-main.js', 'main.js'],
+      ['app.html', 'app.html'],
+      ['skills', 'skills'],
+      ['THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_NOTICES.txt'],
+    ]) {
+      await cp(join(packageRoot, 'dist', source), join(output, destination), {
+        recursive: true,
+      });
+    }
+    const client = await connect(await temporary(), join(output, 'main.js'));
+    expect(parseToolResult(await show(client, input))).toMatchObject(input);
+    expect(
+      (await client.readResource({ uri: BUNDLED_APP_URI })).contents[0],
+    ).toHaveProperty('text');
+    expect(
+      await readFile(join(output, 'skills/generated-ui/SKILL.md'), 'utf8'),
+    ).toBe(
+      await readFile(join(packageRoot, 'skills/generated-ui/SKILL.md'), 'utf8'),
+    );
+    const notices = await readFile(
+      join(output, 'THIRD_PARTY_NOTICES.txt'),
+      'utf8',
+    );
+    expect(notices).toContain('@modelcontextprotocol/sdk@');
+    expect(notices).toContain('quickjs-emscripten-core@');
+    expect(notices).toContain('dompurify@');
+    expect(await readdir(output)).not.toContain('node_modules');
   });
 
   it('keeps concurrent cards independent without mutating the resource or workspace', async () => {
@@ -254,6 +307,7 @@ describe('built generated UI MCP artifact', () => {
       expect.arrayContaining([
         'dist/main.js',
         'dist/app.html',
+        'dist/THIRD_PARTY_NOTICES.txt',
         'qwen-extension.json',
         'skills/generated-ui/SKILL.md',
         'README.md',
