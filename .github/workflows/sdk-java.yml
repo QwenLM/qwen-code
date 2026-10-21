@@ -453,10 +453,12 @@ jobs:
     # repository, so holding the lock across the whole integration suite
     # serialized the fast tier behind a multi-hour hold (run 39628985638 held
     # it 15:54-18:57 while run 39593018205's fast-tier job burned its full
-    # 90-minute wait). The ceiling absorbs that wait, the ~3-hour Maven run
-    # and 30 minutes of uncapped setup: 300. Hosted lanes never take the lock
-    # and inherit this ceiling as a bound, not as an expected duration.
-    timeout-minutes: 300
+    # 90-minute wait). The ceiling absorbs that wait, the measured 183-minute
+    # hold this step used to take (seed, both Maven runs, and write-back) and
+    # 30 minutes of uncapped setup: 303, plus 17 minutes of margin: 320.
+    # Hosted lanes never take the lock and inherit this ceiling as a bound,
+    # not as an expected duration.
+    timeout-minutes: 320
     env:
       MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
@@ -699,16 +701,23 @@ jobs:
             -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
             -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
           # Only the write-back mutates host-shared state, so only it takes
-          # the per-host lock. One acquisition spans the two Maven runs' cache
-          # refresh: run 39353663670's verify step waited the full 90 minutes
-          # after the install step released the lock, so a per-step lock let
-          # this job lose its place in the host queue between installing and
+          # the per-host lock. Both Maven runs above have already passed, and
+          # the write-back itself is best-effort, so a contended queue must
+          # degrade to a skipped copy rather than redden the gate. The
+          # helper's ::error:: timeout signature stays because the fast-tier
+          # site is fatal and the rerun classifier keys on that text; the
+          # warning below records the skipped copy on this site. One
+          # acquisition spans the two Maven runs' cache refresh: run
+          # 39353663670's verify step waited the full 90 minutes after the
+          # install step released the lock, so a per-step lock let this job
+          # lose its place in the host queue between installing and
           # verifying. The ticketed queue in sdk-java-lock.sh makes that one
           # wait FIFO instead of a wake-up race against sibling holds
           # (qwen-code#14743).
+          lock_ok=1
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
             source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
-            sdk_java_lock_acquire 5400
+            sdk_java_lock_acquire 5400 || lock_ok=0
           else
             # release-sdk-java.yml resumes an existing tag by checking out
             # that immutable commit, which may predate this helper. Fall
@@ -718,26 +727,30 @@ jobs:
             exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
             if ! flock --wait 5400 9; then
               echo "::error::sdk-java host lock not acquired within 90 minutes"
-              exit 1
+              lock_ok=0
             fi
           fi
-          # Close the cache loop inside that lock: the one-way seed above alone
-          # does not recapture the Server dependency tree after a pom key
-          # rotation. The excludes name the two in-house fixed release
-          # coordinates rather than the whole com/alibaba group, so
-          # third-party artifacts under it (druid) still recapture into the
-          # host-shared ~/.m2. Best-effort like the seed: the warning arm keeps
-          # a copy failure from reddening the gate after mvn has already
-          # passed, and pipefail keeps a failing left-hand tar from being
-          # masked by the extractor. On a fresh ECS host nothing creates
-          # ~/.m2/repository anymore (the hosted-only cache no longer restores
-          # it), so create it before the write-back or every job re-resolves
-          # through the egress proxy instead of bootstrapping the shared
-          # repository.
-          mkdir -p "${HOME}/.m2/repository"
-          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
-            | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
-            || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          if [ "${lock_ok}" = 1 ]; then
+            # Close the cache loop inside that lock: the one-way seed above
+            # alone does not recapture the Server dependency tree after a pom
+            # key rotation. The excludes name the two in-house fixed release
+            # coordinates rather than the whole com/alibaba group, so
+            # third-party artifacts under it (druid) still recapture into the
+            # host-shared ~/.m2. Best-effort like the seed: the warning arm
+            # keeps a copy failure from reddening the gate after mvn has
+            # already passed, and pipefail keeps a failing left-hand tar from
+            # being masked by the extractor. On a fresh ECS host nothing
+            # creates ~/.m2/repository anymore (the hosted-only cache no
+            # longer restores it), so create it before the write-back or
+            # every job re-resolves through the egress proxy instead of
+            # bootstrapping the shared repository.
+            mkdir -p "${HOME}/.m2/repository"
+            tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
+              | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
+              || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          else
+            echo "::warning::sdk-java host lock not acquired; skipping the best-effort Maven cache write-back — the gate result above is unaffected"
+          fi
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
       # .mvn/maven.config, so compare what ran with the source tree.

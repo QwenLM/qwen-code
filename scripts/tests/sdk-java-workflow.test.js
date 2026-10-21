@@ -145,6 +145,14 @@ describe('SDK Java self-hosted workflow guards', () => {
     for (const command of testCommands) {
       expect(command.trim(), testStep.name).toMatch(/ 9>&-$/);
     }
+    // Both jobs share one lock file, so each must acquire from exactly one
+    // step: a second acquisition in either job reintroduces the lost-place
+    // race (#14743).
+    expect(
+      ['test', 'mysql-integration'].flatMap((name) =>
+        jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
+      ),
+    ).toHaveLength(2);
     // The integration job takes the lock only for the cache write-back, so
     // every Maven command must finish before the acquisition; otherwise a
     // child that inherited fd 9 could keep the host lock past the step.
@@ -153,9 +161,15 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     expect(integrationStep).toBeDefined();
     expect(integrationStep.run).toContain('mvn --batch-mode');
-    expect(integrationStep.run.lastIndexOf('mvn --batch-mode')).toBeLessThan(
-      integrationStep.run.indexOf('sdk_java_lock_acquire'),
-    );
+    const collapsed = integrationStep.run.replace(/\\\n/g, ' ');
+    const integrationLockAt = collapsed.indexOf('sdk_java_lock_acquire');
+    const integrationCommands = [
+      ...collapsed.matchAll(/^\s*(\S*\/)?mvn\b.*$/gm),
+    ];
+    expect(integrationCommands.length).toBeGreaterThan(0);
+    for (const command of integrationCommands) {
+      expect(command.index, command[0]).toBeLessThan(integrationLockAt);
+    }
   });
 
   it.skipIf(process.platform !== 'linux')(
@@ -984,6 +998,16 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step.run).toContain(
       '::error::sdk-java host lock not acquired within',
     );
+    // Both Maven runs have already passed when the write-back waits, so a
+    // timed-out acquisition must skip the copy, not fail the step.
+    expect(step.run).toMatch(/sdk_java_lock_acquire 5400 \|\| lock_ok=0/);
+    expect(step.run).toMatch(
+      /if ! flock --wait 5400 9; then\n\s+echo "::error::sdk-java host lock not acquired within 90 minutes"\n\s+lock_ok=0/,
+    );
+    expect(step.run).toContain('if [ "${lock_ok}" = 1 ]; then');
+    expect(step.run).toContain(
+      'skipping the best-effort Maven cache write-back',
+    );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // Both sites share one wait budget: run 39229303984 died at the old
     // 60-minute wait before Maven started.
@@ -1006,11 +1030,12 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // Maven child can inherit it.
     expect(lockAt).toBeGreaterThan(verifyAt);
     expect(writeBackAt).toBeGreaterThan(lockAt);
-    // The ceiling must absorb one full lock wait plus the ~3 hours of
-    // measured Maven work and ~30 minutes of uncapped setup.
+    // The ceiling must absorb one full lock wait, the measured 183-minute
+    // hold (seed, both Maven runs, and write-back) and ~30 minutes of
+    // uncapped setup, with margin.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
-    ).toBeGreaterThanOrEqual(seconds + 180 * 60 + 30 * 60);
+    ).toBeGreaterThanOrEqual(seconds + 183 * 60 + 30 * 60 + 15 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus its own measured hold (the sdk-java suite plus
     // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
@@ -1055,21 +1080,6 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step.run).toContain(
       '|| echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
     );
-    // One body replaced the two-step split, so only these positions still
-    // order the phases: the write-back runs against a directory the seed has
-    // not created yet if hoisted above it, the lock must cover the write-back
-    // alone, and its warning arm swallows the failure instead of reddening
-    // the gate.
-    const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository"');
-    const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
-    const verifyAt = step.run.indexOf('-Pmysql-integration');
-    const lockAt = step.run.indexOf('sdk_java_lock_acquire');
-    const writeBackAt = step.run.indexOf('tar -C "${RUNNER_TEMP}/m2-repo"');
-    expect(seedAt).toBeGreaterThan(-1);
-    expect(installAt).toBeGreaterThan(seedAt);
-    expect(verifyAt).toBeGreaterThan(installAt);
-    expect(lockAt).toBeGreaterThan(verifyAt);
-    expect(writeBackAt).toBeGreaterThan(lockAt);
   });
 });
 

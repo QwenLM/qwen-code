@@ -5,11 +5,11 @@
 ## Problem
 
 `.github/workflows/sdk-java.yml` serializes the self-hosted Maven steps that
-share the host Maven cache on one file,
-`~/.cache/qwen-code-ci/sdk-java-tests.lock`, via `flock --wait`. On
-2026-10-18/19 and 2026-10-20 the shared ECS pool starved repeatedly: jobs
-waited the full 2400 s, then 3600 s, then 5400 s budget and failed before
-executing a test, on at least three physical hosts at once (#14566, #14743).
+take the host lock on one file, `~/.cache/qwen-code-ci/sdk-java-tests.lock`,
+via `flock --wait`. On 2026-10-18/19 and 2026-10-20 the shared ECS pool
+starved repeatedly: jobs waited the full 2400 s, then 3600 s, then 5400 s
+budget and failed before executing a test, on at least three physical hosts
+at once (#14566, #14743).
 
 `flock(2)` makes no promise about the order in which blocked waiters are
 granted the lock, and the order measured on Linux is insertion order: a
@@ -81,17 +81,32 @@ A new sourced helper, `.github/scripts/sdk-java-lock.sh`, replaces the inline
 
 ### What the lock covers
 
-The lock covers the fast tier's Maven run, which resolves from the host-shared
-`~/.m2` repository. The `mysql-integration` lane resolves from a job-local
-repository seeded from that cache, so only its cache write-back takes the lock;
-its multi-hour `clean verify` does not. Holding the lock across that suite
-starved the fast tier deterministically: on 2026-10-21, run 39628985638's
-integration lane held it for about three hours while run 39593018205's
-fast-tier job burned its full 5400 s wait and failed before Maven started
-(issue #15108). The 5400 s budget and the fast tier's 150-minute ceiling are
-unchanged; the integration lane's ceiling moves from 200 to 300 minutes so
-the post-Maven write-back wait fits the same job bound, and the lane no longer
-contributes a multi-hour hold to the queue.
+The lock covers the fast tier's self-hosted `test` job, whose Maven run
+resolves from the host-shared `~/.m2` repository. Two pool lanes that would
+otherwise share the host repository are deliberately outside the lock:
+
+- `mysql-integration` resolves from a job-local repository seeded from that
+  cache, so only its cache write-back takes the lock; its multi-hour
+  `clean verify` does not. Holding the lock across that suite starved the
+  fast tier deterministically: on 2026-10-21, run 39628985638's integration
+  lane held it for about three hours while run 39593018205's fast-tier job
+  burned its full 5400 s wait and failed before Maven started (issue
+  #15108). The write-back acquisition is best-effort at this site: a timeout
+  skips the copy with a warning rather than reddening a gate whose Maven
+  runs already passed.
+- `daemon-e2e` runs in both tiers with the same shared-repository
+  `MAVEN_ARGS` form, but its Maven run is a single `test` goal measured at
+  about a minute, against the fast tier's 925 s hold. It stays unlocked
+  rather than queueing behind multi-hour suites.
+
+New pool lanes that resolve from the host-shared repository must either take
+the lock or record the same narrow exemption here.
+
+The 5400 s budget and the fast tier's 150-minute ceiling are unchanged; the
+integration lane's ceiling moves from 200 to 320 minutes so the post-Maven
+write-back wait, the measured 183-minute hold it used to take (seed, both
+Maven runs, and write-back), and 30 minutes of setup fit with margin. The
+lane no longer contributes a multi-hour hold to the queue.
 
 ### Why fairness over the alternatives
 
@@ -100,8 +115,9 @@ contributes a multi-hour hold to the queue.
   share the host safely on a pool that just OOMed a build. The integration
   lane is exempt from the long hold for the narrower reason above: its Maven
   run is already isolated by a job-local repository and a per-job database,
-  and the pool's other long Maven suites (for example
-  `hosted-harness-mysql`) do not take this lock at all.
+  and the pool's other job-local-repository Maven lanes
+  (`event-transport-broker`, `event-transport-multi-node`) take no lock at
+  all.
 - Cap registrations per host: needs pool topology changes outside the repo
   and leaves the same lost-place race per host.
 - Second host: at least three hosts starved simultaneously; host count is
@@ -123,6 +139,13 @@ contributes a multi-hour hold to the queue.
   the kernel releases that lock when the holder dies, so there is no aging
   path to clear; a kill inside the read-increment-write costs at most one
   retry.
+- The `mysql-integration` lane's Maven run now overlaps the fast tier's on
+  the same host instead of queueing behind the lock. The evidence that
+  concurrent suites share a host safely is the pre-existing unlocked
+  `event-transport-broker` and `event-transport-multi-node` lanes, which
+  seed job-local repositories and run long Maven verifies alongside it. If
+  a fast-tier job starts failing on memory rather than on the lock queue,
+  suspect that overlap first.
 
 ## Validation plan
 
@@ -143,7 +166,8 @@ contributes a multi-hour hold to the queue.
 
 - Both lock sites in `sdk-java.yml` acquire through the helper at 5400 s;
   the integration site does so only for its shared-cache write-back, after
-  both Maven runs.
+  both Maven runs, and a timeout there skips the write-back instead of
+  failing the lane.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.
