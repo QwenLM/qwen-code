@@ -48,6 +48,7 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...patched, default: patched };
 });
 
+import { DEFAULT_WRITE_QUEUE_BYTES } from '../utils/bun-pty.js';
 import {
   MAX_CONCURRENT_WEB_TERMINALS,
   resolveWebTerminalShell,
@@ -1233,13 +1234,59 @@ describe('WebTerminalRegistry', () => {
     expect(registry.write('terminal:io', 'x')).toBe('backpressure');
   });
 
-  it('accepts one complete oversized input frame on an idle session', async () => {
+  it('refuses an input frame above the admission budget on an idle session', async () => {
     const registry = await start('terminal:paste');
     const paste = 'x'.repeat(256 * 1024 + 1);
 
-    expect(registry.write('terminal:paste', paste)).toBe('written');
     expect(registry.write('terminal:paste', paste)).toBe('backpressure');
-    expect(write).toHaveBeenCalledOnce();
+    expect(write).not.toHaveBeenCalled();
+    expect(registry.readSnapshot('terminal:paste')?.failed).toBeUndefined();
+  });
+
+  it('refuses a single input frame above the backend write budget without failing the session', async () => {
+    const errorListeners: Array<(err: Error) => void> = [];
+    const acceptedBytes = vi.fn((data: string) => {
+      if (Buffer.byteLength(data) <= DEFAULT_WRITE_QUEUE_BYTES) return;
+      for (const listener of errorListeners) {
+        listener(
+          Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+            code: 'QWEN_PTY_WRITE_LIMIT',
+          }),
+        );
+      }
+    });
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write: acceptedBytes,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    });
+    const registry = await start('terminal:oversized-frame');
+
+    expect(
+      registry.write(
+        'terminal:oversized-frame',
+        'x'.repeat(DEFAULT_WRITE_QUEUE_BYTES + 1),
+      ),
+    ).toBe('backpressure');
+    expect(acceptedBytes).not.toHaveBeenCalled();
+    expect(
+      registry.readSnapshot('terminal:oversized-frame')?.failed,
+    ).toBeUndefined();
   });
 
   it.skipIf(process.platform === 'win32')(

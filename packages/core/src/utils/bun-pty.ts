@@ -261,7 +261,7 @@ const EXIT_DRAIN_TIMEOUT_MS = 500;
 // with an explicit structured error: nothing is dropped silently, and pause
 // is never released automatically.
 const DEFAULT_PAUSED_HOLD_BYTES = 4 * 1024 * 1024;
-const DEFAULT_WRITE_QUEUE_BYTES = 1024 * 1024;
+export const DEFAULT_WRITE_QUEUE_BYTES = 1024 * 1024;
 // Paused data is coalesced into fixed-size blocks instead of retaining one
 // Buffer per read: pty read sizes vary wildly with the producer (bulk awk
 // floods arrive as ~0.5 KB reads, a `yes` drip as ~40 byte reads), so

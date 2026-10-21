@@ -195,11 +195,14 @@ with a loud, structured failure past it.
   `debugLogger.warn`. A warn is not a failed session or proof of cleanup, and
   may not persist without an active debug session.
 
-An idle terminal's first input is not capped by the registry's accumulated
-input gate. Above the backend's unchanged 1 MiB write-queue cap, it explicitly
-fails the session; input is not split, replayed or silently accepted. This is
-a budget-failure contract, not lossless backpressure. A future pre-admission
-input policy requires a separate decision.
+Every input frame is capped by the registry's accumulated input gate, including
+an idle terminal's first frame: a frame that would push the session's
+unacknowledged input past 256 KiB is refused as `backpressure` before it reaches
+the backend, so one oversized paste cannot trip the backend's 1 MiB write-queue
+cap and terminate the session. The backend cap still governs accumulated queued
+writes: above it the session explicitly fails, and input is never split,
+replayed or silently accepted. A future pre-admission input policy requires a
+separate decision.
 
 Reference behaviour pinned by probe (Node wrapper, pause → child exits with
 code 7): `onExit` exactly once ~200 ms after child death via the

@@ -685,7 +685,6 @@ export class WebTerminalRegistry {
       data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
     if (
       !isRecoveryControl &&
-      session.unacknowledgedInputBytes !== 0 &&
       session.unacknowledgedInputBytes + bytes > MAX_UNACKNOWLEDGED_INPUT_BYTES
     ) {
       return 'backpressure';
