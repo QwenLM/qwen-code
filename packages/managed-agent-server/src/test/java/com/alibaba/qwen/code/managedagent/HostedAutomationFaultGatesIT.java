@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,6 +41,7 @@ import java.nio.file.attribute.FileTime;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -54,6 +54,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 import java.util.stream.LongStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -69,6 +70,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class HostedAutomationFaultGatesIT {
     private static final String TOKEN = "fg11-local-fixture";
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+    // A public task event cursor: base64url of its scope key and sequence.
+    private static final Pattern TASK_CURSOR = Pattern.compile("tev2:[^:]+:([0-9]+)");
     private static final String OPERATIONS = "/automations/operations";
     // The Harness store client's bounded retry of one commit (http-managed-session-store.ts).
     private static final int STORE_ATTEMPTS = 3;
@@ -1142,8 +1145,7 @@ class HostedAutomationFaultGatesIT {
                 .as("the task journal itself has no gap").isEqualTo(LongStream
                         .rangeClosed(1, taskLedger.size()).boxed().toList());
         assertThat(taskView.stream().map(this::servedTaskEvent).toList())
-                .as("the cut prefix and the resumed suffix are the task journal").isEqualTo(taskLedger.stream()
-                        .map(row -> row.substring(row.indexOf(' ') + 1)).toList());
+                .as("the cut prefix and the resumed suffix are the task journal").isEqualTo(taskLedger);
         assertThat(taskView).extracting(event -> event.path("state").asText())
                 .as("one terminal state, last").endsWith("completed")
                 .filteredOn(state -> List.of("completed", "failed", "cancelled").contains(state)).hasSize(1);
@@ -1177,8 +1179,8 @@ class HostedAutomationFaultGatesIT {
                 .rangeClosed(1, sequences.size()).boxed().toList());
         assertThat(sessionView.stream().map(frame -> frame.path("sequence").asLong() + " "
                 + frame.path("event_id").asText() + " " + frame.path("type").asText()).toList())
-                .as("the Session frames are its journal").isEqualTo(sessionLedger(session)
-                        .subList(0, sessionView.size()));
+                .as("the Session frames are its journal").isEqualTo(sessionLedger(session).stream()
+                        .limit(sessionView.size()).toList());
 
         assertThat(commands(session, "settleRun")).filteredOn(command -> command.startsWith(run + ":"))
                 .as("the run settled once").containsExactly(run + ":3");
@@ -1274,13 +1276,19 @@ class HostedAutomationFaultGatesIT {
         return jdbc.query("SELECT sequence_id, event_type, gmt_create, state, runtime_state FROM ma_public_event"
                 + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?"
                 + " ORDER BY sequence_id", (row, index) -> row.getLong("sequence_id") + " "
-                        + ManagedTaskEventStore.encodeCursor(tenant, session, task, row.getLong("sequence_id"))
-                        + " " + row.getString("event_type") + " " + row.getLong("gmt_create") + " "
+                        + row.getString("event_type") + " " + row.getLong("gmt_create") + " "
                         + row.getString("state") + " " + row.getString("runtime_state"), tenant, session, task);
     }
 
+    // The served event as its ledger row. The sequence is decoded from the
+    // served cursor here rather than re-encoded with the store's own encoder,
+    // so the cursor's format is witnessed independently of the code under
+    // test; a cursor that does not decode stays in the row and reddens it.
     private String servedTaskEvent(JsonNode event) {
-        return event.path("cursor").asText() + " " + event.path("type").asText() + " "
+        String cursor = new String(Base64.getUrlDecoder().decode(event.path("cursor").asText()),
+                StandardCharsets.US_ASCII);
+        var position = TASK_CURSOR.matcher(cursor);
+        return (position.matches() ? position.group(1) : cursor) + " " + event.path("type").asText() + " "
                 + event.path("created_at").asLong() + " " + text(event, "state") + " "
                 + text(event, "runtime_state");
     }
