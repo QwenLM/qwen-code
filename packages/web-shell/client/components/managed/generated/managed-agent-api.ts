@@ -810,6 +810,8 @@ export interface components {
             approvalMode?: "default" | "auto-edit" | "yolo";
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
+            /** @description Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency. */
+            skills?: components["schemas"]["SessionCreationSkill"][];
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */
@@ -1511,6 +1513,8 @@ export interface components {
             planModeSupported?: boolean;
             /** @description Optional deployment capability; missing means false. */
             inputAttachments?: boolean;
+            /** @description Optional deployment capability; missing means false. Requires a compatible Harness and durable Session Store. */
+            skillsSupported?: boolean;
         };
         /** @description Safe allowlisted observation for a Workspace-bound Session. Unknown counts are omitted, never estimated. */
         WebShellModelContext: {
@@ -1743,6 +1747,20 @@ export interface components {
             notices: string[];
             truncated: boolean;
             outputFiles: string[];
+        };
+        SessionCreationSkill: {
+            /** @description Unique Skill name, at most 128 UTF-8 bytes. */
+            name: string;
+            /** @description At most 4096 UTF-8 bytes. */
+            description: string;
+            /** @description Static instructions, at most 524288 UTF-8 bytes. */
+            body: string;
+            /** @description Canonical POSIX path relative to the Session working directory; defaults to dot. */
+            base_directory?: string;
+            /** @description Whether the model may invoke this Skill; defaults to true. */
+            model_invocable?: boolean;
+            /** @description Whether the user may invoke this Skill; defaults to true. */
+            user_invocable?: boolean;
         };
     };
     responses: {
