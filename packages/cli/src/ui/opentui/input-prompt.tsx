@@ -2100,6 +2100,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           // never emits DECSCUSR, and a caret the terminal blinks away reads as
           // a missing caret, so pin the shape and keep it steady.
           cursorStyle={{ style: 'block', blinking: false }}
+          selectionOccupancy="boundary"
           selectionBg={C.selectionBg}
           selectionFg={C.selectionFg}
           wrapMode="char"

@@ -608,6 +608,46 @@ try {
   assert.equal(native.plainText, 'Zcd');
 
   await change(() => getComposerHandle()!.setText('abcd'));
+  await change(() => ui!.mockInput.pressKey('END'));
+  await change(() => ui!.mockInput.pressArrow('left', { shift: true }));
+  await change(() => ui!.mockInput.pressArrow('left', { shift: true }));
+  assert.equal(native.getSelectedText(), 'cd', 'reverse keyboard selection');
+  await composerInput('Z');
+  assert.equal(native.plainText, 'abZ');
+  await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
+  assert.equal(native.plainText, 'abcd', 'reverse replacement is one undo');
+  assert.equal(getComposerBuffer()!.text, 'abcd');
+
+  await change(() => getComposerHandle()!.setText('abcd'));
+  await change(() => ui!.mockInput.pressKey('HOME'));
+  await change(() => ui!.mockInput.pressKey('END', { shift: true }));
+  assert.equal(native.getSelectedText(), 'abcd', 'Shift+End selects the line');
+  await composerInput('Z');
+  assert.equal(native.plainText, 'Z');
+  await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
+  assert.equal(native.plainText, 'abcd', 'full-line replacement is one undo');
+  assert.equal(getComposerBuffer()!.text, 'abcd');
+
+  for (const [text, selected, replaced] of [
+    ['甲乙', '甲', 'Z乙'],
+    ['e\u0301x', 'e\u0301', 'Zx'],
+  ] as const) {
+    await change(() => getComposerHandle()!.setText(text));
+    await change(() => ui!.mockInput.pressKey('HOME'));
+    await change(() => ui!.mockInput.pressArrow('right', { shift: true }));
+    assert.equal(
+      native.getSelectedText(),
+      selected,
+      'keyboard selection contains one complete glyph',
+    );
+    await composerInput('Z');
+    assert.equal(native.plainText, replaced);
+    await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
+    assert.equal(native.plainText, text, 'glyph replacement is one undo');
+    assert.equal(getComposerBuffer()!.text, text);
+  }
+
+  await change(() => getComposerHandle()!.setText('abcd'));
   await act(async () => {
     await ui!.mockMouse.click(native.x + 1, native.y);
   });
