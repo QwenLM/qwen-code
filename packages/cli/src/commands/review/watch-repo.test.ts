@@ -135,6 +135,27 @@ describe('diffRepoWatch', () => {
     ).toEqual(['1', '9']);
   });
 
+  it('carries at most one more page of unseen PRs, newest first', () => {
+    const before = cursor({
+      heads: Object.fromEntries(
+        [1, 2, 3, 4, 5, 10].map((n) => [
+          String(n),
+          { sha: pr(n).headRefOid, draft: false },
+        ]),
+      ),
+    });
+    const after = diffRepoWatch([pr(10), pr(11)], before, NO_FILTERS, true);
+    expect(Object.keys(after.cursor.heads)).toEqual(['4', '5', '10', '11']);
+    expect(after.events.map((e) => [e.type, e.number])).toEqual([
+      ['pr_opened', 11],
+    ]);
+    // A dropped PR that comes back is new to the cursor.
+    const back = diffRepoWatch([pr(2), pr(10)], after.cursor, NO_FILTERS, true);
+    expect(back.events.map((e) => [e.type, e.number])).toEqual([
+      ['pr_opened', 2],
+    ]);
+  });
+
   it('applies the filters to events but follows every PR', () => {
     const prs = [
       pr(1, { author: { login: 'me', __typename: 'User' } }),

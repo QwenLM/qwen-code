@@ -7,7 +7,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
-import { git } from '../review/lib/git.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
 
@@ -76,13 +75,7 @@ export interface AutofixPrPaths {
  * worktree of a clone, so a watch belongs to the clone rather than to the
  * worktree a helper runs from, the autofix worktree itself included.
  */
-export function repoRoot(): string {
-  const first = git('worktree', 'list', '--porcelain').split('\n')[0] ?? '';
-  if (!first.startsWith('worktree ')) {
-    throw new Error(`cannot find the main worktree in: ${first}`);
-  }
-  return first.slice('worktree '.length);
-}
+export { repoRoot } from '../review/lib/git.js';
 
 /** Throws unless `value` is a positive integer; `what` names it. */
 export function assertPositiveInteger(value: number, what: string): void {

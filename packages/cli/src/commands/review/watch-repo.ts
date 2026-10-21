@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { repoRoot } from '../autofix-pr/state.js';
+import { repoRoot } from './lib/git.js';
 import {
   ensureAuthenticated,
   gh,
@@ -129,7 +129,13 @@ function matches(
 /**
  * Compares the open PRs with the cursor. `listFull` means the query may
  * have cut the list, so a number that is missing may still be open and is
- * kept; otherwise missing numbers were closed or merged and are dropped.
+ * carried; otherwise missing numbers were closed or merged and are dropped.
+ *
+ * Carried numbers are bounded to one more page, highest numbers first:
+ * the list is ordered by last update, so a PR off the page is one nobody
+ * touched lately, and without a bound the closed and merged ones would
+ * accumulate for as long as the cursor lives. A dropped PR that resurfaces
+ * reads as `pr_opened`.
  */
 export function diffRepoWatch(
   prs: RepoPr[],
@@ -138,7 +144,15 @@ export function diffRepoWatch(
   listFull: boolean,
 ): { events: WatchRepoEvent[]; cursor: WatchRepoCursor } {
   const events: WatchRepoEvent[] = [];
-  const heads: WatchRepoCursor['heads'] = listFull ? { ...cursor.heads } : {};
+  const heads: WatchRepoCursor['heads'] = {};
+  if (listFull) {
+    const onPage = new Set(prs.map((pr) => String(pr.number)));
+    const carried = Object.keys(cursor.heads)
+      .filter((number) => !onPage.has(number))
+      .sort((a, b) => Number(b) - Number(a))
+      .slice(0, prs.length);
+    for (const number of carried) heads[number] = cursor.heads[number]!;
+  }
   for (const pr of prs) {
     const previous = cursor.heads[String(pr.number)];
     heads[String(pr.number)] = { sha: pr.headRefOid, draft: pr.isDraft };
