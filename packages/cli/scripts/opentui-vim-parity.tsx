@@ -170,7 +170,9 @@ try {
   };
   const send = async (bytes: string, count?: number) => {
     const before = decoded;
-    await change(() => ui!.renderer.stdin.emit('data', Buffer.from(bytes)));
+    await change(() => {
+      ui!.renderer.stdin.emit('data', Buffer.from(bytes));
+    });
     if (count !== undefined) {
       const deadline = Date.now() + 1_000;
       while (decoded < before + count && Date.now() < deadline) {
@@ -395,7 +397,9 @@ try {
   assert(native);
   const composerInput = async (bytes: string) => {
     const target = decoded + [...bytes].length;
-    await change(() => ui!.renderer.stdin.emit('data', Buffer.from(bytes)));
+    await change(() => {
+      ui!.renderer.stdin.emit('data', Buffer.from(bytes));
+    });
     const deadline = Date.now() + 1_000;
     while (decoded < target && Date.now() < deadline) {
       await new Promise((done) => setTimeout(done, 10));
