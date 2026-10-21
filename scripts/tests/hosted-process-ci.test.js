@@ -528,9 +528,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (188 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (189 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 278, 291],
+    ['hosted-harness-mysql', 279, 292],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -765,14 +765,16 @@ describe('Hosted real-process gates', () => {
       // the step to 188 minutes; the FG12d cancel-before-dispatch cell adds
       // 18 s (2x its measured 9.1 s), so the fork moves to 10639; the FG11d
       // retry-reuse cell adds 11 s (2x its measured 5.3 s), moving the fork to
-      // 10650 and the step stays 188 minutes; the FG11d settled-outcome cell adds
-      // 9 s (2x its measured 4.5 s), moving the fork to 10659 and the step
-      // stays 188 minutes):
+      // 10650 and the step stays 188 minutes; the FG12d Spring-restart
+      // owner-release cell adds 24 s (2x its measured 11.9 s), moving the fork
+      // to 10674 with 6 s left before the step must move; the FG11d
+      // settled-outcome cell adds 9 s (2x its measured 4.5 s), moving the fork
+      // to 10683 and the step to 189 minutes):
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(10659);
+        expect(forkSeconds).toBe(10683);
       }
     },
   );
@@ -857,13 +859,14 @@ describe('Hosted real-process gates', () => {
   // FG13f MessageDisplay reload cell adds 150s, so it becomes 10021s; the
   // FG12d cancel-before-dispatch cell adds 18s (2x its measured 9.1s), so it
   // becomes 10039s; the retry-reuse cell adds 11s (2x its measured 5.3s), so it
-  // becomes 10050s; the settled-outcome cell adds 9s (2x its measured 4.5s),
-  // so it becomes 10059s. The largest
+  // becomes 10050s; the FG12d Spring-restart owner-release cell adds 24s (2x
+  // its measured 11.9s), so it becomes 10074s; the settled-outcome cell adds
+  // 9s (2x its measured 4.5s), so it becomes 10083s. The largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10059;
+  const hostedForkHealthySeconds = 10083;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
