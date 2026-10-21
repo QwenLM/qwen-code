@@ -3611,6 +3611,39 @@ describe('OpenTuiInputPrompt editing ownership and recall', () => {
     expect(submit).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps the second search result across a streaming render with unchanged prompts', async () => {
+    const userMessages = ['OLDER', 'NEWER'];
+    const onSubmit = vi.fn(() => true);
+    const component = () => (
+      <OpenTuiInputPrompt
+        userMessages={userMessages}
+        onSubmit={onSubmit}
+        streaming={true}
+      />
+    );
+    const view = render(component());
+    await pressKey('r', true);
+    await waitFor(() => expect(searchLabel('NEWER')).toBeTruthy());
+    await pressKey('down');
+    const selectedRow = () =>
+      searchLabel('OLDER')?.parentElement?.parentElement?.textContent;
+    expect(selectedRow()).toBe('> OLDER');
+    view.rerender(component());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+    expect(selectedRow()).toBe('> OLDER');
+    expect(onSubmit).not.toHaveBeenCalled();
+    await pressKey('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith('OLDER', undefined, {
+      submittedPrompt: 'OLDER',
+      deferUntilIdle: false,
+      displayText: 'OLDER',
+      humanInput: undefined,
+      hasUnknownInput: true,
+      pasteExpansions: undefined,
+      restoredDraft: undefined,
+    });
+  });
+
   it.each([
     { name: 'p', ctrl: true },
     { name: 'n', ctrl: true },
@@ -3756,6 +3789,95 @@ describe('OpenTuiInputPrompt editing ownership and recall', () => {
     expect(match.getAttribute('bg')).toBeTruthy();
     expect(screen.getByText('→')).toBeTruthy();
   });
+
+  it.each([
+    { scenario: 'up', key: 'up', restore: false, recalled: 'printf recalled' },
+    {
+      scenario: 'down',
+      key: 'down',
+      restore: false,
+      recalled: 'printf recalled',
+    },
+    {
+      scenario: 'same-text',
+      key: 'up',
+      restore: true,
+      recalled: 'same display',
+    },
+    { scenario: 'null', key: 'up', restore: true, recalled: null },
+  ] as const)(
+    'shell history $scenario preserves only valid source after Escape',
+    async ({ key, restore, recalled }) => {
+      const composerHandle = { current: null as OpenTuiComposerHandle | null };
+      const onSubmit = vi.fn(() => true);
+      let shellActive = false;
+      function Harness() {
+        const [active, setActive] = useState(false);
+        shellActive = active;
+        return (
+          <OpenTuiInputPrompt
+            userMessages={[]}
+            onSubmit={onSubmit}
+            composerHandle={composerHandle}
+            shellModeActive={active}
+            onToggleShellMode={() => setActive((value) => !value)}
+            onInterrupt={(settled) =>
+              settled?.({
+                kind: 'cancelled',
+                queued: null,
+                prompt: {
+                  text: 'expanded old model text',
+                  displayText: 'same display',
+                  submittedPrompt: '@owned.txt',
+                  humanInput: { text: 'human owned source' },
+                },
+              })
+            }
+          />
+        );
+      }
+      render(<Harness />);
+      await typeText('!');
+      expect(shellActive).toBe(true);
+      expect(currentEditor().plainText).toBe('');
+      if (restore) {
+        await act(async () => composerHandle.current!.cancelTurn!());
+        expect(currentEditor().plainText).toBe('same display');
+      }
+      const history =
+        key === 'up'
+          ? mocks.state.previousShellCommand
+          : mocks.state.nextShellCommand;
+      history.mockReturnValueOnce(recalled);
+      await pressKey(key);
+      expect(history).toHaveBeenCalledOnce();
+      const displayText = recalled ?? 'same display';
+      expect(currentEditor().plainText).toBe(displayText);
+      await pressKey('escape');
+      expect(shellActive).toBe(false);
+      expect(onSubmit).not.toHaveBeenCalled();
+      await pressKey('return');
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith(displayText, undefined, {
+        submittedPrompt: recalled === null ? '@owned.txt' : displayText,
+        deferUntilIdle: false,
+        displayText,
+        humanInput: recalled === null ? { text: displayText } : undefined,
+        hasUnknownInput: recalled !== null,
+        pasteExpansions: undefined,
+        restoredDraft:
+          recalled === null
+            ? {
+                modelText: 'expanded old model text',
+                displayText: 'same display',
+                submittedPrompt: '@owned.txt',
+                humanInput: { text: 'human owned source' },
+                hasUnknownInput: false,
+              }
+            : undefined,
+      });
+      expect(mocks.state.addShellCommand).not.toHaveBeenCalled();
+    },
+  );
 
   it('recalls shell history without touching chat history or queue and persists submitted shell text', async () => {
     mocks.state.shellHistory = ['printf newest', 'printf oldest'];

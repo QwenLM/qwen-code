@@ -59,12 +59,6 @@ const mocks = vi.hoisted(() => {
       confirmationDetails?: { onConfirm: () => Promise<void> };
     }>,
     streaming: false,
-    items: [] as Array<{
-      kind: 'user';
-      id: string;
-      text: string;
-      sentToModel?: boolean;
-    }>,
     interrupt: vi.fn(),
     keyboard: [] as Array<
       (key: { name: string; ctrl: boolean; eventType?: string }) => void
@@ -228,7 +222,7 @@ vi.mock('./resume-session.js', () => ({
 
 import type { ReactElement } from 'react';
 import { render } from '@testing-library/react';
-import { act } from 'react';
+import { act, cloneElement } from 'react';
 import { exitSession } from './exit-lifecycle.js';
 import { startOpenTuiUI } from './start-opentui-ui.js';
 import { createCliRenderer } from '@opentui/core';
@@ -303,7 +297,9 @@ describe('startOpenTuiUI fallback contract', () => {
     return provider?.props?.children?.props?.children?.props?.['initialDialog'];
   }
 
-  async function withEntryApp(check: () => void | Promise<void>) {
+  async function withEntryApp(
+    check: (rerender: () => void) => void | Promise<void>,
+  ) {
     const write = vi
       .spyOn(process.stdout, 'write')
       .mockImplementation(() => true);
@@ -316,12 +312,24 @@ describe('startOpenTuiUI fallback contract', () => {
         '/tmp/project',
         {} as InitializationResult,
       );
+      const tree = mocks.state.root.render.mock.calls.at(
+        -1,
+      )![0] as ReactElement<{
+        children: ReactElement<{ children: ReactElement }>;
+      }>;
       await act(async () => {
-        view = render(
-          mocks.state.root.render.mock.calls.at(-1)![0] as ReactElement,
+        view = render(tree);
+      });
+      await check(() => {
+        const vim = tree.props.children;
+        view!.rerender(
+          cloneElement(
+            tree,
+            {},
+            cloneElement(vim, {}, cloneElement(vim.props.children)),
+          ),
         );
       });
-      await check();
     } finally {
       view?.unmount();
       write.mockRestore();
@@ -512,6 +520,58 @@ describe('startOpenTuiUI fallback contract', () => {
       expect(mocks.state.appProps?.userMessages).toEqual(['B', 'A', 'B']);
     });
   });
+
+  it.each(['assistant', 'info'] as const)(
+    'keeps projected prompt identity when only %s text changes',
+    async (kind) => {
+      const users: LiveHistoryItem[] = [
+        { kind: 'user', id: 'u1', text: 'OLDER' },
+        { kind: 'user', id: 'u2', text: 'NEWER' },
+      ];
+      const nonUser: LiveHistoryItem =
+        kind === 'assistant'
+          ? { kind, id: 'reply', text: 'first', streaming: true }
+          : { kind, id: 'notice', text: 'first' };
+      mocks.state.items = [...users, nonUser];
+      mocks.state.streaming = true;
+      await withEntryApp(async (rerender) => {
+        const prompts = mocks.state.appProps!.userMessages;
+        expect(prompts).toEqual(['OLDER', 'NEWER']);
+        mocks.state.items = [...users, { ...nonUser, text: 'first next' }];
+        await act(async () => rerender());
+        expect(mocks.state.appProps!.userMessages).toEqual(['OLDER', 'NEWER']);
+        expect(mocks.state.appProps!.userMessages).toBe(prompts);
+      });
+    },
+  );
+
+  it.each([
+    { change: 'user', expected: ['OLDER', 'NEWER', 'THIRD'] },
+    { change: 'recallText', expected: ['EDITABLE OLDER', 'NEWER'] },
+    { change: 'sentToModel', expected: ['NEWER'] },
+    { change: 'order', expected: ['NEWER', 'OLDER'] },
+  ] as const)(
+    'updates projected prompts when $change changes',
+    async ({ change, expected }) => {
+      const older = { kind: 'user', id: 'u1', text: 'OLDER' } as const;
+      const newer = { kind: 'user', id: 'u2', text: 'NEWER' } as const;
+      mocks.state.items = [older, newer];
+      await withEntryApp(async (rerender) => {
+        const prompts = mocks.state.appProps!.userMessages;
+        expect(prompts).toEqual(['OLDER', 'NEWER']);
+        const next: Record<typeof change, LiveHistoryItem[]> = {
+          user: [older, newer, { kind: 'user', id: 'u3', text: 'THIRD' }],
+          recallText: [{ ...older, recallText: 'EDITABLE OLDER' }, newer],
+          sentToModel: [{ ...older, sentToModel: false }, newer],
+          order: [newer, older],
+        };
+        mocks.state.items = next[change];
+        await act(async () => rerender());
+        expect(mocks.state.appProps!.userMessages).toEqual(expected);
+        expect(mocks.state.appProps!.userMessages).not.toBe(prompts);
+      });
+    },
+  );
 
   it('returns false when the renderer cannot be created', async () => {
     vi.mocked(createCliRenderer).mockRejectedValueOnce(

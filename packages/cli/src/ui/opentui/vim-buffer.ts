@@ -68,7 +68,7 @@ export function createVimBuffer(
     get lines() {
       return snapshot().lines;
     },
-    get cursor() {
+    get cursor(): [number, number] {
       const state = snapshot();
       return [state.cursorRow, state.cursorCol];
     },
