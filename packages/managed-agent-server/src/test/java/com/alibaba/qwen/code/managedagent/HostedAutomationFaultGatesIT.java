@@ -1287,12 +1287,14 @@ class HostedAutomationFaultGatesIT {
     // The served event as its ledger row. The sequence is decoded from the
     // served cursor here rather than re-encoded with the store's own encoder,
     // so the cursor's format is witnessed independently of the code under
-    // test; a cursor that does not decode stays in the row and reddens it.
+    // test. A cursor outside that format fails here: falling back to its
+    // decoded text would accept one that decodes to a bare sequence.
     private String servedTaskEvent(JsonNode event) {
         String cursor = new String(Base64.getUrlDecoder().decode(event.path("cursor").asText()),
                 StandardCharsets.US_ASCII);
         var position = TASK_CURSOR.matcher(cursor);
-        return (position.matches() ? position.group(1) : cursor) + " " + event.path("type").asText() + " "
+        assertThat(position.matches()).as("the served cursor %s names a task position", cursor).isTrue();
+        return position.group(1) + " " + event.path("type").asText() + " "
                 + event.path("created_at").asLong() + " " + text(event, "state") + " "
                 + text(event, "runtime_state");
     }
