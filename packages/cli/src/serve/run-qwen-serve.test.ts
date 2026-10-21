@@ -8,7 +8,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { createHash, X509Certificate } from 'node:crypto';
-import { createServer, request as httpRequest } from 'node:http';
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+} from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -55,6 +59,7 @@ import { isLoopbackBind } from './loopback-binds.js';
 import { isOwnInterfaceAddress } from './local-bind-addresses.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
+import * as spawnChannelModule from '@qwen-code/acp-bridge/spawnChannel';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   journalGrowthPoolMb,
@@ -83,6 +88,7 @@ import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import * as trustPolicyRuntime from '../config/daemon-trust-policy.js';
+import * as trustPolicyMonitorRuntime from '../config/daemon-trust-policy-monitor.js';
 import * as workspaceServiceRuntime from './workspace-service/index.js';
 import {
   ChannelWorkerStartupError,
@@ -96,10 +102,13 @@ import type {
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
+import { comparableBridgeOptions } from '../test-utils/bridge-options.js';
+import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
   workspaceRegistrationId,
   WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
+import { readDaemonDiscoveries } from './daemon-discovery.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import {
   ENSURE_KEEP_ALIVE_MS,
@@ -1082,6 +1091,7 @@ async function startDeferredDaemon(
   overrides: {
     serveOptions?: Partial<Parameters<typeof runQwenServe>[0]>;
     createBridge?: () => HttpAcpBridge;
+    deps?: RunQwenServeDeps;
   } = {},
 ) {
   const createBridge = vi
@@ -1106,9 +1116,96 @@ async function startDeferredDaemon(
       resolveOnListen: true,
       deferRuntimeUntilFirstHealth: true,
       runtimeStartupTimeoutMs: 0,
+      ...overrides.deps,
     },
   );
   return { handle, createBridge };
+}
+
+interface AcpUpgradeWireResponse {
+  status: number | undefined;
+  retryAfter: string | undefined;
+}
+
+/**
+ * Raw upgrade probe (no `ws` client): resolves with the wire status and the
+ * Retry-After header the daemon answered the /acp upgrade with — status 101
+ * when the socket was upgraded, an HTTP error status when it was answered as
+ * a plain request. `authorization` overrides the bearer header (pass null to
+ * omit it — a default parameter would swallow an explicit undefined);
+ * `onSocket` observes the client socket; `onRequest` observes the outgoing
+ * request before it is sent.
+ */
+function probeAcpUpgradeWireResponse(
+  handle: RunHandle,
+  authorization: string | null = 'Bearer secret-token',
+  onSocket?: (socket: net.Socket) => void,
+  onRequest?: (req: ReturnType<typeof httpRequest>) => void,
+): Promise<AcpUpgradeWireResponse> {
+  const url = new URL(handle.url);
+  return new Promise<AcpUpgradeWireResponse>((resolve, reject) => {
+    const req = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: '/acp',
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Key': Buffer.from('0123456789abcdef').toString('base64'),
+        'Sec-WebSocket-Version': '13',
+        ...(authorization === null ? {} : { Authorization: authorization }),
+      },
+    });
+    onRequest?.(req);
+    if (onSocket) req.once('socket', onSocket);
+    const settle = (res: IncomingMessage): void => {
+      const retryAfter = res.headers['retry-after'];
+      resolve({
+        status: res.statusCode,
+        retryAfter: typeof retryAfter === 'string' ? retryAfter : undefined,
+      });
+    };
+    req.once('upgrade', (res, socket) => {
+      socket.destroy();
+      settle(res);
+    });
+    req.once('response', (res) => {
+      res.resume();
+      settle(res);
+    });
+    req.once('error', reject);
+    req.end();
+  });
+}
+
+/**
+ * Holds the deferred runtime's boot inside buildRuntime (the trust-policy
+ * snapshot read is its first awaited step) so a test can keep the
+ * pre-transport park window open deterministically. `bootStarted` resolves
+ * once the boot begins; `releaseBoot` lets it proceed.
+ */
+function gateDeferredRuntimeBoot(): {
+  bootStarted: Promise<void>;
+  releaseBoot: () => void;
+} {
+  let releaseBoot!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseBoot = resolve;
+  });
+  const bootStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const original = trustPolicyRuntime.readDaemonTrustPolicySnapshot;
+  vi.spyOn(
+    trustPolicyRuntime,
+    'readDaemonTrustPolicySnapshot',
+  ).mockImplementation(async () => {
+    started();
+    await gate;
+    return original();
+  });
+  return { bootStarted, releaseBoot };
 }
 
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
@@ -5951,7 +6048,493 @@ describe('runQwenServe telemetry validation', () => {
   });
 });
 
+describe('runQwenServe paired execution engines', () => {
+  let tmpDir: string | undefined;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = undefined;
+  });
+
+  type BuiltBridge = Parameters<typeof acpBridge.createAcpSessionBridge>[0];
+
+  // A paired Bridge reads owners, and its prompt ledger reads transcripts,
+  // from its own runtime's session storage: a Managed owner written there is
+  // refused on restore, and the ledger sees that transcript's last record.
+  async function expectOwnSessionStorage(options: BuiltBridge) {
+    const workspaceCwd = options.boundWorkspace!;
+    const sessionId = crypto.randomUUID();
+    const uuid = crypto.randomUUID();
+    const transcript = new qwenCore.SessionService(workspaceCwd, {
+      runtimeBaseDir: options.artifactSnapshotRuntimeBaseDir,
+    }).getSessionTranscriptPath(sessionId);
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(
+      transcript,
+      `${JSON.stringify({
+        uuid,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'session_execution_engine',
+        cwd: workspaceCwd,
+        systemPayload: { version: 1, engine: 'managed' },
+      })}\n`,
+    );
+    await expect(
+      options.executionEngines!.select({
+        operation: 'load',
+        request: { workspaceCwd, sessionId },
+        daemonOwnedStandalone: false,
+      }),
+    ).rejects.toMatchObject({
+      errorKind: 'session_execution_engine_unavailable',
+    });
+    expect(options.promptLedger?.transcriptTailUuid?.(sessionId)).toBe(uuid);
+  }
+
+  // Each spawn factory created so far, keyed to the session directory of the
+  // environment it was created for.
+  function spawnFactoryStorage() {
+    return new Map(
+      vi
+        .mocked(spawnChannelModule.createSpawnChannelFactory)
+        .mock.results.map((result, index) => [
+          result.value,
+          (
+            mockCreateSpawnChannelFactoryOptions[index]?.['sourceEnv'] as
+              | NodeJS.ProcessEnv
+              | undefined
+          )?.['QWEN_RUNTIME_DIR'],
+        ]),
+    );
+  }
+
+  // Boots a daemon over two startup workspaces, adds a registered and a
+  // scratch workspace, and reports what each Bridge was built with.
+  async function bootWorkspaceRuntimes(
+    root: string,
+    workspaces: { primary: string; secondary: string; added: string },
+    paired: boolean,
+  ) {
+    const createFactory = vi.mocked(
+      spawnChannelModule.createSpawnChannelFactory,
+    );
+    createFactory.mockClear();
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(workspaces.primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+      removeByIds: vi.fn().mockResolvedValue(1),
+    } as unknown as WorkspaceRegistrationStore;
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [workspaces.primary, workspaces.secondary],
+        token: 'paired-token',
+        // Options that are off or unset by default, so a paired Bridge that
+        // reset one would differ.
+        enableSessionShell: true,
+        restoreAskUserQuestion: true,
+        maxPendingPromptsPerSession: 7,
+        eventRingSize: 1234,
+        compactedReplayMaxBytes: 2_345_678,
+        maxJournalEvents: 3456,
+        maxJournalBytes: 4_567_890,
+        channelIdleTimeoutMs: 45_678,
+        initializeTimeoutMs: 12_345,
+        sessionReapIntervalMs: 23_456,
+        sessionIdleTimeoutMs: 3_456_789,
+        sessionPromptSettledCloseGraceMs: 4567,
+        permissionResponseTimeoutMs: 56_789,
+        serveWebShell: false,
+        ...(paired ? { experimentalPairedEngines: true } : {}),
+      },
+      {
+        preheatBridge: false,
+        workspaceRegistrationStore: store,
+        daemonLogBaseDir: path.join(root, 'debug'),
+        liveConversationWorkspace: new ConversationWorkspace({
+          homeDir: path.join(root, 'home'),
+        }),
+        liveDiscoveryStableBaseDir: path.join(root, 'stable'),
+      },
+    );
+    try {
+      const headers = {
+        Authorization: 'Bearer paired-token',
+        'Content-Type': 'application/json',
+      };
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: workspaces.added, persist: false }),
+      });
+      expect(added.status).toBe(201);
+      const scratch = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ kind: 'scratch' }),
+      });
+      expect(scratch.status).toBe(201);
+      const scratchCwd = ((await scratch.json()) as { cwd: string }).cwd;
+      expect(createBridge).toHaveBeenCalledTimes(4);
+      const factoryStorage = spawnFactoryStorage();
+      return {
+        options: createBridge.mock.calls.map(([options]) => options),
+        factoryStorage,
+        scratchCwd,
+      };
+    } finally {
+      await handle.close();
+      createBridge.mockRestore();
+    }
+  }
+
+  it('pairs the startup, added and scratch runtimes from their own factory and storage, changing nothing else', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-paired-engines-')),
+    );
+    const workspaces = {
+      primary: path.join(tmpDir, 'primary'),
+      secondary: path.join(tmpDir, 'secondary'),
+      added: path.join(tmpDir, 'added'),
+    };
+    // Give every runtime its own session storage, so a runtime that read
+    // another runtime's owners could not pass the restore check below. The
+    // scratch runtime stores sessions under the stubbed QWEN_HOME.
+    delete process.env['QWEN_RUNTIME_DIR'];
+    vi.stubEnv('QWEN_HOME', path.join(tmpDir, 'qwen-home'));
+    const storageOf = (dir: string) => `${dir}-sessions`;
+    for (const dir of Object.values(workspaces)) {
+      fs.mkdirSync(path.join(dir, '.qwen'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.qwen', 'settings.json'),
+        JSON.stringify({ advanced: { runtimeOutputDir: storageOf(dir) } }),
+      );
+    }
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+
+    const plain = await bootWorkspaceRuntimes(tmpDir, workspaces, false);
+    const paired = await bootWorkspaceRuntimes(tmpDir, workspaces, true);
+
+    for (const run of [plain, paired]) {
+      expect(run.options.map((option) => option.boundWorkspace)).toEqual(
+        [
+          workspaces.primary,
+          workspaces.secondary,
+          workspaces.added,
+          run.scratchCwd,
+        ].map(canonicalizeWorkspace),
+      );
+      expect(
+        run.options.map((option) => option.artifactSnapshotRuntimeBaseDir),
+      ).toEqual([
+        storageOf(workspaces.primary),
+        storageOf(workspaces.secondary),
+        storageOf(workspaces.added),
+        path.join(tmpDir, 'qwen-home'),
+      ]);
+    }
+    for (const run of [plain, paired]) {
+      for (const option of run.options) {
+        expect(option.sessionAttachmentsRoot).toBe(
+          sessionAttachmentsRoots(
+            option.boundWorkspace!,
+            option.artifactSnapshotRuntimeBaseDir!,
+          ).root,
+        );
+      }
+    }
+    for (const option of plain.options) {
+      expect(option.executionEngines).toBeUndefined();
+      expect(option.sessionShellCommandEnabled).toBe(true);
+      expect(plain.factoryStorage.get(option.channelFactory)).toBe(
+        option.artifactSnapshotRuntimeBaseDir,
+      );
+    }
+    // Each boot creates a new scratch directory, and the scratch runtime's
+    // attachments root is derived from it, as checked above.
+    const withoutScratchPaths = (run: typeof plain) =>
+      run.options.map((option) =>
+        option.boundWorkspace === canonicalizeWorkspace(run.scratchCwd)
+          ? Object.fromEntries(
+              Object.entries(option).filter(
+                ([key]) =>
+                  key !== 'boundWorkspace' && key !== 'sessionAttachmentsRoot',
+              ),
+            )
+          : option,
+      );
+    expect(comparableBridgeOptions(withoutScratchPaths(paired))).toEqual(
+      comparableBridgeOptions(withoutScratchPaths(plain)),
+    );
+    for (const option of paired.options) {
+      expect(option.channelFactory).toBeUndefined();
+      const engines = option.executionEngines!;
+      expect(paired.factoryStorage.get(engines.legacy)).toBe(
+        option.artifactSnapshotRuntimeBaseDir,
+      );
+      await expect(
+        engines.select({
+          operation: 'spawn',
+          request: { workspaceCwd: option.boundWorkspace! },
+          daemonOwnedStandalone: false,
+        }),
+      ).resolves.toBe('legacy');
+      await expectOwnSessionStorage(option);
+    }
+  });
+
+  it('builds a fresh pair for each runtime that a trust change replaces', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-paired-replacement-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    // Each workspace names its own session storage, which applies once it is
+    // trusted, so a replacement that read another runtime's owners fails.
+    delete process.env['QWEN_RUNTIME_DIR'];
+    vi.stubEnv('QWEN_HOME', path.join(tmpDir, 'qwen-home'));
+    const storageOf = (dir: string) => `${dir}-sessions`;
+    for (const dir of [primary, secondary]) {
+      fs.mkdirSync(path.join(dir, '.qwen'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.qwen', 'settings.json'),
+        JSON.stringify({ advanced: { runtimeOutputDir: storageOf(dir) } }),
+      );
+    }
+    vi.spyOn(trustPolicyRuntime, 'readDaemonTrustPolicySnapshot')
+      .mockResolvedValueOnce({
+        revision: 'boot-untrusted',
+        folderTrustEnabled: true,
+        ideTrust: undefined,
+        trustedFolders: {},
+      } as Awaited<
+        ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
+      >)
+      .mockResolvedValue({
+        revision: 'reconciled-trusted',
+        folderTrustEnabled: false,
+        ideTrust: undefined,
+        trustedFolders: {},
+      } as Awaited<
+        ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
+      >);
+    vi.mocked(spawnChannelModule.createSpawnChannelFactory).mockClear();
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+        experimentalPairedEngines: true,
+      },
+      { resolveOnListen: true, daemonLogBaseDir: path.join(tmpDir, 'debug') },
+    );
+    try {
+      await handle.runtimeReady;
+      const built = (cwd: string) =>
+        createBridge.mock.calls
+          .map(([options]) => options)
+          .filter((options) => options.boundWorkspace === cwd);
+      for (const dir of [primary, secondary]) {
+        const cwd = canonicalizeWorkspace(dir);
+        await vi.waitFor(() => expect(built(cwd)).toHaveLength(2), {
+          timeout: 10_000,
+        });
+        const [boot, replacement] = built(cwd);
+        expect(boot!.executionEngines).toBeDefined();
+        expect(replacement!.channelFactory).toBeUndefined();
+        expect(replacement!.executionEngines).toBeDefined();
+        expect(replacement!.executionEngines).not.toBe(boot!.executionEngines);
+        expect(replacement!.executionEngines!.legacy).not.toBe(
+          boot!.executionEngines!.legacy,
+        );
+        expect(replacement!.artifactSnapshotRuntimeBaseDir).toBe(
+          storageOf(dir),
+        );
+        expect(
+          spawnFactoryStorage().get(replacement!.executionEngines!.legacy),
+        ).toBe(storageOf(dir));
+        await expectOwnSessionStorage(replacement!);
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the Conversations runtime on a single factory', async () => {
+    // The Conversations settings name the runtime directory holding its task.
+    delete process.env['QWEN_RUNTIME_DIR'];
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-paired-conversations-')),
+    );
+    const workspace = path.join(tmpDir, 'workspace');
+    const secondary = path.join(tmpDir, 'secondary');
+    const home = path.join(tmpDir, 'home');
+    const runtimeDir = path.join(tmpDir, 'runtime');
+    fs.mkdirSync(workspace);
+    fs.mkdirSync(secondary);
+    fs.mkdirSync(home);
+    const liveConversationWorkspace = new ConversationWorkspace({
+      homeDir: home,
+    });
+    const { canonicalRoot } = await liveConversationWorkspace.getRoot();
+    fs.mkdirSync(path.join(canonicalRoot, '.qwen'));
+    fs.writeFileSync(
+      path.join(canonicalRoot, '.qwen', 'settings.json'),
+      JSON.stringify({ advanced: { runtimeOutputDir: runtimeDir } }),
+    );
+    await qwenCore.Storage.runWithResolvedRuntimeBaseDir(runtimeDir, () =>
+      qwenCore.updateCronTasks(canonicalRoot, () => [
+        {
+          id: 'live-task',
+          cron: '0 9 * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt: 1_700_000_000_000,
+          lastFiredAt: null,
+          sessionId: 'live-session',
+          sessionOwnedByTask: false,
+        },
+      ]),
+    );
+    vi.spyOn(
+      scheduledTaskKeepalive,
+      'startScheduledTaskKeepalive',
+    ).mockReturnValue({
+      stop: vi.fn(),
+      activeWork: false,
+      tick: vi.fn().mockResolvedValue(undefined),
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(
+        () =>
+          ({
+            ...makeRuntimeBridge(),
+            recordHeartbeat: vi.fn(),
+            resumeSession: vi.fn().mockResolvedValue({}),
+            setLiveScreenContextCaptureHandler: vi.fn(),
+            setLiveTaskToolRequestHandler: vi.fn(),
+            setLiveSpeakToUserHandler: vi.fn(),
+          }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    const optionsFor = (cwd: string) =>
+      createBridge.mock.calls.find(
+        ([options]) => options.boundWorkspace === cwd,
+      )?.[0];
+    const boot = async (paired: boolean) => {
+      createBridge.mockClear();
+      vi.mocked(spawnChannelModule.createSpawnChannelFactory).mockClear();
+      mockCreateSpawnChannelFactoryOptions.length = 0;
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: [workspace, secondary],
+          maxSessions: 1,
+          serveWebShell: false,
+          ...(paired ? { experimentalPairedEngines: true } : {}),
+        },
+        {
+          liveConversationWorkspace,
+          liveDiscoveryStableBaseDir: path.join(tmpDir!, 'stable'),
+          daemonLogBaseDir: path.join(tmpDir!, 'debug'),
+          resolveOnListen: true,
+        },
+      );
+      try {
+        await handle.runtimeReady;
+        await vi.waitFor(
+          () => {
+            expect(optionsFor(canonicalRoot)).toBeDefined();
+          },
+          { timeout: 10_000 },
+        );
+        return {
+          conversations: optionsFor(canonicalRoot)!,
+          ordinary: [workspace, secondary].map(
+            (cwd) => optionsFor(canonicalizeWorkspace(cwd))!,
+          ),
+          factoryStorage: spawnFactoryStorage(),
+        };
+      } finally {
+        await handle.close();
+      }
+    };
+
+    const plain = await boot(false);
+    const paired = await boot(true);
+    expect(paired.conversations.executionEngines).toBeUndefined();
+    // Its single factory is still the one created for its own runtime.
+    expect(paired.factoryStorage.get(paired.conversations.channelFactory)).toBe(
+      runtimeDir,
+    );
+    // Nothing else about it changes either, including its lease marker.
+    expect(comparableBridgeOptions([paired.conversations])).toEqual(
+      comparableBridgeOptions([plain.conversations]),
+    );
+    // The ordinary runtimes of the same daemon are paired.
+    for (const ordinary of paired.ordinary) {
+      expect(ordinary.channelFactory).toBeUndefined();
+      expect(ordinary.executionEngines).toBeDefined();
+    }
+  });
+});
+
 describe('runQwenServe deployment profiles', () => {
+  it('rejects paired engines with the Hosted Harness profile before listening', async () => {
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: isolatedTestRuntimeDir,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          experimentalPairedEngines: true,
+        }),
+      ).rejects.toThrow(
+        '--profile hosted-harness does not pair execution engines.',
+      );
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
+    }
+  });
+
   it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
     const workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
@@ -7892,6 +8475,145 @@ describe('runQwenServe runtime startup failures', () => {
     }
   }
 
+  it('retains a fresh rebuild admission before the next monitor publication', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-admission-race-')),
+    );
+    const repo = path.join(tmpDir, 'repo');
+    const target = path.join(repo, 'packages', 'app');
+    fs.mkdirSync(target, { recursive: true });
+    fs.mkdirSync(path.join(repo, '.git'));
+    const initial = {
+      revision: 'initial-untrusted',
+      folderTrustEnabled: true,
+      ideTrust: undefined,
+      trustedFolders: {},
+    } as Awaited<
+      ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
+    >;
+    const publishedGrant = {
+      ...initial,
+      revision: 'published-grant-A',
+      trustedFolders: { [repo]: trustedFoldersRuntime.TrustLevel.TRUST_FOLDER },
+    };
+    const freshRevoke = {
+      ...initial,
+      revision: 'fresh-revoke-B',
+      trustedFolders: {
+        [target]: trustedFoldersRuntime.TrustLevel.TRUST_FOLDER,
+      },
+    };
+    let currentSnapshot = publishedGrant;
+    const bootBridge = makeRuntimeBridge();
+    const staleCandidate = makeRuntimeBridge();
+    const freshCandidate = makeRuntimeBridge();
+    freshCandidate.getSessionSummary = vi.fn().mockReturnValue({
+      sessionId: 'rebuilt-session',
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValueOnce(bootBridge)
+      .mockReturnValueOnce(staleCandidate)
+      .mockReturnValueOnce(freshCandidate);
+    let releaseValidation!: () => void;
+    const validationBlocked = new Promise<void>((resolve) => {
+      releaseValidation = resolve;
+    });
+    let signalValidation!: () => void;
+    const validationStarted = new Promise<void>((resolve) => {
+      signalValidation = resolve;
+    });
+    let paused = false;
+    vi.spyOn(trustPolicyRuntime, 'readDaemonTrustPolicySnapshot')
+      .mockResolvedValueOnce(initial)
+      .mockImplementation(async () => {
+        if (!paused && createBridge.mock.calls.length === 2) {
+          paused = true;
+          signalValidation();
+          await validationBlocked;
+        }
+        return currentSnapshot;
+      });
+    const publications: string[] = [];
+    const createMonitor =
+      trustPolicyMonitorRuntime.createDaemonTrustPolicyMonitor;
+    vi.spyOn(
+      trustPolicyMonitorRuntime,
+      'createDaemonTrustPolicyMonitor',
+    ).mockImplementation((options) =>
+      createMonitor({
+        ...options,
+        pollIntervalMs: 60_000,
+        onSnapshot: (snapshot, reasons) => {
+          publications.push(snapshot.revision);
+          return options.onSnapshot(snapshot, reasons);
+        },
+      }),
+    );
+    let registry: WorkspaceRegistry | undefined;
+    const createApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      registry = args[2]?.workspaceRegistry;
+      return createApp(...args);
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: target,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true, preheatBridge: false },
+    );
+    try {
+      await Promise.race([
+        validationStarted,
+        handle.runtimeReady.then(() => {
+          throw new Error(
+            'Runtime became ready without the validation barrier',
+          );
+        }),
+      ]);
+      currentSnapshot = freshRevoke;
+      releaseValidation();
+      await handle.runtimeReady;
+
+      expect(createBridge).toHaveBeenCalledTimes(3);
+      expect(staleCandidate.shutdown).toHaveBeenCalledOnce();
+      expect(registry?.primaryEntry.appliedRevision).toBe(freshRevoke.revision);
+      expect(registry?.primary.trusted).toBe(true);
+      expect(publications).toEqual([publishedGrant.revision]);
+      const selected = createBridge.mock.calls[2]?.[0];
+      expect(selected?.sessionLifecycle).toBeDefined();
+      selected!.sessionLifecycle!({
+        type: 'registered',
+        sessionId: 'rebuilt-session',
+        workspaceCwd: target,
+        reason: 'spawn',
+      });
+      expect(registry?.resolveLiveSessionOwner('rebuilt-session')).toEqual({
+        kind: 'found',
+        runtime: registry?.primary,
+      });
+      const handler = selected?.onWorkflowAncestorTrust;
+      expect(handler).toBeDefined();
+      const decision = await handler!({
+        sessionId: 'rebuilt-session',
+        workspaceCwd: target,
+        effectiveCwd: target,
+        canonicalTargetDir: target,
+        ancestorDirs: [path.dirname(target), repo],
+      });
+      expect(decision.trusted).toEqual([false, false]);
+      expect(decision.isCurrent()).toBe(false);
+    } finally {
+      releaseValidation();
+      await handle.close();
+    }
+  });
+
   it('keeps the primary bridge reference from the reconciled startup generation', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-trust-race-')),
@@ -8613,6 +9335,16 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
 
+      vi.mocked(settingsRuntime.reloadEnvironment).mockClear();
+      await workspace!.reloadModelProviders({
+        route: 'POST /workspaces/:workspace/models/reload',
+        workspaceCwd: tmpDir,
+      });
+      expect.soft(settingsRuntime.reloadEnvironment).not.toHaveBeenCalled();
+      expect.soft(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
+      expect.soft(process.env['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
+      expect.soft(process.env['QWEN_TEST_REMOVED_FROM_DOTENV']).toBe('stale');
+
       await workspace!.reload({
         route: 'POST /workspace/reload',
         workspaceCwd: tmpDir,
@@ -8841,11 +9573,11 @@ describe('runQwenServe runtime startup failures', () => {
 
       failReloadRead = true;
       await expect(
-        workspace!.reloadModelProviders({
-          route: 'POST /workspace/auth/provider',
+        workspace!.reload({
+          route: 'POST /workspace/reload',
           workspaceCwd: tmpDir,
         }),
-      ).resolves.toEqual({ status: 'failed' });
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
       expect(reloadEnvironment).toHaveBeenCalledTimes(2);
       expect(reloadEnvironment).toHaveBeenLastCalledWith(
         expect.any(Object),
@@ -9222,6 +9954,22 @@ describe('runQwenServe runtime startup failures', () => {
         'Restored workspace',
       ]);
       expect(restoredRemovable).toEqual([false, false, true]);
+      // `qwen daemon restart` replays only the explicit startup workspaces;
+      // the restored registration stays a removable registration.
+      expect(
+        readDaemonDiscoveries().entries.find(
+          (entry) => entry.record.primaryWorkspace === canonicalPrimary,
+        )?.record,
+      ).toMatchObject({
+        workspaces: [
+          canonicalPrimary,
+          canonicalExplicitSecondary,
+          canonicalRestoredSecondary,
+        ],
+        startupWorkspaces: [canonicalPrimary, canonicalExplicitSecondary],
+        web: false,
+        requireAuth: false,
+      });
       expect(restoredRegistrationIds).toEqual([
         [],
         [workspaceRegistrationId(canonicalExplicitSecondary)],
@@ -10534,6 +11282,460 @@ describe('runQwenServe runtime startup failures', () => {
       expect(createBridge).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
+      await handle.close();
+    }
+  });
+
+  it('holds an /acp WebSocket upgrade arriving in the deferred runtime window instead of 406ing it', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-upgrade-')),
+    );
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    try {
+      // 101 once the held upgrade is replayed onto the attached transport;
+      // 406 when it falls through to the SSE GET /acp handler instead (the
+      // bug this pins against, issue #13995).
+      expect((await probeAcpUpgradeWireResponse(handle)).status).toBe(101);
+      // The held upgrade must itself force the deferred runtime up — a client
+      // that only opens a socket never touches a REST route.
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('answers a terminal 503 to an /acp WebSocket upgrade when the deferred runtime fails to start', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-503-')),
+    );
+    const { handle } = await startDeferredDaemon(tmpDir, {
+      createBridge: () => {
+        throw new Error('runtime boom');
+      },
+    });
+    try {
+      // The probe is held in the pre-transport window and flushed with a 503
+      // once the runtime startup failure rejects runtimeReady. The failure
+      // is terminal — the runtime never restarts — so the 503 must not
+      // claim retryability.
+      const flushed = await probeAcpUpgradeWireResponse(handle);
+      expect(flushed.status).toBe(503);
+      expect(flushed.retryAfter).toBeUndefined();
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      // The gate stays closed: a later upgrade gets the same terminal 503
+      // immediately instead of queueing behind a flush that already ran.
+      const later = await probeAcpUpgradeWireResponse(handle);
+      expect(later.status).toBe(503);
+      expect(later.retryAfter).toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('answers a parked upgrade with a terminal 503 when startup fails after the transport attaches', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-attach-fail-')),
+    );
+    let rejectWorker!: (error: Error) => void;
+    const workerGate = new Promise<void>((_resolve, reject) => {
+      rejectWorker = reject;
+    });
+    const workerSnapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    };
+    const worker = {
+      start: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn().mockResolvedValue(workerSnapshot),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(() => workerSnapshot),
+      enqueueWebhookTask: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
+      deliverChannelMessage: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
+    };
+    const factory = vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
+      worker.start.mockImplementation(async () => {
+        await workerGate;
+        opts.onReady?.(worker.snapshot());
+      });
+      return worker;
+    });
+    const { handle } = await startDeferredDaemon(tmpDir, {
+      serveOptions: {
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      deps: {
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: {
+          readServiceInfo: vi.fn(() => null),
+          writeServeServiceInfo: vi.fn(),
+          reserveServeServiceInfo: vi.fn(),
+          removeServiceInfo: vi.fn(),
+          removeServeServiceInfo: vi.fn(() => true),
+        },
+      },
+    });
+    try {
+      const parked = probeAcpUpgradeWireResponse(handle);
+      // Attach precedes channel-worker startup: once the worker is starting,
+      // the transport listener is registered but the runtime has not settled.
+      await vi.waitFor(
+        () => {
+          expect(worker.start).toHaveBeenCalled();
+        },
+        { timeout: 5_000 },
+      );
+      // Failing the worker start now fails startup AFTER the transport
+      // attached: the failure path disposes the runtime app, which removes
+      // the listener the attached-latch vouches for.
+      rejectWorker(new Error('worker boom'));
+      await expect(handle.runtimeReady).rejects.toThrow();
+      // The parked upgrade must be answered with the terminal 503, not
+      // re-emitted onto the removed listener (where nothing would answer it).
+      const res = await parked;
+      expect(res.status).toBe(503);
+      expect(res.retryAfter).toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('leaves upgrades to the Express fall-through on a settled handle-less app', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-handleless-upgrade-')),
+    );
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      delete app.locals['acpHandle'];
+      return app;
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      // Probe only after the runtime settles: a handle-less app
+      // (hosted-harness profile, QWEN_SERVE_ACP_HTTP=0) never attaches a
+      // transport, so the upgrade keeps the pre-gate fall-through — a plain
+      // GET /acp answered with the SSE handler's 406, not the gate's 503.
+      await handle.runtimeReady;
+      expect((await probeAcpUpgradeWireResponse(handle)).status).toBe(406);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('survives a parked upgrade whose peer resets the connection mid-boot', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-reset-')),
+    );
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    const observedUncaught: unknown[] = [];
+    const uncaughtObserver = (error: unknown): void => {
+      observedUncaught.push(error);
+    };
+    process.on('uncaughtException', uncaughtObserver);
+    try {
+      let parkedSocket: net.Socket | undefined;
+      // The probe stays parked until the runtime settles; its late answer is
+      // irrelevant here, so swallow the rejection the reset causes.
+      const parked = probeAcpUpgradeWireResponse(
+        handle,
+        'Bearer secret-token',
+        (socket) => {
+          parkedSocket = socket;
+        },
+      );
+      void parked.catch(() => 'aborted');
+      // The runtime only starts this early when the parked upgrade's guard
+      // triggers it (the fallback timer is 1s out), so by now the socket is
+      // parked and the boot is blocked on the trust-policy gate.
+      await bootStarted;
+      if (!parkedSocket) throw new Error('probe socket was never assigned');
+      parkedSocket.resetAndDestroy();
+      // Let the daemon process the RST while the boot is still gated. The
+      // parked socket has no owner yet, so without the guard's error sink
+      // this ECONNRESET escapes as an uncaught exception.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      releaseBoot();
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      // The daemon survived: a fresh upgrade is served by the transport.
+      expect((await probeAcpUpgradeWireResponse(handle)).status).toBe(101);
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      expect(observedUncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', uncaughtObserver);
+      releaseBoot();
+      await handle.close();
+    }
+  });
+
+  it('restores the Express fall-through after a failed handle-less boot', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-handleless-failed-')),
+    );
+    // QWEN_SERVE_ACP_HTTP=0: the runtime app never mounts an ACP transport,
+    // so no transport can ever attach — the failed boot must not keep the
+    // raw upgrade gate.
+    vi.stubEnv('QWEN_SERVE_ACP_HTTP', '0');
+    const { handle } = await startDeferredDaemon(tmpDir, {
+      createBridge: () => {
+        throw new Error('runtime boom');
+      },
+    });
+    try {
+      // The probe parked in the pre-transport window is flushed with a
+      // terminal 503 once the startup failure rejects runtimeReady.
+      const flushed = await probeAcpUpgradeWireResponse(handle);
+      expect(flushed.status).toBe(503);
+      expect(flushed.retryAfter).toBeUndefined();
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      // The gate stepped aside: Express answers later upgrades, so a wrong
+      // token hits the bearer gate (401) instead of the raw pre-auth 503.
+      const rejected = await probeAcpUpgradeWireResponse(
+        handle,
+        'Bearer wrong-token',
+      );
+      expect(rejected.status).toBe(401);
+      // An authorized upgrade gets the bootstrap app's startup-failure
+      // envelope: 503 with no Retry-After (a terminal state is not
+      // retryable).
+      const authorized = await probeAcpUpgradeWireResponse(handle);
+      expect(authorized.status).toBe(503);
+      expect(authorized.retryAfter).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+      await handle.close();
+    }
+  });
+
+  it('replays every parked upgrade once the transport attaches', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-replay-')),
+    );
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    try {
+      // Start both probes before awaiting anything so both are parked while
+      // the boot is gated.
+      const first = probeAcpUpgradeWireResponse(handle);
+      const second = probeAcpUpgradeWireResponse(handle);
+      await bootStarted;
+      // Let any in-flight arrival land in the park queue before releasing.
+      await new Promise((resolve) => setImmediate(resolve));
+      releaseBoot();
+      const [firstRes, secondRes] = await Promise.all([first, second]);
+      expect(firstRes.status).toBe(101);
+      expect(secondRes.status).toBe(101);
+      // Two parked upgrades must not start the runtime twice (startRuntime
+      // is idempotent while one is in flight).
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('drains parked upgrades when the daemon closes mid-boot', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-close-')),
+    );
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle } = await startDeferredDaemon(tmpDir);
+    try {
+      const parked = probeAcpUpgradeWireResponse(handle);
+      await bootStarted;
+      // Let the arrival land in the park queue.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // close() must finish even though the runtime boot is still gated: the
+      // close path drains the park with a terminal answer, so the parked
+      // upgrade-detached socket cannot hold the listener open.
+      await handle.close();
+      const res = await parked;
+      expect(res.status).toBe(503);
+      expect(res.retryAfter).toBeUndefined();
+    } finally {
+      releaseBoot();
+      await handle.close();
+    }
+  });
+
+  it('caps parked upgrades and evicts sockets whose peer went away', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-cap-')),
+    );
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle } = await startDeferredDaemon(tmpDir);
+    try {
+      // PRE_TRANSPORT_UPGRADE_HOLD_MAX is 32: fill the park queue while the
+      // boot is gated.
+      const parkedSockets: net.Socket[] = [];
+      const parked = Array.from({ length: 32 }, () =>
+        probeAcpUpgradeWireResponse(handle, 'Bearer secret-token', (socket) =>
+          parkedSockets.push(socket),
+        ),
+      );
+      await bootStarted;
+      // Let all 32 arrivals land in the park queue.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The overflow upgrade is answered immediately — still booting, so
+      // this 503 is the retryable kind.
+      const overflow = await probeAcpUpgradeWireResponse(handle);
+      expect(overflow.status).toBe(503);
+      expect(overflow.retryAfter).toBe('1');
+      // A peer that went away must release its slot: destroy the first
+      // parked socket client-side and give the daemon a moment to evict it.
+      const evicted = parked.shift()!;
+      void evicted.catch(() => 'aborted');
+      // A byte written after the handshake (not pipelined into it) must not
+      // stall the eviction: the parked socket has to keep being read, or the
+      // FIN below is never delivered and the slot stays held.
+      parkedSockets[0]!.write('x');
+      parkedSockets[0]!.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The freed slot lets one more upgrade park; without eviction it would
+      // hit the cap and be answered 503 like the overflow probe above.
+      const refilled = probeAcpUpgradeWireResponse(handle);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      releaseBoot();
+      expect((await refilled).status).toBe(101);
+      const results = await Promise.all(parked);
+      for (const res of results) {
+        expect(res.status).toBe(101);
+      }
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      // Release the gate before closing so a pre-release assertion failure
+      // cannot wedge the close behind a boot that will never proceed (and
+      // mask the real failure with a shutdown error).
+      releaseBoot();
+      await handle.close();
+    }
+  });
+
+  it('re-authenticates a credential-less parked upgrade on replay', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-noauth-')),
+    );
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle } = await startDeferredDaemon(tmpDir);
+    try {
+      // The park is pre-auth, so a credential-less upgrade is still held —
+      // but the replayed handshake must re-authenticate in the acp-http
+      // listener and be rejected there, not upgraded.
+      const parked = probeAcpUpgradeWireResponse(
+        handle,
+        null,
+        undefined,
+        // The daemon answers 401 for a missing bearer and a wrong one alike,
+        // so only the outgoing wire shape discriminates the omit arm.
+        (req) => {
+          expect(req.getHeaders()).not.toHaveProperty('authorization');
+        },
+      );
+      await bootStarted;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      releaseBoot();
+      const res = await parked;
+      expect(res.status).toBe(401);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      releaseBoot();
+      await handle.close();
+    }
+  });
+
+  it('keeps a parked upgrade held until the runtime fully settles when channel workers start', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-settle-')),
+    );
+    let releaseWorker!: () => void;
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    const workerSnapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    };
+    const worker = {
+      start: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn().mockResolvedValue(workerSnapshot),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(() => workerSnapshot),
+      enqueueWebhookTask: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
+      deliverChannelMessage: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
+    };
+    const factory = vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
+      worker.start.mockImplementation(async () => {
+        await workerGate;
+        opts.onReady?.(worker.snapshot());
+      });
+      return worker;
+    });
+    const { handle } = await startDeferredDaemon(tmpDir, {
+      serveOptions: {
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      deps: {
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: {
+          readServiceInfo: vi.fn(() => null),
+          writeServeServiceInfo: vi.fn(),
+          reserveServeServiceInfo: vi.fn(),
+          removeServiceInfo: vi.fn(),
+          removeServeServiceInfo: vi.fn(() => true),
+        },
+      },
+    });
+    try {
+      const probe = probeAcpUpgradeWireResponse(handle);
+      // The transport attaches before channel workers start: once the worker
+      // is starting, attach has already run but the runtime has not settled.
+      // The wait must outlast the 1s runtime-start fallback: on a loaded
+      // runner the fallback can drive the boot instead of the parked upgrade,
+      // and the 1000ms vi.waitFor default would time the test out first.
+      await vi.waitFor(
+        () => {
+          expect(worker.start).toHaveBeenCalled();
+        },
+        { timeout: 5_000 },
+      );
+      // The parked upgrade must not be replayed at attach time — it waits
+      // for the same settle boundary the REST hold waits on.
+      await expect(
+        Promise.race([
+          probe.then(() => 'answered'),
+          new Promise((resolve) => setTimeout(() => resolve('pending'), 150)),
+        ]),
+      ).resolves.toBe('pending');
+      releaseWorker();
+      expect((await probe).status).toBe(101);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      releaseWorker();
       await handle.close();
     }
   });
@@ -16478,6 +17680,50 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('does not load a workspace .env into the daemon environment on a missing-config channel delete', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-delete-env-')),
+    );
+    const daemon = makeLateRegistrationDaemon();
+    // The deleted name is configured nowhere, so the delete takes the
+    // config-loss branch whose merged-view read must skip environment
+    // loading; the sibling settings reads on this path already do.
+    writeWorkspaceSettings(daemon.secondary, {});
+    fs.writeFileSync(
+      path.join(daemon.secondary, '.env'),
+      'QWEN_SERVE_DELETE_ENV_SENTINEL=from-secondary\n',
+    );
+    delete process.env['QWEN_SERVE_DELETE_ENV_SENTINEL'];
+    const handle = await daemon.start();
+
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: daemon.headers,
+        body: JSON.stringify({ cwd: daemon.secondary }),
+      });
+      expect(added.status).toBe(201);
+      const { id } = (await added.json()) as { id: string };
+      const channelsUrl = `${handle.url}/workspaces/${encodeURIComponent(id)}/channels`;
+      const listed = await fetch(channelsUrl, { headers: daemon.headers });
+      expect(listed.status).toBe(200);
+      const { revision } = (await listed.json()) as { revision: string };
+
+      const deleted = await fetch(`${channelsUrl}/ghost`, {
+        method: 'DELETE',
+        headers: daemon.headers,
+        body: JSON.stringify({ expectedRevision: revision }),
+      });
+
+      expect(deleted.status).toBe(200);
+      expect(process.env['QWEN_SERVE_DELETE_ENV_SENTINEL']).toBeUndefined();
+    } finally {
+      delete process.env['QWEN_SERVE_DELETE_ENV_SENTINEL'];
+      await handle.close();
+    }
+  });
+
   it('reports a configured channel the daemon could not start at boot', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-boot-failure-')),
@@ -20852,6 +22098,8 @@ describe('runQwenServe startup observability', () => {
       expect(stderrWrites.join('')).toMatch(
         /qwen serve: startup timing: processToListenMs=\d+ runQwenServeToListenMs=\d+/,
       );
+      expect(stderrWrites.join('')).toMatch(/qwen daemon status\b/);
+      expect(stderrWrites.join('')).not.toMatch(/qwen daemon status --port/);
       expect(stderrWrites.join('')).not.toContain(
         'qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth.',
       );

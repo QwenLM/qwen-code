@@ -19,6 +19,11 @@ import {
 } from './popover';
 import { SelectTrigger } from './select';
 import {
+  ResizablePanelGroup,
+  ResizablePanel,
+  ResizableHandle,
+} from './resizable';
+import {
   Table,
   TableBody,
   TableCaption,
@@ -57,6 +62,9 @@ describe('React 18 ref compatibility', () => {
     ['DropdownMenuTrigger', DropdownMenuTrigger],
     ['DropdownMenuSubTrigger', DropdownMenuSubTrigger],
     ['SelectTrigger', SelectTrigger],
+    ['ResizablePanelGroup', ResizablePanelGroup],
+    ['ResizablePanel', ResizablePanel],
+    ['ResizableHandle', ResizableHandle],
     ['Table', Table],
     ['TableHeader', TableHeader],
     ['TableBody', TableBody],

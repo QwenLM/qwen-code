@@ -8,6 +8,10 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+
   'Cannot disable an extension-provided MCP server here.':
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':
@@ -23,6 +27,8 @@ export default {
   'Project level': 'Project level',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -192,6 +198,8 @@ export default {
   'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
   'toolDisplayName.ProposeGoal': 'toolDisplayName.ProposeGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
+  'toolDisplayName.ManageMemory': 'toolDisplayName.ManageMemory',
+  'toolDisplayName.SearchMemory': 'toolDisplayName.SearchMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Advisor': 'toolDisplayName.Advisor',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
@@ -437,6 +445,8 @@ export default {
     'Rewinding does not affect files edited manually or via shell commands.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -749,6 +759,9 @@ export default {
   // Settings Labels
   // ============================================================================
   'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
+  'Mods (Experimental)': 'Mods (Experimental)',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',
@@ -2373,6 +2386,10 @@ export default {
   'API key cannot be empty.': 'API key cannot be empty.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.',
   'You can get your Coding Plan API key here':
     'You can get your Coding Plan API key here',
   'You can get your Token Plan API key here':
@@ -2400,6 +2417,17 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  QwenCloud: 'QwenCloud',
+  'QwenCloud · Access Method': 'QwenCloud · Access Method',
+  'Official recommended setup: Token Plan or Standard API Key':
+    'Official recommended setup: Token Plan or Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    'Pay-as-you-go · Connect with an existing platform API key',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)',
+  'China — 千问AI平台': 'China — 千问AI平台',
+  'International — QwenCloud': 'International — QwenCloud',
+  Platform: 'Platform',
   Custom: 'Custom',
   'Select Region for Coding Plan': 'Select Region for Coding Plan',
   'Choose based on where your account is registered':
@@ -2932,4 +2960,6 @@ export default {
   'Kept model as {{model}}': 'Kept model as {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
+  'Create a git commit with an AI-drafted message':
+    'Create a git commit with an AI-drafted message',
 };

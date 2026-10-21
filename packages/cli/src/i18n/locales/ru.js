@@ -8,6 +8,10 @@
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Включает встроенный Generated UI в поддерживаемых локальных сеансах. Перезапустите соответствующий сеанс, чтобы применить изменения.',
+
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
@@ -194,6 +198,8 @@ export default {
     'Откат не затрагивает файлы, отредактированные вручную или с помощью shell-команд.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Не удаётся откатиться к сжатому ходу. Попробуйте более недавний ход.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Не удаётся откатить диалог к этому ходу: он больше не соответствует истории модели (например, после повторной попытки). Попробуйте более недавний ход.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Восстановление файлов недоступно для этого хода (нет записанных изменений или ход был до текущей сессии).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -2113,6 +2119,10 @@ export default {
   'to retry last request': 'чтобы повторить последний запрос',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'Недействительный API Key. Coding Plan API Keys начинаются с "sk-sp-". Проверьте.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'Недействительный API Key. Ключи с оплатой по использованию начинаются с "sk-" или "sk-ws-". Для ключей Token Plan ("sk-sp-") используйте запись Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'Недействительный API Key. Token Plan API Keys начинаются с "sk-sp-". Создайте ключ в консоли Token Plan или используйте запись Standard API Key для ключа с оплатой по использованию.',
   'Lock release warning': 'Предупреждение о снятии блокировки',
   'Metadata write warning': 'Предупреждение о записи метаданных',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":

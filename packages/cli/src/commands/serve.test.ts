@@ -62,6 +62,25 @@ describe('serve command args', () => {
     );
   });
 
+  it('documents Hosted Runtime Broker options and does not declare them unimplemented', async () => {
+    // yargs hard-wraps the description column mid-word at its 80-column
+    // default, so compare with whitespace and type hints removed. The next
+    // row starts with "--", so stale text appended to a row cannot hide.
+    const squash = (text: string) => text.replace(/\[string\]|\s+/g, '');
+    const help = squash(await buildParser().getHelp());
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-url Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. --',
+      ),
+    );
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. --',
+      ),
+    );
+    expect(help).not.toContain('ReservedBroker');
+  });
+
   it('defaults authenticated open to disabled', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['open-with-auth']).toBe(false);
@@ -413,6 +432,26 @@ describe('serve rate limit env parsing', () => {
       }),
       expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
+  });
+
+  it.each([
+    ['--experimental-paired-engines --no-web', true],
+    ['--no-web', undefined],
+  ])('maps "%s" to experimentalPairedEngines', async (args, expected) => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(args);
+
+    expect(
+      (
+        mockRunQwenServe.mock.calls[0]?.[0] as {
+          experimentalPairedEngines?: boolean;
+        }
+      ).experimentalPairedEngines,
+    ).toBe(expected);
   });
 
   it('applies authenticated open before the yargs path starts the daemon', async () => {

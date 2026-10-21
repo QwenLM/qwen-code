@@ -13,7 +13,6 @@ import type {
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
-  ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
@@ -176,6 +175,16 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
   'dashscope-us.aliyuncs.com',
 ];
 
+/**
+ * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. Both the
+ * pay-as-you-go endpoints and the `token-plan.`-prefixed subscription
+ * endpoints are subdomains of these, so one suffix match covers all four.
+ */
+export const QWENCLOUD_MAAS_HOSTS: readonly string[] = [
+  'maas.qianwenaiapi.com',
+  'maas.qwencloudapi.com',
+];
+
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -187,7 +196,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
-   * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
+   * Model Studio endpoints under *.maas.aliyuncs.com (workspace-dedicated
+   * <WorkspaceId>.<region>, trial.<region> and token-plan.<region> hosts),
+   * QwenCloud MaaS hosts (QWENCLOUD_MAAS_HOSTS),
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
    * Alibaba Cloud API Gateway domains (*.alicloudapi.com),
    * and proxy matches.
@@ -225,10 +236,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         (host) => hostname === host || hostname.endsWith('.' + host),
       );
 
-    const isTokenPlanOrigin =
+    // Every Model Studio host under maas.aliyuncs.com serves the DashScope
+    // API: workspace-dedicated domains (the recommended production entry),
+    // trial domains and Token Plan domains.
+    const isMaasOrigin =
+      hostname !== null && hostname.endsWith('.maas.aliyuncs.com');
+
+    // 千问AI平台 / QwenCloud MaaS hosts, including their `token-plan.`
+    // subscription subdomains.
+    const isQwenCloudOrigin =
       hostname !== null &&
-      hostname.startsWith('token-plan.') &&
-      hostname.endsWith('.maas.aliyuncs.com');
+      QWENCLOUD_MAAS_HOSTS.some(
+        (host) => hostname === host || hostname.endsWith('.' + host),
+      );
 
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.
@@ -256,7 +276,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (
       normalizedProxyUrl &&
       !isDashscopeOrigin &&
-      !isTokenPlanOrigin &&
+      !isMaasOrigin &&
+      !isQwenCloudOrigin &&
       !isInternalOrigin &&
       !isAliCloudApiOrigin &&
       !isProxyMatch
@@ -280,7 +301,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     return (
       isDashscopeOrigin ||
-      isTokenPlanOrigin ||
+      isMaasOrigin ||
+      isQwenCloudOrigin ||
       isInternalOrigin ||
       isAliCloudApiOrigin ||
       isProxyMatch
@@ -364,7 +386,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     reattachBlockCount = 0,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
-    let tools = request.tools;
+    const tools = request.tools;
 
     // glm-* models served via DashScope only parse structured "content parts"
     // arrays when the request is in function-calling mode. A tool-less request
@@ -384,14 +406,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       messages = this.flattenTextContent(messages);
     } else if (this.shouldEnableCacheControl()) {
       // Apply DashScope cache control if enabled (default is enabled).
-      const { messages: updatedMessages, tools: updatedTools } =
-        this.addDashScopeCacheControl(
-          request,
-          request.stream ? 'all' : 'system_only',
-          reattachBlockCount,
-        );
-      messages = updatedMessages;
-      tools = updatedTools;
+      messages = this.addDashScopeCacheControl(
+        request,
+        request.stream ? 'all' : 'system_only',
+        reattachBlockCount,
+      );
     }
 
     // Apply output token limits using parent class logic.
@@ -543,7 +562,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
     this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
     this.flattenGptReasoningEffort(merged);
-    return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    return this.flattenDeepSeekReasoningEffort(
+      merged,
+    ) as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
   private getConfiguredReasoning(model: string | undefined) {
@@ -785,16 +806,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Add cache control flag to specified message(s) for DashScope providers
+   * Add cache control flag to specified message(s) for DashScope providers.
+   * Tool definitions get no marker: DashScope ignores `cache_control` on
+   * tools, and the system marker already covers them (they render first).
    */
   private addDashScopeCacheControl(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     cacheControl: 'system_only' | 'all',
     reattachBlockCount = 0,
-  ): {
-    messages: OpenAI.Chat.ChatCompletionMessageParam[];
-    tools?: ChatCompletionToolWithCache[];
-  } {
+  ): OpenAI.Chat.ChatCompletionMessageParam[] {
     const messages = request.messages;
 
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
@@ -840,15 +860,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
             } as OpenAI.Chat.ChatCompletionMessageParam;
           });
 
-    const updatedTools =
-      cacheControl === 'all' && request.tools?.length
-        ? this.addCacheControlToTools(request.tools)
-        : (request.tools as ChatCompletionToolWithCache[] | undefined);
-
-    return {
-      messages: updatedMessages,
-      tools: updatedTools,
-    };
+    return updatedMessages;
   }
 
   /**
@@ -920,23 +932,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       remaining -= blockCount;
     }
     return undefined;
-  }
-
-  private addCacheControlToTools(
-    tools: OpenAI.Chat.ChatCompletionTool[],
-  ): ChatCompletionToolWithCache[] {
-    if (tools.length === 0) {
-      return tools as ChatCompletionToolWithCache[];
-    }
-
-    const updatedTools = [...tools] as ChatCompletionToolWithCache[];
-    const lastToolIndex = tools.length - 1;
-    updatedTools[lastToolIndex] = {
-      ...updatedTools[lastToolIndex],
-      cache_control: { type: 'ephemeral' },
-    };
-
-    return updatedTools;
   }
 
   /**

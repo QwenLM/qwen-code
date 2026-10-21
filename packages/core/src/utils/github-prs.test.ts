@@ -31,22 +31,57 @@ const mockExecFile = vi.mocked(execFile);
 
 type ExecCallback = (err: Error | null, stdout: string, stderr: string) => void;
 
-function mockGhSuccess(payload: unknown) {
+/** Answers every execFile call via `respond` (callback, args, options). */
+function mockExec(
+  respond: (cb: ExecCallback, args: unknown, opts: unknown) => void,
+) {
   mockExecFile.mockImplementation(
-    (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-      (cb as ExecCallback)(null, JSON.stringify(payload), '');
+    (_cmd: unknown, args: unknown, opts: unknown, cb: unknown) => {
+      respond(cb as ExecCallback, args, opts);
       return {} as ReturnType<typeof execFile>;
     },
   );
 }
 
-function mockGhError(error: Error & { code?: string; stderr?: string }) {
-  mockExecFile.mockImplementation(
-    (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-      (cb as ExecCallback)(error, '', error.stderr ?? '');
-      return {} as ReturnType<typeof execFile>;
+/** Succeeds with `stdout`; with `expectArgs`, each call asserts its args. */
+function mockStdout(stdout: string, expectArgs?: string[]) {
+  mockExec((cb, args) => {
+    if (expectArgs) expect(args).toEqual(expectArgs);
+    cb(null, stdout, '');
+  });
+}
+
+function mockGhSuccess(payload: unknown, expectArgs?: string[]) {
+  mockStdout(JSON.stringify(payload), expectArgs);
+}
+
+/** Fails with Error(`message`) plus `fields`, passing its stderr through. */
+function mockExecError(
+  message: string,
+  fields: { code?: string; stderr?: string; killed?: boolean } = {},
+) {
+  const error = Object.assign(new Error(message), fields);
+  mockExec((cb) => cb(error, '', error.stderr ?? ''));
+}
+
+/** Gives each test a fresh temp dir (and, by default, reset mocks). */
+function useTmpDir(prefix: string, { resetMocks = true } = {}) {
+  const tmp = {
+    dir: '',
+    /** Makes the temp dir a git repository root and returns it. */
+    repo: () => {
+      fs.mkdirSync(path.join(tmp.dir, '.git'));
+      return tmp.dir;
     },
-  );
+  };
+  beforeEach(() => {
+    if (resetMocks) vi.resetAllMocks();
+    tmp.dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  });
+  afterEach(() => {
+    fs.rmSync(tmp.dir, { recursive: true, force: true });
+  });
+  return tmp;
 }
 
 function ghPrEntry(overrides: Record<string, unknown> = {}) {
@@ -67,19 +102,19 @@ function ghPrEntry(overrides: Record<string, unknown> = {}) {
 }
 
 describe('parseGhPrList', () => {
-  it('maps gh entries to the daemon shape and sorts by updatedAt desc', () => {
-    const older = ghPrEntry({
-      number: 1,
-      updatedAt: '2026-07-20T10:00:00Z',
-    });
-    const newer = ghPrEntry({
-      number: 2,
-      isDraft: true,
-      reviewDecision: null,
-      updatedAt: '2026-07-24T10:00:00Z',
-    });
+  const parse = (...entries: unknown[]) =>
+    parseGhPrList(JSON.stringify(entries));
 
-    const result = parseGhPrList(JSON.stringify([older, newer]));
+  it('maps gh entries to the daemon shape and sorts by updatedAt desc', () => {
+    const result = parse(
+      ghPrEntry({ number: 1, updatedAt: '2026-07-20T10:00:00Z' }),
+      ghPrEntry({
+        number: 2,
+        isDraft: true,
+        reviewDecision: null,
+        updatedAt: '2026-07-24T10:00:00Z',
+      }),
+    );
 
     expect(result.map((pr) => pr.number)).toEqual([2, 1]);
     expect(result[0]).toMatchObject({
@@ -95,13 +130,12 @@ describe('parseGhPrList', () => {
   });
 
   it('maps every review decision variant', () => {
-    const entries = [
+    const result = parse(
       ghPrEntry({ number: 1, reviewDecision: 'APPROVED' }),
       ghPrEntry({ number: 2, reviewDecision: 'CHANGES_REQUESTED' }),
       ghPrEntry({ number: 3, reviewDecision: 'REVIEW_REQUIRED' }),
       ghPrEntry({ number: 4, reviewDecision: '' }),
-    ];
-    const result = parseGhPrList(JSON.stringify(entries));
+    );
     expect(result.map((pr) => pr.reviewDecision)).toEqual([
       'approved',
       'changes_requested',
@@ -134,33 +168,27 @@ describe('parseGhPrList', () => {
     ['passing', [{ __typename: 'CheckRun', conclusion: 'NEUTRAL' }]],
     ['none', []],
   ])('aggregates checks to %s', (expected, rollup) => {
-    const result = parseGhPrList(
-      JSON.stringify([ghPrEntry({ statusCheckRollup: rollup })]),
-    );
+    const result = parse(ghPrEntry({ statusCheckRollup: rollup }));
     expect(result[0]?.checks).toBe(expected);
   });
 
   it('failing wins over pending and passing', () => {
-    const result = parseGhPrList(
-      JSON.stringify([
-        ghPrEntry({
-          statusCheckRollup: [
-            { __typename: 'CheckRun', conclusion: 'SUCCESS' },
-            { __typename: 'CheckRun', status: 'QUEUED' },
-            { __typename: 'StatusContext', state: 'FAILURE' },
-          ],
-        }),
-      ]),
+    const result = parse(
+      ghPrEntry({
+        statusCheckRollup: [
+          { __typename: 'CheckRun', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', status: 'QUEUED' },
+          { __typename: 'StatusContext', state: 'FAILURE' },
+        ],
+      }),
     );
     expect(result[0]?.checks).toBe('failing');
   });
 
   it('drops entries without a numeric PR number and tolerates missing fields', () => {
-    const result = parseGhPrList(
-      JSON.stringify([
-        { title: 'no number' },
-        ghPrEntry({ author: null, reviewDecision: null, updatedAt: 'bad' }),
-      ]),
+    const result = parse(
+      { title: 'no number' },
+      ghPrEntry({ author: null, reviewDecision: null, updatedAt: 'bad' }),
     );
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({
@@ -177,13 +205,11 @@ describe('parseGhPrList', () => {
   });
 
   it('maps the gh state field to merged/closed, falling back to isDraft', () => {
-    const result = parseGhPrList(
-      JSON.stringify([
-        ghPrEntry({ number: 1, state: 'MERGED' }),
-        ghPrEntry({ number: 2, state: 'CLOSED' }),
-        ghPrEntry({ number: 3, state: 'OPEN' }),
-        ghPrEntry({ number: 4, state: 'OPEN', isDraft: true }),
-      ]),
+    const result = parse(
+      ghPrEntry({ number: 1, state: 'MERGED' }),
+      ghPrEntry({ number: 2, state: 'CLOSED' }),
+      ghPrEntry({ number: 3, state: 'OPEN' }),
+      ghPrEntry({ number: 4, state: 'OPEN', isDraft: true }),
     );
     expect(result.map((pr) => pr.state)).toEqual([
       'merged',
@@ -195,26 +221,17 @@ describe('parseGhPrList', () => {
 });
 
 describe('fetchGitHubPullRequests', () => {
-  let dir: string;
-
-  beforeEach(() => {
-    vi.resetAllMocks();
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-test-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  const tmp = useTmpDir('github-prs-test-');
 
   it('returns not_a_repo outside a git repository and never spawns gh', async () => {
-    const result = await fetchGitHubPullRequests(dir);
+    const result = await fetchGitHubPullRequests(tmp.dir);
 
     expect(result).toEqual({ kind: 'not_a_repo' });
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
   it('runs gh pr list at the git root with the expected arguments', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
+    const dir = tmp.repo();
     const nested = path.join(dir, 'sub', 'dir');
     fs.mkdirSync(nested, { recursive: true });
     mockGhSuccess([ghPrEntry()]);
@@ -246,7 +263,7 @@ describe('fetchGitHubPullRequests', () => {
   });
 
   it('uses slim fields and the requested state/limit when asked', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
+    const dir = tmp.repo();
     mockGhSuccess([ghPrEntry({ state: 'MERGED' })]);
 
     const result = await fetchGitHubPullRequests(dir, undefined, {
@@ -277,61 +294,39 @@ describe('fetchGitHubPullRequests', () => {
   });
 
   it('returns cli_unavailable when gh is not installed', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockGhError(
-      Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }),
-    );
-
-    const result = await fetchGitHubPullRequests(dir);
-
+    mockExecError('spawn gh ENOENT', { code: 'ENOENT' });
+    const result = await fetchGitHubPullRequests(tmp.repo());
     expect(result).toEqual({ kind: 'cli_unavailable' });
   });
 
   it('names the timeout when gh is killed after the deadline', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockGhError(
-      Object.assign(new Error('Command failed: gh pr list --state open'), {
-        killed: true,
-        stderr: '',
-      }),
-    );
-
-    const result = await fetchGitHubPullRequests(dir);
-
+    mockExecError('Command failed: gh pr list --state open', {
+      killed: true,
+      stderr: '',
+    });
+    const result = await fetchGitHubPullRequests(tmp.repo());
     expect(result).toEqual({
       kind: 'failed',
       message: 'gh pr list timed out after 10s',
-      gitRoot: dir,
+      gitRoot: tmp.dir,
     });
   });
 
   it('returns failed with a single-line stderr message when gh exits non-zero', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockGhError(
-      Object.assign(new Error('exit 1'), {
-        stderr: 'gh: not logged in\nRun gh auth login',
-      }),
-    );
-
-    const result = await fetchGitHubPullRequests(dir);
-
+    mockExecError('exit 1', { stderr: 'gh: not logged in\nRun gh auth login' });
+    const result = await fetchGitHubPullRequests(tmp.repo());
     expect(result).toEqual({
       kind: 'failed',
       message: 'gh: not logged in Run gh auth login',
-      gitRoot: dir,
+      gitRoot: tmp.dir,
     });
   });
 
   it('keeps stderr past the display cap so the route can sanitize paths', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
+    const dir = tmp.repo();
     // Push the absolute path beyond the 512-char display cap; core must not
     // cut it off before the route redacts it.
-    const padding = 'x'.repeat(600);
-    mockGhError(
-      Object.assign(new Error('exit 1'), {
-        stderr: `${padding} ${dir} denied`,
-      }),
-    );
+    mockExecError('exit 1', { stderr: `${'x'.repeat(600)} ${dir} denied` });
 
     const result = await fetchGitHubPullRequests(dir);
 
@@ -343,44 +338,33 @@ describe('fetchGitHubPullRequests', () => {
   });
 
   it('returns failed when gh emits invalid JSON', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-        (cb as ExecCallback)(null, 'not json', '');
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
-
-    const result = await fetchGitHubPullRequests(dir);
-
+    mockStdout('not json');
+    const result = await fetchGitHubPullRequests(tmp.repo());
     expect(result.kind).toBe('failed');
   });
 });
 
 describe('createGitHubPullRequest', () => {
-  let dir: string;
-
-  beforeEach(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-create-'));
-  });
-
+  const tmp = useTmpDir('github-prs-create-', { resetMocks: false });
   afterEach(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
     vi.unstubAllEnvs();
   });
 
+  /** Answers gh pr create with the PR `url`; `seen.env` is the env gh got. */
+  const answerWithUrl = (url: string) => {
+    const seen: { env?: Record<string, string | undefined> } = {};
+    mockExec((cb, _args, opts) => {
+      seen.env = (opts as { env?: Record<string, string | undefined> }).env;
+      cb(null, `${url}\n`, '');
+    });
+    return seen;
+  };
+
   it('clears repository-shifting git env vars when spawning gh pr create', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
+    const dir = tmp.repo();
     vi.stubEnv('GIT_DIR', '/somewhere/else/.git');
     vi.stubEnv('GIT_WORK_TREE', '/somewhere/else');
-    let seenEnv: Record<string, string | undefined> | undefined;
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
-        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
-        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/42\n', '');
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
+    const seen = answerWithUrl('https://github.com/o/r/pull/42');
 
     const result = await createGitHubPullRequest(dir, { title: 'My PR' });
 
@@ -389,21 +373,14 @@ describe('createGitHubPullRequest', () => {
       url: 'https://github.com/o/r/pull/42',
       number: 42,
     });
-    expect(seenEnv).toBeDefined();
-    expect(seenEnv).not.toHaveProperty('GIT_DIR');
-    expect(seenEnv).not.toHaveProperty('GIT_WORK_TREE');
+    expect(seen.env).toBeDefined();
+    expect(seen.env).not.toHaveProperty('GIT_DIR');
+    expect(seen.env).not.toHaveProperty('GIT_WORK_TREE');
   });
 
   it('forwards a workspace env while still stripping repository selectors', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    let seenEnv: Record<string, string | undefined> | undefined;
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
-        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
-        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/7\n', '');
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
+    const dir = tmp.repo();
+    const seen = answerWithUrl('https://github.com/o/r/pull/7');
 
     const result = await createGitHubPullRequest(
       dir,
@@ -416,9 +393,74 @@ describe('createGitHubPullRequest', () => {
       url: 'https://github.com/o/r/pull/7',
       number: 7,
     });
-    expect(seenEnv).toBeDefined();
-    expect(seenEnv?.['GH_TOKEN']).toBe('ws-token');
-    expect(seenEnv).not.toHaveProperty('GH_REPO');
+    expect(seen.env).toBeDefined();
+    expect(seen.env?.['GH_TOKEN']).toBe('ws-token');
+    expect(seen.env).not.toHaveProperty('GH_REPO');
+  });
+
+  it('uses XDG gh credentials without exposing XDG git config to subprocesses', async () => {
+    const dir = tmp.repo();
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/7\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    await createGitHubPullRequest(
+      dir,
+      { title: 'My PR' },
+      {
+        XDG_CONFIG_HOME: '/tmp/gh-user-config',
+        GIT_SSL_CAINFO: '/tmp/ca.pem',
+        GIT_DIR: '/tmp/decoy/.git',
+      },
+    );
+
+    expect(seenEnv?.['GH_CONFIG_DIR']).toBe(
+      path.join('/tmp/gh-user-config', 'gh'),
+    );
+    expect(seenEnv?.['GIT_SSL_CAINFO']).toBe('/tmp/ca.pem');
+    expect(seenEnv).not.toHaveProperty('XDG_CONFIG_HOME');
+    expect(seenEnv).not.toHaveProperty('GIT_DIR');
+  });
+
+  it("preserves the caller SSH transport for gh pr create's internal git push", async () => {
+    // gh shells out to `git push` for the head branch; the scrubbed env
+    // must re-apply the remote-transport keys the way gitRemoteEnv does for
+    // a direct push, or the push authenticates with the wrong key/proxy.
+    const dir = tmp.repo();
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/7\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    const result = await createGitHubPullRequest(
+      dir,
+      { title: 'My PR' },
+      {
+        GIT_SSH_COMMAND: 'ssh -i ~/.ssh/work_ed25519 -J bastion',
+        GIT_SSH: '/tmp/git-ssh',
+        GIT_ASKPASS: '/tmp/askpass',
+        SSH_ASKPASS: '/tmp/ssh-askpass',
+        GIT_DIR: '/tmp/decoy/.git',
+      },
+    );
+
+    expect(result.kind).toBe('ok');
+    expect(seenEnv?.['GIT_SSH_COMMAND']).toBe(
+      'ssh -i ~/.ssh/work_ed25519 -J bastion',
+    );
+    expect(seenEnv?.['GIT_SSH']).toBe('/tmp/git-ssh');
+    expect(seenEnv?.['GIT_ASKPASS']).toBe('/tmp/askpass');
+    expect(seenEnv?.['SSH_ASKPASS']).toBe('/tmp/ssh-askpass');
+    expect(seenEnv).not.toHaveProperty('GIT_DIR');
   });
 });
 
@@ -516,89 +558,39 @@ describe('repoKeyFromWebUrl', () => {
 });
 
 describe('fetchRemoteWebUrl', () => {
-  let dir: string;
-
-  beforeEach(() => {
-    vi.resetAllMocks();
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-remote-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  const tmp = useTmpDir('github-prs-remote-');
 
   it('resolves and normalizes the origin remote', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
-        expect(args).toEqual(['remote', 'get-url', 'origin']);
-        (cb as ExecCallback)(null, 'git@github.com:o/r.git\n', '');
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
-
-    expect(await fetchRemoteWebUrl(dir)).toBe('https://github.com/o/r');
+    mockStdout('git@github.com:o/r.git\n', ['remote', 'get-url', 'origin']);
+    expect(await fetchRemoteWebUrl(tmp.repo())).toBe('https://github.com/o/r');
   });
 
   it('returns undefined outside a git repository without spawning git', async () => {
-    expect(await fetchRemoteWebUrl(dir)).toBeUndefined();
+    expect(await fetchRemoteWebUrl(tmp.dir)).toBeUndefined();
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
   it('returns undefined when git fails (no origin)', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-        (cb as ExecCallback)(
-          new Error('fatal: no remote named origin'),
-          '',
-          '',
-        );
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
-
-    expect(await fetchRemoteWebUrl(dir)).toBeUndefined();
+    mockExecError('fatal: no remote named origin');
+    expect(await fetchRemoteWebUrl(tmp.repo())).toBeUndefined();
   });
 });
 
 describe('fetchCurrentBranchPullRequest', () => {
-  let dir: string;
-
-  beforeEach(() => {
-    vi.resetAllMocks();
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-branch-pr-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  const tmp = useTmpDir('github-prs-branch-pr-');
 
   it('resolves number, url, state, and head branch from gh', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
-        expect(args).toEqual([
-          'pr',
-          'view',
-          '--json',
-          'number,url,state,headRefName',
-        ]);
-        (cb as ExecCallback)(
-          null,
-          JSON.stringify({
-            number: 77,
-            url: 'https://github.com/o/r/pull/77',
-            state: 'OPEN',
-            headRefName: 'feat/x',
-          }),
-          '',
-        );
-        return {} as ReturnType<typeof execFile>;
+    mockGhSuccess(
+      {
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'OPEN',
+        headRefName: 'feat/x',
       },
+      ['pr', 'view', '--json', 'number,url,state,headRefName'],
     );
 
-    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+    expect(await fetchCurrentBranchPullRequest(tmp.repo())).toEqual({
       status: 'pr',
       number: 77,
       url: 'https://github.com/o/r/pull/77',
@@ -611,7 +603,7 @@ describe('fetchCurrentBranchPullRequest', () => {
     // A retry that resolves the branch's existing PR must never bind on a
     // shape the caller cannot gate on — an unparseable pre-state is an
     // error, not a proved absence.
-    fs.mkdirSync(path.join(dir, '.git'));
+    const dir = tmp.repo();
     mockGhSuccess({ number: 77, url: 'https://github.com/o/r/pull/77' });
     expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
       status: 'error',
@@ -629,13 +621,10 @@ describe('fetchCurrentBranchPullRequest', () => {
   it('reports none when gh proves the branch has no PR', async () => {
     // gh exits non-zero with a characteristic message when the branch
     // simply has no PR — a proved absence, distinct from a fetch failure.
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockGhError(
-      Object.assign(new Error('exit code 1'), {
-        stderr: 'no pull requests found for branch "feat/x"',
-      }),
-    );
-    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+    mockExecError('exit code 1', {
+      stderr: 'no pull requests found for branch "feat/x"',
+    });
+    expect(await fetchCurrentBranchPullRequest(tmp.repo())).toEqual({
       status: 'none',
     });
   });
@@ -644,9 +633,8 @@ describe('fetchCurrentBranchPullRequest', () => {
     // Timeouts, rate limits, and auth failures prove nothing about the
     // branch's PRs; the attribution gate must decline on them instead of
     // reading them as "no prior PR".
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockGhError(Object.assign(new Error('network timeout'), { killed: true }));
-    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+    mockExecError('network timeout', { killed: true });
+    expect(await fetchCurrentBranchPullRequest(tmp.repo())).toEqual({
       status: 'error',
     });
   });
@@ -656,7 +644,7 @@ describe('fetchCurrentBranchPullRequest', () => {
     // may clone the repo into the working dir and resolve its existing PR
     // post-run — so the pre-state fails closed instead of reading as
     // "no prior PR".
-    expect(await fetchCurrentBranchPullRequest(dir)).toEqual({
+    expect(await fetchCurrentBranchPullRequest(tmp.dir)).toEqual({
       status: 'error',
     });
     expect(mockExecFile).not.toHaveBeenCalled();
@@ -664,116 +652,66 @@ describe('fetchCurrentBranchPullRequest', () => {
 });
 
 describe('fetchCurrentBranchName', () => {
-  let dir: string;
-
-  beforeEach(() => {
-    vi.resetAllMocks();
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-branch-name-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  const tmp = useTmpDir('github-prs-branch-name-');
 
   it('resolves the checked-out branch', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
-        expect(args).toEqual(['branch', '--show-current']);
-        (cb as ExecCallback)(null, 'feat/x\n', '');
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
-
-    expect(await fetchCurrentBranchName(dir)).toBe('feat/x');
+    mockStdout('feat/x\n', ['branch', '--show-current']);
+    expect(await fetchCurrentBranchName(tmp.repo())).toBe('feat/x');
   });
 
   it('returns undefined outside a git repository without spawning git', async () => {
-    expect(await fetchCurrentBranchName(dir)).toBeUndefined();
+    expect(await fetchCurrentBranchName(tmp.dir)).toBeUndefined();
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
   it('returns undefined on a detached HEAD or git failure', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-        (cb as ExecCallback)(null, '', '');
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
+    const dir = tmp.repo();
+    mockStdout('');
     expect(await fetchCurrentBranchName(dir)).toBeUndefined();
 
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-        (cb as ExecCallback)(new Error('not a git repository'), '', '');
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
+    mockExecError('not a git repository');
     expect(await fetchCurrentBranchName(dir)).toBeUndefined();
   });
 });
 
 describe('fetchAttributionRepoKeys', () => {
-  let dir: string;
-
-  beforeEach(() => {
-    vi.resetAllMocks();
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-repo-keys-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  const tmp = useTmpDir('github-prs-repo-keys-');
 
   it('resolves the repo key and the fork-parent key', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
-        expect(args).toEqual(['repo', 'view', '--json', 'url,parent']);
-        (cb as ExecCallback)(
-          null,
-          JSON.stringify({
-            url: 'https://github.com/fork/r',
-            parent: { url: 'https://github.com/parent/r' },
-          }),
-          '',
-        );
-        return {} as ReturnType<typeof execFile>;
+    mockGhSuccess(
+      {
+        url: 'https://github.com/fork/r',
+        parent: { url: 'https://github.com/parent/r' },
       },
+      ['repo', 'view', '--json', 'url,parent'],
     );
 
-    expect(await fetchAttributionRepoKeys(dir)).toEqual({
+    expect(await fetchAttributionRepoKeys(tmp.repo())).toEqual({
       resolved: 'github.com/fork/r',
       parent: 'github.com/parent/r',
     });
   });
 
   it('omits the parent key for a non-fork repo', async () => {
-    fs.mkdirSync(path.join(dir, '.git'));
     mockGhSuccess({ url: 'https://github.com/o/r', parent: {} });
-    expect(await fetchAttributionRepoKeys(dir)).toEqual({
+    expect(await fetchAttributionRepoKeys(tmp.repo())).toEqual({
       resolved: 'github.com/o/r',
     });
   });
 
   it('returns no keys outside a git repository without spawning gh', async () => {
-    expect(await fetchAttributionRepoKeys(dir)).toEqual({});
+    expect(await fetchAttributionRepoKeys(tmp.dir)).toEqual({});
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
   it('fails closed when gh cannot answer', async () => {
     // An unresolvable pre-run identity must decline attribution, not read
     // as "any repo may bind".
-    fs.mkdirSync(path.join(dir, '.git'));
-    mockGhError(Object.assign(new Error('network timeout'), { killed: true }));
+    const dir = tmp.repo();
+    mockExecError('network timeout', { killed: true });
     expect(await fetchAttributionRepoKeys(dir)).toEqual({});
 
-    mockExecFile.mockImplementation(
-      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
-        (cb as ExecCallback)(null, 'not json', '');
-        return {} as ReturnType<typeof execFile>;
-      },
-    );
+    mockStdout('not json');
     expect(await fetchAttributionRepoKeys(dir)).toEqual({});
   });
 });

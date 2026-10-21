@@ -14,7 +14,14 @@ import type {
   OmniPolicyToolLookup,
   RawOmniProcessingSettings,
 } from './config.js';
-import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
+import type {
+  OmniPolicyToolModelAccessSettings,
+  OmniPolicyToolSettings,
+} from './types.js';
+import type {
+  MediaPolicyToolDescriptor,
+  MediaPolicyToolOutputSpec,
+} from '../../tools/tools.js';
 import type { OmniModality } from '../recognition.js';
 import { STAGING_GRACE_MS } from '../recovery.js';
 
@@ -61,6 +68,21 @@ function makeTool(
   };
 }
 
+/** A tool whose only outputs are one required lossy `kind` output (with
+ * `role` and a single mime type) plus the disclosure text. */
+const toolEmitting = (
+  mediaType: OmniModality,
+  kind: MediaPolicyToolOutputSpec['kind'],
+  role: string,
+  mimeType: string,
+) =>
+  makeTool([mediaType], {
+    outputs: [
+      { kind, role, mimeTypes: [mimeType], required: true, lossy: true },
+      { kind: 'text', role: 'disclosure', required: true },
+    ],
+  });
+
 function defaultTools(): Record<string, ToolStub> {
   return {
     omni_downsample_image: makeTool(['image']),
@@ -68,6 +90,12 @@ function defaultTools(): Record<string, ToolStub> {
     omni_downsample_audio: makeTool(['audio']),
   };
 }
+
+/** The default tools plus `tool` registered under `name`. */
+const toolsWith = (name: string, tool: ToolStub) => ({
+  ...defaultTools(),
+  [name]: tool,
+});
 
 function lookup(tools: Record<string, ToolStub>): OmniPolicyToolLookup {
   return { getTool: (name) => tools[name] };
@@ -80,13 +108,49 @@ function normalize(
   return normalizeOmniProcessingConfig(raw, lookup(tools));
 }
 
+/** Error-path prefixes of fixed policy `p`, the guard set and the image
+ * tool's policyTools entry. */
+const AT_P = 'omni.processing.fixedPolicies.p';
+const AT_GUARD = 'omni.processing.transportGuard.policies';
+const AT_TOOL = 'omni.processing.policyTools.omni_downsample_image';
+
+/** A minimal image-downsample policy entry plus `extra` fields. */
+const imagePolicy = (extra: Record<string, unknown> = {}) => ({
+  mediaTypes: ['image'],
+  toolName: 'omni_downsample_image',
+  ...extra,
+});
+
+const fixed = (policies: unknown, tools?: Record<string, ToolStub>) =>
+  normalize({ fixedPolicies: policies }, tools);
+const guard = (policies: unknown) =>
+  normalize({ transportGuardPolicies: policies });
+const policyTool = (
+  entry: OmniPolicyToolSettings,
+  tools?: Record<string, ToolStub>,
+) => normalize({ policyTools: { omni_downsample_image: entry } }, tools);
+const modelAccess = (access: OmniPolicyToolModelAccessSettings) =>
+  policyTool({ modelAccess: access });
+
+/** Normalizes imagePolicy(extra) under `id` and returns that policy. */
+const fixedPolicy = (extra: Record<string, unknown>, id = 'p') =>
+  fixed({ [id]: imagePolicy(extra) }).fixedPolicies.find((p) => p.id === id);
+
+/** Asserts that policy `p` = imagePolicy(extra) fails with `error`. */
+function expectFixedError(
+  extra: Record<string, unknown>,
+  error: string | RegExp,
+  tools?: Record<string, ToolStub>,
+) {
+  expect(() => fixed({ p: imagePolicy(extra) }, tools)).toThrow(error);
+}
+
 describe('normalizeOmniProcessingConfig', () => {
   describe('system defaults', () => {
     it('normalizes against the REAL degradation tools, not just stubs', async () => {
-      // The stub lookup above can drift from the shipped tool descriptors;
-      // this is the startup path every real CLI run takes, so a descriptor
-      // that fails §13 validation (e.g. a lossy output without a declared
-      // disclosure) must fail HERE, not at first launch.
+      // The stub lookup can drift from the shipped descriptors; this is the
+      // startup path of every real CLI run, so a descriptor failing §13 (e.g.
+      // lossy output without a disclosure) must fail HERE, not at launch.
       const [image, video, audio] = await Promise.all([
         import('./tools/downsample-image.js'),
         import('./tools/downscale-video.js'),
@@ -103,11 +167,9 @@ describe('normalizeOmniProcessingConfig', () => {
     });
 
     it('registers no default fixed policies: zero config → zero preprocessing (D7)', () => {
-      // The upstream design gives fixedPolicies pure user-experiment
-      // semantics: with no configuration, NOTHING may trigger below
-      // transport limits. Only the transport guard is always-on.
-      const config = normalize();
-      expect(config.fixedPolicies).toEqual([]);
+      // Upstream design: fixedPolicies are pure user experiments. No config →
+      // NOTHING triggers below transport limits; the guard alone is always-on.
+      expect(normalize().fixedPolicies).toEqual([]);
     });
 
     it('produces the three default guard policies without when, stage transport_guard', () => {
@@ -140,38 +202,26 @@ describe('normalizeOmniProcessingConfig', () => {
 
   describe('id-merge semantics', () => {
     it('rejects a "__proto__" policy id instead of silently dropping it', () => {
-      // JSON.parse produces "__proto__" as an ordinary own key; a plain
-      // object-spread merge would route it through the prototype setter and
-      // the entry would vanish without a diagnostic. The null-prototype
-      // merge map keeps it as a real key so the id pattern rejects it.
+      // JSON.parse makes "__proto__" an ordinary own key; an object-spread
+      // merge would route it through the prototype setter and drop it
+      // silently. The null-prototype merge map keeps it for the id check.
       expect(() =>
-        normalize({
-          fixedPolicies: JSON.parse(
+        fixed(
+          JSON.parse(
             '{"__proto__": {"mediaTypes": ["image"], "toolName": "omni_downsample_image"}}',
           ),
-        }),
+        ),
       ).toThrow(/__proto__: policy id must match/);
     });
 
     it('accepts a null tombstone with no matching entry (no fixed defaults exist)', () => {
-      const config = normalize({
-        fixedPolicies: { 'image-downsample': null },
-      });
-      expect(config.fixedPolicies).toEqual([]);
+      expect(fixed({ 'image-downsample': null }).fixedPolicies).toEqual([]);
     });
 
     it('normalizes a user fixed policy with full defaults applied', () => {
-      const config = normalize({
-        fixedPolicies: {
-          'image-downsample': {
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-            arguments: { maxDimension: 1024 },
-          },
-        },
-      });
-      const image = config.fixedPolicies.find(
-        (p) => p.id === 'image-downsample',
+      const image = fixedPolicy(
+        { arguments: { maxDimension: 1024 } },
+        'image-downsample',
       );
       expect(image).toEqual({
         id: 'image-downsample',
@@ -194,34 +244,17 @@ describe('normalizeOmniProcessingConfig', () => {
     });
 
     it('accepts and trims an optional model-facing description', () => {
-      const config = normalize({
-        fixedPolicies: {
-          'image-downsample': {
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-            description: '  Downsamples large images.  ',
-          },
-        },
-      });
-      const image = config.fixedPolicies.find(
-        (p) => p.id === 'image-downsample',
+      const image = fixedPolicy(
+        { description: '  Downsamples large images.  ' },
+        'image-downsample',
       );
       expect(image?.description).toBe('Downsamples large images.');
     });
 
     it('omits description entirely when unset or blank (no empty-string key)', () => {
-      const config = normalize({
-        fixedPolicies: {
-          a: {
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-          },
-          b: {
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-            description: '   ',
-          },
-        },
+      const config = fixed({
+        a: imagePolicy(),
+        b: imagePolicy({ description: '   ' }),
       });
       for (const id of ['a', 'b']) {
         const p = config.fixedPolicies.find((x) => x.id === id)!;
@@ -231,15 +264,7 @@ describe('normalizeOmniProcessingConfig', () => {
 
     it('rejects a non-string description', () => {
       expect(() =>
-        normalize({
-          fixedPolicies: {
-            'image-downsample': {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              description: 123,
-            },
-          },
-        }),
+        fixed({ 'image-downsample': imagePolicy({ description: 123 }) }),
       ).toThrow(
         'omni.processing.fixedPolicies.image-downsample.description: must be a string',
       );
@@ -247,40 +272,22 @@ describe('normalizeOmniProcessingConfig', () => {
 
     it('rejects an over-long description', () => {
       expect(() =>
-        normalize({
-          fixedPolicies: {
-            'image-downsample': {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              description: 'x'.repeat(601),
-            },
-          },
+        fixed({
+          'image-downsample': imagePolicy({ description: 'x'.repeat(601) }),
         }),
       ).toThrow(/description: must be ≤ 600 characters \(got 601\)/);
     });
 
     it('replaces a default guard entry wholesale (no field-level merge)', () => {
-      // Whole-entry replacement: the override does NOT inherit the
-      // default's toolName, so omitting it must be a validation error —
-      // a field-level merge would inherit it and pass.
+      // The override does NOT inherit the default's toolName, so omitting
+      // it must fail — a field-level merge would inherit it and pass.
       expect(() =>
-        normalize({
-          transportGuardPolicies: {
-            'image-downsample': { mediaTypes: ['image'] },
-          },
-        }),
+        guard({ 'image-downsample': { mediaTypes: ['image'] } }),
       ).toThrow(
-        'omni.processing.transportGuard.policies.image-downsample.toolName: ' +
-          'must be a non-empty string',
+        `${AT_GUARD}.image-downsample.toolName: must be a non-empty string`,
       );
-      const config = normalize({
-        transportGuardPolicies: {
-          'image-downsample': {
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-            arguments: { maxDimension: 1024 },
-          },
-        },
+      const config = guard({
+        'image-downsample': imagePolicy({ arguments: { maxDimension: 1024 } }),
       });
       const image = config.transportGuardPolicies.find(
         (p) => p.id === 'image-downsample',
@@ -289,15 +296,7 @@ describe('normalizeOmniProcessingConfig', () => {
     });
 
     it('accepts user fixed policies (the only preprocessing source)', () => {
-      const config = normalize({
-        fixedPolicies: {
-          'my-policy': {
-            priority: 5,
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-          },
-        },
-      });
+      const config = fixed({ 'my-policy': imagePolicy({ priority: 5 }) });
       expect(config.fixedPolicies).toHaveLength(1);
       const mine = config.fixedPolicies.find((p) => p.id === 'my-policy');
       expect(mine?.priority).toBe(5);
@@ -305,22 +304,17 @@ describe('normalizeOmniProcessingConfig', () => {
     });
 
     it('rejects transport-guard tombstones (the guard is mandatory)', () => {
-      expect(() =>
-        normalize({ transportGuardPolicies: { 'image-downsample': null } }),
-      ).toThrow(
-        'omni.processing.transportGuard.policies.image-downsample: ' +
-          'transport guard policies cannot be removed (the guard is ' +
-          'mandatory); override the entry instead',
+      expect(() => guard({ 'image-downsample': null })).toThrow(
+        `${AT_GUARD}.image-downsample: transport guard policies cannot be ` +
+          'removed (the guard is mandatory); override the entry instead',
       );
     });
 
     it('rejects non-object policy maps', () => {
-      expect(() => normalize({ fixedPolicies: ['nope'] })).toThrow(
+      expect(() => fixed(['nope'])).toThrow(
         'omni.processing.fixedPolicies: must be an object map of policy id → policy',
       );
-      expect(() =>
-        normalize({ fixedPolicies: { bad: 'string' as never } }),
-      ).toThrow(
+      expect(() => fixed({ bad: 'string' })).toThrow(
         'omni.processing.fixedPolicies.bad: must be an object (or null to remove a default)',
       );
     });
@@ -328,158 +322,80 @@ describe('normalizeOmniProcessingConfig', () => {
 
   describe('policy entry validation', () => {
     it('rejects unknown keys (§13 #1)', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              retries: 3,
-            },
-          },
-        }),
-      ).toThrow('omni.processing.fixedPolicies.p: unknown key "retries"');
+      expectFixedError({ retries: 3 }, `${AT_P}: unknown key "retries"`);
     });
 
     it('rejects malformed policy ids', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            'has space': {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-            },
-          },
-        }),
-      ).toThrow(OmniPolicyConfigError);
+      expect(() => fixed({ 'has space': imagePolicy() })).toThrow(
+        OmniPolicyConfigError,
+      );
     });
 
     it('rejects empty or unknown mediaTypes (§13 #3)', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: { mediaTypes: [], toolName: 'omni_downsample_image' },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.mediaTypes: must be a non-empty array',
+      expectFixedError(
+        { mediaTypes: [] },
+        `${AT_P}.mediaTypes: must be a non-empty array`,
       );
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: { mediaTypes: ['text'], toolName: 'omni_downsample_image' },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.mediaTypes: unknown modality "text" ' +
-          '(expected image, video, audio)',
+      expectFixedError(
+        { mediaTypes: ['text'] },
+        `${AT_P}.mediaTypes: unknown modality "text" (expected image, video, audio)`,
       );
     });
 
-    it('rejects unknown origins (§13 #4)', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              origins: ['model'],
-              toolName: 'omni_downsample_image',
-            },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.origins: unknown origin "model" ' +
-          '(expected user, tool, policy)',
-      );
-    });
-
-    it('rejects onConditionUnavailable "abortTurn" with an explicit not-yet-supported error', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              onConditionUnavailable: 'abortTurn',
-            },
-          },
-        }),
-      ).toThrow(/"abortTurn" is not yet supported/);
-    });
-
-    it('rejects invalid onFailure', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              onFailure: 'retry',
-            },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.onFailure: must be "continue" or "abort" (got "retry")',
-      );
-    });
-
-    it('rejects non-positive maxRunsPerLineage', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              maxRunsPerLineage: 0,
-            },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.maxRunsPerLineage: must be a positive integer (got 0)',
-      );
+    it.each([
+      [
+        'rejects unknown origins (§13 #4)',
+        { origins: ['model'] },
+        `${AT_P}.origins: unknown origin "model" (expected user, tool, policy)`,
+      ],
+      [
+        'rejects onConditionUnavailable "abortTurn" with an explicit not-yet-supported error',
+        { onConditionUnavailable: 'abortTurn' },
+        /"abortTurn" is not yet supported/,
+      ],
+      [
+        'rejects invalid onFailure',
+        { onFailure: 'retry' },
+        `${AT_P}.onFailure: must be "continue" or "abort" (got "retry")`,
+      ],
+      [
+        'rejects non-positive maxRunsPerLineage',
+        { maxRunsPerLineage: 0 },
+        `${AT_P}.maxRunsPerLineage: must be a positive integer (got 0)`,
+      ],
+      // Derivatives re-enter matching with origin 'policy'; with no policy
+      // accepting that origin, reprocessMedia can never take effect.
+      [
+        'rejects reprocessMedia when no policy in the set accepts origin "policy"',
+        { output: { source: 'keep', reprocessMedia: true } },
+        'omni.processing.fixedPolicies: "p" sets output.reprocessMedia, ' +
+          'but no policy in this set accepts origin "policy"',
+      ],
+      [
+        'rejects invalid when-conditions via the shared validator (§13 #5)',
+        { when: ['>', ['field', 'resource.nonexistent'], 1] },
+        /omni\.processing\.fixedPolicies\.p\.when/,
+      ],
+    ])('%s', (_title, extra, error) => {
+      expectFixedError(extra, error);
     });
 
     it('rejects unknown output keys and illegal output.source (§13 #23)', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              output: { keepBoth: true },
-            },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.output: unknown key "keepBoth"',
+      expectFixedError(
+        { output: { keepBoth: true } },
+        `${AT_P}.output: unknown key "keepBoth"`,
       );
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              output: { source: 'drop' },
-            },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.output.source: must be "keep" or "omit" (got "drop")',
+      expectFixedError(
+        { output: { source: 'drop' } },
+        `${AT_P}.output.source: must be "keep" or "omit" (got "drop")`,
       );
     });
 
     it('allows output.source "keep" for preprocessing policies', () => {
-      const config = normalize({
-        fixedPolicies: {
-          p: {
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-            origins: ['user', 'tool', 'policy'],
-            output: { source: 'keep', reprocessMedia: true },
-          },
-        },
+      const p = fixedPolicy({
+        origins: ['user', 'tool', 'policy'],
+        output: { source: 'keep', reprocessMedia: true },
       });
-      const p = config.fixedPolicies.find((x) => x.id === 'p');
       expect(p?.output).toEqual({
         reprocessMedia: true,
         source: 'keep',
@@ -487,96 +403,34 @@ describe('normalizeOmniProcessingConfig', () => {
       });
     });
 
-    it('rejects reprocessMedia when no policy in the set accepts origin "policy"', () => {
-      // Derivatives re-enter matching with origin 'policy'; with no policy
-      // accepting that origin, reprocessMedia can never take effect.
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              output: { source: 'keep', reprocessMedia: true },
-            },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies: "p" sets output.reprocessMedia, ' +
-          'but no policy in this set accepts origin "policy"',
-      );
-    });
-
     it('accepts reprocessMedia when ANOTHER policy in the set accepts origin "policy"', () => {
       expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              output: { source: 'keep', reprocessMedia: true },
-            },
-            q: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              origins: ['policy'],
-            },
-          },
+        fixed({
+          p: imagePolicy({ output: { source: 'keep', reprocessMedia: true } }),
+          q: imagePolicy({ origins: ['policy'] }),
         }),
       ).not.toThrow();
     });
 
     it('applies the inert-reprocessMedia check to the transport-guard set independently', () => {
       expect(() =>
-        normalize({
-          transportGuardPolicies: {
-            g: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              output: { reprocessMedia: true },
-            },
-          },
-        }),
+        guard({ g: imagePolicy({ output: { reprocessMedia: true } }) }),
       ).toThrow(
-        'omni.processing.transportGuard.policies: "g" sets ' +
-          'output.reprocessMedia, but no policy in this set accepts ' +
-          'origin "policy"',
+        `${AT_GUARD}: "g" sets output.reprocessMedia, but no policy in ` +
+          'this set accepts origin "policy"',
       );
     });
 
-    it('rejects invalid when-conditions via the shared validator (§13 #5)', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              when: ['>', ['field', 'resource.nonexistent'], 1],
-            },
-          },
-        }),
-      ).toThrow(/omni\.processing\.fixedPolicies\.p\.when/);
-    });
-
     it('preserves a valid when-condition verbatim through normalization (D7)', () => {
-      // `when` is preprocessing's ONLY trigger mechanism: a normalization
-      // regression that drops or rewrites it would silently widen every
-      // user condition to ALL matching resources. Pin the round-trip.
+      // `when` is preprocessing's ONLY trigger: a normalization regression
+      // that drops or rewrites it would silently widen every user condition
+      // to ALL matching resources. Pin the round-trip.
       const when = [
         'all',
         ['>', ['field', 'resource.sizeBytes'], 10_000_000],
         ['>=', ['field', 'session.availableContextTokens'], 4096],
       ];
-      const config = normalize({
-        fixedPolicies: {
-          p: {
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-            when,
-          },
-        },
-      });
-      const p = config.fixedPolicies.find((x) => x.id === 'p');
-      expect(p?.when).toEqual(when);
+      expect(fixedPolicy({ when })?.when).toEqual(when);
     });
   });
 
@@ -584,63 +438,29 @@ describe('normalizeOmniProcessingConfig', () => {
     /** Media tool whose descriptor declares producible mime types, so
      * `kind:` selectors have something to match. */
     const mediaToolWithMimes = () =>
-      makeTool(['image'], {
-        outputs: [
-          {
-            kind: 'media',
-            role: 'preview',
-            mimeTypes: ['image/jpeg'],
-            required: true,
-            lossy: true,
-          },
-          { kind: 'text', role: 'disclosure', required: true },
-        ],
-      });
+      toolEmitting('image', 'media', 'preview', 'image/jpeg');
 
-    /** Transcript-protocol tool (§6.2): bounded UTF-8 text/plain file. */
-    const transcribeLikeTool = () =>
-      makeTool(['audio'], {
-        outputs: [
-          {
-            kind: 'file',
-            role: 'transcript',
-            mimeTypes: ['text/plain'],
-            required: true,
-            lossy: true,
-          },
-          { kind: 'text', role: 'disclosure', required: true },
-        ],
-      });
-
-    const withTool = (tool: ToolStub) => ({
-      ...defaultTools(),
-      tool_under_test: tool,
-    });
+    /** Audio tool declaring its `transcript` role on a `kind` output. */
+    const transcriptTool = (
+      kind: MediaPolicyToolOutputSpec['kind'],
+      mimeType: string,
+    ) => toolEmitting('audio', kind, 'transcript', mimeType);
 
     const policyWith = (
       artifacts: Record<string, unknown>,
       tool: ToolStub,
       mediaTypes: OmniModality[] = ['image'],
     ) =>
-      normalize(
+      fixed(
         {
-          fixedPolicies: {
-            p: {
-              mediaTypes,
-              toolName: 'tool_under_test',
-              output: { artifacts },
-            },
-          },
+          p: { mediaTypes, toolName: 'tool_under_test', output: { artifacts } },
         },
-        withTool(tool),
+        toolsWith('tool_under_test', tool),
       );
+    const AT_ARTIFACTS = `${AT_P}.output.artifacts`;
 
     it('defaults an unconfigured artifacts map to include-all', () => {
-      const config = normalize({
-        fixedPolicies: {
-          p: { mediaTypes: ['image'], toolName: 'omni_downsample_image' },
-        },
-      });
+      const config = fixed({ p: imagePolicy() });
       expect(config.fixedPolicies[0].output.artifacts).toEqual({
         '*': 'include',
       });
@@ -658,52 +478,45 @@ describe('normalizeOmniProcessingConfig', () => {
       });
     });
 
-    it('rejects actions other than include/retain', () => {
-      expect(() => policyWith({ '*': 'drop' }, mediaToolWithMimes())).toThrow(
-        'omni.processing.fixedPolicies.p.output.artifacts["*"]: must be "include" or "retain" (got "drop")',
-      );
-    });
-
-    it('rejects unknown selector shapes', () => {
-      expect(() =>
-        policyWith({ preview: 'include' }, mediaToolWithMimes()),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.output.artifacts["preview"]: unknown selector (expected "*", "kind:<kind>", or "role:<role>")',
-      );
-    });
-
-    it('rejects unknown kind targets', () => {
-      expect(() =>
-        policyWith({ 'kind:text': 'include' }, mediaToolWithMimes()),
-      ).toThrow(/unknown artifact kind "text"/);
-    });
-
-    it('rejects malformed role tokens', () => {
-      expect(() =>
-        policyWith({ 'role:no spaces!': 'include' }, mediaToolWithMimes()),
-      ).toThrow(/invalid role token "no spaces!"/);
-    });
-
-    it('rejects a kind selector the descriptor cannot produce (§13 #22)', () => {
-      expect(() =>
-        policyWith({ 'kind:video': 'retain' }, mediaToolWithMimes()),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.output.artifacts["kind:video"]: tool "tool_under_test" declares no output of kind "video"',
-      );
-    });
-
-    it('rejects a role selector no artifact output declares (§13 #22)', () => {
-      expect(() =>
-        policyWith({ 'role:thumbnail': 'include' }, mediaToolWithMimes()),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.output.artifacts["role:thumbnail"]: tool "tool_under_test" declares no artifact output with role "thumbnail"',
-      );
+    it.each([
+      [
+        'rejects actions other than include/retain',
+        { '*': 'drop' },
+        `${AT_ARTIFACTS}["*"]: must be "include" or "retain" (got "drop")`,
+      ],
+      [
+        'rejects unknown selector shapes',
+        { preview: 'include' },
+        `${AT_ARTIFACTS}["preview"]: unknown selector (expected "*", "kind:<kind>", or "role:<role>")`,
+      ],
+      [
+        'rejects unknown kind targets',
+        { 'kind:text': 'include' },
+        /unknown artifact kind "text"/,
+      ],
+      [
+        'rejects malformed role tokens',
+        { 'role:no spaces!': 'include' },
+        /invalid role token "no spaces!"/,
+      ],
+      [
+        'rejects a kind selector the descriptor cannot produce (§13 #22)',
+        { 'kind:video': 'retain' },
+        `${AT_ARTIFACTS}["kind:video"]: tool "tool_under_test" declares no output of kind "video"`,
+      ],
+      [
+        'rejects a role selector no artifact output declares (§13 #22)',
+        { 'role:thumbnail': 'include' },
+        `${AT_ARTIFACTS}["role:thumbnail"]: tool "tool_under_test" declares no artifact output with role "thumbnail"`,
+      ],
+    ])('%s', (_title, artifacts, error) => {
+      expect(() => policyWith(artifacts, mediaToolWithMimes())).toThrow(error);
     });
 
     it('accepts role:transcript and kind:file against a transcript-protocol descriptor (§13 #24)', () => {
       const config = policyWith(
         { 'role:transcript': 'include', 'kind:file': 'include' },
-        transcribeLikeTool(),
+        transcriptTool('file', 'text/plain'), // §6.2 transcript protocol
         ['audio'],
       );
       expect(config.fixedPolicies[0].output.artifacts).toEqual({
@@ -713,65 +526,33 @@ describe('normalizeOmniProcessingConfig', () => {
     });
 
     it('rejects role:transcript when the declared output is not bounded text/plain file (§13 #24)', () => {
-      const wrongMime = makeTool(['audio'], {
-        outputs: [
-          {
-            kind: 'file',
-            role: 'transcript',
-            mimeTypes: ['text/markdown'],
-            required: true,
-            lossy: true,
-          },
-          { kind: 'text', role: 'disclosure', required: true },
-        ],
-      });
-      expect(() =>
-        policyWith({ 'role:transcript': 'include' }, wrongMime, ['audio']),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.output.artifacts["role:transcript"]: a transcript selector must point at a bounded UTF-8 text/plain file output, but tool "tool_under_test" declares role "transcript" differently',
+      const selector = { 'role:transcript': 'include' };
+      const wrongMime = transcriptTool('file', 'text/markdown');
+      expect(() => policyWith(selector, wrongMime, ['audio'])).toThrow(
+        `${AT_ARTIFACTS}["role:transcript"]: a transcript selector must point at a bounded UTF-8 text/plain file output, but tool "tool_under_test" declares role "transcript" differently`,
       );
-
-      const mediaTranscript = makeTool(['audio'], {
-        outputs: [
-          {
-            kind: 'media',
-            role: 'transcript',
-            mimeTypes: ['audio/wav'],
-            required: true,
-            lossy: true,
-          },
-          { kind: 'text', role: 'disclosure', required: true },
-        ],
-      });
-      expect(() =>
-        policyWith({ 'role:transcript': 'include' }, mediaTranscript, [
-          'audio',
-        ]),
-      ).toThrow(/a transcript selector must point at a bounded UTF-8/);
+      const mediaTranscript = transcriptTool('media', 'audio/wav');
+      expect(() => policyWith(selector, mediaTranscript, ['audio'])).toThrow(
+        /a transcript selector must point at a bounded UTF-8/,
+      );
     });
 
     it('accepts the REAL transcribe tool as a fixed-policy target with role:transcript', async () => {
       const { OmniTranscribeAudioTool } = await import(
         './tools/transcribe-audio.js'
       );
-      const tools: Record<string, ToolStub> = {
-        ...defaultTools(),
-        omni_transcribe_audio: new OmniTranscribeAudioTool({}),
-      };
-      const config = normalize(
+      const config = fixed(
         {
-          fixedPolicies: {
-            'audio-transcribe': {
-              mediaTypes: ['audio'],
-              toolName: 'omni_transcribe_audio',
-              output: {
-                source: 'omit',
-                artifacts: { 'role:transcript': 'include' },
-              },
+          'audio-transcribe': {
+            mediaTypes: ['audio'],
+            toolName: 'omni_transcribe_audio',
+            output: {
+              source: 'omit',
+              artifacts: { 'role:transcript': 'include' },
             },
           },
         },
-        tools,
+        toolsWith('omni_transcribe_audio', new OmniTranscribeAudioTool({})),
       );
       expect(config.fixedPolicies[0].output).toEqual({
         reprocessMedia: false,
@@ -783,211 +564,124 @@ describe('normalizeOmniProcessingConfig', () => {
 
   describe('tool reference validation (§13 #6/#8/#14)', () => {
     it('rejects a missing toolName', () => {
-      expect(() =>
-        normalize({ fixedPolicies: { p: { mediaTypes: ['image'] } } }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.toolName: must be a non-empty string',
+      expect(() => fixed({ p: { mediaTypes: ['image'] } })).toThrow(
+        `${AT_P}.toolName: must be a non-empty string`,
       );
     });
 
     it('rejects an unregistered tool (covers excluded tools too)', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: { mediaTypes: ['image'], toolName: 'no_such_tool' },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.toolName: tool "no_such_tool" is ' +
-          'not registered (unknown name, or excluded by tool filtering)',
+      expectFixedError(
+        { toolName: 'no_such_tool' },
+        `${AT_P}.toolName: tool "no_such_tool" is not registered ` +
+          '(unknown name, or excluded by tool filtering)',
       );
     });
 
     it('rejects a registered tool without a media_policy descriptor', () => {
-      const tools = defaultTools();
-      tools['read_file'] = { parameterSchema: {} };
-      expect(() =>
-        normalize(
-          {
-            fixedPolicies: {
-              p: { mediaTypes: ['image'], toolName: 'read_file' },
-            },
-          },
-          tools,
-        ),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.toolName: tool "read_file" is not ' +
-          'a media policy tool (no media_policy descriptor)',
+      expectFixedError(
+        { toolName: 'read_file' },
+        `${AT_P}.toolName: tool "read_file" is not a media policy tool ` +
+          '(no media_policy descriptor)',
+        toolsWith('read_file', { parameterSchema: {} }),
       );
     });
 
     it('rejects a tool declaring no required output', () => {
-      const tools = defaultTools();
-      tools['weak_tool'] = makeTool(['image'], {
+      const weakTool = makeTool(['image'], {
         outputs: [{ kind: 'media', required: false, lossy: false }],
       });
-      expect(() =>
-        normalize(
-          {
-            fixedPolicies: {
-              p: { mediaTypes: ['image'], toolName: 'weak_tool' },
-            },
-          },
-          tools,
-        ),
-      ).toThrow(/declares no required output/);
+      expectFixedError(
+        { toolName: 'weak_tool' },
+        /declares no required output/,
+        toolsWith('weak_tool', weakTool),
+      );
     });
 
     it('rejects a lossy tool without a disclosure output (§13 #8)', () => {
-      const tools = defaultTools();
-      tools['sneaky_tool'] = makeTool(['image'], {
+      const sneakyTool = makeTool(['image'], {
         outputs: [{ kind: 'media', required: true, lossy: true }],
       });
-      expect(() =>
-        normalize(
-          {
-            fixedPolicies: {
-              p: { mediaTypes: ['image'], toolName: 'sneaky_tool' },
-            },
-          },
-          tools,
-        ),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.toolName: tool "sneaky_tool" ' +
-          'declares a lossy media output but no disclosure text output',
+      expectFixedError(
+        { toolName: 'sneaky_tool' },
+        `${AT_P}.toolName: tool "sneaky_tool" declares a lossy media output ` +
+          'but no disclosure text output',
+        toolsWith('sneaky_tool', sneakyTool),
       );
     });
 
     it('rejects mediaTypes the tool does not accept', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image', 'video'],
-              toolName: 'omni_downsample_image',
-            },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.mediaTypes: tool ' +
-          '"omni_downsample_image" does not accept "video" input (accepts image)',
+      expectFixedError(
+        { mediaTypes: ['image', 'video'] },
+        `${AT_P}.mediaTypes: tool "omni_downsample_image" does not accept ` +
+          '"video" input (accepts image)',
       );
     });
   });
 
   describe('fixed arguments validation (§13 #11)', () => {
     it('rejects reserved io keys in arguments', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              arguments: { inputPath: '/tmp/x.png' },
-            },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.fixedPolicies.p.arguments: "inputPath" is injected ' +
-          'by the orchestrator per invocation and must not be configured',
+      expectFixedError(
+        { arguments: { inputPath: '/tmp/x.png' } },
+        `${AT_P}.arguments: "inputPath" is injected by the orchestrator ` +
+          'per invocation and must not be configured',
       );
     });
 
     it('validates arguments against the settingsSchema (io-stripped)', () => {
-      expect(() =>
-        normalize({
-          fixedPolicies: {
-            p: {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              arguments: { bogus: true },
-            },
-          },
-        }),
-      ).toThrow(/omni\.processing\.fixedPolicies\.p\.arguments/);
-      // Valid tunables pass through untouched.
-      const config = normalize({
-        fixedPolicies: {
-          p: {
-            mediaTypes: ['image'],
-            toolName: 'omni_downsample_image',
-            arguments: { maxDimension: 800, quality: 70 },
-          },
-        },
-      });
-      expect(config.fixedPolicies.find((x) => x.id === 'p')?.arguments).toEqual(
-        { maxDimension: 800, quality: 70 },
+      expectFixedError(
+        { arguments: { bogus: true } },
+        /omni\.processing\.fixedPolicies\.p\.arguments/,
       );
+      // Valid tunables pass through untouched.
+      const p = fixedPolicy({ arguments: { maxDimension: 800, quality: 70 } });
+      expect(p?.arguments).toEqual({ maxDimension: 800, quality: 70 });
     });
   });
 
   describe('transport guard rules (§13 #15-#17)', () => {
     it('rejects guard policies declaring when', () => {
       expect(() =>
-        normalize({
-          transportGuardPolicies: {
-            'image-downsample': {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              when: ['>', ['field', 'resource.width'], 1],
-            },
-          },
+        guard({
+          'image-downsample': imagePolicy({
+            when: ['>', ['field', 'resource.width'], 1],
+          }),
         }),
       ).toThrow(
-        'omni.processing.transportGuard.policies.image-downsample.when: ' +
-          'transport guard policies must not declare "when" (they run ' +
-          'exactly when transport limits are exceeded)',
+        `${AT_GUARD}.image-downsample.when: transport guard policies must ` +
+          'not declare "when" (they run exactly when transport limits are ' +
+          'exceeded)',
       );
     });
 
     it('rejects guard policies with output.source "keep"', () => {
       expect(() =>
-        normalize({
-          transportGuardPolicies: {
-            'image-downsample': {
-              mediaTypes: ['image'],
-              toolName: 'omni_downsample_image',
-              output: { source: 'keep' },
-            },
-          },
+        guard({
+          'image-downsample': imagePolicy({ output: { source: 'keep' } }),
         }),
       ).toThrow(
-        'omni.processing.transportGuard.policies.image-downsample.output.source: ' +
-          'transport guard policies must use "omit" (the over-limit source ' +
-          'cannot stay in the delivery set)',
+        `${AT_GUARD}.image-downsample.output.source: transport guard ` +
+          'policies must use "omit" (the over-limit source cannot stay in ' +
+          'the delivery set)',
       );
     });
 
     it('rejects a merged guard set that does not cover all three modalities', () => {
-      const tools = defaultTools();
       // Point every guard entry at image only → video+audio uncovered.
       expect(() =>
-        normalize(
-          {
-            transportGuardPolicies: {
-              'video-downscale': {
-                mediaTypes: ['image'],
-                toolName: 'omni_downsample_image',
-              },
-              'audio-downsample': {
-                mediaTypes: ['image'],
-                toolName: 'omni_downsample_image',
-              },
-            },
-          },
-          tools,
-        ),
+        guard({
+          'video-downscale': imagePolicy(),
+          'audio-downsample': imagePolicy(),
+        }),
       ).toThrow(
-        'omni.processing.transportGuard.policies: no guard policy covers ' +
-          'video, audio — the merged set must cover image, video, and audio',
+        `${AT_GUARD}: no guard policy covers video, audio — the merged set ` +
+          'must cover image, video, and audio',
       );
     });
   });
 
   describe('limits (§12.2)', () => {
     it('merges overrides over defaults', () => {
-      const config = normalize({ limits: { maxLineageDepth: 3 } });
-      expect(config.limits).toEqual({
+      expect(normalize({ limits: { maxLineageDepth: 3 } }).limits).toEqual({
         ...DEFAULT_OMNI_PROCESSING_LIMITS,
         maxLineageDepth: 3,
       });
@@ -1037,23 +731,19 @@ describe('normalizeOmniProcessingConfig', () => {
     it('rejects a non-numeric or negative maxEstimatedTokens (fail-open guard)', () => {
       // guard.ts compares with `<=`/`>`: a string would make both false and
       // silently disable the token guard — must abort startup instead.
-      expect(() =>
-        normalize({ maxEstimatedTokens: 'abc' as unknown as number }),
-      ).toThrow(
+      const withTokens = (value: unknown) =>
+        normalize({ maxEstimatedTokens: value as number });
+      expect(() => withTokens('abc')).toThrow(
         'omni.processing.transportGuard.maxEstimatedTokens: must be a ' +
           'finite number >= 0, where 0 disables the token guard (got "abc")',
       );
-      expect(() =>
-        normalize({ maxEstimatedTokens: true as unknown as number }),
-      ).toThrow(OmniPolicyConfigError);
-      expect(() => normalize({ maxEstimatedTokens: -1 })).toThrow(
+      expect(() => withTokens(true)).toThrow(OmniPolicyConfigError);
+      expect(() => withTokens(-1)).toThrow(OmniPolicyConfigError);
+      expect(() => withTokens(Number.POSITIVE_INFINITY)).toThrow(
         OmniPolicyConfigError,
       );
-      expect(() =>
-        normalize({ maxEstimatedTokens: Number.POSITIVE_INFINITY }),
-      ).toThrow(OmniPolicyConfigError);
-      expect(() => normalize({ maxEstimatedTokens: 0 })).not.toThrow();
-      expect(() => normalize({ maxEstimatedTokens: 262144 })).not.toThrow();
+      expect(() => withTokens(0)).not.toThrow();
+      expect(() => withTokens(262144)).not.toThrow();
     });
   });
 
@@ -1082,137 +772,68 @@ describe('normalizeOmniProcessingConfig', () => {
     });
 
     it('rejects unknown keys at every level of an entry (§13 #1)', () => {
-      // Typos like "settigns" would otherwise read as absent downstream
-      // and the intended configuration would silently never take effect.
-      expect(() =>
-        normalize({
-          policyTools: { omni_downsample_image: { settigns: {} } as never },
-        }),
-      ).toThrow(
-        'omni.processing.policyTools.omni_downsample_image: unknown key "settigns"',
+      // A typo like "settigns" would otherwise read as absent downstream and
+      // the intended configuration would silently never take effect.
+      expect(() => policyTool({ settigns: {} } as never)).toThrow(
+        `${AT_TOOL}: unknown key "settigns"`,
       );
-      expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: { runtime: { timeout: 30000 } },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.policyTools.omni_downsample_image.runtime: ' +
-          'unknown key "timeout"',
+      expect(() => policyTool({ runtime: { timeout: 30000 } })).toThrow(
+        `${AT_TOOL}.runtime: unknown key "timeout"`,
       );
-      expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: { modelAccess: { lockedArgs: {} } as never },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.policyTools.omni_downsample_image.modelAccess: ' +
-          'unknown key "lockedArgs"',
+      expect(() => modelAccess({ lockedArgs: {} } as never)).toThrow(
+        `${AT_TOOL}.modelAccess: unknown key "lockedArgs"`,
       );
     });
 
     it('validates settings against the settingsSchema (§13 #7)', () => {
-      expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: { settings: { bogus: 1 } },
-          },
-        }),
-      ).toThrow(
+      expect(() => policyTool({ settings: { bogus: 1 } })).toThrow(
         /omni\.processing\.policyTools\.omni_downsample_image\.settings/,
       );
     });
 
     it('rejects non-positive runtime.timeoutMs', () => {
-      expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: { runtime: { timeoutMs: -5 } },
-          },
-        }),
-      ).toThrow(
-        'omni.processing.policyTools.omni_downsample_image.runtime.timeoutMs: ' +
-          'must be a positive integer (got -5)',
+      expect(() => policyTool({ runtime: { timeoutMs: -5 } })).toThrow(
+        `${AT_TOOL}.runtime.timeoutMs: must be a positive integer (got -5)`,
       );
     });
 
     it('caps runtime.timeoutMs below the staging sweep grace window (cross-file invariant with recovery §5)', () => {
-      // A tool allowed to run for >= STAGING_GRACE_MS could have its live
-      // staging directory classified as crash leftovers and deleted
-      // mid-run by another process's startup sweep. Pin BOTH sides of the
-      // boundary so removing, inverting (`<=`), or relocating the cap
-      // fails a test instead of shipping green.
+      // A tool running >= STAGING_GRACE_MS could have its live staging dir
+      // swept as crash leftovers by another process's startup. Pin BOTH
+      // sides so removing, inverting (`<=`) or relocating the cap fails.
       expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: {
-              runtime: { timeoutMs: STAGING_GRACE_MS },
-            },
-          },
-        }),
+        policyTool({ runtime: { timeoutMs: STAGING_GRACE_MS } }),
       ).toThrow(
-        'omni.processing.policyTools.omni_downsample_image.runtime.timeoutMs: ' +
+        `${AT_TOOL}.runtime.timeoutMs: ` +
           `must be below the staging sweep grace window (${STAGING_GRACE_MS}ms) ` +
           `so a live invocation's staging directory is never reclaimed mid-run`,
       );
       expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: {
-              runtime: { timeoutMs: STAGING_GRACE_MS - 1 },
-            },
-          },
-        }),
+        policyTool({ runtime: { timeoutMs: STAGING_GRACE_MS - 1 } }),
       ).not.toThrow();
     });
 
     it('rejects overlapping defaultArguments and lockedArguments (§13 #21)', () => {
       expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: {
-              modelAccess: {
-                defaultArguments: { quality: 80 },
-                lockedArguments: { quality: 60 },
-              },
-            },
-          },
+        modelAccess({
+          defaultArguments: { quality: 80 },
+          lockedArguments: { quality: 60 },
         }),
       ).toThrow(
-        'omni.processing.policyTools.omni_downsample_image.modelAccess: ' +
-          '"quality" present in both defaultArguments and lockedArguments',
+        `${AT_TOOL}.modelAccess: "quality" present in both defaultArguments ` +
+          'and lockedArguments',
       );
     });
 
     it('rejects a defaultArguments key the native schema does not declare', () => {
-      expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: {
-              modelAccess: {
-                defaultArguments: { sharpen: 2 },
-              },
-            },
-          },
-        }),
-      ).toThrow(
+      expect(() => modelAccess({ defaultArguments: { sharpen: 2 } })).toThrow(
         /omni\.processing\.policyTools\.omni_downsample_image\.modelAccess\.defaultArguments/,
       );
     });
 
     it('rejects a lockedArguments value the native sub-schema refuses', () => {
       expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: {
-              modelAccess: {
-                lockedArguments: { quality: 'very high' },
-              },
-            },
-          },
-        }),
+        modelAccess({ lockedArguments: { quality: 'very high' } }),
       ).toThrow(
         /omni\.processing\.policyTools\.omni_downsample_image\.modelAccess\.lockedArguments/,
       );
@@ -1220,28 +841,20 @@ describe('normalizeOmniProcessingConfig', () => {
 
     it('accepts schema-valid partial defaultArguments and lockedArguments', () => {
       expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: {
-              modelAccess: {
-                defaultArguments: { quality: 80 },
-                lockedArguments: { maxDimension: 1024 },
-              },
-            },
-          },
+        modelAccess({
+          defaultArguments: { quality: 80 },
+          lockedArguments: { maxDimension: 1024 },
         }),
       ).not.toThrow();
     });
 
     it('validates locked/operator-only arguments against a REAL tool (whose `schema` getter hides them)', async () => {
-      // Regression: validation must read the tool's NATIVE parameterSchema.
-      // A real BaseMediaPolicyTool's `schema` getter is the model-visible
-      // projection, which strips lockedArguments and operatorOnlyParams
-      // keys — validated against THAT, every legitimate locked/operator
-      // config would abort startup with "must NOT have additional
-      // properties". The stub lookup can't catch this (its shape is
-      // static), so this test wires real tool instances whose config view
-      // serves the very settings under validation.
+      // Regression: validation must read the NATIVE parameterSchema. A real
+      // tool's `schema` getter is the model projection, which strips locked
+      // and operator-only keys, so every legitimate locked/operator config
+      // would abort startup ("must NOT have additional properties"). Static
+      // stubs can't catch this: wire real tools whose config view serves
+      // the very settings under validation.
       const raw: RawOmniProcessingSettings = {
         policyTools: {
           omni_downsample_image: {
@@ -1275,131 +888,96 @@ describe('normalizeOmniProcessingConfig', () => {
 
     it('rejects parameterSchema properties absent from the native schema (§13 #20)', () => {
       expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: {
-              modelAccess: {
-                parameterSchema: {
-                  properties: { quality: {}, sharpen: {} },
-                },
-              },
-            },
-          },
+        modelAccess({
+          parameterSchema: { properties: { quality: {}, sharpen: {} } },
         }),
       ).toThrow(
-        'omni.processing.policyTools.omni_downsample_image.modelAccess.parameterSchema: ' +
+        `${AT_TOOL}.modelAccess.parameterSchema: ` +
           '"sharpen" not present in the tool\'s native schema (projection may only narrow)',
       );
     });
 
     it('accepts a narrowing-only parameterSchema', () => {
       expect(() =>
-        normalize({
-          policyTools: {
-            omni_downsample_image: {
-              modelAccess: {
-                parameterSchema: { properties: { quality: {} } },
-              },
-            },
-          },
-        }),
+        modelAccess({ parameterSchema: { properties: { quality: {} } } }),
       ).not.toThrow();
     });
 
     describe('constraint-value narrowing (§11.2: 不能扩大类型、枚举、范围)', () => {
       /** Tool whose native schema carries real constraints to loosen. */
-      const constrainedTools = (): Record<string, ToolStub> => {
-        const tools = defaultTools();
-        tools['omni_downsample_image'] = {
-          ...makeTool(['image']),
-          parameterSchema: {
-            type: 'object',
-            properties: {
-              inputPath: { type: 'string' },
-              outputDir: { type: 'string' },
-              quality: { type: 'number', minimum: 1, maximum: 100 },
-              format: { type: 'string', enum: ['jpeg', 'webp'] },
-              tags: { type: 'array', minItems: 1, maxItems: 4 },
-            },
+      const constrainedTool = (): ToolStub => ({
+        ...makeTool(['image']),
+        parameterSchema: {
+          type: 'object',
+          properties: {
+            inputPath: { type: 'string' },
+            outputDir: { type: 'string' },
+            quality: { type: 'number', minimum: 1, maximum: 100 },
+            format: { type: 'string', enum: ['jpeg', 'webp'] },
+            tags: { type: 'array', minItems: 1, maxItems: 4 },
           },
-        };
-        return tools;
-      };
+        },
+      });
       const withProjection = (
         prop: string,
         override: Record<string, unknown>,
       ) =>
-        normalize(
+        policyTool(
           {
-            policyTools: {
-              omni_downsample_image: {
-                modelAccess: {
-                  parameterSchema: { properties: { [prop]: override } },
-                },
-              },
+            modelAccess: {
+              parameterSchema: { properties: { [prop]: override } },
             },
           },
-          constrainedTools(),
+          toolsWith('omni_downsample_image', constrainedTool()),
         );
-      const at =
-        'omni.processing.policyTools.omni_downsample_image.modelAccess.' +
-        'parameterSchema.properties.';
+      const at = `${AT_TOOL}.modelAccess.parameterSchema.properties.`;
 
-      it('rejects an override raising the native maximum (probe case)', () => {
-        expect(() => withProjection('quality', { maximum: 200 })).toThrow(
-          `${at}quality: the upper bound loosens the native one ` +
-            '(200 vs native 100) (projection may only narrow)',
-        );
-      });
-
-      it('rejects an override lowering the native minimum', () => {
-        expect(() => withProjection('quality', { minimum: 0 })).toThrow(
-          `${at}quality: the lower bound loosens the native one ` +
-            '(0 vs native 1) (projection may only narrow)',
-        );
-      });
-
-      it('rejects an enum override adding values outside the native enum', () => {
-        expect(() =>
-          withProjection('format', { enum: ['jpeg', 'png'] }),
-        ).toThrow(
-          `${at}format: "enum" adds values the native enum does not allow ` +
-            '("png") (projection may only narrow)',
-        );
-      });
-
-      it('rejects an override changing the native type', () => {
-        expect(() => withProjection('quality', { type: 'string' })).toThrow(
-          `${at}quality: "type" changes the native type ` +
-            '("string" vs native "number") (projection may only narrow)',
-        );
-      });
-
-      it('rejects maxItems above the native cap', () => {
-        expect(() => withProjection('tags', { maxItems: 10 })).toThrow(
-          `${at}tags: "maxItems" loosens the native constraint ` +
-            '(10 vs native 4) (projection may only narrow)',
+      it.each([
+        [
+          'rejects an override raising the native maximum (probe case)',
+          'quality',
+          { maximum: 200 },
+          'quality: the upper bound loosens the native one (200 vs native 100)',
+        ],
+        [
+          'rejects an override lowering the native minimum',
+          'quality',
+          { minimum: 0 },
+          'quality: the lower bound loosens the native one (0 vs native 1)',
+        ],
+        [
+          'rejects an enum override adding values outside the native enum',
+          'format',
+          { enum: ['jpeg', 'png'] },
+          'format: "enum" adds values the native enum does not allow ("png")',
+        ],
+        [
+          'rejects an override changing the native type',
+          'quality',
+          { type: 'string' },
+          'quality: "type" changes the native type ("string" vs native "number")',
+        ],
+        [
+          'rejects maxItems above the native cap',
+          'tags',
+          { maxItems: 10 },
+          'tags: "maxItems" loosens the native constraint (10 vs native 4)',
+        ],
+      ])('%s', (_title, prop, override, reason) => {
+        expect(() => withProjection(prop, override)).toThrow(
+          `${at}${reason} (projection may only narrow)`,
         );
       });
 
       it('accepts genuinely narrowing overrides', () => {
-        expect(() =>
-          withProjection('quality', {
-            type: 'integer', // integer narrows number
-            minimum: 10,
-            maximum: 80,
-          }),
-        ).not.toThrow();
-        expect(() =>
-          withProjection('format', { enum: ['jpeg'] }),
-        ).not.toThrow();
-        expect(() =>
-          withProjection('tags', { minItems: 2, maxItems: 3 }),
-        ).not.toThrow();
+        const narrows = (prop: string, override: Record<string, unknown>) =>
+          expect(() => withProjection(prop, override)).not.toThrow();
+        // integer narrows number
+        narrows('quality', { type: 'integer', minimum: 10, maximum: 80 });
+        narrows('format', { enum: ['jpeg'] });
+        narrows('tags', { minItems: 2, maxItems: 3 });
         // Adding a bound where the native schema has none narrows too.
-        expect(() =>
-          withProjection('inputPath', { minLength: 1 }),
-        ).not.toThrow();
+        narrows('inputPath', { minLength: 1 });
       });
     });
   });

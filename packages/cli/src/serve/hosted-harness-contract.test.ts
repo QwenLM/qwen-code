@@ -43,10 +43,45 @@ describe('Hosted Harness private contract', () => {
       protocolVersions: { current: 1, supported: [1] },
       bootId: BOOT_ID,
       capabilityDigest: DIGEST,
+      lifecycleProtocolVersion: 1,
+      lifecycleV2Profiles: [],
+      titleProtocolVersion: 1,
+      features: [
+        'hosted_approval_resume_v1',
+        'hosted_model_round_recovery_v1',
+        'model-selection/1',
+        'approval-selection/1',
+        'live-approval-selection/1',
+        'agent-definition-approval-selection/1',
+        'plan-mode/1',
+        'input-attachments/1',
+        'session-skills/1',
+        'session-skills/2',
+        'event-keepalive/1',
+      ],
     });
     expect(Object.isFrozen(contract)).toBe(true);
     expect(Object.isFrozen(contract.protocolVersions)).toBe(true);
     expect(Object.isFrozen(contract.protocolVersions.supported)).toBe(true);
+    expect(Object.isFrozen(contract.lifecycleV2Profiles)).toBe(true);
+  });
+
+  it('advertises only enabled exact lifecycle profiles', () => {
+    expect(
+      createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/1'])
+        .lifecycleV2Profiles,
+    ).toEqual(['hosted-workspace-shell/1']);
+    expect(() =>
+      createHostedHarnessContract(DIGEST, BOOT_ID, [
+        'hosted-workspace-shell/2',
+      ]),
+    ).toThrow('exact supported profiles');
+    expect(() =>
+      createHostedHarnessContract(DIGEST, BOOT_ID, [
+        'hosted-workspace-mcp/1',
+        'hosted-workspace-mcp/1',
+      ]),
+    ).toThrow('once');
   });
 
   it('generates a fresh RFC UUID boot id by default', () => {

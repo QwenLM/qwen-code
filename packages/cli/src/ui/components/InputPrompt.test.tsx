@@ -7,6 +7,7 @@
 
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
+import { useState } from 'react';
 import type { InputPromptProps } from './InputPrompt.js';
 import {
   InputPrompt,
@@ -430,6 +431,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('send this', {
         deferUntilIdle: false,
         submittedPrompt: 'send this',
+        displayText: 'send this',
+        humanInput: { text: 'send this' },
       });
     });
     unmount();
@@ -450,6 +453,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('restored prompt', {
         deferUntilIdle: false,
         submittedPrompt: 'restored prompt',
+        displayText: 'restored prompt',
+        humanInput: { text: 'restored prompt' },
       });
     });
     expect(
@@ -499,6 +504,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('send this later', {
         deferUntilIdle: true,
         submittedPrompt: 'send this later',
+        displayText: 'send this later',
+        humanInput: { text: 'send this later' },
       });
     });
     expect(props.buffer.setText).toHaveBeenCalledWith('');
@@ -1200,6 +1207,8 @@ describe('InputPrompt', () => {
           expect(props.onSubmit).toHaveBeenCalledWith('ship it', {
             deferUntilIdle: false,
             submittedPrompt: 'ship it',
+            displayText: 'ship it',
+            humanInput: { text: 'ship it' },
           });
           expect(onPromptSuggestionDismiss).toHaveBeenCalled();
         } finally {
@@ -1526,6 +1535,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('ls -l', {
       deferUntilIdle: false,
       submittedPrompt: 'ls -l',
+      displayText: 'ls -l',
+      humanInput: { text: 'ls -l' },
     });
     unmount();
   });
@@ -1555,6 +1566,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('some text', {
       deferUntilIdle: false,
       submittedPrompt: 'some text',
+      displayText: 'some text',
+      humanInput: { text: 'some text' },
     });
     unmount();
   });
@@ -1737,6 +1750,8 @@ describe('InputPrompt', () => {
           {
             deferUntilIdle: false,
             submittedPrompt: 'describe this image',
+            displayText: 'describe this image',
+            humanInput: { text: 'describe this image' },
           },
         );
       });
@@ -1806,12 +1821,72 @@ describe('InputPrompt', () => {
       expect(addItem).toHaveBeenCalledWith(
         {
           type: 'error',
-          text: 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+          text:
+            process.platform === 'linux'
+              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
         },
         expect.any(Number),
       );
       second.unmount();
     });
+
+    // Issue #12504. PASTE_CLIPBOARD_IMAGE is computed once at module-import
+    // time from the real host platform, so `process.platform` cannot be
+    // stubbed late. Only run on a real Linux runner; skip on Windows
+    // (where the Ctrl+V byte would never trigger the keybinding) and
+    // macOS (where the Linux message branch wouldn't fire anyway).
+    const linuxOnly = process.platform === 'linux' ? describe : describe.skip;
+    linuxOnly(
+      'uses a Linux-specific unavailable message on Linux (#12504)',
+      () => {
+        it('emits the wl-clipboard/xclip message under stubbed process.platform', async () => {
+          const originalPlatform = process.platform;
+          Object.defineProperty(process, 'platform', { value: 'linux' });
+          try {
+            const addItem = vi.fn();
+            const clipboardUnavailableShownRef = { current: false };
+            mockedUseUIState.mockReturnValue({
+              isFeedbackDialogOpen: false,
+              messageQueue: [],
+              pendingLlmHistoryItems: [],
+              historyManager: { addItem },
+            } as unknown as ReturnType<typeof useUIState>);
+            vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+              async (onUnavailable) => {
+                onUnavailable?.();
+                return false;
+              },
+            );
+
+            const view = renderWithProviders(
+              <InputPrompt
+                {...props}
+                clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+              />,
+            );
+            await wait();
+
+            view.stdin.write('\x16');
+            await wait();
+
+            expect(addItem).toHaveBeenCalledTimes(1);
+            expect(addItem).toHaveBeenCalledWith(
+              {
+                type: 'error',
+                text: 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
+              },
+              expect.any(Number),
+            );
+            view.unmount();
+          } finally {
+            Object.defineProperty(process, 'platform', {
+              value: originalPlatform,
+            });
+          }
+        });
+      },
+    );
 
     it('should handle image save failure gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
@@ -2046,6 +2121,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
       deferUntilIdle: false,
       submittedPrompt: '/clear',
+      displayText: '/clear',
+      humanInput: { text: '/clear' },
     });
     unmount();
   });
@@ -2070,6 +2147,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/quit', {
       deferUntilIdle: false,
       submittedPrompt: '/quit',
+      displayText: '/quit',
+      humanInput: { text: '/quit' },
     });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
@@ -2121,6 +2200,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/export', {
       deferUntilIdle: false,
       submittedPrompt: '/export',
+      displayText: '/export',
+      humanInput: { text: '/export' },
     });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
@@ -2157,6 +2238,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/export md', {
       deferUntilIdle: false,
       submittedPrompt: '/export md',
+      displayText: '/export md',
+      humanInput: { text: '/export md' },
     });
     unmount();
   });
@@ -2855,6 +2938,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
       deferUntilIdle: false,
       submittedPrompt: '/memory',
+      displayText: '/memory',
+      humanInput: { text: '/memory' },
     });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmountFinal();
@@ -2883,6 +2968,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
       deferUntilIdle: false,
       submittedPrompt: '/memory',
+      displayText: '/memory',
+      humanInput: { text: '/memory' },
     });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
@@ -3167,6 +3254,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history', {
       deferUntilIdle: false,
       submittedPrompt: 'a prompt from history',
+      displayText: 'a prompt from history',
+      humanInput: { text: 'a prompt from history' },
     });
     expect(mockInputHistory.resetHistoryNav).toHaveBeenCalled();
     unmount();
@@ -3189,6 +3278,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
       deferUntilIdle: false,
       submittedPrompt: '/clear',
+      displayText: '/clear',
+      humanInput: { text: '/clear' },
     });
     unmount();
   });
@@ -3211,6 +3302,40 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should submit on Enter when completion suggestions are still loading', async () => {
+    // The dropdown shows "Loading suggestions..." with an empty list
+    // (showSuggestions true, no suggestions yet) — there is nothing to
+    // accept, so Enter must submit the buffer rather than be swallowed.
+    // Regression for render-derived completion state lagging a fast
+    // `@file` + Enter burst (#13015).
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [],
+      isLoadingSuggestions: true,
+      completionMode: CompletionMode.AT,
+    });
+    props.buffer.setText('@context.txt Inspect this context.');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      '@context.txt Inspect this context.',
+      {
+        deferUntilIdle: false,
+        submittedPrompt: '@context.txt Inspect this context.',
+        displayText: '@context.txt Inspect this context.',
+        humanInput: { text: '@context.txt Inspect this context.' },
+      },
+    );
     unmount();
   });
 
@@ -4129,6 +4254,8 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith('test command', {
           deferUntilIdle: false,
           submittedPrompt: 'test command',
+          displayText: 'test command',
+          humanInput: { text: 'test command' },
         });
       } finally {
         vi.useRealTimers();
@@ -4153,6 +4280,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('normal command', {
         deferUntilIdle: false,
         submittedPrompt: 'normal command',
+        displayText: 'normal command',
+        humanInput: { text: 'normal command' },
       });
 
       unmount();
@@ -4442,6 +4571,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('echo hello', {
         deferUntilIdle: false,
         submittedPrompt: 'echo hello',
+        displayText: 'echo hello',
+        humanInput: { text: 'echo hello' },
       });
       expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
       expect(
@@ -4637,6 +4768,11 @@ describe('InputPrompt', () => {
             deferUntilIdle: false,
             submittedPrompt:
               '<system-reminder>generated</system-reminder>\nuser text',
+            displayText:
+              '<system-reminder>generated</system-reminder>\nuser text',
+            humanInput: {
+              text: '<system-reminder>generated</system-reminder>\nuser text',
+            },
           },
         );
       });
@@ -4978,7 +5114,69 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
+          displayText: '[Pasted Content 1001 chars]',
+          humanInput: { text: largeContent },
+          pasteExpansions: new Map([
+            ['[Pasted Content 1001 chars]', largeContent],
+          ]),
         });
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
+    });
+
+    it('reserves restored paste IDs and keeps edited bodies after another same-size paste', async () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const originalBody = 'workflow payload'.padEnd(1200, 'x');
+      const nextBody = 'ultracode payload'.padEnd(1200, 'y');
+      const literal = '<system-reminder>user literal</system-reminder>';
+      mockBuffer.text = `${literal}\n${placeholder}\nappend instruction`;
+      mockBuffer.lines = mockBuffer.text.split('\n');
+      mockBuffer.cursor = [2, 'append instruction'.length];
+      function RestoredDraft() {
+        const [pendingPastes, setPendingPastes] = useState(
+          new Map([[placeholder, originalBody]]),
+        );
+        return (
+          <InputPrompt
+            {...props}
+            pendingPastes={pendingPastes}
+            onPendingPastesChange={setPendingPastes}
+          />
+        );
+      }
+      const { stdin, unmount } = renderWithProviders(<RestoredDraft />);
+      await wait();
+      vi.useFakeTimers();
+      try {
+        act(() => stdin.write(`\x1b[200~${nextBody}\x1b[201~`));
+        await flush();
+        expect(mockBuffer.insert).toHaveBeenCalledWith(`${placeholder} #2`, {
+          paste: false,
+        });
+        const edited = `${literal}\n${placeholder}\nappend instruction ${placeholder} #2`;
+        mockBuffer.text = edited;
+        mockBuffer.lines = edited.split('\n');
+        mockBuffer.cursor = [2, mockBuffer.lines[2].length];
+        await advanceTimers(500);
+        act(() => stdin.write('\r'));
+        await flush();
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          `${literal}\n${originalBody}\nappend instruction ${nextBody}`,
+          {
+            deferUntilIdle: false,
+            submittedPrompt: edited,
+            displayText: edited,
+            humanInput: {
+              text: `${literal}\n${originalBody}\nappend instruction ${nextBody}`,
+            },
+            pasteExpansions: new Map([
+              [placeholder, originalBody],
+              [`${placeholder} #2`, nextBody],
+            ]),
+          },
+        );
       } finally {
         vi.useRealTimers();
         unmount();
@@ -5024,6 +5222,15 @@ describe('InputPrompt', () => {
             deferUntilIdle: false,
             submittedPrompt:
               '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
+            displayText:
+              '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
+            humanInput: {
+              text: `${secondPaste}\n${firstPaste}`,
+            },
+            pasteExpansions: new Map([
+              ['[Pasted Content 1001 chars]', firstPaste],
+              ['[Pasted Content 1001 chars] #2', secondPaste],
+            ]),
           },
         );
       } finally {
@@ -5065,6 +5272,11 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
+          displayText: '[Pasted Content 1001 chars]',
+          humanInput: { text: largeContent },
+          pasteExpansions: new Map([
+            ['[Pasted Content 1001 chars]', largeContent],
+          ]),
         });
       } finally {
         vi.useRealTimers();
@@ -6195,13 +6407,95 @@ describe('InputPrompt', () => {
     });
   });
 
-  describe('VP-mode bare Up/Down scrolls the conversation (#10749)', () => {
+  describe('VP-mode bare Up/Down recalls input history by default', () => {
+    // `ui.useTerminalBuffer` (VP mode, on by default) documents the transcript
+    // scroll keys as Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End and the mouse wheel,
+    // so a bare ↑/↓ reaching an empty composer has to walk input history —
+    // even when the transcript overflows and the scrollbar is on screen.
+    const vpSettings = {
+      merged: { ui: { useTerminalBuffer: true } },
+    } as LoadedSettings;
+
+    const renderVp = (
+      scrollBy: (delta: number) => void,
+      hasScrollableTranscript: () => boolean = () => true,
+    ) =>
+      renderWithProviders(
+        <ScrollContext.Provider value={{ scrollBy, hasScrollableTranscript }}>
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+        { settings: vpSettings },
+      );
+
+    it('Up from an empty composer recalls history instead of scrolling the transcript', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer recalls history instead of scrolling the transcript', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer still descends when history is exhausted', async () => {
+      // The pre-existing ↓ fall-through (history → descendFromComposer) must
+      // survive unchanged now that the scroll fallback no longer preempts it.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+  });
+
+  describe('VP-mode bare Up/Down scrolls the conversation when opted in (#10749)', () => {
     // Terminals without SGR mouse reporting turn wheel events into bare ↑/↓.
-    // In VP mode (ui.useTerminalBuffer, on by default) those keys have to
+    // ui.arrowKeysScrollTranscript is the explicit opt-in that lets those keys
     // scroll the transcript while the composer is empty instead of rewriting
     // the input with an old prompt.
     const vpSettings = {
-      merged: { ui: { useTerminalBuffer: true } },
+      merged: {
+        ui: { useTerminalBuffer: true, arrowKeysScrollTranscript: true },
+      },
     } as LoadedSettings;
 
     const renderVp = (
@@ -6265,6 +6559,8 @@ describe('InputPrompt', () => {
     });
 
     it('keeps history navigation when VP mode is off', async () => {
+      // The opt-in is meaningless outside VP mode — there the host terminal
+      // still owns native scrollback and never translates the wheel into ↑/↓.
       const scrollBy = vi.fn();
       (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
       mockBuffer.setText('');
@@ -6275,6 +6571,16 @@ describe('InputPrompt', () => {
         >
           <InputPrompt {...props} />
         </ScrollContext.Provider>,
+        {
+          settings: {
+            merged: {
+              ui: {
+                useTerminalBuffer: false,
+                arrowKeysScrollTranscript: true,
+              },
+            },
+          } as LoadedSettings,
+        },
       );
       await wait();
 

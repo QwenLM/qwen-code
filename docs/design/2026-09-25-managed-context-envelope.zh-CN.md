@@ -110,6 +110,8 @@ Attestation v3 保留 v2 的 gate，只改变身份字段。
 | `binding`         | 封闭为七个 `ContextBinding` 字段的对象，每个字段适用 W0a 的规则，取 W0a 的线上字符串形式 |
 | `contextDigest`   | 匹配 `sha256:[0-9a-f]{64}` 的字符串                                                      |
 
+Broker 只获取 [Broker Provider 控制](2026-09-27-broker-provider-control.zh-CN.md)所允许的更窄的 Runtime Session ID。
+
 worker 按以下顺序检查请求，遇到第一个失败就停止：
 
 1. 不符合形状的请求返回 400 `managed_runtime_attestation_invalid`。
@@ -183,7 +185,7 @@ schema 固定每种记录的形状，以及它能以可读方式表达的规则�
 
 - `packages/cli/src/serve/contracts/managed-context-v1.schema.json` 与 `.fixtures.json`（新增）。
 - `packages/cli/src/serve/managed-context-envelope.ts` 及其测试（新增）。
-- `packages/sdk-java/runtime-broker/src/test/java/com/alibaba/qwen/code/runtimebroker/managedworkspace/` 中的一致性测试（新增）。
+- `packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/runtimebroker/managedworkspace/` 中的一致性测试（新增）。
 - `packages/cli/src/serve/managed-workspace-binding.ts` 导出它的三项 W0a 检查以供复用，行为不变。
 - 本设计文档的中英文两个版本（新增），以及 W0a 文档的“启动信封”一节和后续工作表，它们现在指向本文。
 - runtime-broker 的 `README.md` 和 `QWEN.md`，其中关于摘要的维护规则现在也点名这些 fixtures。

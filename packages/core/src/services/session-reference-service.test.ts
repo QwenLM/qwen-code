@@ -5,8 +5,16 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import type { Content, Part } from '@google/genai';
 import { SessionReferenceService } from './session-reference-service.js';
 import type { ResumedSessionData } from './sessionService.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  modelText,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 function fakeResumed(messages: unknown[]): ResumedSessionData {
   return {
@@ -30,6 +38,42 @@ function makeSvc(resumed: ResumedSessionData | undefined) {
   return svc;
 }
 
+/** Resolves session `s1` holding `messages`; fails if it is not found. */
+async function resolveS1(
+  messages: unknown[],
+  opts?: { budgetTokens?: number; title?: string },
+) {
+  const svc = makeSvc(fakeResumed(messages));
+  const res = await svc.resolve('s1', opts);
+  if ('notFound' in res) throw new Error('unexpected');
+  return { res, svc };
+}
+
+const user = (text: string) => ({ type: 'user', message: userText(text) });
+
+const assistant = (message: Content) => ({ type: 'assistant', message });
+
+const toolResult = (
+  toolCallResult: Record<string, unknown>,
+  ...parts: Part[]
+) => ({
+  type: 'tool_result',
+  toolCallResult,
+  message: content('user', ...parts),
+});
+
+/** A custom_title system record; `systemPayload` only when a title is given. */
+const customTitle = (title?: string) => ({
+  type: 'system',
+  subtype: 'custom_title',
+  ...(title !== undefined ? { systemPayload: { customTitle: title } } : {}),
+  message: undefined,
+});
+
+/** 50 user turns of ~400 chars each: `turn 0 xxx…` to `turn 49 xxx…`. */
+const manyTurns = () =>
+  Array.from({ length: 50 }, (_, i) => user(`turn ${i} ` + 'x'.repeat(400)));
+
 describe('SessionReferenceService', () => {
   it('returns notFound when session is missing', async () => {
     const svc = makeSvc(undefined);
@@ -37,53 +81,38 @@ describe('SessionReferenceService', () => {
   });
 
   it('keeps user + assistant text and drops thoughts', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        { type: 'user', message: { role: 'user', parts: [{ text: 'hi' }] } },
-        {
-          type: 'assistant',
-          message: {
-            role: 'model',
-            parts: [{ thought: true, text: 'reason' }, { text: 'hello' }],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      user('hi'),
+      assistant(
+        content('model', { thought: true, text: 'reason' }, { text: 'hello' }),
+      ),
+    ]);
     expect(res.text).toContain('User: hi');
     expect(res.text).toContain('Assistant: hello');
     expect(res.text).not.toContain('reason');
   });
 
   it('uses clean user display metadata for referenced text and title', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          message: {
-            role: 'user',
-            parts: [
-              { text: 'expanded model prompt' },
-              {
-                text: [
-                  '<qwen:user-prompt-submit-context>',
-                  'hook-only context',
-                  '</qwen:user-prompt-submit-context>',
-                ].join('\n'),
-              },
-            ],
+    const { res } = await resolveS1([
+      {
+        type: 'user',
+        message: content(
+          'user',
+          { text: 'expanded model prompt' },
+          {
+            text: [
+              '<qwen:user-prompt-submit-context>',
+              'hook-only context',
+              '</qwen:user-prompt-submit-context>',
+            ].join('\n'),
           },
-          systemPayload: {
-            displayText: 'raw @file prompt',
-            hookContext: 'hook-only context',
-          },
+        ),
+        systemPayload: {
+          displayText: 'raw @file prompt',
+          hookContext: 'hook-only context',
         },
-      ]),
-    );
-
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+      },
+    ]);
 
     expect(res.meta.title).toBe('raw @file prompt');
     expect(res.text).toContain('User: raw @file prompt');
@@ -91,127 +120,63 @@ describe('SessionReferenceService', () => {
   });
 
   it('keeps notification model text instead of its display label', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          subtype: 'notification',
-          message: {
-            role: 'user',
-            parts: [{ text: 'notification model text' }],
-          },
-          systemPayload: { displayText: 'Background agent completed' },
-        },
-      ]),
-    );
-
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      {
+        type: 'user',
+        subtype: 'notification',
+        message: userText('notification model text'),
+        systemPayload: { displayText: 'Background agent completed' },
+      },
+    ]);
 
     expect(res.text).toContain('User: notification model text');
     expect(res.text).not.toContain('Background agent completed');
   });
 
   it('collapses tool calls to one-line summaries without result bodies', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'tool_result',
-          toolCallResult: { callId: 'c1' },
-          message: {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  name: 'read_file',
-                  response: { huge: 'BODY' },
-                },
-              },
-            ],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      toolResult({ callId: 'c1' }, fnResponse('read_file', { huge: 'BODY' })),
+    ]);
     expect(res.text).toContain('[tool: read_file — ok]');
     expect(res.text).not.toContain('BODY');
   });
 
   it('marks a failed tool call as error', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'tool_result',
-          toolCallResult: { callId: 'c1', error: new Error('boom') },
-          message: {
-            role: 'user',
-            parts: [{ functionResponse: { name: 'write_file', response: {} } }],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      toolResult(
+        { callId: 'c1', error: new Error('boom') },
+        fnResponse('write_file', {}),
+      ),
+    ]);
     expect(res.text).toContain('[tool: write_file — error]');
   });
 
   it('marks a cancelled tool call as cancelled, not ok', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'tool_result',
-          toolCallResult: { callId: 'c1', status: 'cancelled' },
-          message: {
-            role: 'user',
-            parts: [{ functionResponse: { name: 'read_file', response: {} } }],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      toolResult(
+        { callId: 'c1', status: 'cancelled' },
+        fnResponse('read_file', {}),
+      ),
+    ]);
     expect(res.text).toContain('[tool: read_file — cancelled]');
     expect(res.text).not.toContain('[tool: read_file — ok]');
   });
 
   it('maps a successful tool call status to the ok display label', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'tool_result',
-          toolCallResult: { callId: 'c1', status: 'success' },
-          message: {
-            role: 'user',
-            parts: [{ functionResponse: { name: 'read_file', response: {} } }],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      toolResult(
+        { callId: 'c1', status: 'success' },
+        fnResponse('read_file', {}),
+      ),
+    ]);
     expect(res.text).toContain('[tool: read_file — ok]');
     expect(res.text).not.toContain('success');
   });
 
   it('surfaces an error tool_result that has no functionResponse parts', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'tool_result',
-          toolCallResult: {
-            callId: 'c1',
-            error: new Error('permission denied'),
-          },
-          message: {
-            role: 'user',
-            parts: [],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      toolResult({ callId: 'c1', error: new Error('permission denied') }),
+    ]);
     // No functionResponse names to derive a tool line from; the record
     // contributes nothing to the slimmed output. Verify it does not throw
     // and the session still resolves.
@@ -222,37 +187,16 @@ describe('SessionReferenceService', () => {
     // An assistant turn that calls a tool is a SINGLE record carrying both the
     // text and the functionCall parts; the paired tool_result carries the
     // response. The assistant preamble must not be dropped.
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'assistant',
-          message: {
-            role: 'model',
-            parts: [
-              { text: "I'll read the config to check X" },
-              { functionCall: { name: 'read_file', args: {} } },
-            ],
-          },
-        },
-        {
-          type: 'tool_result',
-          toolCallResult: { callId: 'c1' },
-          message: {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  name: 'read_file',
-                  response: { huge: 'BODY' },
-                },
-              },
-            ],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      assistant(
+        content(
+          'model',
+          { text: "I'll read the config to check X" },
+          fnCall('read_file', {}),
+        ),
+      ),
+      toolResult({ callId: 'c1' }, fnResponse('read_file', { huge: 'BODY' })),
+    ]);
     expect(res.text).toContain("Assistant: I'll read the config to check X");
     // exactly one tool line (from the response side), not duplicated
     expect(res.text.match(/\[tool: read_file — ok\]/g)).toHaveLength(1);
@@ -260,45 +204,25 @@ describe('SessionReferenceService', () => {
   });
 
   it('emits one tool line per parallel tool call in a single turn', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'tool_result',
-          toolCallResult: { callId: 'c1' },
-          message: {
-            role: 'user',
-            parts: [
-              { functionResponse: { name: 'read_file', response: {} } },
-              { functionResponse: { name: 'grep', response: {} } },
-            ],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      toolResult(
+        { callId: 'c1' },
+        fnResponse('read_file', {}),
+        fnResponse('grep', {}),
+      ),
+    ]);
     expect(res.text).toContain('[tool: read_file — ok]');
     expect(res.text).toContain('[tool: grep — ok]');
   });
 
   it('retains the newest turn even when it alone exceeds the budget', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'old turn' }] },
-        },
-        {
-          type: 'assistant',
-          message: {
-            role: 'model',
-            parts: [{ text: 'huge newest turn ' + 'y'.repeat(4000) }],
-          },
-        },
-      ]),
+    const { res } = await resolveS1(
+      [
+        user('old turn'),
+        assistant(modelText('huge newest turn ' + 'y'.repeat(4000))),
+      ],
+      { budgetTokens: 50, title: 's1' },
     );
-    const res = await svc.resolve('s1', { budgetTokens: 50, title: 's1' });
-    if ('notFound' in res) throw new Error('unexpected');
     expect(res.truncated).toBe(true);
     expect(res.text).toContain('[earlier turns omitted]');
     // the newest turn is still present, not collapsed to just the marker
@@ -307,16 +231,10 @@ describe('SessionReferenceService', () => {
   });
 
   it('tail-trims to budget and marks truncated', async () => {
-    const many = Array.from({ length: 50 }, (_, i) => ({
-      type: 'user',
-      message: {
-        role: 'user',
-        parts: [{ text: `turn ${i} ` + 'x'.repeat(400) }],
-      },
-    }));
-    const svc = makeSvc(fakeResumed(many));
-    const res = await svc.resolve('s1', { budgetTokens: 200, title: 's1' });
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1(manyTurns(), {
+      budgetTokens: 200,
+      title: 's1',
+    });
     expect(res.truncated).toBe(true);
     expect(res.text).toContain('[earlier turns omitted]');
     expect(res.text).toContain('turn 49'); // newest retained
@@ -324,44 +242,20 @@ describe('SessionReferenceService', () => {
   });
 
   it('emits a placeholder when there is no textual content', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        { type: 'system', subtype: 'custom_title', message: undefined },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([customTitle()]);
     expect(res.text).toContain('(no textual content)');
     expect(res.truncated).toBe(false);
   });
 
   it('includes header overhead in approxTokens', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'hello' }] },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1', { title: 'Test' });
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res, svc } = await resolveS1([user('hello')], { title: 'Test' });
     // approxTokens must account for the header overhead, not just the body.
     const bodyOnly = svc['estimate'](['User: hello']);
     expect(res.meta.approxTokens).toBeGreaterThan(bodyOnly);
   });
 
   it('excludes omission marker cost from approxTokens when not truncated', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'hello' }] },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1', { title: 'Test' });
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res, svc } = await resolveS1([user('hello')], { title: 'Test' });
     expect(res.truncated).toBe(false);
     const header = '--- Referenced session "Test" (slimmed, read-only) ---';
     const expected =
@@ -370,16 +264,10 @@ describe('SessionReferenceService', () => {
   });
 
   it('includes omission marker cost in approxTokens when truncated', async () => {
-    const many = Array.from({ length: 50 }, (_, i) => ({
-      type: 'user',
-      message: {
-        role: 'user',
-        parts: [{ text: `turn ${i} ` + 'x'.repeat(400) }],
-      },
-    }));
-    const svc = makeSvc(fakeResumed(many));
-    const res = await svc.resolve('s1', { budgetTokens: 200, title: 's1' });
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res, svc } = await resolveS1(manyTurns(), {
+      budgetTokens: 200,
+      title: 's1',
+    });
     expect(res.truncated).toBe(true);
     const header = '--- Referenced session "s1" (slimmed, read-only) ---';
     const overhead = svc['estimate']([header, '[earlier turns omitted]']);
@@ -393,125 +281,51 @@ describe('SessionReferenceService', () => {
 
 describe('title derivation', () => {
   it('derives title from first user message when no explicit title given', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Fix the auth bug' }] },
-        },
-        {
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'Sure' }] },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      user('Fix the auth bug'),
+      assistant(modelText('Sure')),
+    ]);
     expect(res.meta.title).toBe('Fix the auth bug');
     expect(res.text).toContain('Referenced session "Fix the auth bug"');
   });
 
   it('prefers a custom_title system record over the first user message', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'Auth bug investigation' },
-          message: undefined,
-        },
-        {
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Fix the auth bug' }] },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      customTitle('Auth bug investigation'),
+      user('Fix the auth bug'),
+    ]);
     expect(res.meta.title).toBe('Auth bug investigation');
   });
 
   it('uses the last custom_title when a session has been renamed', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'Fix the auth bug' },
-          message: undefined,
-        },
-        {
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'hello' }] },
-        },
-        {
-          type: 'system',
-          subtype: 'custom_title',
-          systemPayload: { customTitle: 'Auth investigation' },
-          message: undefined,
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([
+      customTitle('Fix the auth bug'),
+      user('hello'),
+      customTitle('Auth investigation'),
+    ]);
     expect(res.meta.title).toBe('Auth investigation');
   });
 
   it('truncates a long first user message to 80 chars', async () => {
-    const long = 'A'.repeat(120);
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          message: { role: 'user', parts: [{ text: long }] },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([user('A'.repeat(120))]);
     expect(res.meta.title).toHaveLength(80);
     expect(res.meta.title.endsWith('...')).toBe(true);
   });
 
   it('uses only the first line of a multi-line user message', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          message: {
-            role: 'user',
-            parts: [{ text: 'Short title\nLonger body text' }],
-          },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([user('Short title\nLonger body text')]);
     expect(res.meta.title).toBe('Short title');
   });
 
   it('falls back to sessionId when there are no user messages', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        { type: 'system', subtype: 'custom_title', message: undefined },
-      ]),
-    );
-    const res = await svc.resolve('s1');
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([customTitle()]);
     expect(res.meta.title).toBe('s1');
   });
 
   it('prefers an explicit title over derivation', async () => {
-    const svc = makeSvc(
-      fakeResumed([
-        {
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'First message' }] },
-        },
-      ]),
-    );
-    const res = await svc.resolve('s1', { title: 'Custom Title' });
-    if ('notFound' in res) throw new Error('unexpected');
+    const { res } = await resolveS1([user('First message')], {
+      title: 'Custom Title',
+    });
     expect(res.meta.title).toBe('Custom Title');
   });
 });

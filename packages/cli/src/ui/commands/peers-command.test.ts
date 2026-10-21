@@ -135,11 +135,20 @@ function makeContext(
   peerMessaging: Fake | null,
   crossSessionMessaging?: unknown,
   scopes: Record<string, unknown> = {},
+  suppression: { isSafeMode?: boolean; getBareMode?: boolean } = {},
 ): CommandContext {
   return {
     services: {
       peerMessaging,
       settings: { merged: { agents: { crossSessionMessaging } }, ...scopes },
+      // The gate reads the two session-level suppressions off the Config,
+      // so the double models them rather than stubbing the answer: a case
+      // where the flags and the setting disagree stays expressible, and the
+      // message can be checked against the cause it actually derived.
+      config: {
+        isSafeMode: () => suppression.isSafeMode === true,
+        getBareMode: () => suppression.getBareMode === true,
+      },
     },
   } as unknown as CommandContext;
 }
@@ -455,6 +464,93 @@ describe('/peers', () => {
     expect(result.content).toContain('failed to register');
     expect(result.content).not.toContain('Cross-session messaging is off');
     expect(result.content).not.toContain('Remove that entry');
+  });
+
+  // Arm-specific assertions on purpose. Every branch of
+  // `describeMessagingOff` also begins with "Cross-session messaging is
+  // off", so asserting only that shared prefix stays green with the
+  // suppression arm deleted — and `/peers` then tells a safe-mode user
+  // whose setting is already `true` to go remove that entry, a remedy that
+  // changes nothing. Each case also pins the environment channel, since
+  // both suppressions can be reached without the flag.
+  it('names safe mode as the reason instead of a settings remedy', async () => {
+    const result = await peersCommand.action!(
+      makeContext(null, true, {}, { isSafeMode: true }),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in safe mode');
+    expect(result.content).toContain('QWEN_CODE_SAFE_MODE');
+    expect(result.content).not.toContain('Remove that entry');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
+  it('names bare mode as the reason instead of a settings remedy', async () => {
+    const result = await peersCommand.action!(
+      makeContext(null, true, {}, { getBareMode: true }),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in bare mode');
+    expect(result.content).toContain('QWEN_CODE_SIMPLE');
+    expect(result.content).not.toContain('Remove that entry');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
+  // The both-causes state, which the two cases above cannot express: they
+  // build their context with the setting on. Naming only the flag here tells
+  // a user whose own settings entry is also off that the setting cannot
+  // matter, and sends them to a restart that leaves messaging off.
+  async function runBothCauses(suppression: {
+    isSafeMode?: boolean;
+    getBareMode?: boolean;
+  }): Promise<{ messageType: string; content: string }> {
+    const result = await peersCommand.action!(
+      makeContext(
+        null,
+        false,
+        { user: { settings: { agents: { crossSessionMessaging: false } } } },
+        suppression,
+      ),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+    return { messageType: result.messageType, content: result.content };
+  }
+
+  it('names the settings remedy and safe mode when both turn messaging off', async () => {
+    const result = await runBothCauses({ isSafeMode: true });
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in safe mode');
+    expect(result.content).toContain('QWEN_CODE_SAFE_MODE');
+    expect(result.content).toContain('Remove that entry');
+    // The single-cause claim is false in this state: the setting is one of
+    // the two reasons messaging is off, so it is not something the flag
+    // alone overrides.
+    expect(result.content).not.toContain('cannot turn it back on');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
+  it('names the settings remedy and bare mode when both turn messaging off', async () => {
+    const result = await runBothCauses({ getBareMode: true });
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in bare mode');
+    expect(result.content).toContain('QWEN_CODE_SIMPLE');
+    expect(result.content).toContain('Remove that entry');
+    expect(result.content).not.toContain('cannot turn it back on');
+    expect(result.content).not.toContain('failed to bind');
   });
 
   it('repeats the bind failure and what to change when the inbox could not bind', async () => {

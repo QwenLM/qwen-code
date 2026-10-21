@@ -9,8 +9,9 @@
 中所记工作区契约门槛里的两项：区分整体存活与工作区控制就绪；由通道持有的 epoch
 及停止代际策略，其中包括覆盖多个存活通道的停止回执。第三项门槛，即把影响会话的
 工作区变更下发到所有存活引擎，并采用 #12737 中 Q2 已决定的确认与权限围栏语义，是
-B2b 的第二部分，另行提交。本改动之后，普通 daemon、Channels 和嵌入式构造都仍不传
-`executionEngines`。
+B2b 的第二部分，见
+[双引擎工作区变更传播](./2026-09-27-paired-engine-workspace-change-propagation.zh-CN.md)。
+本改动之后，普通 daemon、Channels 和嵌入式构造都仍不传 `executionEngines`。
 
 ## 问题与现状
 

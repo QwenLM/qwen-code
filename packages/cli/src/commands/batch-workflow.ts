@@ -13,7 +13,10 @@
 // session's realtime cache statistics — the two price models stay separate.
 import fs from 'node:fs';
 import path from 'node:path';
-import { isQwenFamilyWireModel } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
+import {
+  isQwenFamilyWireModel,
+  isTieredEffortWireModel,
+} from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import {
   SETTLED_STATUSES,
   MAX_REQUESTS_PER_FILE,
@@ -139,7 +142,14 @@ const unitPrice = (
 interface AttemptAssembly {
   jsonl: string;
   inputTokens: number;
+  /** Rough forecast of output tokens, excluding thinking. */
   outputTokens: number;
+  /** The most output the requests can bill — each request's output cap
+   * plus its thinking bound — or undefined when some request has no
+   * finite bound. What `maxCostUsd` is enforced against. */
+  boundOutputTokens: number | undefined;
+  /** Some request may think, and thinking is not in `outputTokens`. */
+  thinkingExcluded: boolean;
   /** Per-item source hashes; applied to the task only when the attempt
    * provably becomes a batch (see TaskAttempt.sourceSha256). */
   sources: Record<string, string>;
@@ -177,6 +187,8 @@ function assembleAttempt(
   let fileBytes = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  let boundOutputTokens: number | undefined = 0;
+  let thinkingExcluded = false;
   const sources: Record<string, string> = {};
   for (const request of assembled) {
     const encoded = JSON.stringify(request.line) + '\n';
@@ -198,19 +210,48 @@ function assembleAttempt(
     const expected =
       task.plan.expectedOutputTokensPerItem ?? request.inputTokens;
     outputTokens += limit === undefined ? expected : Math.min(expected, limit);
+    // The bound is read off the request exactly as it will be sent. On
+    // DashScope the output cap does not cover reasoning, so a request that
+    // may think is bounded only by a thinking_budget, which the tiered
+    // family does not honour.
+    const body = request.line['body'] as Record<string, unknown>;
+    const cap = body[outputBudgetKey(body)];
+    const thinkingOff =
+      body['enable_thinking'] === false || body['reasoning_effort'] === 'none';
+    const budget = body['thinking_budget'];
+    const thinkingBound = thinkingOff
+      ? 0
+      : typeof budget === 'number' && !isTieredEffortWireModel(task.model)
+        ? budget
+        : undefined;
+    if (!thinkingOff) thinkingExcluded = true;
+    boundOutputTokens =
+      boundOutputTokens !== undefined &&
+      typeof cap === 'number' &&
+      thinkingBound !== undefined
+        ? boundOutputTokens + cap + thinkingBound
+        : undefined;
     sources[request.itemId] = request.sourceSha256;
   }
-  return { jsonl, inputTokens, outputTokens, sources };
+  return {
+    jsonl,
+    inputTokens,
+    outputTokens,
+    boundOutputTokens,
+    thinkingExcluded,
+    sources,
+  };
 }
 
 function costLine(
-  inputTokens: number,
-  outputTokens: number,
+  assembly: AttemptAssembly,
   env: Record<string, string | undefined>,
-): { text: string; costUsd?: number } {
+): { text: string; costUsd?: number; boundCostUsd?: number } {
   const inputPrice = unitPrice(env, ENV_PRICE_INPUT);
   const outputPrice = unitPrice(env, ENV_PRICE_OUTPUT);
-  const tokens = `~${inputTokens.toLocaleString()} in / ~${outputTokens.toLocaleString()} out tokens (rough estimate)`;
+  const tokens =
+    `~${assembly.inputTokens.toLocaleString()} in / ~${assembly.outputTokens.toLocaleString()} out tokens (rough estimate` +
+    `${assembly.thinkingExcluded ? '; excludes thinking tokens, which can be several times the output' : ''})`;
   if (inputPrice === undefined || outputPrice === undefined) {
     return {
       text:
@@ -218,18 +259,37 @@ function costLine(
         `for a monetary estimate (Batch bills successful requests at 50% of realtime list)`,
     };
   }
-  const costUsd =
-    ((inputTokens * inputPrice + outputTokens * outputPrice) / 1_000_000) *
+  const price = (outputTokens: number) =>
+    ((assembly.inputTokens * inputPrice + outputTokens * outputPrice) /
+      1_000_000) *
     BATCH_PRICE_FACTOR;
+  const costUsd = price(assembly.outputTokens);
+  const boundCostUsd =
+    assembly.boundOutputTokens === undefined
+      ? undefined
+      : price(assembly.boundOutputTokens);
   return {
     text:
-      `${tokens}; estimated Batch cost ≈ $${costUsd.toFixed(4)} ` +
-      `(estimate only — the provider bill is authoritative; excludes the preparation spent in this session)`,
+      `${tokens}; estimated Batch cost ≈ $${costUsd.toFixed(4)}` +
+      (boundCostUsd === undefined
+        ? ''
+        : `, worst case ≤ $${boundCostUsd.toFixed(4)} at the request caps`) +
+      ` (estimate only — the provider bill is authoritative; excludes the preparation spent in this session)`,
     costUsd,
+    boundCostUsd,
   };
 }
 
-function enforceBudget(plan: BatchPlan, cost: { costUsd?: number }): void {
+/**
+ * `maxCostUsd` is a promise that the submitted batch cannot cost more, so it
+ * is enforced against the worst case at the request caps, never against the
+ * rough forecast — which leaves out thinking and can be exceeded several
+ * times over.
+ */
+function enforceBudget(
+  plan: BatchPlan,
+  cost: { costUsd?: number; boundCostUsd?: number },
+): void {
   if (plan.maxCostUsd === undefined) return;
   if (cost.costUsd === undefined) {
     throw new Error(
@@ -237,10 +297,18 @@ function enforceBudget(plan: BatchPlan, cost: { costUsd?: number }): void {
         `(${ENV_PRICE_INPUT}, ${ENV_PRICE_OUTPUT}); the budget cannot be enforced, refusing to submit.`,
     );
   }
-  if (cost.costUsd > plan.maxCostUsd) {
+  if (cost.boundCostUsd === undefined) {
     throw new Error(
-      `estimated Batch cost $${cost.costUsd.toFixed(4)} exceeds the plan's ` +
-        `maxCostUsd=$${plan.maxCostUsd}; refusing to submit. Adjust the plan or its budget.`,
+      `plan sets maxCostUsd=$${plan.maxCostUsd}, but the requests have no finite output bound to enforce it against; refusing to submit. ` +
+        `Set maxOutputTokens, and either turn thinking off (enableThinking: false) or set a thinking_budget ` +
+        `(not honoured by the tiered qwen3.8-max family) — or remove maxCostUsd.`,
+    );
+  }
+  if (cost.boundCostUsd > plan.maxCostUsd) {
+    throw new Error(
+      `worst-case Batch cost $${cost.boundCostUsd.toFixed(4)} at the request caps exceeds the plan's ` +
+        `maxCostUsd=$${plan.maxCostUsd} (rough estimate $${cost.costUsd.toFixed(4)}); refusing to submit. ` +
+        `Lower maxOutputTokens, or adjust the plan or its budget.`,
     );
   }
 }
@@ -483,7 +551,7 @@ export async function runPlan(
   };
   task.attempts.push(attempt);
   let assembly: AttemptAssembly;
-  let cost: { text: string; costUsd?: number };
+  let cost: ReturnType<typeof costLine>;
   let digest: string;
   try {
     if (plan.enableThinking === false && request.thinkingMandatory) {
@@ -501,7 +569,7 @@ export async function runPlan(
       );
     }
     assembly = assembleAttempt(task, attemptNumber, attempt.itemIds);
-    cost = costLine(assembly.inputTokens, assembly.outputTokens, deps.env);
+    cost = costLine(assembly, deps.env);
     enforceBudget(plan, cost);
     digest = snapshotDigest(task, assembly);
     // An approval covers the batch that was previewed, not whatever the
@@ -782,21 +850,33 @@ async function collectLocked(
     // only retries remote cleanup must not re-announce the batch as newly
     // settled (auto-collect announces only the first).
     const firstHarvest = attempt.finalStatus === undefined;
-    if (!attempt.collected) {
+    // A harvested attempt is asked about again only to finish remote
+    // cleanup; its items are settled and are never re-derived from the job.
+    const cleanupPending =
+      attempt.collected === true &&
+      attempt.remoteCleaned !== true &&
+      attempt.remoteKept !== true;
+    if (!attempt.collected || cleanupPending) {
       try {
         job = await api.getBatch(deps.ep, batchId);
       } catch (error) {
-        // The batch record is needed to retry remote cleanup, but the local
-        // result files are enough to finish delivering — a provider hiccup
-        // must not withhold what is already on disk. With no local copies
-        // the batch cannot be collected at all: report it.
-        if (!attempt.outputPath && !attempt.errorPath) throw error;
-        deps.err(
-          `[batch] warning: cannot re-fetch ${batchId} (${error instanceof Error ? error.message : String(error)}); ` +
-            `delivering from the local copies and retrying remote cleanup later.`,
-        );
+        if (cleanupPending && (error as BatchApiError).status === 404) {
+          // The provider forgot the batch: there is nothing left to delete.
+          attempt.remoteCleaned = true;
+          store.save(task);
+        } else {
+          // The batch record is needed to retry remote cleanup, but the
+          // local result files are enough to finish delivering — a provider
+          // hiccup must not withhold what is already on disk. With no local
+          // copies the batch cannot be collected at all: report it.
+          if (!attempt.outputPath && !attempt.errorPath) throw error;
+          deps.err(
+            `[batch] warning: cannot re-fetch ${batchId} (${error instanceof Error ? error.message : String(error)}); ` +
+              `delivering from the local copies and retrying remote cleanup later.`,
+          );
+        }
       }
-      if (job && !SETTLED_STATUSES.has(job.status)) {
+      if (!attempt.collected && job && !SETTLED_STATUSES.has(job.status)) {
         deps.out(
           `${batchId} is ${job.status} (${job.request_counts?.completed ?? 0}/${job.request_counts?.total ?? attempt.itemIds.length}); ` +
             `re-run \`qwen batch collect ${taskId}\` later or add --wait.`,
@@ -805,30 +885,35 @@ async function collectLocked(
       }
     }
 
+    // Only an attempt that is not harvested yet learns anything from the
+    // job; for a harvested one the job serves remote cleanup alone.
+    const harvestJob = attempt.collected ? undefined : job;
+
     // Settled but its result file not published yet: collecting now would
     // fail every item as "no result line" and invite a paid retry of
     // requests that were already billed. For `completed`, a provider that
     // omits request_counts is treated as "results expected" (fail closed); a
     // cancelled or expired batch defers only when it reports finished work.
-    const finished = job?.request_counts?.completed;
+    const finished = harvestJob?.request_counts?.completed;
     if (
-      job &&
-      !job.output_file_id &&
-      !job.error_file_id &&
-      (job.status === 'completed'
+      harvestJob &&
+      !harvestJob.output_file_id &&
+      !harvestJob.error_file_id &&
+      (harvestJob.status === 'completed'
         ? finished !== 0
-        : (job.status === 'cancelled' || job.status === 'expired') &&
+        : (harvestJob.status === 'cancelled' ||
+            harvestJob.status === 'expired') &&
           (finished ?? 0) > 0)
     ) {
       deps.out(
-        `${batchId} is ${job.status} but its result file is not available yet; collect again shortly.`,
+        `${batchId} is ${harvestJob.status} but its result file is not available yet; collect again shortly.`,
       );
       return;
     }
 
-    const finalStatus = job?.status ?? attempt.finalStatus;
-    if (job) {
-      const errors = jobErrorsOf(job);
+    const finalStatus = harvestJob?.status ?? attempt.finalStatus;
+    if (harvestJob) {
+      const errors = jobErrorsOf(harvestJob);
       if (errors.length > 0) attempt.jobErrors = errors;
       settledErrors.push(...errors);
     }
@@ -836,23 +921,40 @@ async function collectLocked(
     const attemptDir = store.attemptDir(task.id, attempt.attempt);
     fs.mkdirSync(attemptDir, { recursive: true, mode: PRIVATE_DIR_MODE });
     // A recorded local copy that has since disappeared is downloaded again
-    // rather than read as "the batch produced nothing".
-    if (
-      job?.output_file_id &&
-      !(attempt.outputPath && fs.existsSync(attempt.outputPath))
-    ) {
-      const target = path.join(attemptDir, 'output.jsonl');
-      await api.downloadFile(deps.ep, job.output_file_id, target);
-      attempt.outputPath = target;
+    // rather than read as "the batch produced nothing". A result file the
+    // provider no longer has (404) will never come back: its missing items
+    // fail below instead of wedging the attempt on every collect.
+    let downloadedThisPass = false;
+    let resultsGone = false;
+    const download = async (
+      fileId: string | undefined,
+      recorded: string | undefined,
+      name: string,
+    ): Promise<string | undefined> => {
+      if (!fileId || (recorded && fs.existsSync(recorded))) return recorded;
+      const target = path.join(attemptDir, name);
+      try {
+        await api.downloadFile(deps.ep, fileId, target);
+      } catch (error) {
+        if ((error as BatchApiError).status !== 404) throw error;
+        resultsGone = true;
+        return undefined;
+      }
+      downloadedThisPass = true;
+      return target;
+    };
+    if (harvestJob) {
+      attempt.outputPath = await download(
+        harvestJob.output_file_id,
+        attempt.outputPath,
+        'output.jsonl',
+      );
       store.save(task);
-    }
-    if (
-      job?.error_file_id &&
-      !(attempt.errorPath && fs.existsSync(attempt.errorPath))
-    ) {
-      const target = path.join(attemptDir, 'error.jsonl');
-      await api.downloadFile(deps.ep, job.error_file_id, target);
-      attempt.errorPath = target;
+      attempt.errorPath = await download(
+        harvestJob.error_file_id,
+        attempt.errorPath,
+        'error.jsonl',
+      );
       store.save(task);
     }
 
@@ -965,21 +1067,27 @@ async function collectLocked(
         item.lastError = `provider reported failure: ${JSON.stringify(line.error ?? line).slice(0, 300)}`;
       }
     }
-    // An incomplete harvest must be downloaded again before missing items
-    // can fail or remote originals can be deleted. This also covers zero
-    // matching lines, without a separate recovery path.
-    if (
-      job &&
-      (attempt.outputPath || attempt.errorPath) &&
-      seen.size < (job.request_counts?.completed ?? 0)
-    ) {
+    // An incomplete harvest is downloaded again once before missing items
+    // can fail or remote originals can be deleted (a download cut short
+    // looks exactly like this). Short again from fresh copies means the
+    // provider's file itself is unusable: finish the harvest — missing
+    // items fail with that reason, and the remote files are kept for
+    // inspection — rather than wedge the attempt on every collect.
+    const reported = harvestJob?.request_counts?.completed ?? 0;
+    const short =
+      harvestJob !== undefined &&
+      !resultsGone &&
+      (attempt.outputPath !== undefined || attempt.errorPath !== undefined) &&
+      seen.size < reported;
+    if (short && !(downloadedThisPass && attempt.harvestShort)) {
       attempt.outputPath = undefined;
       attempt.errorPath = undefined;
+      attempt.harvestShort = true;
       attempt.usage = usage;
       refreshTaskStatus(task);
       store.save(task);
       throw new Error(
-        `result files account for ${seen.size} of ${job.request_counts?.completed} finished request(s); ` +
+        `result files account for ${seen.size} of ${reported} finished request(s); ` +
           `remote files were kept and missing items were not marked failed — collect again to download fresh copies`,
       );
     }
@@ -991,12 +1099,17 @@ async function collectLocked(
         // provider's reason instead of a bare "no result line".
         item.lastError = attempt.jobErrors?.length
           ? `batch ${finalStatus ?? 'failed'}: ${attempt.jobErrors[0]}`
-          : finalStatus && finalStatus !== 'completed'
-            ? `batch ${finalStatus} before this request produced a result`
-            : 'no result line for this request in the settled batch';
+          : resultsGone
+            ? "the provider no longer has this batch's result file (404)"
+            : short
+              ? `the provider's result file has no usable line for this request ` +
+                `(${seen.size} of ${reported} finished requests mapped, after a fresh download)`
+              : finalStatus && finalStatus !== 'completed'
+                ? `batch ${finalStatus} before this request produced a result`
+                : 'no result line for this request in the settled batch';
       }
     }
-    if (job) attempt.finalStatus = job.status;
+    if (harvestJob) attempt.finalStatus = harvestJob.status;
     // A pass that read no local result file recomputed nothing, so writing
     // these empty totals back would erase the billed usage of an
     // already-collected attempt whose local copy has since gone.
@@ -1004,13 +1117,27 @@ async function collectLocked(
     refreshTaskStatus(task);
     store.save(task);
 
-    if (job) {
+    if (harvestJob) {
+      // Harvested: from here the attempt blocks nothing, whatever happens
+      // to the remote cleanup below.
       if (firstHarvest) settledNow += 1;
+      attempt.collected = true;
+      attempt.harvestShort = undefined;
+      store.save(task);
+    }
+    if (short && harvestJob) {
+      attempt.remoteKept = true;
+      store.save(task);
+      deps.err(
+        `[batch] warning: kept the remote files of ${batchId} for inspection ` +
+          `(${[harvestJob.input_file_id, harvestJob.output_file_id, harvestJob.error_file_id].filter(Boolean).join(', ')}); ` +
+          `its result file could not be read in full.`,
+      );
+    } else if (job && attempt.collected && attempt.remoteCleaned !== true) {
       // Results are safely local now; uploaded files otherwise live on
-      // the provider until somebody deletes them. A failed deletion leaves
-      // the attempt uncollected, so the next collect re-fetches the
-      // settled batch and retries instead of leaking the files; it never
-      // fails the collect.
+      // the provider until somebody deletes them. A failed deletion is
+      // retried by the next manual collect; it never fails the collect and
+      // never blocks retry, cancel or clean.
       let failed = 0;
       for (const fileId of [
         job.input_file_id,
@@ -1029,7 +1156,7 @@ async function collectLocked(
           );
         }
       }
-      attempt.collected = failed === 0;
+      attempt.remoteCleaned = failed === 0;
       store.save(task);
     }
   };
@@ -1235,7 +1362,7 @@ async function retryLocked(
     attempt.itemIds,
     attempt.maxOutputTokens,
   );
-  const cost = costLine(assembly.inputTokens, assembly.outputTokens, deps.env);
+  const cost = costLine(assembly, deps.env);
   // The plan's budget binds every submission, not just the first.
   enforceBudget(task.plan, cost);
   deps.out(
@@ -1370,6 +1497,17 @@ export async function cleanTask(
             .map((item) => item.id)
             .join(', ')}) were the only copy; the remote files are already ` +
             `deleted, so they are now lost.`,
+        );
+      }
+      // Cleanup that failed, or files kept for inspection, outlive the
+      // record: name them, since nothing will delete them afterwards.
+      const leftRemote = task.attempts.filter(
+        (attempt) => attempt.collected && attempt.remoteCleaned !== true,
+      );
+      if (leftRemote.length > 0) {
+        deps.err(
+          `[batch] note: the remote files of ${leftRemote.map((attempt) => attempt.batchId).join(', ')} ` +
+            `were not deleted; remove them in the provider console if they are no longer needed.`,
         );
       }
       store.remove(taskId);

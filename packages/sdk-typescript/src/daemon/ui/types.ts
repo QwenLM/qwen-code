@@ -201,6 +201,8 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
  * recorded value — a missing field means the session did not record it.
  */
 export interface DaemonTranscriptTimingMeta {
+  /** One application-observable model invocation, independent of response ID. */
+  executionId?: string;
   kind: 'request' | 'tool';
   /**
    * Epoch ms. A request frame has one whenever its end was recorded: a request
@@ -471,6 +473,18 @@ export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   clearActiveText?: boolean;
 }
 
+/**
+ * Loop-protection detail of a `loop_detected` turn error: the detector's
+ * `loopType`, the `loopReason` when that type covers several causes, and the
+ * tool-call count and limit of a `turn_tool_call_cap` stop.
+ */
+export interface DaemonLoopStop {
+  loopType?: string;
+  loopReason?: string;
+  toolCallCount?: number;
+  toolCallLimit?: number;
+}
+
 export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   type: 'error';
   text: string;
@@ -478,6 +492,8 @@ export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   code?: string;
   promptId?: string;
   source?: 'turn_error';
+  /** Set on a `loop_detected` turn error that names its detector. */
+  loop?: DaemonLoopStop;
   /**
    * Closed-enum error category propagated from the daemon's typed-error
    * taxonomy. Lets renderers branch on `errorKind` for "retry auth" vs
@@ -1178,6 +1194,8 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   code?: string;
   promptId?: string;
   errorKind?: DaemonErrorKind;
+  /** Mirrors `DaemonUiErrorEvent.loop`; only set on `error` blocks. */
+  loop?: DaemonLoopStop;
   source?: string;
   data?: unknown;
   /** Mirrors `DaemonUiStatusEvent.debugReason`; only set on `debug` blocks. */

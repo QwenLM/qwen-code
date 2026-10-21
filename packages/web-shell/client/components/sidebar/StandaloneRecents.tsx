@@ -23,8 +23,8 @@ import {
 } from '../../daemon/session/session-context';
 import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
+import { SessionRenameDialog } from '../dialogs/SessionRenameDialog';
 import { Button } from '../ui/button';
-import { Input } from '../ui/input';
 import sidebarStyles from './WebShellSidebar.module.css';
 import workspaceStyles from './WorkspaceSection.module.css';
 
@@ -597,54 +597,30 @@ export function StandaloneRecents({
         )}
       </section>
       {renameCandidate && (
-        <DialogShell
-          title={t('sidebar.rename')}
-          size="sm"
+        <SessionRenameDialog
+          value={renameValue}
+          busy={busySessionId === renameCandidate.sessionId}
+          onChange={setRenameValue}
           onClose={() => setRenameCandidate(undefined)}
-        >
-          <form
-            className="flex flex-col gap-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const displayName = renameValue.trim();
-              if (!displayName) return;
-              void run(renameCandidate.sessionId, async () => {
-                await workspace.client.renameStandaloneSession(
-                  renameCandidate.sessionId,
-                  displayName,
-                );
-                setSessions((current) =>
-                  current.map((session) =>
-                    session.sessionId === renameCandidate.sessionId
-                      ? { ...session, displayName }
-                      : session,
-                  ),
-                );
-                onRenameSession?.(renameCandidate.sessionId, displayName);
-              }).then((succeeded) => {
-                if (succeeded) setRenameCandidate(undefined);
-              });
-            }}
-          >
-            <Input
-              autoFocus
-              value={renameValue}
-              onChange={(event) => setRenameValue(event.target.value)}
-            />
-            <div className="flex justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setRenameCandidate(undefined)}
-              >
-                {t('common.cancel')}
-              </Button>
-              <Button type="submit" disabled={!renameValue.trim()}>
-                {t('common.save')}
-              </Button>
-            </div>
-          </form>
-        </DialogShell>
+          onSubmit={(displayName) => {
+            void run(renameCandidate.sessionId, async () => {
+              await workspace.client.renameStandaloneSession(
+                renameCandidate.sessionId,
+                displayName,
+              );
+              setSessions((current) =>
+                current.map((session) =>
+                  session.sessionId === renameCandidate.sessionId
+                    ? { ...session, displayName }
+                    : session,
+                ),
+              );
+              onRenameSession?.(renameCandidate.sessionId, displayName);
+            }).then((succeeded) => {
+              if (succeeded) setRenameCandidate(undefined);
+            });
+          }}
+        />
       )}
       {deleteCandidate && (
         <DialogShell

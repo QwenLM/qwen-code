@@ -722,7 +722,12 @@ describe('FeishuChannel', () => {
     }
   });
 
-  it('dispatches both media and ordinary text', async () => {
+  it.each([
+    { contentType: 'image/png', mimeType: 'image/png' },
+    { contentType: 'image/webp', mimeType: 'image/webp' },
+    { contentType: undefined, mimeType: 'image/jpeg' },
+  ])('dispatches $mimeType media and text', async (testCase) => {
+    const { contentType, mimeType } = testCase;
     const bridge = createMockBridge();
     const channel = new FeishuChannel('test', createConfig(), bridge);
     const onMessage = getPrivateMethod<(data: unknown) => void>(
@@ -744,12 +749,160 @@ describe('FeishuChannel', () => {
       sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
     });
 
-    onMessage(event('media-image', 'image', { image_key: 'img_1' }));
-    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const image = new Uint8Array([1, 2, 3]);
+    const resourceUrl =
+      'https://open.feishu.cn/open-apis/im/v1/messages/media-image/resources/img_1?type=image';
+    const fetchSpy = vi
+      .spyOn(global, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/auth/v3/tenant_access_token/internal')) {
+          return jsonResponse({
+            tenant_access_token: 'test_token',
+            expire: 3600,
+          });
+        }
+        if (url === resourceUrl) {
+          return new Response(image, {
+            headers: contentType ? { 'Content-Type': contentType } : {},
+          });
+        }
+        return jsonResponse({ code: 0, data: {} });
+      });
 
-    onMessage(event('plain-text', 'text', { text: 'inspect this' }));
-    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    try {
+      onMessage(event('media-image', 'image', { image_key: 'img_1' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      expect(fetchSpy).toHaveBeenCalledWith(
+        resourceUrl,
+        expect.objectContaining({
+          method: 'GET',
+          headers: { Authorization: 'Bearer test_token' },
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        1,
+        'session-1',
+        expect.any(String),
+        expect.objectContaining({
+          images: [
+            {
+              data: Buffer.from(image).toString('base64'),
+              mimeType,
+            },
+          ],
+        }),
+      );
+
+      onMessage(event('plain-text', 'text', { text: 'inspect this' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        2,
+        'session-1',
+        expect.stringContaining('inspect this'),
+        expect.not.objectContaining({ images: expect.anything() }),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
+
+  it.each([
+    {
+      failure: 'authentication',
+      authStatus: 401,
+      mediaStatus: 200,
+      cachedToken: false,
+    },
+    {
+      failure: 'media download',
+      authStatus: 200,
+      mediaStatus: 500,
+      cachedToken: false,
+    },
+    {
+      failure: 'media authorization',
+      authStatus: 200,
+      mediaStatus: 401,
+      cachedToken: true,
+    },
+  ])(
+    'dispatches an image as text when $failure fails',
+    async ({ authStatus, mediaStatus, cachedToken }) => {
+      const bridge = createMockBridge();
+      const channel = new FeishuChannel('test', createConfig(), bridge);
+      if (cachedToken) {
+        Object.assign(channel, {
+          tokenCache: {
+            token: 'test_token',
+            expiresAt: Date.now() + 3600_000,
+          },
+        });
+      }
+      const message = feishuDmMessage('failed-image');
+      Object.assign(message['message'] as Record<string, unknown>, {
+        message_type: 'image',
+        content: JSON.stringify({ image_key: 'img_1' }),
+      });
+      const authUrl =
+        'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
+      const resourceUrl =
+        'https://open.feishu.cn/open-apis/im/v1/messages/failed-image/resources/img_1?type=image';
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockImplementation(async (input) => {
+          const url = String(input);
+          if (url === authUrl) {
+            return jsonResponse(
+              { tenant_access_token: 'test_token', expire: 3600 },
+              authStatus,
+            );
+          }
+          if (url === resourceUrl) {
+            return jsonResponse('Media unavailable', mediaStatus);
+          }
+          return jsonResponse({ code: 0, data: {} });
+        });
+
+      try {
+        getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+          channel,
+          message,
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          'session-1',
+          expect.stringContaining('(image)'),
+          expect.not.objectContaining({ images: expect.anything() }),
+        );
+        if (cachedToken) {
+          expect(
+            fetchSpy.mock.calls.filter(([input]) => String(input) === authUrl),
+          ).toHaveLength(0);
+        } else {
+          expect(fetchSpy).toHaveBeenCalledWith(authUrl, expect.anything());
+        }
+        const mediaRequests = fetchSpy.mock.calls.filter(
+          ([input]) => String(input) === resourceUrl,
+        );
+        expect(mediaRequests).toHaveLength(authStatus === 200 ? 1 : 0);
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            authStatus === 200
+              ? `downloadMedia failed: HTTP ${mediaStatus}`
+              : 'getTenantAccessToken failed: HTTP 401',
+          ),
+        );
+      } finally {
+        fetchSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    },
+  );
 
   it('preserves text after platform-normalized mentions with spaced names', async () => {
     const bridge = createMockBridge();

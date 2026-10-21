@@ -53,6 +53,8 @@ interface ChannelHarnessOptions
   hasNoWorkspaceWork(info: HarnessChannel): boolean;
   channelShouldReapWhenIdle(info: HarnessChannel): boolean;
   getChannelIdleTimeoutMs(): number | undefined;
+  /** A kill or a reap has just marked this channel dying. */
+  onChannelTerminationStart?(info: HarnessChannel): void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -115,6 +117,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     context?: string,
   ): Promise<void> {
     ci.isDying = true;
+    options.onChannelTerminationStart?.(ci);
     cancelIdleTimer(ci);
     ci.channelLiveness?.stop();
     await terminateChannel(
@@ -222,6 +225,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     if (!channelShouldReapWhenIdle(ci) || !hasNoChannelWork(ci, opts)) return;
     ci.emptyReapPending = false;
     ci.isDying = true;
+    options.onChannelTerminationStart?.(ci);
     ci.channelLiveness?.stop();
     await terminateChannel(
       ci.channel,

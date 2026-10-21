@@ -5,7 +5,16 @@
  */
 
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useRef,
+} from 'react';
+import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 import { Box, Text } from 'ink';
 import {
   SuggestionsDisplay,
@@ -152,26 +161,7 @@ export function classifyPastedImagePaths(pasted: string): {
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
 
-export function expandPendingPastePlaceholders(
-  value: string,
-  pendingPastes: ReadonlyMap<string, string>,
-): string {
-  if (pendingPastes.size === 0) {
-    return value;
-  }
-  const placeholders = Array.from(pendingPastes.keys()).sort(
-    (a, b) => b.length - a.length,
-  );
-  const escapedPlaceholders = placeholders.map((placeholderValue) =>
-    placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-  );
-  const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
-  return value.replace(
-    placeholderRegex,
-    (matchedPlaceholder) =>
-      pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
-  );
-}
+export { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 
 export interface InputPromptProps {
   buffer: TextBuffer;
@@ -180,8 +170,15 @@ export interface InputPromptProps {
     options?: {
       deferUntilIdle?: boolean;
       submittedPrompt?: string;
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      pasteExpansions?: ReadonlyMap<string, string>;
     },
   ) => void;
+  pendingPastes?: Map<string, string>;
+  onPendingPastesChange?: React.Dispatch<
+    React.SetStateAction<Map<string, string>>
+  >;
   userMessages: readonly string[];
   onClearScreen: () => void;
   config: Config;
@@ -235,6 +232,8 @@ const LARGE_PASTE_LINE_THRESHOLD = 10;
 export const InputPrompt: React.FC<InputPromptProps> = ({
   buffer,
   onSubmit,
+  pendingPastes: controlledPendingPastes,
+  onPendingPastesChange,
   userMessages,
   onClearScreen,
   config,
@@ -269,6 +268,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const mouseTrackingEnabled = useMouseTrackingEnabled();
   const isVpMode = useVirtualViewport(settings.merged.ui?.useTerminalBuffer);
   const mouseInteractionsEnabled = isVpMode && mouseTrackingEnabled;
+  // Bare ↑/↓ belong to input history; the transcript is scrolled with
+  // Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End or the mouse wheel (the contract
+  // ui.useTerminalBuffer documents). Opt-in only: on a terminal or
+  // multiplexer that does not pass mouse reporting through, the wheel arrives
+  // as a burst of ↑/↓ and would rewrite the composer with an older
+  // prompt (#10749), so
+  // ui.arrowKeysScrollTranscript hands those keys to the viewport instead.
+  // Derived once so the ↑ and ↓ branches cannot drift apart.
+  const arrowKeysScrollTranscript =
+    isVpMode && settings.merged.ui?.arrowKeysScrollTranscript === true;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -334,9 +343,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const clipboardUnavailableShownRef =
     sessionClipboardUnavailableShownRef ?? localClipboardUnavailableShownRef;
   // Large paste placeholder handling
-  const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
-    new Map(),
-  );
+  const [localPendingPastes, setLocalPendingPastes] = useState<
+    Map<string, string>
+  >(new Map());
+  const pendingPastes = controlledPendingPastes ?? localPendingPastes;
+  const setPendingPastes = onPendingPastesChange ?? setLocalPendingPastes;
   // Track active placeholder IDs for each charCount to enable reuse
   const activePlaceholderIds = useRef<Map<number, Set<number>>>(new Map());
 
@@ -353,6 +364,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     },
     [],
   );
+
+  useLayoutEffect(() => {
+    const ids = new Map<number, Set<number>>();
+    for (const placeholder of pendingPastes.keys()) {
+      const parsed = parsePlaceholder(placeholder);
+      if (!parsed) continue;
+      const active = ids.get(parsed.charCount) ?? new Set<number>();
+      active.add(parsed.id);
+      ids.set(parsed.charCount, active);
+    }
+    activePlaceholderIds.current = ids;
+  }, [pendingPastes, parsePlaceholder]);
 
   // Free a placeholder ID when deleted so it can be reused
   const freePlaceholderId = useCallback((charCount: number, id: number) => {
@@ -636,12 +659,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       exportCompletion.reset();
       // Expand any large paste placeholders to their full content before submitting
       const submittedPrompt = submittedValue;
+      const pasteExpansions =
+        pendingPastes.size > 0 ? new Map(pendingPastes) : undefined;
       let finalValue = submittedValue;
       if (pendingPastes.size > 0) {
         finalValue = expandPendingPastePlaceholders(finalValue, pendingPastes);
         setPendingPastes(new Map());
         activePlaceholderIds.current.clear();
       }
+      const humanInput = { text: finalValue };
       if (shellModeActive) {
         shellHistory.addCommandToHistory(finalValue);
       }
@@ -658,7 +684,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
       clearPromptStash(targetDir);
-      onSubmit(finalValue, { deferUntilIdle, submittedPrompt });
+      onSubmit(finalValue, {
+        deferUntilIdle,
+        submittedPrompt,
+        displayText: submittedValue,
+        humanInput,
+        ...(pasteExpansions ? { pasteExpansions } : {}),
+      });
 
       // Reset history navigation so the next Up-arrow starts from the newest
       // entry rather than advancing from whatever index the user picked.
@@ -692,6 +724,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       config,
       targetDir,
       pendingPastes,
+      setPendingPastes,
       followup,
       onPromptSuggestionDismiss,
     ],
@@ -762,12 +795,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       return;
     }
     clipboardUnavailableShownRef.current = true;
+    const messageKey =
+      process.platform === 'linux'
+        ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+        : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.';
     uiState.historyManager?.addItem(
       {
         type: 'error',
-        text: t(
-          'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
-        ),
+        text: t(messageKey),
       },
       Date.now(),
     );
@@ -1549,7 +1584,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
 
-        if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
+        // While suggestions are loading the list is empty and there is
+        // nothing to accept; the dropdown state is render-derived and can lag
+        // the buffer, so Enter must fall through to SUBMIT instead of being
+        // swallowed here.
+        if (
+          keyMatchers[Command.ACCEPT_SUGGESTION](key) &&
+          !key.paste &&
+          completion.suggestions.length > 0
+        ) {
           // Capture the suggestion BEFORE acceptActiveCompletionSuggestion
           // mutates the buffer/index. When the suggestion's command opted
           // into `submitOnAccept` (a leaf command whose bare action takes
@@ -1731,14 +1774,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
-          // In VP mode with empty input, scroll the conversation instead of
-          // navigating input history. This handles terminals that translate
-          // mouse wheel events to Up/Down arrow keys. Only take the key when
-          // the transcript actually overflows: in a short conversation there is
-          // nothing to scroll and ↑ must keep recalling history rather than
-          // going dead.
+          // Opt-in wheel fallback (ui.arrowKeysScrollTranscript): a terminal
+          // that cannot report the mouse wheel delivers it as bare ↑/↓, so
+          // hand those to the viewport while the composer is empty. Only take
+          // the key when the transcript actually overflows: in a short
+          // conversation there is nothing to scroll and ↑ must keep recalling
+          // history rather than going dead.
           if (
-            isVpMode &&
+            arrowKeysScrollTranscript &&
             buffer.text.length === 0 &&
             scrollActions?.hasScrollableTranscript()
           ) {
@@ -1760,14 +1803,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
-          // In VP mode with empty input, scroll the conversation instead of
-          // navigating input history. This handles terminals that translate
-          // mouse wheel events to Up/Down arrow keys. Yields to history when
-          // the transcript does not overflow, and to descendFromComposer when
-          // an agent surface is on screen — descending is the only keyboard
-          // route into those.
+          // Opt-in wheel fallback (ui.arrowKeysScrollTranscript), mirroring ↑.
+          // Yields to history when the transcript does not overflow, and to
+          // descendFromComposer when an agent surface is on screen —
+          // descending is the only keyboard route into those.
           if (
-            isVpMode &&
+            arrowKeysScrollTranscript &&
             buffer.text.length === 0 &&
             scrollActions?.hasScrollableTranscript() &&
             !hasComposerDescendTarget()
@@ -1984,6 +2025,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       pasteWorkaround,
       nextLargePastePlaceholder,
       pendingPastes,
+      setPendingPastes,
       parsePlaceholder,
       freePlaceholderId,
       agentTabBarFocused,
@@ -2014,7 +2056,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       categoryTabsVisible,
       voiceInput,
       targetDir,
-      isVpMode,
+      arrowKeysScrollTranscript,
       scrollActions,
     ],
   );

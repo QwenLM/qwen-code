@@ -11,8 +11,9 @@ separating aggregate liveness from workspace-control readiness, and
 channel-owned epochs with a stop generation policy, including a stop receipt for
 multiple live channels. The third gate, delivering session-affecting workspace
 changes to every live engine with the acknowledgement and permission-fence
-semantics decided for Q2 in #12737, is the second part of B2b and a separate
-change. After this change no ordinary daemon, Channels or embedded constructor
+semantics decided for Q2 in #12737, is the second part of B2b:
+[Paired engine workspace change propagation](./2026-09-27-paired-engine-workspace-change-propagation.md).
+After this change no ordinary daemon, Channels or embedded constructor
 passes `executionEngines`.
 
 ## Problem and current behavior

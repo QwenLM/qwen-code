@@ -25,6 +25,7 @@ import {
   pickE2eRenderer,
   resolveE2eCliCommand,
 } from './renderer-matrix.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from './e2e-memory-defaults.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -243,6 +244,13 @@ export class TestRig {
     // The container mounts the test directory at the same path as the host
     const telemetryPath = join(this.testDir, 'telemetry.log'); // Always use test directory for telemetry
 
+    const optionsSettings = options.settings ?? {};
+    const memorySettings =
+      typeof optionsSettings['memory'] === 'object' &&
+      optionsSettings['memory'] !== null
+        ? (optionsSettings['memory'] as Record<string, unknown>)
+        : {};
+
     const settings = {
       telemetry: {
         enabled: true,
@@ -252,6 +260,8 @@ export class TestRig {
       },
       sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
+      // Per-key merge: a suite opting back into one flag keeps the other off.
+      memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
     };
     writeFileSync(
       join(qwenDir, 'settings.json'),
@@ -1038,6 +1048,7 @@ export async function runForcedToolCallScenario(options: {
   vi.stubEnv('QWEN_MODEL', 'fake-model');
   vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
   vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_CODE_MODELS_DEV_REFRESH', 'off');
   vi.stubEnv('NO_PROXY', noProxy);
   vi.stubEnv('no_proxy', noProxy);
 

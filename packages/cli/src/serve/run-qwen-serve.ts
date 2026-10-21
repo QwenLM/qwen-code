@@ -13,12 +13,13 @@ import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
 import * as fs from 'node:fs';
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
 import * as https from 'node:https';
 import { isIP } from 'node:net';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
+import type { Duplex } from 'node:stream';
 import express, {
   type Application,
   type NextFunction,
@@ -27,7 +28,10 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import {
+  validateHostedHarnessProfile,
+  HOSTED_CSI_SESSION_STORE_URL_ENV,
+} from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
@@ -93,6 +97,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 // Named subpath: the core barrel pulls shell/glob/chokidar into the serve
 // pre-listen static closure.
 import {
@@ -181,6 +186,10 @@ import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
 } from '../config/daemon-trust-policy.js';
+import type {
+  WorkflowTrustAdmission,
+  WorkflowTrustPolicyPublication,
+} from './workflow-ancestor-trust.js';
 import {
   isManagedScratchChild,
   prepareManagedScratchRoot,
@@ -206,6 +215,7 @@ import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+import { recoverBranchWorktreePreparations } from './branch-worktree-preparation.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
@@ -287,6 +297,13 @@ import {
   setDeferredRuntimeRequestTiming,
   type DeferredRuntimeRequestTiming,
 } from './server/request-helpers.js';
+import {
+  DAEMON_DISCOVERY_VERSION,
+  currentPidNamespace,
+  daemonDiscoveryUrl,
+  removeDaemonDiscovery,
+  writeDaemonDiscovery,
+} from './daemon-discovery.js';
 
 // Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
@@ -475,6 +492,14 @@ const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
 const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 // Keep manual/non-probed starts moving; health probes cancel this fallback.
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
+// Cap parked pre-transport upgrades: the park is pre-auth, so without a cap
+// an unauthenticated peer could hold one connection slot per upgrade for the
+// whole boot window.
+const PRE_TRANSPORT_UPGRADE_HOLD_MAX = 32;
+// Cap the bytes accumulated from a parked upgrade socket into its replay
+// head. A pipelined first frame must survive the park, but a peer flooding
+// the held socket is dropped instead of buffered without bound.
+const PRE_TRANSPORT_UPGRADE_HEAD_MAX = 64 * 1024;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 32;
@@ -1901,6 +1926,8 @@ export interface RunHandle {
   resolvedToken?: string;
   /** Resolves when the full REST/Web/ACP runtime has been mounted. */
   runtimeReady: Promise<void>;
+  /** Current primary runtime for callers that must inherit its trust lifetime. */
+  getPrimaryWorkspaceRuntime(): WorkspaceRuntime | undefined;
   /**
    * The Local Control service, once the runtime app exists.
    *
@@ -2292,6 +2319,8 @@ async function loadServeRuntimeModules() {
     workspaceRegistryModule,
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
+    sessionExecutionEngineSelectorModule,
+    managedExecutionEngineModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -2306,6 +2335,8 @@ async function loadServeRuntimeModules() {
     import('./workspace-registry.js'),
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
+    import('./session-execution-engine-selector.js'),
+    import('./managed-execution-engine.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -2336,6 +2367,10 @@ async function loadServeRuntimeModules() {
     getWorkspaceRuntimeCoordinatorIfSupported:
       workspaceRuntimeCoordinatorModule.getWorkspaceRuntimeCoordinatorIfSupported,
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
+    createPairedExecutionEngines:
+      sessionExecutionEngineSelectorModule.createPairedExecutionEngines,
+    createManagedExecutionEngine:
+      managedExecutionEngineModule.createManagedExecutionEngine,
   };
 }
 
@@ -3313,6 +3348,36 @@ export async function runQwenServe(
   }
 }
 
+function bridgeHasLiveSessionWithin(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  worktreePath: string,
+): boolean {
+  return bridge.listWorkspaceSessions(workspaceCwd).some((session) => {
+    try {
+      return isWithinRoot(
+        path.resolve(
+          bridge.getSessionExecutionSnapshot(session.sessionId).effectiveCwd,
+        ),
+        path.resolve(worktreePath),
+      );
+    } catch {
+      return true;
+    }
+  });
+}
+
+async function createBranchRecoverySessionService(
+  runtime: WorkspaceRuntime,
+): Promise<SessionService> {
+  const { SessionService } = await import(
+    '@qwen-code/qwen-code-core/services/sessionService.js'
+  );
+  return new SessionService(runtime.workspaceCwd, {
+    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+  });
+}
+
 let brokenPipeGuardInstalled = false;
 
 /**
@@ -3393,12 +3458,16 @@ async function runQwenServeImpl(
     (optsIn.profile === 'hosted-harness'
       ? process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV]
       : undefined);
+  const hostedCsiSessionStoreUrl =
+    optsIn.hostedCsiSessionStoreUrl ??
+    process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
   validateHostedHarnessProfile({
     ...optsIn,
     token,
     requireAuth:
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
+    hostedCsiSessionStoreUrl,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
@@ -3535,6 +3604,7 @@ async function runQwenServeImpl(
     ),
     token,
     hostedHarnessCapabilityDigest,
+    hostedCsiSessionStoreUrl,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -4615,6 +4685,16 @@ async function runQwenServeImpl(
     daemonLog.raw(line, level);
 
   let actualPort = opts.port;
+  let discoveryRecordPath: string | undefined;
+  const removeDiscoveryRecord = (): void => {
+    if (!discoveryRecordPath) return;
+    discoveryRecordPath = undefined;
+    try {
+      removeDaemonDiscovery(actualPort, { expectedPid: process.pid });
+    } catch {
+      // Best-effort: a stale record is pruned by `qwen daemon status`.
+    }
+  };
 
   // Resolve the built Web Shell SPA so createServeApp can mount the UI at the
   // daemon root. --no-web (serveWebShell=false) skips it. Absent assets (e.g.
@@ -5044,10 +5124,13 @@ async function runQwenServeImpl(
     if (!app || stoppedRuntimeAppProducers.has(app)) return;
     stoppedRuntimeAppProducers.add(app);
     const locals = app.locals as {
+      stopMcpAppSandbox?: () => void;
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
+      stopAgentHostRestore?: () => void;
       stopWebTerminalRegistry?: () => void;
+      stopHostedMountHandbacks?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -5061,10 +5144,13 @@ async function runQwenServeImpl(
         );
       }
     };
+    stopSafely('MCP App sandbox', locals.stopMcpAppSandbox);
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
+    stopSafely('Agent Host reconnect', locals.stopAgentHostRestore);
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
+    stopSafely('Hosted mount handbacks', locals.stopHostedMountHandbacks);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
@@ -5155,20 +5241,50 @@ async function runQwenServeImpl(
     app: Application;
     bridge: AcpSessionBridge | undefined;
   }> => {
-    const [runtime, core, settingsRuntime, resolvedCliVersion, trustPolicy] =
-      await Promise.all([
-        loadServeRuntimeModules(),
-        loadCoreRuntime(),
-        loadSettingsRuntimeModules(),
-        cliVersionPromise,
-        import('../config/daemon-trust-policy.js'),
-      ]);
+    const [
+      runtime,
+      core,
+      settingsRuntime,
+      resolvedCliVersion,
+      trustPolicy,
+      workflowTrust,
+    ] = await Promise.all([
+      loadServeRuntimeModules(),
+      loadCoreRuntime(),
+      loadSettingsRuntimeModules(),
+      cliVersionPromise,
+      import('../config/daemon-trust-policy.js'),
+      import('./workflow-ancestor-trust.js'),
+    ]);
     getWorkspaceRuntimeCoordinatorIfSupported =
       runtime.getWorkspaceRuntimeCoordinatorIfSupported;
     cliVersion = resolvedCliVersion;
     settingsRuntime.environment.preResolveHomeEnvOverrides();
     const bootTrustSnapshot = await trustPolicy.readDaemonTrustPolicySnapshot();
     let latestTrustPolicySnapshot = bootTrustSnapshot;
+    let publishedWorkflowTrustPolicy: WorkflowTrustPolicyPublication = {
+      publication: 0,
+      snapshot: bootTrustSnapshot,
+    };
+    const bootWorkflowTrustAdmission: WorkflowTrustAdmission = {
+      publication: 0,
+      snapshot: bootTrustSnapshot,
+    };
+    const workflowTrustAdmissions = new WeakMap<
+      DaemonTrustPolicySnapshot,
+      WorkflowTrustAdmission
+    >();
+    workflowTrustAdmissions.set(bootTrustSnapshot, bootWorkflowTrustAdmission);
+    const readWorkflowTrustAdmission = async () => {
+      const admission = await workflowTrust.readWorkflowTrustAdmission(
+        trustPolicy.readDaemonTrustPolicySnapshot,
+        () => publishedWorkflowTrustPolicy,
+      );
+      // Preserve the read's publication when reconciliation retries a build.
+      workflowTrustAdmissions.set(admission.snapshot, admission);
+      return admission;
+    };
+    const workflowTrustIdeScopeCwd = process.cwd();
     const bootPrimaryTrustDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
       bootTrustSnapshot,
       boundWorkspace,
@@ -5590,7 +5706,9 @@ async function runQwenServeImpl(
       generationGuard: primaryGenerationGuard,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
-    const channelFactory = runtime.createSpawnChannelFactory({
+    const channelFactoryOptions: NonNullable<
+      Parameters<typeof runtime.createSpawnChannelFactory>[0]
+    > = {
       processRegistry,
       childHeapPolicy,
       reclaimIdleChild: async (signal) => {
@@ -5613,7 +5731,10 @@ async function runQwenServeImpl(
       ...(acpChildExtraArgs(opts)
         ? { extraArgs: acpChildExtraArgs(opts) }
         : {}),
-    });
+    };
+    const channelFactory = runtime.createSpawnChannelFactory(
+      channelFactoryOptions,
+    );
     const statusProvider = runtime.createDaemonStatusProvider({
       env: runtimeEffectiveEnv,
     });
@@ -5679,6 +5800,33 @@ async function runQwenServeImpl(
     const workspaceRegistryForPersistence: {
       current: WorkspaceRegistry | undefined;
     } = { current: undefined };
+    const createRuntimeWorkflowAncestorTrustHandler = (
+      workspaceCwd: string,
+      getBridge: () => AcpSessionBridge | undefined,
+      generationGuard: WorkspaceGenerationGuard,
+      admissionPolicy: WorkflowTrustAdmission,
+    ) =>
+      workflowTrust.createWorkflowAncestorTrustHandler({
+        generationGuard,
+        admissionPolicy,
+        getPublished: () => publishedWorkflowTrustPolicy,
+        ideScopeCwd: workflowTrustIdeScopeCwd,
+        isCurrentOwner: (sessionId) => {
+          const registry = workspaceRegistryForPersistence.current;
+          if (!registry) return false;
+          const owner = registry.resolveLiveSessionOwner(sessionId);
+          const entry = registry.getManagedEntryByWorkspaceCwd(workspaceCwd);
+          return (
+            owner.kind === 'found' &&
+            owner.runtime.trusted &&
+            owner.runtime.workspaceCwd === workspaceCwd &&
+            owner.runtime.bridge === getBridge() &&
+            entry?.state === 'active' &&
+            entry.current?.runtime === owner.runtime &&
+            entry.current.guard === generationGuard
+          );
+        },
+      });
     const isWorkspaceTrustedForPersistence = (workspace: string): boolean =>
       workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace)
         ?.trusted ??
@@ -6072,6 +6220,12 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
+          boundWorkspace,
+          () => bridgeRef,
+          primaryGenerationGuard,
+          bootWorkflowTrustAdmission,
+        ),
         artifactSnapshotRuntimeBaseDir: primarySessionRuntimeBaseDir,
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
@@ -6159,7 +6313,25 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory,
+        ...(opts.experimentalPairedEngines
+          ? {
+              executionEngines: runtime.createPairedExecutionEngines({
+                legacy: channelFactory,
+                managed: runtime.createManagedExecutionEngine({
+                  legacy: channelFactoryOptions,
+                  host: {
+                    workspaceCwd: boundWorkspace,
+                    workspaceTrusted: trustedWorkspace,
+                    environment: runtimeEffectiveEnv,
+                    forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                    hasLiveMcpServers: () =>
+                      bridgeRef?.hasRuntimeMcpServers() === true,
+                  },
+                }),
+                runtimeBaseDir: primarySessionRuntimeBaseDir,
+              }),
+            }
+          : { channelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
@@ -6305,12 +6477,21 @@ async function runQwenServeImpl(
       persistSettings: persistSettingsFn,
       preheatAcpChild: () => bridge.preheat(),
       reloadDaemonEnv: reloadPrimaryDaemonEnv,
+      reloadModelProvidersDaemonEnv: (workspace, assertGenerationOpen) =>
+        reloadRuntimeOverlaySnapshotForModelProviders(
+          workspace,
+          trustedWorkspace,
+          { metadata: primaryRuntimeEnv, replace: replaceRuntimeEffectiveEnv },
+          assertGenerationOpen,
+        ),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
-      refreshExtensionsForAllSessions: () =>
-        bridge.refreshExtensionsForAllSessions(),
+      refreshExtensionsForAllSessions: (sessionIds) =>
+        sessionIds === undefined
+          ? bridge.refreshExtensionsForAllSessions()
+          : bridge.refreshExtensionsForAllSessions(undefined, { sessionIds }),
       publishWorkspaceEvent: (event) => {
         if (
           event.type === 'settings_changed' ||
@@ -6343,6 +6524,23 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
+    if (trustedWorkspace) {
+      await recoverBranchWorktreePreparations({
+        workspaceCwd: boundWorkspace,
+        sessionService: await createBranchRecoverySessionService(
+          workspaceRuntimes[0],
+        ),
+        assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
+        isWorktreeOccupied: (worktreePath) =>
+          bridgeHasLiveSessionWithin(bridge, boundWorkspace, worktreePath),
+        warn: (message, fields) => daemonLog.warn(message, fields),
+      }).catch((error: unknown) => {
+        daemonLog.warn('branch worktree recovery sweep failed', {
+          workspace: boundWorkspace,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
 
     const createRuntimeEnvMetadata = (
       workspace: string,
@@ -6423,7 +6621,10 @@ async function runQwenServeImpl(
     const reloadRuntimeOverlaySnapshotForModelProviders = (
       workspace: string,
       trusted: boolean,
-      env: ReturnType<typeof createRuntimeEnvMetadata>,
+      env: Pick<
+        ReturnType<typeof createRuntimeEnvMetadata>,
+        'metadata' | 'replace'
+      >,
       assertGenerationOpen?: () => void,
     ) =>
       withSettingsLock(workspace, async () => {
@@ -6615,7 +6816,9 @@ async function runQwenServeImpl(
           ? { customIgnoreFiles: secondaryCustomIgnoreFiles }
           : {}),
       });
-      const secondaryChannelFactory = runtime.createSpawnChannelFactory({
+      const secondaryChannelFactoryOptions: NonNullable<
+        Parameters<typeof runtime.createSpawnChannelFactory>[0]
+      > = {
         processRegistry,
         childHeapPolicy,
         reclaimIdleChild: async (signal) => {
@@ -6638,7 +6841,10 @@ async function runQwenServeImpl(
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
-      });
+      };
+      const secondaryChannelFactory = runtime.createSpawnChannelFactory(
+        secondaryChannelFactoryOptions,
+      );
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
       // Wire sub-session support for the secondary workspace too — without
       // this, create_sub_session calls from sessions bound to a secondary
@@ -6660,6 +6866,12 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
+          workspaceInput.cwd,
+          () => secondaryBridgeRef,
+          secondaryGenerationGuard,
+          bootWorkflowTrustAdmission,
+        ),
         artifactSnapshotRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
@@ -6743,7 +6955,25 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory: secondaryChannelFactory,
+        ...(opts.experimentalPairedEngines
+          ? {
+              executionEngines: runtime.createPairedExecutionEngines({
+                legacy: secondaryChannelFactory,
+                managed: runtime.createManagedExecutionEngine({
+                  legacy: secondaryChannelFactoryOptions,
+                  host: {
+                    workspaceCwd: workspaceInput.cwd,
+                    workspaceTrusted: secondaryTrusted,
+                    environment: secondaryEnv.effectiveEnv,
+                    forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                    hasLiveMcpServers: () =>
+                      secondaryBridgeRef?.hasRuntimeMcpServers() === true,
+                  },
+                }),
+                runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
+              }),
+            }
+          : { channelFactory: secondaryChannelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
@@ -6917,8 +7147,12 @@ async function runQwenServeImpl(
           secondaryBridge.queryWorkspaceStatus(method, idle),
         invokeWorkspaceCommand: (method, params, invokeOpts) =>
           secondaryBridge.invokeWorkspaceCommand(method, params, invokeOpts),
-        refreshExtensionsForAllSessions: () =>
-          secondaryBridge.refreshExtensionsForAllSessions(),
+        refreshExtensionsForAllSessions: (sessionIds) =>
+          sessionIds === undefined
+            ? secondaryBridge.refreshExtensionsForAllSessions()
+            : secondaryBridge.refreshExtensionsForAllSessions(undefined, {
+                sessionIds,
+              }),
         publishWorkspaceEvent: (event) =>
           secondaryBridge.publishWorkspaceEvent(event),
       });
@@ -7220,9 +7454,14 @@ async function runQwenServeImpl(
       if (provenance === 'live-conversation') {
         await liveConversationWorkspace.assertExactRoot(cwd);
       }
-      const snapshot =
-        buildOptions?.snapshot ??
-        (await trustPolicy.readDaemonTrustPolicySnapshot());
+      const workflowTrustAdmission: WorkflowTrustAdmission =
+        buildOptions?.snapshot
+          ? (workflowTrustAdmissions.get(buildOptions.snapshot) ?? {
+              snapshot: buildOptions.snapshot,
+              publication: -1,
+            })
+          : await readWorkflowTrustAdmission();
+      const snapshot = workflowTrustAdmission.snapshot;
       const decision =
         buildOptions?.decision ??
         trustPolicy.evaluateDaemonWorkspaceTrust(snapshot, cwd);
@@ -7290,7 +7529,9 @@ async function runQwenServeImpl(
                 : {}),
             })
           : wsFsFactory;
-      const wsChannelFactory = runtime.createSpawnChannelFactory({
+      const wsChannelFactoryOptions: NonNullable<
+        Parameters<typeof runtime.createSpawnChannelFactory>[0]
+      > = {
         processRegistry,
         childHeapPolicy,
         reclaimIdleChild: async (signal) => {
@@ -7313,7 +7554,10 @@ async function runQwenServeImpl(
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
-      });
+      };
+      const wsChannelFactory = runtime.createSpawnChannelFactory(
+        wsChannelFactoryOptions,
+      );
       const wsClientMcpRegistry = new ClientMcpSenderRegistry();
       // eslint-disable-next-line prefer-const
       let wsBridgeRef:
@@ -7353,6 +7597,12 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
+            cwd,
+            () => wsBridgeRef,
+            generationGuard,
+            workflowTrustAdmission,
+          ),
           artifactSnapshotRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
@@ -7450,7 +7700,29 @@ async function runQwenServeImpl(
                     PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
                 }
               : childEnvOverrides,
-          channelFactory: wsChannelFactory,
+          // The Conversations runtime hosts only daemon-owned standalone
+          // conversations and the sessions they start, which stay on Legacy,
+          // so it keeps a single factory.
+          ...(opts.experimentalPairedEngines &&
+          provenance !== 'live-conversation'
+            ? {
+                executionEngines: runtime.createPairedExecutionEngines({
+                  legacy: wsChannelFactory,
+                  managed: runtime.createManagedExecutionEngine({
+                    legacy: wsChannelFactoryOptions,
+                    host: {
+                      workspaceCwd: cwd,
+                      workspaceTrusted: trusted,
+                      environment: wsEnv.effectiveEnv,
+                      forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                      hasLiveMcpServers: () =>
+                        wsBridgeRef?.hasRuntimeMcpServers() === true,
+                    },
+                  }),
+                  runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
+                }),
+              }
+            : { channelFactory: wsChannelFactory }),
           externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
@@ -7624,26 +7896,23 @@ async function runQwenServeImpl(
                 return { ...result, runtimeEnvironmentApplied };
               }
             }),
-          ...(buildOptions?.primary === true
-            ? {}
-            : {
-                reloadModelProvidersDaemonEnv: (
-                  workspace: string,
-                  assertGenerationOpen?: () => void,
-                ) =>
-                  reloadRuntimeOverlaySnapshotForModelProviders(
-                    workspace,
-                    trusted,
-                    wsEnv,
-                    assertGenerationOpen,
-                  ),
-              }),
+          reloadModelProvidersDaemonEnv: (workspace, assertGenerationOpen) =>
+            reloadRuntimeOverlaySnapshotForModelProviders(
+              workspace,
+              trusted,
+              wsEnv,
+              assertGenerationOpen,
+            ),
           queryWorkspaceStatus: (method, idle) =>
             wsBridge.queryWorkspaceStatus(method, idle),
           invokeWorkspaceCommand: (method, params, invokeOpts) =>
             wsBridge.invokeWorkspaceCommand(method, params, invokeOpts),
-          refreshExtensionsForAllSessions: () =>
-            wsBridge.refreshExtensionsForAllSessions(),
+          refreshExtensionsForAllSessions: (sessionIds) =>
+            sessionIds === undefined
+              ? wsBridge.refreshExtensionsForAllSessions()
+              : wsBridge.refreshExtensionsForAllSessions(undefined, {
+                  sessionIds,
+                }),
           publishWorkspaceEvent: (event) => {
             if (
               buildOptions?.primary === true &&
@@ -7731,6 +8000,21 @@ async function runQwenServeImpl(
             validationAttempt: (buildOptions?.validationAttempt ?? 0) + 1,
           });
         }
+      }
+      if (wsRuntime.primary && wsRuntime.trusted) {
+        await recoverBranchWorktreePreparations({
+          workspaceCwd: cwd,
+          sessionService: await createBranchRecoverySessionService(wsRuntime),
+          assertGenerationOpen: () => generationGuard.assertOpen(),
+          isWorktreeOccupied: (worktreePath) =>
+            bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),
+          warn: (message, fields) => daemonLog.warn(message, fields),
+        }).catch((error: unknown) => {
+          daemonLog.warn('branch worktree recovery sweep failed', {
+            workspace: cwd,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
       return wsRuntime;
     };
@@ -8148,10 +8432,22 @@ async function runQwenServeImpl(
           import('./channel-management-service.js'),
           import('./channel-settings-store.js'),
         ]);
+        const manager = await ensureChannelWorkerManager();
+        const workerRuntime = await ensureChannelRuntime();
+        const settingsRuntime = await loadSettingsRuntimeModules();
         return createChannelManagementService({
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
-          manager: await ensureChannelWorkerManager(),
+          manager,
+          loadChannelsConfig: (cwd) =>
+            workerRuntime.loadChannelsConfig(
+              cwd,
+              settingsRuntime.settings.loadSettings(cwd, {
+                skipLoadEnvironment: true,
+                skipWorkspaceSettings: !targetRuntime.trusted,
+                workspaceTrusted: targetRuntime.trusted,
+              }),
+            ),
           restoreFailures: channelRestoreFailures,
         });
       })();
@@ -8467,7 +8763,8 @@ async function runQwenServeImpl(
         app.locals?.['acpHandle'] as AcpHttpHandle | undefined;
       const trustReconciler = createWorkspaceTrustReconciler({
         registry: workspaceRegistry,
-        readLatestSnapshot: trustPolicy.readDaemonTrustPolicySnapshot,
+        readLatestSnapshot: async () =>
+          (await readWorkflowTrustAdmission()).snapshot,
         materializationKey: ({ entry, snapshot, decision }) =>
           materializationFor(entry, snapshot, decision).key,
         isTrustDecrease: ({
@@ -8597,11 +8894,22 @@ async function runQwenServeImpl(
       const trustMonitor = createDaemonTrustPolicyMonitor({
         onSnapshot: (snapshot) => {
           latestTrustPolicySnapshot = snapshot;
+          publishedWorkflowTrustPolicy = {
+            publication: publishedWorkflowTrustPolicy.publication + 1,
+            snapshot,
+          };
+          workflowTrustAdmissions.set(snapshot, {
+            publication: publishedWorkflowTrustPolicy.publication,
+            snapshot,
+          });
           return runWorkspaceTrustOperation(() =>
             trustReconciler.reconcile(snapshot),
           );
         },
         onError: (error) => {
+          publishedWorkflowTrustPolicy = {
+            publication: publishedWorkflowTrustPolicy.publication + 1,
+          };
           daemonLog.error(
             'workspace trust policy monitor failed',
             error instanceof Error ? error : null,
@@ -8690,12 +8998,20 @@ async function runQwenServeImpl(
       // through (and start the runtime) exactly like the warm app would.
       // Dynamic import keeps web-shell-static out of the serve fast-path
       // static closure (see the import-boundary guards in fast-path.test.ts).
-      isPreAuthRequest: webShellMounted
-        ? (req) =>
-            import('./web-shell-static.js').then((webShellStatic) =>
-              webShellStatic.isPreAuthWebShellRequest(req),
-            )
-        : undefined,
+      // Agent Host transport routes authenticate with their own scoped
+      // credential on the mounted route; during a coordinator restart the
+      // bearer gate would answer a 401 the Host could misread as revocation,
+      // so those requests instead wait for the runtime like the warm path.
+      isPreAuthRequest: async (req) => {
+        if (req.path.startsWith('/agent-hosts/')) {
+          return true;
+        }
+        if (!webShellMounted) {
+          return false;
+        }
+        const webShellStatic = await import('./web-shell-static.js');
+        return webShellStatic.isPreAuthWebShellRequest(req);
+      },
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -9704,7 +10020,7 @@ async function runQwenServeImpl(
         const acpHandle = candidateApp.locals?.['acpHandle'] as
           | AcpHttpHandle
           | undefined;
-        acpHandle?.attachServer?.(server);
+        attachAcpWsTransport(acpHandle);
         if (opts.channelSelection) {
           closeServerAfterChannelWorkerStartupFailure = true;
           let manager: ChannelWorkerManager | undefined;
@@ -9918,6 +10234,7 @@ async function runQwenServeImpl(
           // dangling stdin/stdout pipes — visible as orphan
           // `qwen` processes in the operator's `ps` output.
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
+          removeDiscoveryRecord();
           try {
             managedProcessRegistry?.killAllSync();
             channelWorkerManager?.killAllSync();
@@ -9976,6 +10293,13 @@ async function runQwenServeImpl(
         webShellMounted,
         resolvedToken: token,
         runtimeReady,
+        getPrimaryWorkspaceRuntime: () => {
+          const registry = runtimeApp?.locals?.['workspaceRegistry'] as
+            | WorkspaceRegistry
+            | undefined;
+          const entry = registry?.primaryEntry;
+          return entry?.state === 'active' ? entry.current?.runtime : undefined;
+        },
         getLocalControl: () =>
           (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
             'localControlService'
@@ -10017,6 +10341,9 @@ async function runQwenServeImpl(
               ?.locals?.['conversationRuntimeActivity'] as
               | { sealAndWait?: () => Promise<void> }
               | undefined;
+            const initiallyMountedCsiStop = initiallyMountedApp?.locals?.[
+              'stopHostedCsiSessions'
+            ] as (() => Promise<void>) | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
@@ -10031,6 +10358,7 @@ async function runQwenServeImpl(
               initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
             const initialConversationActivityWait =
               initiallyMountedConversationActivity?.sealAndWait?.();
+            const initialCsiWait = initiallyMountedCsiStop?.();
             let processRegistryShutdown: Promise<Error | undefined> | undefined;
             const startProcessRegistryShutdown = () => {
               processRegistryShutdown ??= managedProcessRegistry
@@ -10045,6 +10373,7 @@ async function runQwenServeImpl(
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
+            drainPreTransportUpgrades?.();
             // NOTE: the shutdown signal handlers stay attached during the
             // drain so a second signal can take the explicit force-exit path
             // above. Detaching them up front would leave Node's default signal
@@ -10214,6 +10543,11 @@ async function runQwenServeImpl(
                 ) {
                   await conversationActivity?.sealAndWait?.();
                 }
+                const csiStop = appForCleanup?.locals?.[
+                  'stopHostedCsiSessions'
+                ] as (() => Promise<void>) | undefined;
+                await initialCsiWait;
+                if (csiStop !== initiallyMountedCsiStop) await csiStop?.();
                 stopTrustPolicyMonitor(appForCleanup);
                 const waitForTrustPolicyIdle = appForCleanup?.locals?.[
                   'waitForTrustPolicyIdle'
@@ -10309,7 +10643,10 @@ async function runQwenServeImpl(
         },
       };
       closeHost = handle.close;
-      handle.close = () => serveAppLifecycle.close();
+      handle.close = async () => {
+        await serveAppLifecycle.close();
+        removeDiscoveryRecord();
+      };
 
       try {
         const resolved = resolveChannelWorkspaceGroupsAtListen();
@@ -10404,6 +10741,35 @@ async function runQwenServeImpl(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
       );
+      try {
+        const discoveryLogPath = daemonLog.getLogPath();
+        discoveryRecordPath = writeDaemonDiscovery({
+          v: DAEMON_DISCOVERY_VERSION,
+          pid: process.pid,
+          port: actualPort,
+          hostname: opts.hostname,
+          url: daemonDiscoveryUrl(url),
+          workspaces: workspaceInputs.map((workspace) => workspace.cwd),
+          startupWorkspaces: workspaceInputs
+            .filter((workspace) => !workspace.removable)
+            .map((workspace) => workspace.cwd),
+          primaryWorkspace: boundWorkspace,
+          startedAt: new Date().toISOString(),
+          auth: token ? 'bearer' : 'none',
+          ...(generatedToken ? { tokenGenerated: true } : {}),
+          web: opts.serveWebShell !== false,
+          requireAuth: opts.requireAuth === true,
+          ...(discoveryLogPath ? { logPath: discoveryLogPath } : {}),
+          pidNamespace: currentPidNamespace(),
+        });
+        process.once('exit', removeDiscoveryRecord);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: could not write the daemon discovery record: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
       // The quickstart block keys off the address the socket actually bound:
       // a DNS name that resolves to loopback binds loopback only, so its
       // addresses and QR would be undialable from anywhere else, while a
@@ -10525,6 +10891,11 @@ async function runQwenServeImpl(
             'on every route, including loopback /health).',
         );
       }
+      writeStderrLine(
+        `qwen serve: manage this daemon with \`qwen daemon status\`, ` +
+          `\`qwen daemon logs --port ${actualPort} --follow\`, or ` +
+          `\`qwen daemon stop --port ${actualPort}\`.`,
+      );
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
@@ -10552,7 +10923,7 @@ async function runQwenServeImpl(
           const acpHandle = preparedRuntimeApp.locals?.['acpHandle'] as
             | AcpHttpHandle
             | undefined;
-          acpHandle?.attachServer?.(server);
+          attachAcpWsTransport(acpHandle);
           markServeAppStartupReady();
           void publishLiveDiscovery(preparedRuntimeApp);
           if (!runtimeStartupSettled) {
@@ -10608,6 +10979,10 @@ async function runQwenServeImpl(
         );
       }
     };
+    // Late-assigned where the pre-transport upgrade park is set up below
+    // (close() is defined on the handle first): close() drains the park so an
+    // upgrade-detached socket cannot hold the listener open.
+    let drainPreTransportUpgrades: (() => void) | undefined = undefined;
     let server: Server;
     if (tlsOptions) {
       try {
@@ -10642,6 +11017,213 @@ async function runQwenServeImpl(
         });
       },
     });
+
+    // A deferred boot (deferRuntimeUntilFirstHealth) listens before the
+    // runtime app — and its ACP WebSocket transport — exists. With no
+    // 'upgrade' listener registered yet, Node routes an upgrade request to
+    // Express as a plain GET, which the delegating app holds until the
+    // runtime is ready and then forwards to the SSE GET handler: the client
+    // sees a misleading 406 instead of a socket. Park early upgrades here
+    // and replay them once the runtime settles with a transport attached —
+    // the same settle boundary the delegating app's REST hold waits on.
+    // Unlike the REST hold this parks pre-auth (the replayed handshake
+    // re-authenticates in the acp-http listener), so the queue is capped and
+    // sockets whose peer went away are evicted. Once startup settles or
+    // fails without a transport the answer is a terminal 503, and a runtime
+    // that settles without a transport (handle-less app) restores the
+    // Express fall-through for later upgrades.
+    const preTransportUpgrades: Array<{
+      req: IncomingMessage;
+      socket: Duplex;
+      head: Buffer;
+      detach: () => void;
+    }> = [];
+    let acpWsTransportAttached = false;
+    let preTransportUpgradeGateClosed = false;
+    const dropPreTransportUpgrade = (socket: Duplex): void => {
+      const index = preTransportUpgrades.findIndex(
+        (queued) => queued.socket === socket,
+      );
+      if (index !== -1) preTransportUpgrades.splice(index, 1);
+    };
+    const answerPreTransportUpgrade503 = (
+      socket: Duplex,
+      retryable: boolean,
+    ): void => {
+      // Retry-After only while the daemon may still finish booting (queue
+      // overflow); the settle/failure flushes are terminal — this process
+      // never retries the runtime startup.
+      // Gate-closed and overflow answers reach sockets that never entered
+      // the park, so they carry no error sink; attach one before writing so
+      // a peer that resets instead of reading the answer cannot surface an
+      // uncaught ECONNRESET (a TLS socket's write flushes asynchronously, so
+      // the window is real there even though a plain-HTTP same-tick
+      // write+destroy does not reproduce it).
+      socket.once('error', () => {});
+      socket.write(
+        retryable
+          ? 'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n'
+          : 'HTTP/1.1 503 Service Unavailable\r\n\r\n',
+      );
+      socket.destroy();
+    };
+    const releasePreTransportUpgrades = (): void => {
+      const queued = preTransportUpgrades.splice(0);
+      let rejected = 0;
+      for (const { req, socket, head, detach } of queued) {
+        detach();
+        if (socket.destroyed) continue;
+        if (acpWsTransportAttached) {
+          // 'upgrade' listeners run in registration order: this guard is
+          // first and returns immediately once the transport is attached,
+          // so the acp-http listener performs the real upgrade (auth, path
+          // routing, handshake) exactly as for a direct arrival.
+          server.emit('upgrade', req, socket, head);
+        } else {
+          rejected += 1;
+          answerPreTransportUpgrade503(socket, false);
+        }
+      }
+      if (rejected > 0) {
+        daemonLog.warn(
+          `deferred runtime: answered ${rejected} parked upgrade(s) with ` +
+            '503 (no ACP transport attached)',
+        );
+      }
+    };
+    const attachAcpWsTransport = (
+      acpHandle: AcpHttpHandle | undefined,
+    ): void => {
+      if (!acpHandle || acpWsTransportAttached) return;
+      acpHandle.attachServer(server);
+      acpWsTransportAttached = true;
+      // Parked upgrades are deliberately not released here: attach precedes
+      // channel-worker startup in completeRuntimeStartup, and the REST hold
+      // ends only when runtimeReady settles. The runtimeReady handlers below
+      // release the queue, keeping WS clients on the same settle boundary.
+    };
+    const preTransportUpgradeGuard = (
+      req: IncomingMessage,
+      socket: Duplex,
+      head: Buffer,
+    ): void => {
+      if (acpWsTransportAttached) return;
+      if (preTransportUpgradeGateClosed) {
+        answerPreTransportUpgrade503(socket, false);
+        return;
+      }
+      if (preTransportUpgrades.length >= PRE_TRANSPORT_UPGRADE_HOLD_MAX) {
+        answerPreTransportUpgrade503(socket, true);
+        return;
+      }
+      // Node detaches its own error handling before emitting 'upgrade', so
+      // without these sinks a peer that resets or abandons a parked socket
+      // would surface as an uncaught ECONNRESET and take the daemon down.
+      const dropAndDestroy = (): void => {
+        dropPreTransportUpgrade(socket);
+        socket.destroy();
+      };
+      const drop = (): void => dropPreTransportUpgrade(socket);
+      const entry = { req, socket, head, detach: (): void => {} };
+      // The upgrade path leaves the socket neither flowing nor paused, so an
+      // unread byte would stall FIN/RST delivery and the eviction above would
+      // never fire. Keep reading while parked: bytes accumulate into the
+      // entry's head (they are a pipelined first frame, replayed in order),
+      // and a peer that floods past the cap is dropped.
+      const accumulate = (chunk: Buffer): void => {
+        if (
+          entry.head.byteLength + chunk.byteLength <=
+          PRE_TRANSPORT_UPGRADE_HEAD_MAX
+        ) {
+          entry.head = Buffer.concat([entry.head, chunk]);
+        } else {
+          dropAndDestroy();
+        }
+      };
+      const detach = (): void => {
+        socket.removeListener('data', accumulate);
+        socket.removeListener('error', dropAndDestroy);
+        socket.removeListener('end', dropAndDestroy);
+        socket.removeListener('close', drop);
+      };
+      entry.detach = detach;
+      socket.on('data', accumulate);
+      socket.once('error', dropAndDestroy);
+      socket.once('end', dropAndDestroy);
+      socket.once('close', drop);
+      preTransportUpgrades.push(entry);
+      daemonLog.info(
+        `deferred runtime: parked pre-transport upgrade ${
+          req.url?.split('?', 1)[0] ?? '/'
+        } from ${
+          (socket as { remoteAddress?: string }).remoteAddress ?? 'unknown'
+        } (${preTransportUpgrades.length} held)`,
+      );
+      // A socket opened before any REST request must still force the
+      // deferred runtime up, same as the delegating app's start-on-request.
+      if (!runtimeStartupSettled) startRuntimeForRequest?.();
+    };
+    server.on('upgrade', preTransportUpgradeGuard);
+    drainPreTransportUpgrades = () => {
+      preTransportUpgradeGateClosed = true;
+      const queued = preTransportUpgrades.splice(0);
+      for (const { socket, detach } of queued) {
+        detach();
+        if (socket.destroyed) continue;
+        answerPreTransportUpgrade503(socket, false);
+      }
+    };
+    void runtimeReady.then(
+      () => {
+        // A runtime that settles without a transport (handle-less app:
+        // hosted-harness profile, QWEN_SERVE_ACP_HTTP=0) must keep the
+        // Express fall-through its routes already expose (hidden 404, SSE
+        // 406), so the guard steps aside for later upgrades. Upgrades that
+        // raced the startup window still get the gate's terminal 503.
+        const acpHandle = (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+          'acpHandle'
+        ] as AcpHttpHandle | undefined;
+        if (!acpHandle) {
+          server.removeListener('upgrade', preTransportUpgradeGuard);
+          daemonLog.info(
+            'deferred runtime: settled without an ACP transport, ' +
+              'restoring Express upgrade fall-through',
+          );
+        }
+        preTransportUpgradeGateClosed = true;
+        releasePreTransportUpgrades();
+      },
+      () => {
+        // failRuntimeStartup has already disposed the runtime app, which
+        // removes the transport listener the latch vouches for. Re-derive
+        // the latch from the actual listener count — this server also hosts
+        // the guard, so an attached transport means more than one 'upgrade'
+        // listener — so the release below answers parked upgrades instead of
+        // emitting them into a void, and the guard's attached-check stops
+        // swallowing later upgrades.
+        if (acpWsTransportAttached && server.listenerCount('upgrade') < 2) {
+          acpWsTransportAttached = false;
+        }
+        // A failed startup never retries (runtimeStarting is never reset),
+        // so a handle-less configuration must not keep the raw gate: it
+        // would answer every upgrade pre-auth for the rest of the process
+        // lifetime. The app-local handle cannot decide here — a failed
+        // buildRuntime leaves both runtimeApp and runtimeAppForCleanup
+        // undefined — so mirror the boot-time mount condition instead.
+        if (
+          opts.profile === 'hosted-harness' ||
+          !resolveAcpHttpEnabled(daemonRuntimeBaseEnv)
+        ) {
+          server.removeListener('upgrade', preTransportUpgradeGuard);
+          daemonLog.info(
+            'deferred runtime: startup failed without an ACP transport, ' +
+              'restoring Express upgrade fall-through',
+          );
+        }
+        preTransportUpgradeGateClosed = true;
+        releasePreTransportUpgrades();
+      },
+    );
 
     const tryListen = (attemptPort: number, attempt: number): void => {
       const handleListening = (): void => {

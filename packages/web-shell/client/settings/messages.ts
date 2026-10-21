@@ -16,6 +16,10 @@ type SettingsMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
+  'settings.label.experimental.generatedUi': 'Generated UI',
+  'settings.description.experimental.generatedUi':
+    'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -109,6 +113,10 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
 };
 
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
+  'settings.label.experimental.generatedUi': 'Generated UI 生成式界面',
+  'settings.description.experimental.generatedUi':
+    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
+
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
@@ -261,6 +269,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '一个 PR 要达到多少轮评审之后，评审才可以追加一段提示性文字，说明看起来成问题的是改动的方向而不是当前补丁本身。它只在 diff 自评审首次测量以来也膨胀了数倍时出现，且从不出现在 Approve 上。它仅是披露：不新增发现、不改变结论、不阻塞任何事——它存在的原因是每条发现都锚定在当前 diff 的某一行上，所以评审能报告某个方向在哪里漏，却永远说不出换个方向能一次性消除所有这些漏洞。保持 0 表示用内置的 5 轮阈值；调大让这段文字更晚出现；设得非常大则彻底关闭。非正整数的值会被忽略。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略，仓库无法为其评审者设定评审策略。',
   'settings.label.ui.theme': '主题',
   'settings.description.ui.theme': '界面的颜色主题。',
+  'settings.label.ui.allowedApprovalModes': 'Web Shell 审批模式',
+  'settings.description.ui.allowedApprovalModes':
+    'Web Shell 提供的执行审批模式。未配置时显示 default、auto-edit、auto 和 yolo；空列表不提供任何选项。宿主 allowedApprovalModes 优先于此设置。仅控制展示，不改变当前模式或强制约束后端权限。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略并产生警告。请直接编辑 settings.json。',
   'settings.label.ui.hideTips': '隐藏提示',
   'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
   'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',
@@ -393,6 +404,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.agentTeam': '启用 Agent Team',
   'settings.description.experimental.agentTeam':
     '启用 agent 团队协作工具（实验性）。启用后，模型可以创建 agent 团队，并用 team_create、team_delete、send_message、task_create、task_update 和 task_list 协调工作。也可通过 QWEN_CODE_ENABLE_AGENT_TEAM=1 环境变量启用。',
+  'settings.label.experimental.agentCollaboration': '启用 Agent 协作',
+  'settings.description.experimental.agentCollaboration':
+    '启用持久化的工作区 Agent 在共享任务线程上协作（实验性）。与 Agent Team 相互独立：两个开关互不隐含。启用只表示允许协作；把 Agent 开放给外部调用方、信任某个连接、注册 host 仍各自需要显式配置。也可通过 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 环境变量启用。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',

@@ -123,6 +123,7 @@ it('rejects in-session Managed resume before changing the active session', async
         settings: { merged: {} } as LoadedSettings,
         historyManager: { addItem, clearItems: vi.fn(), loadHistory: vi.fn() },
         startNewSession: switchUi,
+        seedPromptCount: vi.fn(),
       }),
     );
     unmount = hook.unmount;

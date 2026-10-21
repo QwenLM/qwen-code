@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest';
 import {
   getAvailableCommands,
   handleSlashCommand,
@@ -20,12 +28,20 @@ import {
 import type { LoadedSettings } from './config/settings.js';
 import {
   CommandKind,
+  type CommandSource,
   type ExecutionMode,
   type NonInteractiveSlashCommandPolicy,
+  type SlashCommand,
 } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
+import { BundledSkillLoader } from './services/BundledSkillLoader.js';
+import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { McpPromptLoader } from './services/McpPromptLoader.js';
+import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
+import { SkillCommandLoader } from './services/SkillCommandLoader.js';
+import type { ICommandLoader } from './services/types.js';
 
 const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
@@ -1641,6 +1657,271 @@ describe('handleSlashCommand', () => {
       if (result.type === 'submit_prompt') {
         expect(result.modelOverride).toBe('gemini-2.5-pro');
       }
+    });
+  });
+
+  describe('admission before a command expands', () => {
+    const loaderClasses = [
+      McpPromptLoader,
+      BuiltinCommandLoader,
+      BundledSkillLoader,
+      SkillCommandLoader,
+      SavedWorkflowLoader,
+      FileCommandLoader,
+    ];
+    const loaded = new Map<(typeof loaderClasses)[number], SlashCommand[]>();
+    const spies: Array<{ mockRestore: () => void }> = [];
+    let order: string[];
+    let admit: Mock<() => Promise<boolean>>;
+
+    const promptCommand = (
+      name: string,
+      kind: CommandKind,
+      extra: Partial<SlashCommand> = {},
+    ) => ({
+      name,
+      description: name,
+      kind,
+      ...extra,
+      action: vi.fn(async () => {
+        order.push(`action:${name}`);
+        return {
+          type: 'submit_prompt' as const,
+          content: [{ text: `${name} expanded` }],
+        };
+      }),
+    });
+    const run = (
+      query: string,
+      options: { modCommands?: ICommandLoader; unadmitted?: boolean } = {},
+    ) =>
+      handleSlashCommand(
+        query,
+        abortController,
+        mockConfig,
+        mockSettings,
+        undefined,
+        undefined,
+        options.modCommands,
+        options.unadmitted ? undefined : admit,
+      );
+
+    beforeEach(() => {
+      order = [];
+      admit = vi.fn(async () => {
+        order.push('admit');
+        return true;
+      });
+      loaded.clear();
+      for (const Loader of loaderClasses) {
+        spies.push(
+          vi
+            .spyOn(Loader.prototype as ICommandLoader, 'loadCommands')
+            .mockImplementation(async () => loaded.get(Loader) ?? []),
+        );
+      }
+      // Like CommandService: every loader runs, each command is copied, and a
+      // later loader's command takes the name.
+      mockCommandServiceCreate.mockImplementation(
+        async (loaders: ICommandLoader[], signal: AbortSignal) => {
+          const byName = new Map<string, SlashCommand>();
+          for (const loader of loaders) {
+            for (const command of await loader.loadCommands(signal)) {
+              byName.set(command.name, { ...command });
+            }
+          }
+          const commands = [...byName.values()];
+          return {
+            getCommands: () => commands,
+            getCommandsForMode: (mode: ExecutionMode) =>
+              filterCommandsForMode(commands, mode),
+            getModelInvocableCommands: () =>
+              commands.filter((command) => command.modelInvocable),
+          };
+        },
+      );
+    });
+
+    afterEach(() => {
+      for (const spy of spies.splice(0)) spy.mockRestore();
+    });
+
+    it('admits a file command before its action runs', async () => {
+      loaded.set(FileCommandLoader, [
+        promptCommand('deploy', CommandKind.FILE),
+      ]);
+
+      const result = await run('/deploy prod');
+
+      expect(order).toEqual(['admit', 'action:deploy']);
+      expect(result).toMatchObject({
+        type: 'submit_prompt',
+        content: [{ text: 'deploy expanded' }],
+      });
+    });
+
+    it('returns the input unexpanded when admission refuses it', async () => {
+      const deploy = promptCommand('deploy', CommandKind.FILE);
+      loaded.set(FileCommandLoader, [deploy]);
+      admit.mockResolvedValue(false);
+
+      const result = await run('/deploy prod');
+
+      expect(deploy.action).not.toHaveBeenCalled();
+      expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'submit_prompt',
+        content: [{ text: '/deploy prod' }],
+        resolvedCommand: { name: 'deploy', kind: CommandKind.FILE },
+      });
+    });
+
+    it('runs no action when admission fails', async () => {
+      const deploy = promptCommand('deploy', CommandKind.FILE);
+      loaded.set(FileCommandLoader, [deploy]);
+      admit.mockRejectedValue(new Error('hook failed'));
+
+      await expect(run('/deploy prod')).rejects.toThrow('hook failed');
+      expect(deploy.action).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['user, project or extension', SkillCommandLoader],
+      ['bundled', BundledSkillLoader],
+    ])('admits a %s skill before its action runs', async (_, Loader) => {
+      loaded.set(Loader, [promptCommand('review', CommandKind.SKILL)]);
+
+      await run('/review 123');
+
+      expect(order).toEqual(['admit', 'action:review']);
+    });
+
+    it('admits stacked skills once, before the first action', async () => {
+      loaded.set(SkillCommandLoader, [
+        promptCommand('alpha', CommandKind.SKILL),
+      ]);
+      loaded.set(BundledSkillLoader, [
+        promptCommand('beta', CommandKind.SKILL),
+      ]);
+
+      await run('/alpha /beta do it');
+
+      expect(order).toEqual(['admit', 'action:alpha', 'action:beta']);
+    });
+
+    it('runs no stacked skill when admission refuses the input', async () => {
+      const alpha = promptCommand('alpha', CommandKind.SKILL);
+      const beta = promptCommand('beta', CommandKind.SKILL);
+      loaded.set(SkillCommandLoader, [alpha, beta]);
+      admit.mockResolvedValue(false);
+
+      const result = await run('/alpha /beta do it');
+
+      expect(alpha.action).not.toHaveBeenCalled();
+      expect(beta.action).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'submit_prompt',
+        content: [{ text: '/alpha /beta do it' }],
+      });
+    });
+
+    it.each([
+      [
+        'a saved workflow',
+        SavedWorkflowLoader,
+        CommandKind.FILE,
+        'workflow-command',
+      ],
+      ['an MCP prompt', McpPromptLoader, CommandKind.MCP_PROMPT, 'mcp-prompt'],
+      [
+        'a built-in command',
+        BuiltinCommandLoader,
+        CommandKind.BUILT_IN,
+        'builtin-command',
+      ],
+    ] as const)(
+      'leaves %s on its existing path',
+      async (_, Loader, kind, source: CommandSource) => {
+        const deploy = promptCommand('deploy', kind, {
+          source,
+          supportedModes: ['non_interactive'],
+        });
+        loaded.set(Loader, [deploy]);
+
+        await run('/deploy prod');
+
+        expect(admit).not.toHaveBeenCalled();
+        expect(deploy.action).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('leaves a Mod command on its existing path, also when it replaces a file command', async () => {
+      loaded.set(FileCommandLoader, [
+        promptCommand('deploy', CommandKind.FILE),
+      ]);
+      const mod = promptCommand('deploy', CommandKind.FILE, {
+        source: 'plugin-command',
+        extensionName: 'deploy-mod',
+      });
+
+      await run('/deploy prod', {
+        modCommands: { loadCommands: async () => [mod] },
+      });
+
+      expect(admit).not.toHaveBeenCalled();
+      expect(order).toEqual(['action:deploy']);
+      expect(mod.action).toHaveBeenCalledOnce();
+    });
+
+    it('admits a file command that replaces a workflow of the same name', async () => {
+      const workflow = promptCommand('deploy', CommandKind.FILE, {
+        source: 'workflow-command',
+      });
+      loaded.set(SavedWorkflowLoader, [workflow]);
+      loaded.set(FileCommandLoader, [
+        promptCommand('deploy', CommandKind.FILE),
+      ]);
+
+      await run('/deploy prod');
+
+      expect(order).toEqual(['admit', 'action:deploy']);
+      expect(workflow.action).not.toHaveBeenCalled();
+    });
+
+    it('does not admit an unknown or disabled command', async () => {
+      loaded.set(FileCommandLoader, [
+        promptCommand('deploy', CommandKind.FILE),
+      ]);
+      vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue([
+        'deploy',
+      ]);
+
+      expect(await run('/missing')).toEqual({ type: 'no_command' });
+      expect(await run('/deploy prod')).toMatchObject({ type: 'unsupported' });
+      expect(admit).not.toHaveBeenCalled();
+    });
+
+    it('runs the action unadmitted without a callback', async () => {
+      const deploy = promptCommand('deploy', CommandKind.FILE);
+      loaded.set(FileCommandLoader, [deploy]);
+
+      await run('/deploy prod', { unadmitted: true });
+
+      expect(deploy.action).toHaveBeenCalledOnce();
+    });
+
+    it('does not admit the same command when the model invokes it', async () => {
+      const deploy = promptCommand('deploy', CommandKind.FILE, {
+        modelInvocable: true,
+      });
+      loaded.set(FileCommandLoader, [deploy]);
+      await run('/deploy prod');
+      const executor = vi.mocked(mockConfig.setModelInvocableCommandsExecutor)
+        .mock.calls[0]![0];
+
+      await expect(executor('deploy', 'prod')).resolves.toBe('deploy expanded');
+
+      expect(order).toEqual(['admit', 'action:deploy', 'action:deploy']);
     });
   });
 });

@@ -72,6 +72,26 @@ export interface AutoMemoryMetadata {
   recentSessionIdsSinceDream?: string[];
 }
 
+export type UserAutoMemoryDreamStatus =
+  | 'idle'
+  | 'pending'
+  | 'running'
+  | 'updated'
+  | 'noop'
+  | 'failed'
+  | 'cancelled';
+
+export interface UserAutoMemoryMetadata {
+  version: typeof AUTO_MEMORY_SCHEMA_VERSION;
+  createdAt: string;
+  updatedAt: string;
+  lastDreamAt?: string;
+  lastAttemptAt?: string;
+  dirtyMutations: number;
+  status: UserAutoMemoryDreamStatus;
+  pendingReason?: 'dirty_mutations' | 'document_limit';
+}
+
 export interface AutoMemoryExtractCursor {
   sessionId?: string;
   processedOffset?: number;

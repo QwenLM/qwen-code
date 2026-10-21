@@ -14,10 +14,11 @@ import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import { HOSTED_STORE_PREFIX } from '../scratch-dir.js';
 
 // An HTTP transport fixture, not a substitute for the Spring/MySQL slice.
 export async function startHostedSessionStore(sessionId: string) {
-  const root = await mkdtemp(path.join(tmpdir(), 'hosted-store-'));
+  const root = await mkdtemp(path.join(tmpdir(), HOSTED_STORE_PREFIX));
   const sessionKey = {
     tenantId: 'tenant',
     workspaceId: 'workspace',
@@ -39,6 +40,7 @@ export async function startHostedSessionStore(sessionId: string) {
   const pending = new Set<Promise<void>>();
   let handle: ManagedSessionJournalHandle | undefined;
   let writerToken: string | undefined;
+  let writerId: string | undefined;
   let writerGeneration = 0;
   let seals = 0;
   const scan = () =>
@@ -76,6 +78,7 @@ export async function startHostedSessionStore(sessionId: string) {
           return;
         }
         writerToken = String(req.headers['x-qwen-managed-writer-token']);
+        writerId = String(body.writerId);
         handle = await journal.open({ sessionKey });
         writerGeneration++;
       } else {
@@ -96,7 +99,19 @@ export async function startHostedSessionStore(sessionId: string) {
         activationEpoch: current.activation?.epoch ?? 0,
       };
       if (route === '/writers:acquire' || route === '/writers:renew') {
-        json({ ...head, leaseUntil: Date.now() + Number(body.leaseMillis) });
+        json({
+          ...head,
+          leaseUntil: Date.now() + Number(body.leaseMillis),
+          // Matches ManagedSessionReaderVersion.SUPPORTED on the Java store:
+          // the Harness writes Hosted recovery records at storage version 2.
+          supportedStorageVersion: 2,
+        });
+      } else if (route === '/execution:authorize') {
+        assert.equal(req.method, 'POST');
+        assert(handle);
+        assert.equal(body.writerId, writerId);
+        assert.equal(body.writerGeneration, writerGeneration);
+        json({ authorized: true });
       } else if (route === '/restore') {
         json({
           ...head,
@@ -107,7 +122,10 @@ export async function startHostedSessionStore(sessionId: string) {
           recoveryStatus: 'READY',
           recoveryDetailCode: null,
         });
-      } else if (route === '/transactions:commit') {
+      } else if (
+        route === '/transactions:commit' ||
+        route === '/transactions:commit-v2'
+      ) {
         assert(handle);
         assert.equal(body.writerGeneration, writerGeneration);
         assert.equal(body.expectedJournalRevision, transactions.length);

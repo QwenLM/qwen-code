@@ -7,6 +7,10 @@
 // Japanese translations for Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI（生成 UI）',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '対応するローカルセッションで内蔵 Generated UI を有効にします。変更を適用するには対象のセッションを再起動してください。',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -148,6 +152,8 @@ export default {
     '巻き戻しは、手動で編集されたファイルや shell コマンドで変更されたファイルには影響しません。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '圧縮されたターンへは巻き戻せません。より最近のターンをお試しください。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'このターンまで会話を巻き戻せません。モデル履歴と対応しなくなっています（再試行後など）。より最近のターンをお試しください。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'このターンではファイル復元できません（捕捉されたファイル変更がないか、現在のセッションより前のターンです）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -1905,6 +1911,10 @@ export default {
   'to retry last request': '最後のリクエストを再試行',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無効な API Key です。Coding Plan の API Key は "sk-sp-" で始まります。確認してください。',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '無効な API Key です。従量課金キーは "sk-" または "sk-ws-" で始まります。Token Plan キー（"sk-sp-"）は Token Plan エントリを使用してください。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '無効な API Key です。Token Plan API Key は "sk-sp-" で始まります。Token Plan コンソールから生成するか、Standard API Key エントリで従量課金キーを使用してください。',
   'Lock release warning': 'ロック解除の警告',
   'Metadata write warning': 'メタデータ書き込みの警告',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":

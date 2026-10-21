@@ -116,6 +116,7 @@ export interface APIAssistantMessage {
  */
 export interface CLIUserMessage {
   type: 'user';
+  origin?: { kind: 'human' };
   uuid?: string;
   session_id: string;
   message: APIUserMessage;
@@ -349,6 +350,8 @@ export interface CLIMcpServerConfig {
   tcp?: string;
   timeout?: number;
   versionNegotiation?: 'auto' | 'legacy';
+  appResourceMaxBytes?: number;
+  appResourceTimeoutMs?: number;
   trust?: boolean;
   description?: string;
   includeTools?: string[];

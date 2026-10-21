@@ -80,12 +80,35 @@ beforeEach(() => {
   manager = makeManager();
 });
 
-afterEach(() => {
-  manager.dispose();
+afterEach(async () => {
+  await manager.dispose();
   fs.rmSync(workDir, { recursive: true, force: true });
 });
 
 describe('NodeReplKernelManager', () => {
+  it('awaits Computer Use session cleanup on reset and disposal', async () => {
+    const marker = path.join(workDir, 'cua-cleanup.txt');
+    createEsmPackage(
+      path.join(workDir, 'node_modules'),
+      'cua-cleanup-fixture',
+      `
+      import fs from 'node:fs';
+      import { setTimeout } from 'node:timers/promises';
+      export const cua = { async [Symbol.asyncDispose]() {
+        await setTimeout(30);
+        fs.appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify('released\n')});
+      } };
+    `,
+    );
+    const install = `globalThis.cua = (await import('cua-cleanup-fixture')).cua;`;
+    expect((await run(install)).status).toBe('ok');
+    await manager.reset();
+    expect(fs.readFileSync(marker, 'utf8')).toBe('released\n');
+    expect((await run(install)).status).toBe('ok');
+    await manager.dispose();
+    expect(fs.readFileSync(marker, 'utf8')).toBe('released\nreleased\n');
+  });
+
   it('preserves bounded error diagnostics without invoking getters or custom inspectors', async () => {
     const result = await run(`
       var invoked = 0;
@@ -1221,7 +1244,7 @@ describe('NodeReplKernelManager', () => {
       fs.mkdirSync(readableRoot);
       const original = path.join(readableRoot, 'original.png');
       fs.writeFileSync(original, Buffer.from(PNG_BASE64, 'base64'));
-      manager.dispose();
+      await manager.dispose();
       manager = makeManager({ readableRoots: [readableRoot] });
       expect(
         (
@@ -1361,7 +1384,11 @@ describe('NodeReplKernelManager', () => {
       const controller = new AbortController();
       const pending = manager.exec({
         code: `const fs = await import('node:fs'); fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready'); nodeRepl.write('before hang'); ${code}`,
-        timeoutMs: status === 'cancelled' ? 60_000 : 200,
+        // The timeout must comfortably exceed kernel start-up on a loaded
+        // shared runner: if the cancel frame arrives while the kernel is
+        // still suspended at the pre-hang await, the kernel cancels cleanly
+        // and survives, so no replacement is observed.
+        timeoutMs: status === 'cancelled' ? 60_000 : 2_000,
         signal: controller.signal,
       });
       await expect.poll(() => fs.existsSync(readyFile)).toBe(true);
@@ -1382,7 +1409,7 @@ describe('NodeReplKernelManager', () => {
       expect(manager.getKernelPid()).not.toBe(pid);
       expect(manager.getGeneration()).toBeGreaterThan(generation);
     },
-    10_000,
+    20_000,
   );
 
   it(
@@ -1554,7 +1581,7 @@ describe('NodeReplKernelManager', () => {
     async () => {
       const volatileCwd = path.join(workDir, 'volatile-cwd');
       fs.mkdirSync(volatileCwd);
-      manager.dispose();
+      await manager.dispose();
       manager = new NodeReplKernelManager({
         cwd: volatileCwd,
         homeDir: os.homedir(),
@@ -1603,11 +1630,11 @@ describe('NodeReplKernelManager', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       const queuedReset = manager.reset();
-      manager.dispose();
+      const disposal = manager.dispose();
 
       expect((await pending).status).toBe('cancelled');
       await expect(queuedReset).rejects.toThrow(/disposed/);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await disposal;
       expect(() => process.kill(pid, 0)).toThrow();
       expect(fs.existsSync(tmpDir)).toBe(false);
       await expect(run('1;')).rejects.toThrow(/disposed/);
