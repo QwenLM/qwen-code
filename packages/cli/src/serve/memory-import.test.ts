@@ -83,7 +83,10 @@ async function setup(nested = false) {
         overlayKeys: [],
         effectiveEnv: { QWEN_CODE_MEMORY_PROJECT_SCOPE: 'workspace' },
       },
-      bridge: { invokeWorkspaceCommand: invoke },
+      bridge: {
+        invokeWorkspaceCommand: invoke,
+        isWorkspaceMemoryRememberAvailable: vi.fn(async () => true),
+      },
       routeFileSystemFactory: {},
       generationGuard: createWorkspaceGenerationGuard(),
     } as unknown as WorkspaceRuntime;
@@ -311,6 +314,37 @@ describe('selected-workspace memory import HTTP', () => {
       400,
     );
     expect(h.secondary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
+  it('refuses admission and retry while managed memory is unavailable', async () => {
+    const h = await setup();
+    const base = '/workspaces/secondary/memory/import';
+    const submitted = await request(h.app)
+      .post(`${base}/batches`)
+      .set('x-confirm', 'yes')
+      .send({ source, selection: selection(), idempotencyKey: 'available' });
+    expect(submitted.status).toBe(202);
+    expect((await terminal(h.app, base, submitted.body.id))['status']).toBe(
+      'completed',
+    );
+    expect(h.secondary.bridge.invokeWorkspaceCommand).toHaveBeenCalledTimes(1);
+
+    vi.mocked(
+      h.secondary.bridge.isWorkspaceMemoryRememberAvailable,
+    ).mockResolvedValue(false);
+    const refused = await request(h.app)
+      .post(`${base}/batches`)
+      .set('x-confirm', 'yes')
+      .send({ source, selection: selection(), idempotencyKey: 'refused' });
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe('memory_import_rejected');
+    expect(refused.body.error).toContain('unavailable');
+    const retried = await request(h.app)
+      .post(`${base}/batches/${submitted.body.id}/retry`)
+      .set('x-confirm', 'yes')
+      .send({});
+    expect(retried.status).toBe(400);
+    expect(retried.body.code).toBe('memory_import_rejected');
+    expect(h.secondary.bridge.invokeWorkspaceCommand).toHaveBeenCalledTimes(1);
   });
   it.each(['submit', 'retry'] as const)(
     'returns the durable %s receipt if the runtime drains after admission',

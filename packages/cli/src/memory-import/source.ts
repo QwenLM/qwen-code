@@ -139,7 +139,7 @@ function scopeFor(
 ): Pick<ImportSection, 'suggestedScope' | 'sourceProject' | 'reason'> {
   const scopes = [
     ...content.matchAll(
-      /(?:^|[\s;(])cwd\s*[=:]\s*(?:`([^`\n]+)`|([^\n,;()]+))/gim,
+      /(?:^|[\s;(])cwd\s*[=:]\s*(?:`([^`\n]+)`|([^\r\n,;()]+))/gim,
     ),
   ].map((m) => (m[1] ?? m[2]).trim());
   if (/^(?:\/|[A-Za-z]:[\\/])/.test(title.trim()))
@@ -276,7 +276,9 @@ export function previewSource(input: unknown): ImportPreview {
       if (
         !own ||
         /^v\d+$/.test(own) ||
-        own.split('\n').every((line) => !line.trim() || /^#{1,6}\s/.test(line))
+        own
+          .split(/\r\n|[\r\n]/)
+          .every((line) => !line.trim() || /^#{1,6}\s/.test(line))
       )
         continue;
       const ancestors: typeof headings = [];

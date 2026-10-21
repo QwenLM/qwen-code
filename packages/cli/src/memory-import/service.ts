@@ -19,7 +19,10 @@ import {
   scanAutoMemorySnapshot,
   parseAutoMemoryTopicDocument,
 } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
-import { tokenizeMemoryRecallText } from '@qwen-code/qwen-code-core/memory/recall.js';
+import {
+  tokenizeMemoryRecallTerms,
+  tokenizeMemoryRecallText,
+} from '@qwen-code/qwen-code-core/memory/recall.js';
 import { rebuildAutoMemoryIndexAtRoot } from '@qwen-code/qwen-code-core/memory/indexer.js';
 import {
   validateMemoryImportBatchProposal,
@@ -206,7 +209,7 @@ function selectImportContext(
 ): MemoryImportModelInput['existing'] {
   const queries = sources.map((source) => ({
     text: source.normalize('NFKC').toLowerCase(),
-    terms: new Set(tokenizeMemoryRecallText(source)),
+    terms: tokenizeMemoryRecallTerms(source),
   }));
   const index = existing.map((item) => {
     const parsed = parseAutoMemoryTopicDocument('existing.md', item.content);
@@ -801,7 +804,7 @@ export class MemoryImportService {
       journal.baseline.map((item) => [item.ref, item.digest]),
     );
     for (const record of Object.values(ledger)) {
-      if (record.batchId === task.id && record.phase === 'committed')
+      if (record.phase === 'committed')
         for (const output of record.outputs) {
           const ref = `${section.scope}:${output.relativePath}`;
           if (!expected.has(ref)) expected.set(ref, output.digest);
@@ -998,9 +1001,10 @@ export class MemoryImportService {
             if (
               record.outputs.some((output) => output.bodyDigest === bodyDigest)
             ) {
+              // Publication renames the stage into this directory, so an
+              // intent that never created it imported nothing.
               if (
                 record.phase === 'intent' &&
-                (await exists(path.join(scopeState, record.stage))) &&
                 !(await exists(path.join(root, 'imported', sourceId)))
               )
                 continue;

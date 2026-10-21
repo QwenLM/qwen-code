@@ -142,6 +142,14 @@ export function mountMemoryImportRoutes(
         sendError(res, error);
       }
     };
+  const assertManagedMemoryAvailable = async (
+    runtime: WorkspaceRuntime,
+  ): Promise<void> => {
+    if (!(await runtime.bridge.isWorkspaceMemoryRememberAvailable()))
+      throw new MemoryImportRequestError(
+        'Managed memory import is unavailable.',
+      );
+  };
   const base = '/workspaces/:workspace/memory/import';
   app.post(
     `${base}/preview`,
@@ -151,15 +159,14 @@ export function mountMemoryImportRoutes(
   app.post(
     `${base}/batches`,
     deps.mutate({ strict: true }),
-    handle(
-      async (req, runtime) =>
-        (await service(runtime)).submit(
-          req.body?.source,
-          req.body?.selection,
-          req.body?.idempotencyKey,
-        ),
-      202,
-    ),
+    handle(async (req, runtime) => {
+      await assertManagedMemoryAvailable(runtime);
+      return (await service(runtime)).submit(
+        req.body?.source,
+        req.body?.selection,
+        req.body?.idempotencyKey,
+      );
+    }, 202),
   );
   app.get(
     `${base}/batches`,
@@ -190,11 +197,10 @@ export function mountMemoryImportRoutes(
   app.post(
     `${base}/batches/:batch/retry`,
     deps.mutate({ strict: true }),
-    handle(
-      async (req, runtime) =>
-        (await service(runtime)).retry(String(req.params['batch'])),
-      202,
-    ),
+    handle(async (req, runtime) => {
+      await assertManagedMemoryAvailable(runtime);
+      return (await service(runtime)).retry(String(req.params['batch']));
+    }, 202),
   );
   // Recover registered trusted runtimes at daemon startup; later runtimes recover
   // on their first import request. No source/model work occurs for previews.

@@ -62,7 +62,7 @@ need caller review. Retry processes only pending/failed items, not conflicts or
 successful items. Cancellation prevents further publication; a provider request
 already in flight may finish, but its result is discarded. Model responses are scope-validated before retention; retry can regenerate scope-invalid items retained by older versions without resetting usage or changing valid sibling records. A CLI reader closing its output pipe early does not turn completed work into an error; use the idempotency key to retrieve the result again.
 
-HTTP 400 `memory_import_rejected` identifies invalid source, selection, batch ID or unsupported legacy memory overrides; 404 `memory_import_not_found` identifies a missing batch. Generation closure or draining returns 503 `workspace_runtime_unavailable` with `Retry-After: 1`. Unexpected storage/service failures return 500 `memory_import_failed`, with details confined to daemon logs. Retry submission with the same idempotency key, or retry/status requests with the same batch ID, after resolving the failure. Existing authentication, mutation and trust rejection rules remain in force.
+HTTP 400 `memory_import_rejected` identifies invalid source, selection, batch ID, unsupported legacy memory overrides, or admission while managed memory is unavailable; 404 `memory_import_not_found` identifies a missing batch. Submit and retry refuse admission with that 400 before charging task usage when the workspace's managed memory is unavailable, so a workspace that can never import does not exhaust its budget. Generation closure or draining returns 503 `workspace_runtime_unavailable` with `Retry-After: 1`. Unexpected storage/service failures return 500 `memory_import_failed`, with details confined to daemon logs. Retry submission with the same idempotency key, or retry/status requests with the same batch ID, after resolving the failure. Existing authentication, mutation and trust rejection rules remain in force.
 
 A 202 response acknowledges durable admission, not completed publication. Once submit or retry has returned its durable task, a subsequent runtime closure does not discard that receipt or its task ID. Background work still checks the runtime before publishing; clients query the task after the workspace becomes available again. Reads, including retained source content, recheck runtime access before responding.
 
@@ -116,10 +116,13 @@ conflicts, partial results and cancellation produce a nonzero exit status. Bare/
 
 Preview includes `estimate` and `groups[].estimate`: `modelCalls`, `sourceTokens`,
 `maxOutputTokens`, `reservedTokens`, `exceedsBudget`, and `limits`. Estimates cover
-all selectable sources; unmapped groups are provisional. Offline preview neither
-reads native memory nor invokes a model; it reserves up to 32 KiB context and a
-bounded prompt/schema allowance per batch. Actual selected groups, previous imports
-and relevant existing context can reduce the reservation. This is not a billing quote.
+all selectable sources; unmapped groups are provisional. `modelCalls` is an upper
+bound: a preview group can be mapped across both `project` and `user`, and the
+estimate counts each of the two scope layouts, so an explicit selection can only
+stay at or below it. Offline preview neither reads native memory nor invokes a
+model; it reserves up to 32 KiB context and a bounded prompt/schema allowance per
+batch. Actual selected groups, previous imports and relevant existing context can
+reduce the reservation. This is not a billing quote.
 
 Each task exposes `usage.modelCalls`, `usage.reservedTokens` and `budget`. Limits are
 32 logical invocations and 512,000 reserved token units, including an 8,192-token

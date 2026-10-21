@@ -29,7 +29,7 @@
 
 任务返回 `version:1`、`kind:"task"`、`id`、`status`、创建/更新时间、`items` 与 `result`。状态为 queued、running、completed、partial 或 cancelled。条目区分 pending、added、duplicate、conflict、skipped 与 failed，提供原因及新增原生记忆的引用。结果计数区分来源章节与新增原生文档。已完成任务仍可能包含需调用方处理的冲突。重试只处理 pending/failed，不重新处理冲突或成功项。取消阻止后续发布；已发出的模型请求可能继续完成，但结果会被丢弃。模型响应保存前校验范围；旧版本保存的范围无效条目可在重试时重新生成，不重置用量或更改有效的同批记录。CLI 输出管道的读取方提前退出不会把已完成操作变为错误；可使用幂等键重新获取结果。
 
-HTTP 400 `memory_import_rejected` 表示来源、选择、批次 ID 无效或不支持的旧记忆路径配置；404 `memory_import_not_found` 表示批次不存在。运行代关闭或进入排空状态返回 503 `workspace_runtime_unavailable` 和 `Retry-After: 1`。意外的存储或服务故障返回 500 `memory_import_failed`，详细原因仅记录在 daemon 日志。排除故障后，提交使用相同幂等键，重试或查询使用相同批次 ID。已有认证、修改授权及信任拒绝规则保持有效。
+HTTP 400 `memory_import_rejected` 表示来源、选择、批次 ID 无效、不支持的旧记忆路径配置，或托管记忆不可用时拒绝受理；404 `memory_import_not_found` 表示批次不存在。当工作区托管记忆不可用时，提交与重试会在计入任务用量之前以该 400 拒绝受理，因此永远无法导入的工作区不会耗尽自己的额度。运行代关闭或进入排空状态返回 503 `workspace_runtime_unavailable` 和 `Retry-After: 1`。意外的存储或服务故障返回 500 `memory_import_failed`，详细原因仅记录在 daemon 日志。排除故障后，提交使用相同幂等键，重试或查询使用相同批次 ID。已有认证、修改授权及信任拒绝规则保持有效。
 
 202 表示任务已持久化接收，不表示发布完成。提交或重试已返回持久化任务后，随后关闭运行时不会丢弃回执及其任务 ID。后台工作仍在发布前检查运行时；工作区恢复可用后，客户端继续查询该任务。读取操作（包括保留来源正文）在响应前再次检查运行时访问权限。
 
@@ -65,7 +65,7 @@ const status = await authenticatedJson(`${base}/batches/${task.id}`);
 
 ## 用量估算与任务预算
 
-预览包含 `estimate` 与 `groups[].estimate`，字段为 `modelCalls`、`sourceTokens`、`maxOutputTokens`、`reservedTokens`、`exceedsBudget`、`limits`。估算覆盖全部可选来源，待映射组仅供预估。离线预览不读取原生记忆、不调用模型；每批预留最多 32 KiB 已有上下文及有界提示词/schema。实际选择、已处理来源和相关已有上下文可能降低预留量；这不是计费报价。
+预览包含 `estimate` 与 `groups[].estimate`，字段为 `modelCalls`、`sourceTokens`、`maxOutputTokens`、`reservedTokens`、`exceedsBudget`、`limits`。估算覆盖全部可选来源，待映射组仅供预估。`modelCalls` 是上界：一个预览组可能被映射到 `project` 与 `user` 两个范围，估算同时计入这两种范围布局，因此显式选择只会等于或低于该值。离线预览不读取原生记忆、不调用模型；每批预留最多 32 KiB 已有上下文及有界提示词/schema。实际选择、已处理来源和相关已有上下文可能降低预留量；这不是计费报价。
 
 任务公开 `usage.modelCalls`、`usage.reservedTokens` 和 `budget`。上限为 32 次逻辑调用及 512,000 个预留 token 单位，每次含 8,192 个输出 token 额度。调用前持久化预留；失败、重启、取消和重试均不重置。`partial` 结果通过 `items[].reason` 标明预算耗尽或元数据/相关证据超限。耗尽任务的重试不会补充额度；需显式确认更小的新选择，跨任务仍按原始来源去重。缺少预算记录的旧任务模型预算和已记录用量均为零，历史用量未知。
 

@@ -73,6 +73,18 @@ describe('Codex source preview', () => {
     expect(preview.sections[0].content).toContain('Alpha-only fact.');
     expect(preview.sections[1].content).not.toContain('Alpha-only fact.');
   });
+  it('keeps CR-terminated section bodies instead of dropping them as heading-only', () => {
+    const preview = previewSource(
+      source('## /home/u/b\rcwd=/home/u/b\rfact\r'),
+    );
+    expect(preview.sections).toHaveLength(1);
+    expect(preview.sections[0].suggestedScope).toBe('project');
+    expect(preview.sections[0].sourceProject).toBe('/home/u/b');
+
+    const crOnly = previewSource(source('# Topic\rKeep this fact.\r'));
+    expect(crOnly.sections).toHaveLength(1);
+    expect(crOnly.sections[0].content).toContain('Keep this fact.');
+  });
   it('leaves unknown and conflicting scopes unassigned', () => {
     const preview = previewSource(
       source(

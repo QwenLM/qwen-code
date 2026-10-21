@@ -51,38 +51,37 @@ export function packMemoryImportSections<
 }
 
 export function estimateMemoryImport(
-  sections: Array<{
-    id: string;
-    content: string;
-    groupId: string;
-    scope?: string;
-  }>,
+  sections: Array<{ id: string; content: string; groupId: string }>,
 ) {
   const batches = packMemoryImportSections(sections);
+  // An explicit selection can map one preview group's sections to both
+  // scopes, and the run packs each scope as its own sequence. Each scope's
+  // subsequence packs into no more batches than the unsplit group, so twice
+  // the unsplit count bounds any selection.
+  const modelCalls = batches.length * 2;
   const sourceTokens = sections.reduce(
     (n, section) => n + estimateTextTokens(section.content),
     0,
   );
-  const reservedTokens = batches.reduce(
-    (n, batch) =>
-      n +
-      Buffer.byteLength(
-        JSON.stringify(batch.map(({ id, content }) => ({ id, content }))),
-      ) +
-      MEMORY_IMPORT_BUDGET.contextBytes +
-      MEMORY_IMPORT_BUDGET.promptBytes +
-      MEMORY_IMPORT_BUDGET.outputTokens +
-      1024,
-    0,
+  const sourceBytes = Buffer.byteLength(
+    JSON.stringify(sections.map(({ id, content }) => ({ id, content }))),
   );
+  const reservedTokens =
+    modelCalls *
+      (MEMORY_IMPORT_BUDGET.contextBytes +
+        MEMORY_IMPORT_BUDGET.promptBytes +
+        MEMORY_IMPORT_BUDGET.outputTokens +
+        1024) +
+    sourceBytes +
+    modelCalls;
   return {
     basis: 'source-only-with-context-reserve' as const,
-    modelCalls: batches.length,
+    modelCalls,
     sourceTokens,
-    maxOutputTokens: batches.length * MEMORY_IMPORT_BUDGET.outputTokens,
+    maxOutputTokens: modelCalls * MEMORY_IMPORT_BUDGET.outputTokens,
     reservedTokens,
     exceedsBudget:
-      batches.length > MEMORY_IMPORT_BUDGET.maxCalls ||
+      modelCalls > MEMORY_IMPORT_BUDGET.maxCalls ||
       reservedTokens > MEMORY_IMPORT_BUDGET.maxReservedTokens,
     limits: MEMORY_IMPORT_BUDGET,
   };

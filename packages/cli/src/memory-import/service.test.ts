@@ -670,6 +670,7 @@ describe('durable memory import', () => {
     }));
   it.each([
     'unpublished',
+    'abandoned',
     'published-edited',
     'published-forgotten',
     'committed-forgotten',
@@ -685,7 +686,7 @@ describe('durable memory import', () => {
               path.basename(String(from)).startsWith('stage-') &&
               state !== 'committed-forgotten'
             ) {
-              if (state !== 'unpublished') await original(from, to);
+              if (state.startsWith('published-')) await original(from, to);
               throw new Error('Synthetic interruption at publication');
             }
             return original(from, to);
@@ -697,6 +698,17 @@ describe('durable memory import', () => {
         );
         rename.mockRestore();
         const memory = getImportedProjectMemoryRoot(project);
+        if (state === 'abandoned')
+          await fs.rm(
+            path.join(
+              runtime,
+              'memory-import',
+              'scopes',
+              digest(memory),
+              `stage-${selection()[0].id}`,
+            ),
+            { recursive: true, force: true },
+          );
         const file = path.join(memory, 'imported', selection()[0].id, '0.md');
         if (state === 'published-edited')
           await fs.appendFile(file, '\nUser edit.\n');
@@ -717,7 +729,9 @@ describe('durable memory import', () => {
           'second-source',
         );
         expect((await svc.idle(next.id)).items[0].status).toBe(
-          state === 'unpublished' ? 'added' : 'conflict',
+          state === 'unpublished' || state === 'abandoned'
+            ? 'added'
+            : 'conflict',
         );
         if (state === 'published-edited')
           expect(await fs.readFile(file, 'utf8')).toBe(doc + '\nUser edit.\n');
@@ -871,7 +885,7 @@ describe('bounded project batches', () => {
         propose,
       });
       const input = many(12);
-      expect(previewSource(input).estimate.modelCalls).toBe(2);
+      expect(previewSource(input).estimate.modelCalls).toBe(4);
       await expect(fs.stat(runtime)).rejects.toMatchObject({ code: 'ENOENT' });
       const task = await svc.submit(input, selections(input), 'packed');
       const result = await svc.idle(task.id);
@@ -885,7 +899,7 @@ describe('bounded project batches', () => {
         previewSource(separate).groups.map(
           (group) => group.estimate.modelCalls,
         ),
-      ).toEqual([1, 1, 1]);
+      ).toEqual([2, 2, 2]);
       const second = await svc.submit(
         separate,
         selections(separate),
@@ -947,6 +961,76 @@ describe('bounded project batches', () => {
         Array(16).fill('added'),
       );
       expect(propose).toHaveBeenCalledTimes(2);
+    }));
+  it('reuses a journal after another batch commits to the same scope', () =>
+    context(async () => {
+      const input = many(2);
+      const proposeFor = (tag: string) =>
+        vi.fn(async (request: MemoryImportModelInput) => ({
+          items: request.sources.map(({ id }) => ({
+            id,
+            decision: 'new' as const,
+            reason: `${tag} fact`,
+            documents: [
+              doc.replace(
+                'Validate rollback paths for every schema migration.',
+                `${tag} fact ${id}.`,
+              ),
+            ],
+          })),
+        }));
+      const a = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose: proposeFor('first'),
+      });
+      const b = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose: proposeFor('second'),
+      });
+      const original = fs.rename;
+      let publications = 0;
+      const rename = vi
+        .spyOn(fs, 'rename')
+        .mockImplementation(async (from, to) => {
+          if (
+            path.basename(String(from)).startsWith('stage-') &&
+            path.basename(path.dirname(String(to))) === 'imported' &&
+            ++publications === 2
+          )
+            throw new Error('Synthetic publication interruption');
+          return original(from, to);
+        });
+      const task = await a.submit(input, selections(input), 'cross-batch-a');
+      const first = await a.idle(task.id);
+      rename.mockRestore();
+      expect(first.items.map((item) => item.status).sort()).toEqual([
+        'added',
+        'failed',
+      ]);
+      const other = {
+        version: 1,
+        source: 'codex',
+        files: [
+          {
+            path: 'MEMORY.md',
+            content: '# Other\ncwd: /synthetic/project\nAnother durable fact.',
+          },
+        ],
+      };
+      const otherTask = await b.submit(
+        other,
+        selections(other),
+        'cross-batch-b',
+      );
+      expect((await b.idle(otherTask.id)).items[0].status).toBe('added');
+      await a.retry(task.id);
+      const done = await a.idle(task.id);
+      expect(done.items.map((item) => item.status).sort()).toEqual([
+        'added',
+        'added',
+      ]);
     }));
   it('sends metadata instead of unrelated full bodies and rejects excessive evidence before calling the model', () =>
     context(async () => {
@@ -1060,6 +1144,46 @@ describe('bounded project batches', () => {
         ]);
       }),
   );
+  it('matches tokens from the middle of a long source section', () =>
+    context(async () => {
+      const memory = getUserAutoMemoryRoot();
+      await fs.mkdir(memory, { recursive: true });
+      const existing =
+        '---\nname: pnpm lockfile drift\ndescription: Keep the frozen lockfile reproducible\ntype: user\ncategory: dependency_configuration\nkeywords: [pnpm, lockfile, frozen-lockfile]\nusage_scenarios: [Updating dependencies]\n---\nUse the frozen lockfile in CI.\n';
+      await fs.writeFile(path.join(memory, 'existing.md'), existing);
+      const filler = (start: number, count: number) =>
+        Array.from({ length: count }, (_, i) => `token${start + i}`).join(' ');
+      const input = {
+        version: 1,
+        source: 'codex',
+        files: [
+          {
+            path: 'MEMORY.md',
+            content:
+              '# Workflow\n' +
+              `${filler(0, 32)} pnpm lockfile ${filler(32, 80)}`,
+          },
+        ],
+      };
+      const propose = vi.fn(async (request: MemoryImportModelInput) =>
+        skipped(request),
+      );
+      const svc = new MemoryImportService({
+        projectRoot: project,
+        assertActive: () => {},
+        propose,
+      });
+      const task = await svc.submit(
+        input,
+        [{ id: previewSource(input).sections[0].id, scope: 'user' }],
+        'middle-tokens',
+      );
+      expect((await svc.idle(task.id)).items[0].status).toBe('skipped');
+      expect(propose).toHaveBeenCalledTimes(1);
+      expect(propose.mock.calls[0][0].existing).toEqual([
+        { ref: 'user:existing.md', content: existing, indexOnly: false },
+      ]);
+    }));
   it('does not expand unrelated mature-store bodies for generic shared words', () =>
     context(async () => {
       const memory = getUserAutoMemoryRoot();
