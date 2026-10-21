@@ -147,10 +147,11 @@ worktree included:
 3. Require exactly one local remote that matches the base repository (the
    matcher behind `review match-remote`).
 4. Resolve the push target. Prefer the one local remote that matches the head
-   repository and pushes to it (the matcher reads fetch URLs; a remote whose
-   `pushurl` names another repository does not count); otherwise use the head
-   repository URL in the protocol from `gh config get git_protocol`. Record it
-   in the state file.
+   repository and pushes only to it: the matcher reads fetch URLs, so every
+   URL the remote pushes to — its `pushurl`, or each of several `url` entries
+   — is checked by the same matcher, and a remote with any destination
+   elsewhere does not count. Otherwise use the head repository URL in the
+   protocol from `gh config get git_protocol`. Record it in the state file.
 5. The state file is the lock. It records the session id
    (`QWEN_CODE_SESSION_ID`); a state file written by another session is a
    refusal, never a takeover.

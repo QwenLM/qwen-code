@@ -22,12 +22,7 @@ import {
   setGhHost,
 } from '../review/lib/gh.js';
 import { git, gitOpt, refExists } from '../review/lib/git.js';
-import {
-  hostsEquivalent,
-  matchRemotes,
-  normalizeSegment,
-  parseRemoteUrl,
-} from '../review/lib/remote-match.js';
+import { matchRemotes } from '../review/lib/remote-match.js';
 import { redirectedAncestor } from '../review/lib/worktree.js';
 import {
   assertOwnedBySession,
@@ -114,10 +109,11 @@ function onlyRemote(
 
 /**
  * Where pushes to the head repository go: the one local remote that fetches
- * from it, when that remote also pushes to it, else the repository's URL.
- * `matchRemotes` reads the fetch side only, and a remote may carry its own
- * `pushurl`; the remote qualifies when its push URLs are its fetch URLs or
- * every one of them names the head repository itself.
+ * from it, when every URL that remote pushes to names it as well, else the
+ * repository's URL. `matchRemotes` reads the fetch side only, and a remote
+ * may push elsewhere — through its own `pushurl`, or through a second `url`
+ * entry, which git fetches from the first of and pushes to all of. Each
+ * effective push URL is judged by the same matcher that chose the remote.
  */
 function pushTargetFor(
   remoteV: string,
@@ -143,23 +139,24 @@ function remotePushesTo(
   owner: string,
   repo: string,
 ): boolean {
-  const fetchUrls = gitOpt('remote', 'get-url', '--all', remote);
   const pushUrls = gitOpt('remote', 'get-url', '--push', '--all', remote);
-  if (fetchUrls === null || pushUrls === null) return false;
-  if (pushUrls.trim() === fetchUrls.trim()) return true;
-  return pushUrls
+  if (pushUrls === null) return false;
+  const urls = pushUrls
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line !== '')
-    .every((url) => {
-      const identity = parseRemoteUrl(url);
-      return (
-        identity !== null &&
-        hostsEquivalent(identity.host, host) &&
-        identity.owner === normalizeSegment(owner) &&
-        identity.repo === normalizeSegment(repo)
-      );
-    });
+    .filter((line) => line !== '');
+  return (
+    urls.length > 0 &&
+    urls.every((url) =>
+      // The matcher reads `<name>\t<url> (fetch)` lines; one line per push
+      // URL asks it the same question about each destination.
+      matchRemotes(`${remote}\t${url} (fetch)`, {
+        owner,
+        repo,
+        host,
+      }).matched.includes(remote),
+    )
+  );
 }
 
 function report(state: AutofixPrState, extra: Record<string, unknown>): void {

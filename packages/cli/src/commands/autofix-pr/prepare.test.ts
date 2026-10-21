@@ -16,7 +16,12 @@ import { join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   gh: vi.fn((..._args: string[]): string => ''),
-  matched: vi.fn((_owner: string): string[] => ['origin']),
+  // Steers `matchRemotes` for a real `git remote -v` listing (several lines:
+  // the clone's remotes are local paths); null hands a call to the real
+  // matcher, which the push-URL validation uses one synthesized line at a time.
+  matched: vi.fn((_owner: string, _remoteV: string): string[] | null => [
+    'origin',
+  ]),
   stdout: vi.fn((_line: string) => {}),
 }));
 
@@ -27,12 +32,22 @@ vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ensureAuthenticated: () => {},
 }));
 
-vi.mock('../review/lib/remote-match.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../review/lib/remote-match.js')>()),
-  matchRemotes: (_remoteV: string, { owner }: { owner: string }) => ({
-    matched: mocks.matched(owner),
-  }),
-}));
+vi.mock('../review/lib/remote-match.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../review/lib/remote-match.js')>();
+  return {
+    ...original,
+    matchRemotes: (
+      remoteV: string,
+      input: Parameters<typeof original.matchRemotes>[1],
+    ) => {
+      const steered = mocks.matched(input.owner, remoteV);
+      return steered === null
+        ? original.matchRemotes(remoteV, input)
+        : { matched: steered };
+    },
+  };
+});
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mocks.stdout,
@@ -174,7 +189,14 @@ describe('runPrepare (real git)', () => {
       if (args[0] === 'config') return 'https';
       throw new Error(`unexpected gh ${args.join(' ')}`);
     });
-    mocks.matched.mockImplementation(() => ['origin']);
+    // The clone's remotes are local paths the real matcher cannot read, so
+    // the listing and their push-URL lines are steered; a synthesized line
+    // with a GitHub URL goes to the real matcher.
+    mocks.matched.mockImplementation((_owner, remoteV) =>
+      !remoteV.includes('\n') && remoteV.includes('github.com')
+        ? null
+        : ['origin'],
+    );
     mocks.stdout.mockClear();
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
@@ -256,6 +278,45 @@ describe('runPrepare (real git)', () => {
     expect(readState(autofixPrPaths(clone, 7).statePath)?.pushTarget).toBe(
       'https://github.com/o/r.git',
     );
+  });
+
+  it('pushes to the head repository URL when a second remote URL points elsewhere', () => {
+    // Two `remote.fork.url` entries and no `pushurl`: git fetches from the
+    // first, which the matcher sees, and pushes to both.
+    run(clone, 'remote', 'add', 'fork', 'https://github.com/contributor/r.git');
+    run(
+      clone,
+      'remote',
+      'set-url',
+      '--add',
+      'fork',
+      'https://github.com/elsewhere/r.git',
+    );
+    expect(run(clone, 'remote', 'get-url', '--push', '--all', 'fork')).toBe(
+      'https://github.com/contributor/r.git\nhttps://github.com/elsewhere/r.git',
+    );
+    mocks.matched.mockImplementation((owner, remoteV) =>
+      remoteV.includes('\n') ? (owner === 'o' ? ['origin'] : ['fork']) : null,
+    );
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(
+          prView({
+            headRefOid: headSha,
+            isCrossRepository: true,
+            maintainerCanModify: true,
+            headRepositoryOwner: { login: 'contributor' },
+          }),
+        );
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      pushTarget: 'https://github.com/contributor/r.git',
+    });
   });
 
   it('keeps the remote whose push URL is another spelling of the head repository', () => {
