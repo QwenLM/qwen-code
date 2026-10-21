@@ -1,25 +1,34 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# flock(2) does not order its wakeups: under continuous arrivals one waiter
-# can lose every release and starve to its wait budget (qwen-code#14743).
-# Take a ticket first, so only the oldest live ticket touches the lock; the
-# rest sleep. Tickets carry their owner's PID, and a dead owner's ticket is
-# dropped by the next waiter. The lock itself still releases at the step
-# boundary, so release semantics are unchanged.
+# flock(2) does not promise an order for blocked waiters, and a waiter that
+# re-enters the wait queue loses its place behind every waiter that stayed
+# resident -- under continuous arrivals that starves it to its wait budget
+# (qwen-code#14743). Take a ticket first, so only the head of line touches
+# the lock; the rest sleep. Tickets carry their owner's PID and kernel start
+# time, and a ticket whose owner is gone is dropped by the next waiter. The
+# lock itself still releases at the step boundary, so release semantics are
+# unchanged.
 #
 # Two classes share the one physical lock. `fast` is the pull-request
-# feedback lane; it is served before `normal` (approval and main full-tier
-# work), so a PR job waits at most the hold already running instead of a
-# queue of long full-tier holds (qwen-code#14962). A normal ticket that waits
-# more than SDK_JAVA_LOCK_PROMOTE_AFTER seconds (default 1200) is promoted
-# into the fast class, so continuous PR traffic cannot starve the full tier.
+# feedback lane; its tickets sort before `normal` (approval and main
+# full-tier work), so a PR job waits at most the hold already running plus
+# the one normal head already blocked in the kernel, not the full-tier
+# queue behind it (qwen-code#14962). A normal ticket that waits more than
+# SDK_JAVA_LOCK_PROMOTE_AFTER seconds (default 1200) is promoted into the
+# fast class, so continuous PR traffic cannot starve the full tier.
 #
 # Source this file and call
-# `sdk_java_lock_acquire <wait-seconds> [fast|normal]`. On success the lock
-# stays on fd 9 in the step shell, so it releases automatically at the step
-# boundary exactly like the inline `flock --wait` block did; the armed traps
-# drop the ticket on exit, interrupt or termination. On timeout the function
-# prints the pinned infrastructure-signature line and returns 1.
+# `sdk_java_lock_acquire <wait-seconds> [fast|normal]`; it returns non-zero
+# on timeout with the pinned `lock not acquired within` error.
+
+# Field 22 of /proc/<pid>/stat is the process start time in clock ticks
+# since boot, so a recycled PID can be told apart from the ticket's owner.
+# Prints nothing when /proc is unavailable; callers then trust `kill -0`.
+sdk_java_lock_owner_start() {
+  local pid="${1}"
+  sed 's/.*) //' "/proc/${pid}/stat" 2>/dev/null | awk '{print $20}' || true
+}
+
 sdk_java_lock_acquire() {
   local wait_seconds="${1:?wait seconds required}"
   local priority="${2:-normal}"
@@ -33,6 +42,10 @@ sdk_java_lock_acquire() {
   mkdir -p "${queue}"
   exec 9>"${lock}"
 
+  local self_start
+  self_start=$(sdk_java_lock_owner_start "$$")
+  self_start=${self_start:-0}
+
   # Atomic sequence: fd 8 holds the counter file and flock serializes the
   # read-increment-write. A holder killed inside this millisecond window only
   # costs one sequence number, not a stuck queue.
@@ -44,38 +57,61 @@ sdk_java_lock_acquire() {
   seq=$(tail -n 1 "${queue}/.seq" 2>/dev/null)
   seq=$((${seq:-0} + 1))
   printf '%s\n' "${seq}" >>"${queue}/.seq"
+  local ticket
+  ticket=$(printf '%s/%d-%010d-%s' "${queue}" "${rank}" "${seq}" "$$")
+  # Publish inside the critical section: a later arrival that sees an empty
+  # queue names itself head and wins out of arrival order. The ticket body
+  # records the owner's start time for the recycled-PID check.
+  printf '%s\n' "${self_start}" >"${ticket}"
   exec 8>&-
-  local seq_padded
-  seq_padded=$(printf '%010d' "${seq}")
-  local ticket="${queue}/${rank}.${seq_padded}.$$.ticket"
-  : >"${ticket}"
 
-  local start=${SECONDS} head name pid mtime remaining announced=0
-  local promoted=$((rank == 0))
+  local start=${SECONDS} head name pid owner_start current_start alive mtime
+  local age remaining last_log=-60 blocking promoted=$((rank == 0))
+  local promoted_ticket
   while true; do
-    # Drop dead owners' tickets. The 10-second mtime guard skips a ticket
-    # whose owner is between touches, and a recycled PID alone cannot clear a
-    # live waiter.
-    for head in "${queue}/"*.ticket; do
-      [[ -e ${head} ]] || continue
+    # Drop tickets whose owner is gone. A waiter waiting its turn re-touches
+    # every loop; the head cannot while it is blocked in `flock`, so the mtime
+    # arm below also bounds a ticket whose PID was recycled to a live process.
+    for head in "${queue}/"*; do
+      [[ -e ${head} && ${head##*/} != .seq ]] || continue
       name=${head##*/}
-      pid=${name%.ticket}
-      pid=${pid##*.}
-      if ! kill -0 "${pid}" 2>/dev/null; then
-        mtime=$(
-          stat -c %Y "${head}" 2>/dev/null \
-            || { stat -f %m "${head}" 2>/dev/null; } || echo 0
-        )
-        if ((${EPOCHSECONDS:-$(date +%s)} - mtime > 10)); then
-          rm -f "${head}"
+      pid=${name##*-}
+      owner_start=0
+      if [[ -s ${head} ]]; then
+        read -r owner_start <"${head}" || true
+      fi
+      if [[ ! ${owner_start} =~ ^[0-9]+$ ]]; then
+        owner_start=0
+      fi
+      mtime=$(
+        stat -c %Y "${head}" 2>/dev/null \
+          || { stat -f %m "${head}" 2>/dev/null; } || echo 0
+      )
+      age=$((${EPOCHSECONDS:-$(date +%s)} - mtime))
+      alive=0
+      if kill -0 "${pid}" 2>/dev/null; then
+        alive=1
+        # A recycled PID has a different start time from the ticket's owner.
+        if ((owner_start > 0)); then
+          current_start=$(sdk_java_lock_owner_start "${pid}")
+          if [[ -n ${current_start} && ${current_start} != "${owner_start}" ]]; then
+            alive=0
+          fi
         fi
+      fi
+      # 1800s is far above one full hold (~925s): it is the backstop for a
+      # ticket with no recorded start time, where only the PID can be checked.
+      if ((age > 1800)) ||
+        { ((age > 10)) && ((alive == 0)); }; then
+        rm -f "${head}"
       fi
     done
 
     # Age a normal ticket into the fast class so a continuous PR stream
-    # cannot starve the full tier.
+    # cannot starve the full tier. The renamed ticket keeps its sequence, so
+    # it still precedes fast tickets that arrived after it.
     if ((!promoted && SECONDS - start >= promote_after)); then
-      local promoted_ticket="${queue}/0.${seq_padded}.$$.ticket"
+      promoted_ticket=$(printf '%s/0-%010d-%s' "${queue}" "${seq}" "$$")
       if mv "${ticket}" "${promoted_ticket}" 2>/dev/null; then
         ticket="${promoted_ticket}"
         promoted=1
@@ -83,33 +119,38 @@ sdk_java_lock_acquire() {
       fi
     fi
 
-    # sed -n 1p consumes every line: head -n 1 would close the pipe early
-    # and pipefail would then fail the assignment with a SIGPIPE status.
-    head=$(printf '%s\n' "${queue}/"*.ticket | sort | sed -n '1p')
+    head=$(printf '%s\n' "${queue}/"* | grep -v '/\.seq$' | sort | sed -n '1p')
     remaining=$((wait_seconds - (SECONDS - start)))
-    if ((remaining < 0)); then
-      remaining=0
+    ((remaining < 0)) && remaining=0
+    # Head of line: one blocking wait, so this ticket enters the kernel's
+    # wait queue once and keeps its arrival position. Re-entering every few
+    # seconds would put it behind every waiter that stayed blocked.
+    blocking=0
+    if [[ ${head} == "${ticket}" && ${remaining} -gt 0 ]]; then
+      # Probe first, so the wait line is printed before blocking: a head
+      # parked behind a sibling hold used to emit nothing for the whole
+      # budget (run 39528681869's step sat in flock for 40 minutes silently).
+      if flock --nonblock 9; then
+        rm -f "${ticket}"
+        return 0
+      fi
+      blocking=1
     fi
-    # Head of line: block inside the kernel's wake race like the legacy
-    # inline `flock --wait` waiters still run elsewhere, in five-second
-    # slices so the budget stays sharp.
-    if [[ ${head} == "${ticket}" && ${remaining} -gt 0 ]] \
-      && flock --wait "$((remaining < 5 ? remaining : 5))" 9; then
-      # The traps outlive this function's locals: an EXIT trap expands its
-      # command after the function has returned, when `ticket` is gone.
-      SDK_JAVA_LOCK_TICKET="${ticket}"
-      trap 'rm -f "${SDK_JAVA_LOCK_TICKET}"' EXIT
-      trap 'rm -f "${SDK_JAVA_LOCK_TICKET}"; exit 143' TERM
-      trap 'rm -f "${SDK_JAVA_LOCK_TICKET}"; exit 130' INT
-      return 0
+    if ((SECONDS - start - last_log >= 60)); then
+      last_log=$((SECONDS - start))
+      echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${priority}, ${remaining}s left in a ${wait_seconds}s budget)"
     fi
-    if ((!announced)); then
-      announced=1
-      echo "Waiting for the sdk-java host lock as queue ticket ${seq} (${priority})"
+    if ((blocking)); then
+      if flock --wait "${remaining}" 9; then
+        # Leave the queue at acquisition: a holder needs no place in line once
+        # the kernel holds the lock, and a trap cannot see this `local` anyway.
+        rm -f "${ticket}"
+        return 0
+      fi
     fi
     if ((SECONDS - start >= wait_seconds)); then
       rm -f "${ticket}"
-      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq} (${priority})"
+      echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq} (${priority}); head of queue is ${head##*/}"
       return 1
     fi
     touch "${ticket}"

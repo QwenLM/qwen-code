@@ -237,12 +237,14 @@ impl Tool for HotkeyTool {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id,
                 element_index,
                 via_token: _,
+                ..
             } => (Some(element_index), window_id),
         };
         // delivery_mode gates whether we raise: background (default) never fronts
@@ -258,11 +260,7 @@ impl Tool for HotkeyTool {
         }
 
         let element_guard = if let (Some(index), Some(window_id)) = (element_index, window_id) {
-            match self
-                .state
-                .element_cache
-                .get_element_retained(pid, window_id, index)
-            {
+            match element_cache.get_element_retained(pid, window_id, index) {
                 Some(guard) => Some(guard),
                 None => {
                     return ToolResult::error(format!(
@@ -311,6 +309,42 @@ impl Tool for HotkeyTool {
         } else {
             None
         };
+
+        if !fg && px.is_none() && element_ptr.is_none() && apps::frontmost_pid() != Some(pid) {
+            if let (Some(wid), Some(combo)) = (
+                window_id,
+                super::menu_equivalent::Combo::parse(&modifiers, &key),
+            ) {
+                let save = key.eq_ignore_ascii_case("s")
+                    && modifiers.len() == 1
+                    && matches!(
+                        modifiers[0].to_ascii_lowercase().as_str(),
+                        "cmd" | "command" | "meta" | "super"
+                    );
+                let native = !crate::apps::bundle_id_for_pid(pid)
+                    .as_deref()
+                    .is_some_and(crate::browser::BrowserJs::supports)
+                    && !crate::browser::electron_js::ElectronJs::is_electron(pid);
+                if native {
+                    let result = tokio::task::spawn_blocking(move || {
+                        super::menu_equivalent::find(pid, &combo)
+                            .map(|item| super::menu_equivalent::run(pid, wid, item, save))
+                    })
+                    .await;
+                    match result {
+                        Ok(Some(result)) => return result,
+                        Err(error) => {
+                            return ToolResult::computer_use_error(
+                                "menu_unavailable",
+                                error.to_string(),
+                                true,
+                            )
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         // Web-content AX nodes can acknowledge AXFocused without moving the
         // renderer's real first responder. That makes a direct focus write an
