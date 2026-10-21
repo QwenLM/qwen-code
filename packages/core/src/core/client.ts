@@ -4896,9 +4896,11 @@ export class LlmClient {
           const functionResponseId = (part as Part).functionResponse?.id;
           if (!functionResponseId) continue;
           if (
-            this.loopDetector.recordToolResultByCallId(functionResponseId, [
-              part as Part,
-            ])
+            this.loopDetector.recordToolResultByCallId(
+              functionResponseId,
+              [part as Part],
+              { queueReminders: ownsExplorationBudget },
+            )
           ) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(
               undefined,

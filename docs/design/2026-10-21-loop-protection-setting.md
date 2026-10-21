@@ -97,9 +97,11 @@ carries tool results, where the exploration and todo reminders already go:
 
 Reminders of different patterns queued in the same batch go out together. A
 retry discards the attempt's queued reminders, because the replayed calls
-queue them again. A concurrent `/btw` side query neither queues nor takes the
-running turn's reminders. The reminder names the detector, the tool and what
-to change, and under `stop` it says that continuing will stop the turn.
+queue them again. A concurrent `/btw` side query neither queues, takes nor
+discards the running turn's reminders, including through its stateful tool
+results and its retries, and under `off` it records no `observed` decision for
+the turn. The reminder names the detector, the tool and what to change, and
+under `stop` it says that continuing will stop the turn.
 
 ### Telemetry
 

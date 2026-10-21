@@ -510,8 +510,8 @@ export class LoopDetectionService {
     { text: string; loopType: LoopType; detail: LoopStopDetail }
   >();
 
-  // False while a concurrent side query feeds the detectors: its calls must
-  // not queue reminders into the running turn.
+  // False while a concurrent side query feeds the detectors: its calls and
+  // retries must not queue, drop or observe the running turn's decisions.
   private queueingReminders = true;
 
   // A stop is logged as one `stopped` decision even when several detectors
@@ -577,8 +577,10 @@ export class LoopDetectionService {
     return pending.map(({ text }) => text).join('\n\n');
   }
 
-  // A retry replays the attempt's calls, which queue the reminders again.
+  // A retry replays the attempt's calls, which queue the reminders again. A
+  // side query's retry replays none of them, so it keeps them.
   private dropPendingReminders(): void {
+    if (!this.queueingReminders) return;
     for (const key of this.pendingReminders.keys()) {
       this.loopProtectionHandled.delete(key);
     }
@@ -632,7 +634,7 @@ export class LoopDetectionService {
     loopType: LoopType,
     detail: LoopStopDetail,
   ): void {
-    if (this.loopProtectionHandled.has(key)) return;
+    if (!this.queueingReminders || this.loopProtectionHandled.has(key)) return;
     this.loopProtectionHandled.add(key);
     this.logLoopProtectionDecision(loopType, 'observed', detail);
   }
@@ -724,9 +726,20 @@ export class LoopDetectionService {
    *
    * Returns true when the recorded result itself trips a detector (the
    * result-aware global-duplicate count); callers must then halt the turn
-   * the same way they do for an event-detected loop.
+   * the same way they do for an event-detected loop. `queueReminders` is as
+   * in addAndCheckHeuristicLoops.
    */
   recordToolResult(
+    toolCall: { name: string; args: object },
+    responseParts: readonly Part[],
+    { queueReminders = true }: LoopCheckOptions = {},
+  ): boolean {
+    return this.withReminderQueueing(queueReminders, () =>
+      this.runRecordToolResult(toolCall, responseParts),
+    );
+  }
+
+  private runRecordToolResult(
     toolCall: { name: string; args: object },
     responseParts: readonly Part[],
   ): boolean {
@@ -817,6 +830,7 @@ export class LoopDetectionService {
   recordToolResultByCallId(
     callId: string,
     responseParts: readonly Part[],
+    options: LoopCheckOptions = {},
   ): boolean {
     const request = this.requestByCallId.get(callId);
     if (!request) return false;
@@ -824,6 +838,7 @@ export class LoopDetectionService {
     return this.recordToolResult(
       { name: request.name, args: request.args },
       responseParts,
+      options,
     );
   }
 
@@ -926,7 +941,6 @@ export class LoopDetectionService {
         break;
       }
       case LlmEventType.Retry: {
-        this.dropPendingReminders();
         // A retry replays the failed attempt's tool calls (Turn clears
         // pendingToolCalls on retry), so drop the heuristic duplicate counters
         // to avoid firing on a duplicated replay — e.g. 3 identical calls +
@@ -954,7 +968,6 @@ export class LoopDetectionService {
         break;
       }
       case LlmEventType.ModelFallback: {
-        this.dropPendingReminders();
         // The fallback model restarts the attempt from scratch: Turn clears
         // pending tool calls and stream consumers discard the failed model's
         // buffer, so the failed model's streamed content/thought text and
@@ -1101,14 +1114,13 @@ export class LoopDetectionService {
     }
 
     // Consecutive identical tool calls (same name AND identical args) are the
-    // one repetition signal precise enough to halt unconditionally — for
-    // deterministic tools an identical call returns an identical result, so
-    // it is never productive. Promoted here from the opt-in tier so it
-    // protects every user regardless of the `skipLoopDetection` config
-    // default: the DashScope server rejects this pattern with a 400 (issue
-    // #5019) far below the per-turn cap, so the gated default left users
-    // unprotected. For stateful read tools the guard additionally requires
-    // the observed results to be unchanged (issue #9450).
+    // most precise repetition signal — for deterministic tools an identical
+    // call returns an identical result, so it is never productive. It runs
+    // here, outside the opt-in tier, so it protects every user regardless of
+    // the `skipLoopDetection` config default; model.loopProtection decides
+    // whether it reminds or stops (#14828). For stateful read tools the guard
+    // additionally requires the observed results to be unchanged (issue
+    // #9450).
     if (this.checkToolCallLoop(toolCall, key)) {
       this.loopDetected = true;
       return true;

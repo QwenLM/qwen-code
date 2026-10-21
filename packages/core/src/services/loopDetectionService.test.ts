@@ -2530,6 +2530,55 @@ ${boardState}
       expect(service.takeLoopReminder()).toContain('4 times in a row');
     });
 
+    it("keeps the turn's pending reminder on a side query's retry", () => {
+      withMode('stop');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      expect(
+        service.checkAlwaysOnSafeties(RETRY, { queueReminders: false }),
+      ).toBe(false);
+      expect(service.takeLoopReminder()).toContain('3 times in a row');
+    });
+
+    it("queues no reminder from a side query's stateful results", () => {
+      withMode('warn', { skipLoopDetection: false });
+      const args = { status: 'open' };
+      for (let i = 0; i < 6; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            toolCall('task_list', args, `side-${i}`),
+            { queueReminders: false },
+          ),
+        ).toBe(false);
+        expect(
+          service.recordToolResultByCallId(
+            `side-${i}`,
+            [fnResponse('task_list', { output: 'board' }, `side-${i}`)],
+            { queueReminders: false },
+          ),
+        ).toBe(false);
+      }
+      expect(service.takeLoopReminder()).toBeUndefined();
+      expect(decisions()).toEqual([]);
+    });
+
+    it('records no observed decision from a side query under off', () => {
+      withMode('off');
+      for (let i = 0; i < 5; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            toolCall('read_file', { file_path: 'a.txt' }),
+            { queueReminders: false },
+          ),
+        ).toBe(false);
+      }
+      expect(decisions()).toEqual([]);
+      // The pattern is not marked handled, so the turn's own streak is
+      // observed.
+      expect(same()).toBe(false);
+      expect(decisions()).toEqual([`${IDENTICAL}:observed`]);
+    });
+
     it('drops the pending reminder on retry and queues it again on replay', () => {
       withMode('stop');
       reminders(2, same);
