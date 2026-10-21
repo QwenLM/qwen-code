@@ -108,6 +108,7 @@ import {
   workspaceRegistrationId,
   WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
+import { readDaemonDiscoveries } from './daemon-discovery.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import {
   ENSURE_KEEP_ALIVE_MS,
@@ -9953,6 +9954,22 @@ describe('runQwenServe runtime startup failures', () => {
         'Restored workspace',
       ]);
       expect(restoredRemovable).toEqual([false, false, true]);
+      // `qwen daemon restart` replays only the explicit startup workspaces;
+      // the restored registration stays a removable registration.
+      expect(
+        readDaemonDiscoveries().entries.find(
+          (entry) => entry.record.primaryWorkspace === canonicalPrimary,
+        )?.record,
+      ).toMatchObject({
+        workspaces: [
+          canonicalPrimary,
+          canonicalExplicitSecondary,
+          canonicalRestoredSecondary,
+        ],
+        startupWorkspaces: [canonicalPrimary, canonicalExplicitSecondary],
+        web: false,
+        requireAuth: false,
+      });
       expect(restoredRegistrationIds).toEqual([
         [],
         [workspaceRegistrationId(canonicalExplicitSecondary)],
@@ -15583,6 +15600,62 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       vi.unstubAllEnvs();
       await started?.close();
+    }
+  });
+
+  it('admits an ephemeral desktop origin through a loopback port wildcard', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-loopback-port-')),
+    );
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          allowOrigins: ['http://127.0.0.1:*'],
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      const port = (started.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'http://127.0.0.1:54321',
+          'access-control-request-method': 'GET',
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe(
+        'http://127.0.0.1:54321',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('refuses a loopback port wildcard on a tokenless loopback bind', async () => {
+    vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            serveWebShell: false,
+            allowOrigins: ['http://127.0.0.1:*'],
+          },
+          { bridge: makeFakeBridge() },
+        ),
+      ).rejects.toThrow(/loopback port wildcard/i);
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 

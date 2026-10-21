@@ -1772,10 +1772,15 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
       const content = contentAt(result, 1);
       expect(content).toHaveLength(3);
-      // Breakpoint lands on the stable text block, not the reattach marker/image.
-      expect(content?.[0]).toMatchObject(cachedText('Stable user text'));
+      // The gateway's cache boundary is message-level, so no block inside the
+      // attachment-bearing message is marked; with no earlier conversational
+      // message, the conversation anchor degrades onto the system message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
       expect(content?.[1]).not.toHaveProperty('cache_control');
       expect(content?.[2]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
     });
 
     it('places the conversation breakpoint before the request-only memory catalog', () => {
@@ -1798,8 +1803,14 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
       const content = contentAt(result, 1);
       expect(trailingReattachPartCount(contents)).toBe(1);
-      expect(content?.[0]).toMatchObject(cachedText('what changed?'));
+      // Same message-level rule: the part carrying the regenerated catalog
+      // shares its message with the stable question, so nothing in this
+      // message is marked; the anchor degrades onto the system message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
       expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
     });
 
     it('walks back to the previous message when the whole last message is reattach', () => {
@@ -1862,7 +1873,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ]);
     });
 
-    it('walks the anchor back past a current-turn inline image to stable text', () => {
+    it('lifts the conversation breakpoint off the attachment-bearing message instead of anchoring within it', () => {
       const result = streamed(
         [
           { role: 'system', content: 'System prompt' },
@@ -1879,10 +1890,71 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         2,
       );
       const content = contentAt(result, 1);
-      // Breakpoint lands on the prompt text, not the inline image the next
-      // turn textualizes.
-      expect(content?.[0]).toMatchObject(cachedText('look at this screenshot'));
+      // A block-level anchor inside this message measures the same as no
+      // conversation breakpoint at all on the message-level gateway, so no
+      // block here is marked — the anchor moves before the whole message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
       expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+      expect(content?.[3]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
+    });
+
+    it('anchors on the assistant message preceding the attachment-bearing user message', () => {
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          { role: 'assistant', content: 'Earlier answer' },
+          {
+            role: 'user',
+            content: [
+              txt('Follow-up question'),
+              txt('Recent images reattached'),
+              reattachImageBlock,
+            ],
+          },
+        ],
+        2,
+      );
+      // The dominant interactive layout: the conversation breakpoint moves
+      // entirely before the attachment-bearing message, so the cached prefix
+      // covers the whole prior conversation.
+      expect(result.messages[1]?.content).toEqual([
+        cachedText('Earlier answer'),
+      ]);
+      const content = contentAt(result, 2);
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+    });
+
+    it('skips an empty-string tool result when stepping back off the attachment-bearing message', () => {
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          { role: 'tool', tool_call_id: 'call_1', content: '' },
+          {
+            role: 'user',
+            content: [
+              txt('Stable user text'),
+              txt('Recent images reattached'),
+              reattachImageBlock,
+            ],
+          },
+        ],
+        2,
+      );
+      // The empty tool result stays a bare string and carries no anchor.
+      expect(result.messages[1]?.content).toBe('');
+      const content = contentAt(result, 2);
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+      // With no earlier conversational content, the conversation anchor
+      // degrades to the system message.
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
     });
   });
 

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.event.JournalEventTransport;
@@ -11,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
+import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -147,6 +149,12 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<String> definitionModels;
     private final List<WebShellModelOption> modelCatalog;
     private ManagedAgentDefinitionStore definitions;
+    private ManagedSessionSkills creationSkills;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setManagedSessionSkills(ManagedSessionSkills skills) {
+        this.creationSkills = skills;
+    }
     private static final Pattern DEFINITION_REVISION = Pattern.compile(
             "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
@@ -308,6 +316,8 @@ public class ManagedAgentStore implements AgentStateStore {
             ManagedAgentProperties properties) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
+        this.creationSkills = new ManagedSessionSkills(jdbc, objectMapper,
+                new RequestDigests(), null);
         this.clock = clock;
         this.snapshots = new ManagedSnapshotStore(jdbc, objectMapper, clock, this::snapshotItems);
         this.approvalMode =
@@ -400,6 +410,19 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestedRevision, String title, List<Map<String, Object>> input,
             String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
             boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
+                approvalSelectionSupported, requestedPlanMode, planModeSupported, List.of());
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title, List<Map<String, Object>> input,
+            String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
+            boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported,
+            List<Map<String, Object>> skills) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -446,9 +469,20 @@ public class ManagedAgentStore implements AgentStateStore {
                         || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw workspaceExecutionUnavailable();
         }
-        return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
+        List<Map<String, Object>> merged = new ArrayList<>();
+        if (!skills.isEmpty() && pin.digest() != null) {
+            merged.addAll(AgentDefinitionExtensions.skills(readMap(definitions.find(tenantId, agentId,
+                    Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
+        }
+        merged.addAll(skills);
+        var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
+        Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 workspace, actorId, pin, null, planMode);
+        if (!skills.isEmpty()) {
+            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
+        }
+        return admission;
     }
 
     private boolean configuredStorage(String tenant, String storage) {
@@ -744,6 +778,10 @@ public class ManagedAgentStore implements AgentStateStore {
         ManagedReceipts.insertCreation(jdbc, tenantId,
                 ManagedWorkspaceRegistry.actorKey(tenantId, childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
+        var inheritedSkills = creationSkills.snapshot(tenantId, parentSessionId);
+        if (inheritedSkills != null) {
+            creationSkills.save(tenantId, sessionId, inheritedSkills);
+        }
         appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {

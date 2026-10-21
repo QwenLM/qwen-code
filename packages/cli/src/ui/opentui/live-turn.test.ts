@@ -148,6 +148,42 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     (live.turns[turn - 1].options as LivePromptOptions).onWaitingCall?.(call);
   }
 
+  it.each([false, true])(
+    'retains editable paste content independently from display after completion (queued: %s)',
+    async (queued) => {
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'workflow pasted body'.padEnd(1200, 'x');
+      const literal = '<system-reminder>literal</system-reminder>';
+      const displayText = `${literal}\n${placeholder}`;
+      const recallText = `${literal}\n${body}`;
+      if (queued) act(() => result.current.submit('active turn'));
+      act(() => {
+        result.current.submit(
+          `managed model-only notice\n${recallText}`,
+          undefined,
+          {
+            displayText,
+            humanInput: { text: displayText },
+            pasteExpansions: new Map([[placeholder, body]]),
+          },
+        );
+      });
+      await act(async () => {
+        for (const wake of live.waiters.splice(0)) wake();
+      });
+      await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+      const users = result.current.items.filter((item) => item.kind === 'user');
+      expect(users.at(-1)).toMatchObject({ text: displayText, recallText });
+      expect(users.at(-1)?.text).not.toContain(body);
+      expect(users.at(-1)?.recallText).not.toContain(
+        'managed model-only notice',
+      );
+    },
+  );
+
   it.each(['error', 'abort'])(
     'clears terminal approval state without another key after %s',
     async (kind) => {
@@ -372,6 +408,158 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(result.current.applyEvent).toBe(applyEvent);
     expect(result.current.resetTranscript).toBe(resetTranscript);
   });
+
+  it('keeps per-entry human intent through queued turns and never upgrades unknown entries', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const humanInput = { text: 'ultracode inspect' };
+    act(() => result.current.submit('first prompt'));
+    act(() => {
+      result.current.submit('expanded human payload', undefined, {
+        humanInput,
+        displayText: 'visible human prompt',
+      });
+      result.current.submit('unknown workflow payload');
+    });
+    expect(result.current.messageQueue).toEqual([
+      'visible human prompt',
+      'unknown workflow payload',
+    ]);
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+      await vi.waitFor(() => expect(live.turns).toHaveLength(3));
+    });
+    expect(live.turns[1]?.options).toMatchObject({ humanInput });
+    expect(live.turns[2]?.options).toMatchObject({ humanInput: undefined });
+    expect(
+      result.current.items.filter((item) => item.kind === 'user'),
+    ).toMatchObject([
+      { text: 'first prompt' },
+      { text: 'visible human prompt' },
+      { text: 'unknown workflow payload' },
+    ]);
+  });
+
+  it('pops display text and restores the model copy with only the original human members eligible', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('first prompt'));
+    act(() => {
+      result.current.submit('expanded body with ultracode', undefined, {
+        displayText: '[Pasted Content]',
+        humanInput: { text: '[Pasted Content]' },
+      });
+      result.current.submit('unknown workflow body', undefined, {
+        displayText: 'unknown visible text',
+      });
+    });
+    let popped: string | null = null;
+    act(() => {
+      popped = result.current.popQueue();
+    });
+    expect(popped).toBe('[Pasted Content]\n\nunknown visible text');
+    act(() =>
+      result.current.submit(popped!, undefined, {
+        displayText: popped!,
+        humanInput: { text: popped! },
+      }),
+    );
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+      await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    });
+    expect(live.turns[1]?.prompt).toBe(
+      'expanded body with ultracode\n\nunknown workflow body',
+    );
+    expect(live.turns[1]?.options).toMatchObject({
+      humanInput: { text: '[Pasted Content]' },
+    });
+  });
+
+  it('restores the original human descriptor when an in-flight steering read is aborted', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const humanInput = { text: 'ultracode inspect' };
+    act(() => result.current.submit('first prompt'));
+    act(() =>
+      result.current.submit('expanded payload', undefined, {
+        humanInput,
+        displayText: 'original display',
+      }),
+    );
+    const options = live.turns[0]?.options as {
+      drainSteering: () => string[];
+      restoreSteering: (texts: string[]) => void;
+    };
+    act(() => {
+      const drained = options.drainSteering();
+      expect(drained).toEqual(['expanded payload']);
+      options.restoreSteering(drained);
+    });
+    expect(result.current.messageQueue).toEqual(['original display']);
+  });
+
+  it.each([false, true])(
+    'keeps a popped paste editable after appending instructions (interrupt: %s)',
+    async (interrupt) => {
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'ultracode workflow payload'.padEnd(1200, 'x');
+      const literal = '<system-reminder>user literal</system-reminder>';
+      const displayText = `${literal}\n${placeholder}`;
+      const pasteExpansions = new Map([[placeholder, body]]);
+      act(() => result.current.submit('first prompt'));
+      act(() => {
+        result.current.submit(`${literal}\n${body}`, undefined, {
+          displayText,
+          humanInput: { text: displayText },
+          pasteExpansions,
+        });
+      });
+      const restorePastes = vi.fn();
+      act(() => {
+        expect(result.current.popQueue(new Map(), restorePastes)).toBe(
+          displayText,
+        );
+      });
+      expect(restorePastes).toHaveBeenCalledWith(
+        expect.objectContaining({ pasteExpansions, hasUnknownInput: false }),
+        expect.any(Function),
+      );
+      if (interrupt) {
+        act(() => result.current.interrupt());
+        await act(async () => {
+          for (const wake of live.waiters.splice(0)) wake();
+        });
+        await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+      }
+      const edited = `${displayText}\nappend instruction`;
+      act(() => {
+        result.current.submit(edited, undefined, {
+          displayText: edited,
+          humanInput: { text: edited },
+        });
+      });
+      await act(async () => {
+        for (const wake of live.waiters.splice(0)) wake();
+        await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+      });
+      expect(live.turns[1]?.prompt).toBe(
+        `${literal}\n${body}\nappend instruction`,
+      );
+      expect(live.turns[1]?.options).toMatchObject({
+        humanInput: { text: edited },
+      });
+      expect(result.current.items).toContainEqual(
+        expect.objectContaining({ kind: 'user', text: edited }),
+      );
+    },
+  );
 
   it('replays queued mid-turn text as the next turn, raw and with provenance', async () => {
     const { result } = renderHook(() =>

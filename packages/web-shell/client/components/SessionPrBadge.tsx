@@ -22,16 +22,26 @@ interface SessionPrBadgeProps {
 }
 
 /**
+ * The bound PRs the badge can open. Non-http(s) bindings are filtered out as
+ * a defense-in-depth measure on top of the daemon-side validators; callers
+ * that lay out around the badge use this to know whether it renders.
+ */
+export function openableSessionPrs(
+  prs: DaemonSessionPrInfo[],
+): DaemonSessionPrInfo[] {
+  return prs.filter((pr) => isExternalOpenUrl(pr.url));
+}
+
+/**
  * The `#N (+M)` pull-request badge shared by the sidebar session row, the
  * session overview card, and the picker dialogs. Renders the latest bound
  * PR with an overflow count and opens it through the desktop-aware
- * external-link opener. Non-http(s) bindings are filtered out as a
- * defense-in-depth measure on top of the daemon-side validators.
+ * external-link opener.
  */
 export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
-  const openable = prs.filter((pr) => isExternalOpenUrl(pr.url));
+  const openable = openableSessionPrs(prs);
   if (openable.length === 0) return null;
   const latest = openable[openable.length - 1];
   const multiple = openable.length > 1;
