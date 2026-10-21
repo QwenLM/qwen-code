@@ -855,7 +855,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
   if (record) {
     if (argv['save-token']) {
       try {
-        writeDaemonToken(record.port, token!);
+        writeDaemonToken(record.port, record.pid, token!);
       } catch (error) {
         writeStderrLine(
           `qwen daemon: could not persist the token: ${
@@ -1172,8 +1172,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
     const { record } = entry;
     const health = await probeHealth(record);
     if (health === 'stale') {
-      removeDaemonDiscovery(record.port, { expectedPid: record.pid });
-      removeDaemonToken(record.port);
+      if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+        removeDaemonToken(record.port, record.pid);
+      }
       writeStdoutLine(
         `qwen daemon: removed stale record for port ${record.port} (pid ${record.pid} is gone).`,
       );
@@ -1238,8 +1239,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
     }
     const exited = await waitForExit(record.pid, STOP_TIMEOUT_MS);
     if (exited) {
-      removeDaemonDiscovery(record.port, { expectedPid: record.pid });
-      removeDaemonToken(record.port);
+      if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+        removeDaemonToken(record.port, record.pid);
+      }
       writeStdoutLine(
         `qwen daemon: ${
           process.platform === 'win32' ? 'hard-killed' : 'stopped'
@@ -1255,8 +1257,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
       }
       const forced = await waitForExit(record.pid, STOP_TIMEOUT_MS);
       if (forced) {
-        removeDaemonDiscovery(record.port, { expectedPid: record.pid });
-        removeDaemonToken(record.port);
+        if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+          removeDaemonToken(record.port, record.pid);
+        }
         writeStdoutLine(
           `qwen daemon: force-stopped port ${record.port} (pid ${record.pid}).`,
         );
@@ -1292,7 +1295,7 @@ async function handleToken(argv: TokenArgs): Promise<void> {
 
   const record = selected[0]!.record;
   if (argv.remove === true) {
-    const removed = removeDaemonToken(record.port);
+    const removed = removeDaemonToken(record.port, record.pid);
     if (!removed) {
       writeStderrLine(
         `qwen daemon: no persisted token for port ${record.port}.`,
@@ -1308,7 +1311,7 @@ async function handleToken(argv: TokenArgs): Promise<void> {
     return;
   }
 
-  const token = readDaemonToken(record.port);
+  const token = readDaemonToken(record.port, record.pid);
   if (!token) {
     writeStderrLine(
       `qwen daemon: no persisted token for port ${record.port}; start with --save-token or use QWEN_SERVER_TOKEN.`,

@@ -92,18 +92,20 @@ export function daemonDiscoveryFilePath(
 
 export function daemonTokenFilePath(
   port: number,
+  pid: number,
   dir: string = resolveDaemonDiscoveryDir(),
 ): string {
-  return path.join(dir, `${RECORD_PREFIX}${port}.token`);
+  return path.join(dir, `${RECORD_PREFIX}${port}-${pid}.token`);
 }
 
 /**
- * Opt-in token persistence. The file sits beside the 0600 discovery record,
- * is readable only by its owner, and is never referenced by the record or
- * written to the daemon log.
+ * Opt-in token persistence. The file is scoped to the daemon instance's pid,
+ * sits beside the 0600 discovery record, and is never referenced by the
+ * record or written to the daemon log.
  */
 export function writeDaemonToken(
   port: number,
+  pid: number,
   token: string,
   dir: string = resolveDaemonDiscoveryDir(),
 ): string {
@@ -111,7 +113,7 @@ export function writeDaemonToken(
     throw new TypeError('A daemon token cannot be empty.');
   }
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const target = daemonTokenFilePath(port, dir);
+  const target = daemonTokenFilePath(port, pid, dir);
   fs.writeFileSync(target, `${token}\n`, { mode: 0o600 });
   if (process.platform !== 'win32') {
     try {
@@ -125,10 +127,11 @@ export function writeDaemonToken(
 
 export function readDaemonToken(
   port: number,
+  pid: number,
   dir: string = resolveDaemonDiscoveryDir(),
 ): string | undefined {
   try {
-    return fs.readFileSync(daemonTokenFilePath(port, dir), 'utf8').trim();
+    return fs.readFileSync(daemonTokenFilePath(port, pid, dir), 'utf8').trim();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;
@@ -137,10 +140,11 @@ export function readDaemonToken(
 
 export function removeDaemonToken(
   port: number,
+  pid: number,
   dir: string = resolveDaemonDiscoveryDir(),
 ): boolean {
   try {
-    fs.unlinkSync(daemonTokenFilePath(port, dir));
+    fs.unlinkSync(daemonTokenFilePath(port, pid, dir));
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
