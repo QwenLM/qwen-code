@@ -14,6 +14,10 @@ class StoreFaultGateTest {
     private static final byte[] EVENT = ("{\"managedSession\":{\"kind\":\"domain.committed\","
             + "\"payload\":{\"domain\":\"hook_execution\",\"recordRef\":{\"resourceId\":\"r1\"}}}}")
             .getBytes(StandardCharsets.UTF_8);
+    private static final byte[] REGISTRATION_EVENT = ("{\"managedSession\":{\"kind\":"
+            + "\"domain.committed\",\"payload\":{\"domain\":\"hook_registration\","
+            + "\"recordRef\":{\"resourceId\":\"r2\"}}}}")
+            .getBytes(StandardCharsets.UTF_8);
 
     @AfterEach
     void clear() {
@@ -94,6 +98,39 @@ class StoreFaultGateTest {
         StoreFaultGate.INSTANCE.afterApply(
                 EVENT, record("__plan__", "settled", "SessionStart"));
         assertThat(StoreFaultGate.INSTANCE.attempts()).isZero();
+    }
+
+    @Test
+    void registrationAckModeSkipsTheAdmissionCommit() {
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_REGISTRATION_SETTLED, null);
+        StoreFaultGate.INSTANCE.inspect(
+                REGISTRATION_EVENT, registration("admitted"));
+        assertThat(StoreFaultGate.INSTANCE.attempts()).isZero();
+    }
+
+    @Test
+    void registrationAckModeThrowsAfterTheSettleLands() {
+        StoreFaultGate.INSTANCE.armAck(
+                StoreFaultGate.Phase.HOOK_REGISTRATION_SETTLED, null);
+        StoreFaultGate.INSTANCE.inspect(
+                REGISTRATION_EVENT, registration("settled"));
+        assertThat(StoreFaultGate.INSTANCE.attempts()).isZero();
+        assertThatThrownBy(() -> StoreFaultGate.INSTANCE.afterApply(
+                REGISTRATION_EVENT, registration("settled")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Store ack lost");
+        assertThat(StoreFaultGate.INSTANCE.attempts()).isEqualTo(1);
+    }
+
+    private static Function<String, StoredResource> registration(
+            String state) {
+        byte[] bytes = ("{\"registrationId\":\"occ-2\",\"catalogId\":\"fg13-hooks\","
+                + "\"catalogRevision\":1,\"run\":{\"state\":\"" + state
+                + "\",\"execution\":null}}")
+                .getBytes(StandardCharsets.UTF_8);
+        return id -> new StoredResource(id, "managed-hook-registration", 1,
+                bytes.length, "sha256:x", bytes);
     }
 
     private static Function<String, StoredResource> record(
