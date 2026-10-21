@@ -130,6 +130,20 @@ describe('Managed file reference snapshots', () => {
     expect(current.error).toBe('Workspace storage is unavailable.');
   });
 
+  it('still reports a 409 probe failure whose code is not the capability refusal', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(new Error('Workspace file is unavailable.'), {
+        status: 409,
+        code: 'workspace_file_unavailable',
+      }),
+    );
+    await render();
+    // The suppression keys on the code, not the status: a fenced or draining
+    // Workspace answers this same probe with 409 too, and must still surface.
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBe('Workspace file is unavailable.');
+  });
+
   it('still surfaces an unsupported refusal after the mount probe succeeded', async () => {
     await render();
     vi.mocked(provider.workspaceFiles!.read).mockRejectedValueOnce(

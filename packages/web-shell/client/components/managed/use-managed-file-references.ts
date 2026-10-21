@@ -27,11 +27,7 @@ function object(value: unknown): Record<string, unknown> {
 // and reports nothing; a refusal later in the Session still surfaces, because
 // the same code also covers a broker that failed mid-request.
 function isFileAccessUnsupported(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as { code?: unknown }).code === 'workspace_files_unsupported'
-  );
+  return object(error).code === 'workspace_files_unsupported';
 }
 
 export function useManagedFileReferences(
