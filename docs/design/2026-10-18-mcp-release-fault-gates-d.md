@@ -78,6 +78,6 @@ Mutation witnesses, each rebuilt into the bundle the case runs (`hosted-mcp-sess
 
 Each mutant was rebuilt into `dist/cli.js` and run against the single case; the unmutated control rebuilt afterwards is green.
 
-Budget: the case measures 9.1 s inside the eight-case class run (94.5 s) on JDK 21, MySQL 8.4.6 and Linux aarch64. It adds 18 s (2x) to the shared healthy sum (9862 → 9880 s), so the `hosted-harness-mysql` fork moves to 10480 s and the 185-minute Verify step still wraps it (11080 s of fork plus wrap); the job ceiling stays 288. The `hosted-mcp-gates` 1200 s profile and the artifact root `target/fg12-cases/fg12d/` are unchanged.
+Budget: the case measures 9.1 s inside the eight-case class run (94.5 s) on JDK 21, MySQL 8.4.6 and Linux aarch64. It adds 18 s (2x) to the shared healthy sum (9871 → 9889 s), so the `hosted-harness-mysql` fork moves to 10489 s and the 185-minute Verify step still wraps it (11089 s of fork plus wrap); the job ceiling stays 288. The `hosted-mcp-gates` 1200 s profile and the artifact root `target/fg12-cases/fg12d/` are unchanged.
 
 Not covered: a pre-dispatch cancel of a configuration (configurations are cancelled only by `reconcileEffects()` during a close) and an MCP tool call (tool calls ride the ordinary tool lifecycle, not `mcp_operation`).

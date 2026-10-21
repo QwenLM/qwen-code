@@ -567,12 +567,14 @@
                                  fork 10328 s, Verify 183 minutes. The FG11d
                                  close-queued cell adds 134 s (2x its measured
                                  67.2 s): healthy 9862 s, fork 10462 s, Verify
-                                 185 minutes. The FG12d cancel-before-dispatch
-                                 cell adds 18 s (2x its measured 9.1 s):
-                                 healthy 9880 s, fork 10480 s, and the
-                                 185-minute step still wraps (11080 s of fork
-                                 plus wrap). -->
-                            <forkedProcessTimeoutInSeconds>10480</forkedProcessTimeoutInSeconds>
+                                 185 minutes. The FG11d close-in-flight refusal
+                                 cell adds 9 s (2x its measured 4.5 s): healthy
+                                 9871 s, fork 10471 s, Verify 185 minutes. The
+                                 FG12d cancel-before-dispatch cell adds 18 s
+                                 (2x its measured 9.1 s): healthy 9889 s, fork
+                                 10489 s, and the 185-minute step still wraps
+                                 (11089 s of fork plus wrap). -->
+                            <forkedProcessTimeoutInSeconds>10489</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
