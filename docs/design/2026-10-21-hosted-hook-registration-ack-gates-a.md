@@ -83,5 +83,5 @@ in ack mode the fault lands only on the settle.
 The `hosted-harness-mysql` lane on Linux with MySQL 8.4 and a delegated
 cgroup v2 root is the evidence. `managed-agent-gate.yml` selects the `fast`
 tier on `pull_request`; the full suite runs on the first maintainer approval
-of the head commit. The cell adds 150 s to the shared fork: healthy 10489 s,
-fork 11089 s, Verify 195 minutes.
+of the head commit. The cell adds 150 s to the shared fork: healthy 10500 s,
+fork 11100 s, Verify 195 minutes.
