@@ -441,7 +441,8 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 Harness. When it is blank and the store listener — the internal listener when
 `internal-server.port` is set, otherwise the public one — binds a blank,
 `127.0.0.1`, `0.0.0.0`, `::` or `::1` address on a fixed port, the server
-uses that listener's loopback URL. Any other listener needs an explicit URL.
+uses that listener's loopback `http://` URL. A public listener that serves TLS
+through `server.ssl`, or any other listener, needs an explicit URL.
 When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript

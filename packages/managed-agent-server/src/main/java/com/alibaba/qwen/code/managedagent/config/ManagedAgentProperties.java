@@ -8,7 +8,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.convert.DurationUnit;
+import org.springframework.boot.web.server.Ssl;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.env.Environment;
 
@@ -194,7 +196,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 : environment.getProperty("server.port", Integer.class, 8080);
         String address = internal ? internalServer.getAddress()
                 : environment.getProperty("server.address", "");
-        if (port <= 0) {
+        // The internal listener is always plaintext; a TLS public listener
+        // needs a URL whose certificate the Harness accepts.
+        if (port <= 0 || !internal
+                && Ssl.isEnabled(Binder.get(environment).bind("server.ssl", Ssl.class).orElse(null))) {
             return "";
         }
         return switch (address) {

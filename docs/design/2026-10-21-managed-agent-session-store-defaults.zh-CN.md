@@ -46,7 +46,7 @@ Store 开启且 `session-store.base-url` 为空时，`ManagedAgentProperties` �
 - `internal-server.port` 为正数时，用独立内部监听（`internal-server.address` 和 `internal-server.port`）；
 - 否则用公共监听（`server.address`，以及 `server.port`，缺省为 Spring Boot 默认的 `8080`）。
 
-地址为空、`0.0.0.0`、`::` 或 `127.0.0.1` 时 URL 为 `http://127.0.0.1:<port>`，地址为 `::1` 时为 `http://[::1]:<port>`。其他地址或非正端口（例如测试用的随机端口）不推导，原有启动拒绝仍要求显式 URL。loopback 字面地址满足现有的明文传输检查和内部端口检查，因此其他校验不变。
+地址为空、`0.0.0.0`、`::` 或 `127.0.0.1` 时 URL 为 `http://127.0.0.1:<port>`，地址为 `::1` 时为 `http://[::1]:<port>`。其他地址或非正端口（例如测试用的随机端口）不推导，原有启动拒绝仍要求显式 URL。提供 TLS 的公共监听同样不推导：Spring Boot 在 `server.ssl` 已绑定且启用时开启 TLS，推导出的 URL 却是明文，而 HTTPS URL 必须使用证书覆盖的主机名。独立内部监听始终是明文，因此在 TLS 公共监听之后它仍然推导。loopback 字面地址满足现有的明文传输检查和内部端口检查，因此其他校验不变。
 
 推导需要 Spring `Environment` 来读取 `server.*`。preflight 在没有 Spring 上下文的情况下绑定配置，因此现在把它的 environment 传给绑定出的配置对象。不带 environment 的 `new ManagedAgentProperties()` 不推导 URL。
 
@@ -88,7 +88,7 @@ URL 或 ID 为空时的启动拒绝消息也会给出要设置的变量。
 
 ## 验证计划
 
-- `ManagedAgentProperties` 单元测试：`application.yml` 默认值跟随 Harness，显式 `false` 仍然优先；公共监听和内部监听、每种接受的地址形式以及 IPv6 loopback 都能推导 URL；指定的非 loopback 地址和端口 `0` 时 URL 保持为空；显式值从不被替换；workspace ID 跟随 Broker ID，否则取规范化 cwd 哈希，并与 Broker 自身的解析一致。
+- `ManagedAgentProperties` 单元测试：`application.yml` 默认值跟随 Harness，显式 `false` 仍然优先；公共监听和内部监听、每种接受的地址形式以及 IPv6 loopback 都能推导 URL；指定的非 loopback 地址、端口 `0` 和提供 TLS 的公共监听时 URL 保持为空，而 TLS 公共监听之后的内部监听仍然推导；显式值从不被替换；workspace ID 跟随 Broker ID，否则取规范化 cwd 哈希，并与 Broker 自身的解析一致。
 - preflight 测试：`session-store` 行报告 `SKIP`、`FAIL` 和 `PASS`，且 preflight 通过其 environment 推导 URL。
 - 模板测试：bootstrap 输出和 `server.env.example` 不再包含被删除的变量，并设置了 Workspace 目录。
 - 模块验证：在 `packages/managed-agent-server` 中运行 `mvn verify`。

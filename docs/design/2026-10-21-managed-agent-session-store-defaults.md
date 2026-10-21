@@ -46,7 +46,7 @@ When the store is enabled and `session-store.base-url` is blank, `ManagedAgentPr
 - the dedicated internal listener (`internal-server.address` and `internal-server.port`) when `internal-server.port` is positive;
 - otherwise the public listener (`server.address`, and `server.port` with the Spring Boot default `8080`).
 
-The URL is `http://127.0.0.1:<port>` when the address is blank, `0.0.0.0`, `::` or `127.0.0.1`, and `http://[::1]:<port>` for `::1`. Any other address, or a non-positive port (for example a random test port), derives nothing, and the existing startup refusal still asks for an explicit URL. A loopback literal satisfies the existing plaintext-transport and internal-port checks, so no other validation changes.
+The URL is `http://127.0.0.1:<port>` when the address is blank, `0.0.0.0`, `::` or `127.0.0.1`, and `http://[::1]:<port>` for `::1`. Any other address, or a non-positive port (for example a random test port), derives nothing, and the existing startup refusal still asks for an explicit URL. A public listener that serves TLS also derives nothing: Spring Boot enables TLS when `server.ssl` is bound and enabled, the derived URL would be plaintext, and an HTTPS URL must name a host the certificate covers. The dedicated internal listener is always plaintext, so it still derives behind a TLS public listener. A loopback literal satisfies the existing plaintext-transport and internal-port checks, so no other validation changes.
 
 Derivation needs the Spring `Environment` to read `server.*`. Preflight binds without a Spring context, so it now passes its environment to the bound properties. A plain `new ManagedAgentProperties()` without an environment derives no URL.
 
@@ -88,7 +88,7 @@ The startup refusal for a blank URL or ID also names the variables to set.
 
 ## Validation plan
 
-- Unit tests on `ManagedAgentProperties`: the `application.yml` default follows the Harness and an explicit `false` still wins; the URL derives for the public and internal listeners, each accepted address form and the IPv6 loopback; it stays blank for a specific non-loopback address and for port `0`; explicit values are never replaced; the workspace ID follows the Broker ID, otherwise the canonical cwd hash, and matches the Broker's own resolution.
+- Unit tests on `ManagedAgentProperties`: the `application.yml` default follows the Harness and an explicit `false` still wins; the URL derives for the public and internal listeners, each accepted address form and the IPv6 loopback; it stays blank for a specific non-loopback address, for port `0` and for a TLS public listener, while the internal listener behind a TLS public one still derives; explicit values are never replaced; the workspace ID follows the Broker ID, otherwise the canonical cwd hash, and matches the Broker's own resolution.
 - Preflight tests: the `session-store` row reports `SKIP`, `FAIL` and `PASS`, and preflight derives the URL through its environment.
 - Template tests: the bootstrap output and `server.env.example` no longer carry the removed variables and set the Workspace directory.
 - Module verification: `mvn verify` in `packages/managed-agent-server`.

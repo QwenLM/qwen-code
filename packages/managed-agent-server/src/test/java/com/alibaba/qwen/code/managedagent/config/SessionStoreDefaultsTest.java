@@ -65,12 +65,21 @@ class SessionStoreDefaultsTest {
                 "qwen.managed-agent.internal-server.port=4190");
         assertBaseUrl("http://[::1]:4190", "qwen.managed-agent.internal-server.port=4190",
                 "qwen.managed-agent.internal-server.address=::1");
+        // The internal listener stays plaintext behind a TLS public one.
+        assertBaseUrl("http://127.0.0.1:4190", "server.ssl.bundle=web",
+                "qwen.managed-agent.internal-server.port=4190");
+        assertBaseUrl("http://127.0.0.1:8080", "server.ssl.key-store=classpath:server.p12",
+                "server.ssl.enabled=false");
     }
 
     @Test
     void leavesTheBaseUrlBlankWhenNoLoopbackUrlReachesTheListener() {
         assertBaseUrl("", "server.address=10.0.0.5");
         assertBaseUrl("", "server.port=0");
+        // A TLS public listener refuses plaintext; its URL must name a host
+        // the certificate covers.
+        assertBaseUrl("", "server.ssl.key-store=classpath:server.p12");
+        assertBaseUrl("", "server.ssl.bundle=web");
         assertBaseUrl("", "qwen.managed-agent.internal-server.port=4190",
                 "qwen.managed-agent.internal-server.address=10.0.0.5");
         ManagedAgentProperties plain = enabledStore();

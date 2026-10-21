@@ -295,6 +295,28 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
+    void failsTheDerivedStoreUrlOfATlsListener(@TempDir Path workspace) {
+        var environment = new StandardEnvironment();
+        environment.getPropertySources().addFirst(
+                new org.springframework.core.env.MapPropertySource("test",
+                        java.util.Map.of(
+                                "QWEN_MANAGED_AGENT_HARNESS_ENABLED", "true",
+                                "QWEN_MANAGED_AGENT_WORKSPACE_CWD",
+                                workspace.toString(),
+                                "server.ssl.bundle", "web")));
+        List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
+        ManagedAgentPreflight.loadConfiguration(environment, List.of(),
+                checks);
+        ManagedAgentProperties properties =
+                ManagedAgentPreflight.bind(environment, checks);
+        ManagedAgentPreflight.startupValidationCheck(properties);
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.sessionStoreCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertEquals("base URL is empty", check.detail());
+    }
+
+    @Test
     void requiresTheSessionStoreForWorkspaceFiles() {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setEnabled(true);
