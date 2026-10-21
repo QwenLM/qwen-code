@@ -11,7 +11,7 @@ import chalk from 'chalk';
 import prompts from 'prompts';
 import stripAnsi from 'strip-ansi';
 import { t } from '../../i18n/index.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 /**
  * Requests consent from the user to perform an action, by reading a Y/n
@@ -113,17 +113,35 @@ async function promptForConsentNonInteractive(
 
   return new Promise((resolve) => {
     let answered = false;
-    // EOF on a stdin that is not a terminal closes the interface without ever
-    // invoking the question callback. Left unhandled, the pending promise is
-    // simply dropped and the process exits 0 having printed a consent prompt
-    // and done nothing — a refused operation reports success. Fail closed.
-    rl.once('close', () => {
-      if (!answered) resolve(false);
-    });
-    rl.question(prompt, (answer) => {
+    const finish = (value: boolean): void => {
+      if (answered) return;
       answered = true;
       rl.close();
-      resolve(['y', ''].includes(answer.trim().toLowerCase()));
+      resolve(value);
+    };
+    // readline emits `line` for a final unterminated line but skips the
+    // question callback once the interface is closing, so `printf 'y' |
+    // qwen ...` would otherwise read as a refusal.
+    rl.once('line', (line: string) => {
+      finish(['y', ''].includes(line.trim().toLowerCase()));
+    });
+    // EOF on a stdin that is not a terminal closes the interface without an
+    // answer. Left unhandled, the pending promise is dropped and the process
+    // exits 0 having installed nothing — a refusal reported as success. An
+    // explicit "n" takes the same branch, so name the cause; the command's own
+    // "Installation cancelled" line would read as a decline that never
+    // happened.
+    rl.once('close', () => {
+      if (answered) return;
+      writeStderrLine(
+        t(
+          'Could not read an answer from stdin (input closed); treating this as a refusal.',
+        ),
+      );
+      finish(false);
+    });
+    rl.question(prompt, (answer) => {
+      finish(['y', ''].includes(answer.trim().toLowerCase()));
     });
   });
 }

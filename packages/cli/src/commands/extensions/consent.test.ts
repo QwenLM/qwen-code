@@ -499,25 +499,37 @@ describe('requestChoicePluginNonInteractive', () => {
 
 describe('requestConsentNonInteractive', () => {
   /**
-   * A stand-in for readline's Interface: `once`/`emit` plus the two calls the
-   * consent prompt makes. `answer === undefined` models stdin at EOF, where
-   * readline closes without ever invoking the question callback.
+   * A stand-in for readline's Interface: `once`/`emit` plus the calls the
+   * consent prompt makes. `undefined` models stdin at EOF (close with no
+   * answer); `newline: false` models a final line the terminal never
+   * newline-terminated, which readline delivers as a `line` event instead of
+   * the question callback.
    */
-  const fakeInterface = (answer: string | undefined) => {
-    const handlers = new Map<string, Array<() => void>>();
+  const fakeInterface = (
+    answer: string | undefined,
+    { newline = true }: { newline?: boolean } = {},
+  ) => {
+    type Handler = (value?: string) => void;
+    const handlers = new Map<string, Handler[]>();
     const fake = {
-      once(event: string, cb: () => void) {
+      once(event: string, cb: Handler) {
         handlers.set(event, [...(handlers.get(event) ?? []), cb]);
         return fake;
       },
-      emit(event: string) {
-        for (const cb of handlers.get(event) ?? []) cb();
+      emit(event: string, value?: string) {
+        for (const cb of handlers.get(event) ?? []) cb(value);
         handlers.delete(event);
       },
       question(_prompt: string, cb: (value: string) => void) {
         setImmediate(() => {
-          if (answer === undefined) fake.emit('close');
-          else cb(answer);
+          if (answer === undefined) {
+            fake.emit('close');
+          } else if (newline) {
+            cb(answer);
+          } else {
+            fake.emit('line', answer);
+            fake.emit('close');
+          }
         });
       },
       close() {
@@ -536,8 +548,27 @@ describe('requestConsentNonInteractive', () => {
     // prompt is printed, readline closes at EOF, and the command used to exit
     // 0 having installed nothing. A refused operation must not report success.
     readlineMock.createInterface.mockReturnValue(fakeInterface(undefined));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     await expect(requestConsentNonInteractive('consent?')).resolves.toBe(false);
+
+    // The cause is named; the command's own cancellation line would read as a
+    // decline that never happened.
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('Could not read an answer from stdin'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('accepts an answer that never got a newline (#15037 review)', async () => {
+    // `printf 'y' | qwen extensions install …` reaches readline as a final
+    // unterminated line: the question callback is skipped once the interface
+    // closes, but the `line` event still carries the answer.
+    readlineMock.createInterface.mockReturnValue(
+      fakeInterface('y', { newline: false }),
+    );
+
+    await expect(requestConsentNonInteractive('consent?')).resolves.toBe(true);
   });
 
   it.each([
