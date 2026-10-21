@@ -14,7 +14,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import * as childProcess from 'node:child_process';
+import { execFile, execFileSync } from 'child_process';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { InputPromptProps } from './input-prompt.js';
 import type { TextareaRenderable } from '@opentui/core';
@@ -108,6 +108,11 @@ const mocks = vi.hoisted(() => {
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
   return { state, buildJsxRuntime };
+});
+
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return { ...actual, execFile: vi.fn(), execFileSync: vi.fn(() => '') };
 });
 
 vi.mock('@opentui/core', () => ({
@@ -256,6 +261,8 @@ const settings = {
 
 describe('startOpenTuiUI fallback contract', () => {
   beforeEach(() => {
+    vi.mocked(execFile).mockReset();
+    vi.mocked(execFileSync).mockReset().mockReturnValue('');
     setSetting.mockClear();
     mocks.state.sidecarRejects = false;
     mocks.state.cleanups = [];
@@ -375,9 +382,7 @@ describe('startOpenTuiUI fallback contract', () => {
   });
 
   it('connects actual Vim paste import decisions to the current composer', async () => {
-    const clipboard = vi
-      .spyOn(childProcess, 'execFileSync')
-      .mockReturnValue('X');
+    const clipboard = vi.mocked(execFileSync).mockReturnValue('X');
     try {
       await withEntryApp(async () => {
         await act(async () => mocks.state.appProps!.onToggleVim!());
@@ -425,7 +430,7 @@ describe('startOpenTuiUI fallback contract', () => {
         expect(invalidateImportedInput).toHaveBeenCalledTimes(1);
       });
     } finally {
-      clipboard.mockRestore();
+      clipboard.mockReset().mockReturnValue('');
     }
   });
 

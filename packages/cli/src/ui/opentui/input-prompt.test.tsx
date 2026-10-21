@@ -28,7 +28,7 @@ import type { TextareaRenderable } from '@opentui/core';
 import { render, screen, waitFor } from '@testing-library/react';
 import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import * as childProcess from 'node:child_process';
+import { execFile, execFileSync } from 'child_process';
 import { join } from 'node:path';
 import { ApprovalMode, Storage, type Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -302,6 +302,11 @@ const mocks = vi.hoisted(() => {
   return { state, renderer, buildJsxRuntime };
 });
 
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return { ...actual, execFile: vi.fn(), execFileSync: vi.fn(() => '') };
+});
+
 vi.mock('../hooks/useShellHistory.js', () => ({
   useShellHistory: () => ({
     history: mocks.state.shellHistory,
@@ -384,6 +389,8 @@ vi.mock('../utils/clipboardUtils.js', () => ({
 }));
 
 beforeEach(() => {
+  vi.mocked(execFile).mockReset();
+  vi.mocked(execFileSync).mockReset().mockReturnValue('');
   mocks.state.shellHistory = [];
   mocks.state.addShellCommand.mockClear();
   mocks.state.previousShellCommand.mockReset().mockReturnValue(null);
@@ -4128,9 +4135,7 @@ describe('Vim composer ownership', () => {
   ])(
     'Vim $key with clipboard "$pasted" invalidates only an actual import',
     async ({ key, pasted, text }) => {
-      const clipboard = vi
-        .spyOn(childProcess, 'execFileSync')
-        .mockReturnValue(pasted);
+      const clipboard = vi.mocked(execFileSync).mockReturnValue(pasted);
       try {
         const composerHandle = {
           current: null as OpenTuiComposerHandle | null,
@@ -4174,7 +4179,7 @@ describe('Vim composer ownership', () => {
               },
         });
       } finally {
-        clipboard.mockRestore();
+        clipboard.mockReset().mockReturnValue('');
       }
     },
   );
