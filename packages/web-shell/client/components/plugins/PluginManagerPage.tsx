@@ -22,12 +22,20 @@ interface PluginManagerPageProps {
   onClose: () => void;
   onUseSkill: (name: string) => void;
   initialFocusRef?: Ref<HTMLButtonElement>;
+  initialTab?: PluginTab;
+  skillsWorkspaceCwd?: string;
+  onSkillsWorkspaceChange?: (cwd: string) => void;
+  managedSkills?: boolean;
 }
 
 export function PluginManagerPage({
   onClose,
   onUseSkill,
   initialFocusRef,
+  initialTab = 'extensions',
+  skillsWorkspaceCwd,
+  onSkillsWorkspaceChange,
+  managedSkills = false,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -58,11 +66,14 @@ export function PluginManagerPage({
       'workspace_skills_config_runtime',
     ) === true;
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
-    () => defaultWorkspaceCwd,
+    () => skillsWorkspaceCwd ?? defaultWorkspaceCwd,
   );
-  const [activeTab, setActiveTab] = useState<PluginTab>('extensions');
+  const [activeTab, setActiveTab] = useState<PluginTab>(initialTab);
   const [detailOpen, setDetailOpen] = useState(false);
   const [pageRevision, setPageRevision] = useState(0);
+  const skillsWorkspace = splitSkillsRuntimeAvailable
+    ? selectedWorkspaceCwd
+    : workspace.workspaceCwd;
 
   useEffect(() => {
     if (
@@ -75,6 +86,11 @@ export function PluginManagerPage({
     }
     setSelectedWorkspaceCwd(defaultWorkspaceCwd);
   }, [defaultWorkspaceCwd, selectedWorkspaceCwd, workspaces]);
+
+  useEffect(() => {
+    if (activeTab === 'skills' && skillsWorkspace)
+      onSkillsWorkspaceChange?.(skillsWorkspace);
+  }, [activeTab, onSkillsWorkspaceChange, skillsWorkspace]);
 
   const resetToRoot = useCallback(() => {
     setDetailOpen(false);
@@ -130,18 +146,41 @@ export function PluginManagerPage({
       {!detailOpen ? (
         <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center justify-between gap-3 border-b bg-background px-5 py-3">
           <TabsList className="h-8" aria-label={t('plugins.sections')}>
-            <TabsTrigger ref={initialFocusRef} value="extensions">
+            <TabsTrigger
+              ref={activeTab === 'extensions' ? initialFocusRef : undefined}
+              value="extensions"
+            >
               {t('plugins.extensions')}
             </TabsTrigger>
-            <TabsTrigger value="mcp">{t('plugins.mcp')}</TabsTrigger>
-            <TabsTrigger value="skills">{t('plugins.skills')}</TabsTrigger>
-            <TabsTrigger value="agents">{t('plugins.agents')}</TabsTrigger>
+            <TabsTrigger
+              ref={activeTab === 'mcp' ? initialFocusRef : undefined}
+              value="mcp"
+            >
+              {t('plugins.mcp')}
+            </TabsTrigger>
+            <TabsTrigger
+              ref={activeTab === 'skills' ? initialFocusRef : undefined}
+              value="skills"
+            >
+              {t('plugins.skills')}
+            </TabsTrigger>
+            <TabsTrigger
+              ref={activeTab === 'agents' ? initialFocusRef : undefined}
+              value="agents"
+            >
+              {t('plugins.agents')}
+            </TabsTrigger>
           </TabsList>
           {workspaceSelect(false)}
         </div>
       ) : null}
 
       <TabsContent value={activeTab} className="mt-0">
+        {activeTab === 'skills' && managedSkills && (
+          <p className="my-2 text-sm text-muted-foreground">
+            {t('managed.creationSkillsFromSettings')}
+          </p>
+        )}
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
             key={`extensions-${pageRevision}`}
@@ -154,11 +193,7 @@ export function PluginManagerPage({
             onClose={onClose}
             onUseSkill={onUseSkill}
             embedded={embedded}
-            workspaceCwd={
-              splitSkillsRuntimeAvailable
-                ? selectedWorkspaceCwd
-                : workspace.workspaceCwd
-            }
+            workspaceCwd={skillsWorkspace}
             workspaceControl={workspaceSelect(true)}
           />
         ) : activeTab === 'agents' ? (

@@ -277,6 +277,27 @@ function sessionWriterRpcError(err: unknown):
   };
 }
 
+function withGeneratedUiReceipt(
+  generatedUi: BridgeRestoredSession['generatedUi'],
+  state: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const { generatedUi: _stateGeneratedUi, ...response } = state;
+  const meta = isObject(response['_meta']) ? response['_meta'] : undefined;
+  const { generatedUi: _stateGeneratedUiMeta, ...publicMeta } = meta ?? {};
+  return {
+    ...response,
+    ...(generatedUi ? { generatedUi } : {}),
+    ...(meta || generatedUi
+      ? {
+          _meta: {
+            ...publicMeta,
+            ...(generatedUi ? { generatedUi } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
 
 type PermissionResponse = Parameters<
@@ -2176,6 +2197,7 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  ...withGeneratedUiReceipt(session.generatedUi),
                   ...(session.startupConfigApplied
                     ? {
                         modelApplied: true,
@@ -2527,18 +2549,20 @@ export class AcpDispatcher {
                 conn,
                 id,
                 {
-                  ...loadState,
-                  ...(replayStatus
-                    ? {
-                        _meta: {
-                          ...(loadMeta ?? {}),
-                          [QWEN_META_KEY]: {
-                            ...(loadQwenMeta ?? {}),
-                            sessionLoadReplay: replayStatus,
+                  ...withGeneratedUiReceipt(restored.generatedUi, {
+                    ...loadState,
+                    ...(replayStatus
+                      ? {
+                          _meta: {
+                            ...(loadMeta ?? {}),
+                            [QWEN_META_KEY]: {
+                              ...(loadQwenMeta ?? {}),
+                              sessionLoadReplay: replayStatus,
+                            },
                           },
-                        },
-                      }
-                    : {}),
+                        }
+                      : {}),
+                  }),
                   ...(loadConfigOptions
                     ? { configOptions: loadConfigOptions }
                     : {}),
@@ -2829,6 +2853,7 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: result.sessionId,
+                  ...withGeneratedUiReceipt(result.generatedUi),
                   ...(configOptions ? { configOptions } : {}),
                   ...(models ? { models } : {}),
                   ...(modes ? { modes } : {}),
