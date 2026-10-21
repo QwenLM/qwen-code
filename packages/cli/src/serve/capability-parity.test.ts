@@ -9,6 +9,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CAPABILITY_PARITY,
+  MANAGED_ONLY_NOT_A_GAP,
+  managedOnlyLabels,
   MANAGED_SURFACE_FILE,
   MANAGED_SURFACE_SOURCE,
   PARITY_COLUMNS,
@@ -128,6 +130,43 @@ describe('capability parity matrix', () => {
     expect(capabilityParityMatrix()['legacy only']).not.toContain(
       'web_shell_brand',
     );
+  });
+
+  it('derives the managed-only column from uncited route labels', () => {
+    const surface = readManagedSurfaceSet();
+    const cited = new Set(
+      Object.values(CAPABILITY_PARITY).flatMap((row) =>
+        row.evidence
+          .split(',')
+          .map((token) => /^surface:(.+)$/.exec(token.trim())?.[1])
+          .filter((label): label is string => label !== undefined),
+      ),
+    );
+    const uncited = [...surface.labels]
+      .filter(
+        (label) => !cited.has(label) && !MANAGED_ONLY_NOT_A_GAP.has(label),
+      )
+      .sort();
+    expect(managedOnlyLabels(surface)).toEqual(uncited);
+    expect(uncited).toEqual([]);
+  });
+
+  it('reports a Managed route with no legacy tag', () => {
+    const surface = readManagedSurfaceSet();
+    const extra = {
+      labels: new Set([...surface.labels, 'SOME_FUTURE_ROUTE']),
+      routes: surface.routes,
+    };
+    expect(capabilityParityMatrix(extra)['managed only']).toContain(
+      'SOME_FUTURE_ROUTE',
+    );
+  });
+
+  it('excludes only labels the twin actually records', () => {
+    const surface = readManagedSurfaceSet();
+    expect(
+      [...MANAGED_ONLY_NOT_A_GAP].filter((l) => !surface.labels.has(l)),
+    ).toEqual([]);
   });
 });
 

@@ -57,26 +57,32 @@ cannot do that.
 
 The TypeScript test cannot read a Java enum. The committed file
 `packages/managed-agent-server/src/test/resources/capability-parity/managed-surface.txt`
-is the twin of `SurfaceRegistry`. Each line is `label method template`. The
-header records the SHA-256 digest of the sorted route lines.
+is the twin of `SurfaceRegistry`. Each line is
+`label method template surface`. The header records the SHA-256 digest of the
+sorted route lines.
 
-Two Java checks keep the twin honest:
+`ManagedSurfaceCaptureTest` compares the file with the enum and never writes
+on an ordinary run. Re-capture is opt-in, because a test that rewrites its own
+baseline turns a second run green against data the first run edited:
 
-- `ManagedSurfaceCaptureTest` compares the file with the enum. To re-capture,
-  run `mvn -Dtest=ManagedSurfaceCaptureTest#capture test`.
-- `SurfaceRegistryApiTest` compares each public and WebShell route with the
-  published OpenAPI document, in both directions.
+```bash
+mvn -Dtest=ManagedSurfaceCaptureTest -Dcapability.parity.capture=true test
+```
 
-The TypeScript test parses `SurfaceRegistry.java` for its route set. A drift
-between the twin and the enum fails on both sides.
+The TypeScript test also reads `SurfaceRegistry.java` and fails when the twin
+and the enum disagree. That check runs only when `packages/cli` tests run, so a
+registry change fails on both sides.
 
 ## Boundaries
 
 - The matrix does not judge whether one path should copy the other.
 - Internal writer routes are outside the OpenAPI document. The registry alone
   lists them.
-- The `managed only` column lists Managed capabilities with no legacy tag. It
-  starts with the tail-events route.
+- The `managed only` column is derived: it lists route labels in the twin that
+  no `managed` row cites. An exclusion set records why a label is not a gap,
+  and every entry in that set must name a label the twin records. A route that
+  is mounted with no legacy tag and no exclusion appears in the column, which
+  is the signal #15075 asked for. The column is currently empty.
 
 ## Acceptance
 

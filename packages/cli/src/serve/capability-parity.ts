@@ -276,11 +276,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'issue #14503: no Managed MCP server management route',
   ),
   mcp_guardrail_events: NO_MANAGED_EQUIVALENT('no Managed MCP client budget'),
-  external_tool_guard: {
-    standing: 'managed',
-    evidence:
-      'docs:packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/security',
-  },
+  external_tool_guard: NO_MANAGED_EQUIVALENT(
+    'no external per-tool policy provider on the Managed execution boundary',
+  ),
   mcp_server_runtime_mutation: NO_MANAGED_EQUIVALENT(
     'issue #14503: no Managed MCP server management route',
   ),
@@ -516,15 +514,114 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   web_terminal: NO_MANAGED_EQUIVALENT('no Managed web terminal'),
 };
 
-const MANAGED_ONLY_LABELS = ['tail'] as const;
-
 export interface CapabilityParityMatrix {
   'legacy only': ServeFeature[];
   both: ServeFeature[];
   'managed only': string[];
 }
 
-export function capabilityParityMatrix(): CapabilityParityMatrix {
+/**
+ * Managed route labels with no legacy tag behind them, and why each is not a
+ * parity claim. These are Managed operations the daemon models differently
+ * rather than capabilities the daemon lacks; the two-column reading above
+ * already accounts for them, so listing them as "managed only" would only
+ * restate that.
+ */
+export const MANAGED_ONLY_NOT_A_GAP = new Set([
+  // Covered by a legacy tag the row maps at a different granularity.
+  'SESSION_GET',
+  'SESSION_RENAME',
+  'SESSION_DELETE',
+  'SESSION_CWD_CHANGE',
+  'SESSION_OPERATION_GET',
+  'SESSION_MODELS',
+  'SESSION_MCP',
+  'SESSION_OPTIONS',
+  'ITEM_LIST',
+  'TOOL_RESULT_GET',
+  'TURN_LIST',
+  'TASK_GET',
+  'TASK_CANCEL',
+  'TASK_EVENT_LIST',
+  'ACTION_GET',
+  'ACTION_LIST',
+  'WORKSPACE_GET',
+  'WORKSPACE_LIST',
+  'WORKSPACE_DIRECTORY_CHECK',
+  'WORKSPACE_FILES_QUERY',
+  'WORKSPACE_FILES_READ',
+  // Tenant resources and admission the daemon has no counterpart for.
+  'AGENT_DEFINITION_GET',
+  'AGENT_DEFINITION_UPDATE',
+  'AUTOMATION_CREATE',
+  'AUTOMATION_GET',
+  'AUTOMATION_LIST',
+  'AUTOMATION_RETIRE',
+  'AUTOMATION_RUN_LIST',
+  'AUTOMATION_UPDATE',
+  'CHANNEL_DELIVERY_LIST',
+  'RUNTIME_NODE_LIST',
+  // Internal writer and publication routes: between the control plane and its
+  // own stores, behind writer credentials, never a client capability.
+  'PUB_ADMISSION_PREPARE',
+  'PUB_FINISH',
+  'PUB_FINISHED',
+  'PUB_GRANT',
+  'PUB_OPERATION_GET',
+  'PUB_OPERATION_RECOVER',
+  'PUB_RANGE',
+  'PUB_RECEIPT_COMMIT',
+  'PUB_RECEIPT_VERIFY',
+  'PUB_RESOURCE',
+  'PUB_SEGMENT',
+  'PUB_STREAM_PREFIX',
+  'PUB_STREAM_SEAL',
+  'STORE_APPROVAL_QUERY',
+  'STORE_EXECUTION_AUTHORIZE',
+  'STORE_LIFECYCLE_AUTHORIZE',
+  'STORE_RECOVERY_BLOCK',
+  'STORE_RESOURCE_GET',
+  'STORE_RESTORE',
+  'STORE_TOOL_RESULT_PUBLISH',
+  'STORE_TRANSACTION_COMMIT',
+  'STORE_TRANSACTION_LIST',
+  'STORE_WRITER_ACQUIRE',
+  'STORE_WRITER_RENEW',
+  'STORE_WRITER_SEAL',
+]);
+
+/**
+ * Every `surface:` target a row cites, so a claim is one place only. */
+function citedLabels(): Set<string> {
+  const cited = new Set<string>();
+  for (const row of Object.values(CAPABILITY_PARITY)) {
+    if (row.standing !== 'managed') continue;
+    for (const token of row.evidence.split(',')) {
+      const match = /^surface:(.+)$/.exec(token.trim());
+      if (match) cited.add(match[1]!);
+    }
+  }
+  return cited;
+}
+
+/**
+ * The Managed route labels no row cites: a route the Managed control plane
+ * serves with no legacy tag behind it. Derived from the twin, so a newly
+ * mounted route shows up here instead of needing a hand edit.
+ */
+export function managedOnlyLabels(
+  surface: ManagedSurfaceSet = readManagedSurfaceSet(),
+): string[] {
+  const cited = citedLabels();
+  return [...surface.labels]
+    .filter((label) => !cited.has(label))
+    .filter((label) => !MANAGED_ONLY_NOT_A_GAP.has(label))
+    .sort();
+}
+
+export function capabilityParityMatrix(
+  surface: ManagedSurfaceSet = readManagedSurfaceSet(),
+): CapabilityParityMatrix {
   const legacyOnly: ServeFeature[] = [];
   const both: ServeFeature[] = [];
   for (const tag of Object.keys(SERVE_CAPABILITY_REGISTRY) as ServeFeature[]) {
@@ -534,7 +631,7 @@ export function capabilityParityMatrix(): CapabilityParityMatrix {
   return {
     'legacy only': legacyOnly,
     both,
-    'managed only': [...MANAGED_ONLY_LABELS],
+    'managed only': managedOnlyLabels(surface),
   };
 }
 

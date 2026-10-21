@@ -41,20 +41,21 @@ Issue #15075 要求一个持续校验的矩阵。矩阵只报告差异。矩阵�
 
 ### Java 路由集合
 
-TypeScript 测试不能读取 Java 枚举。提交文件 `packages/managed-agent-server/src/test/resources/capability-parity/managed-surface.txt` 是 `SurfaceRegistry` 的副本。每行为 `label method template`。文件头部记录排序后路由行的 SHA-256 摘要。
+TypeScript 测试不能读取 Java 枚举。提交文件 `packages/managed-agent-server/src/test/resources/capability-parity/managed-surface.txt` 是 `SurfaceRegistry` 的副本。每行为 `label method template surface`。文件头部记录排序后路由行的 SHA-256 摘要。
 
-两项 Java 校验保证副本正确：
+`ManagedSurfaceCaptureTest` 把文件与枚举对比，常规运行绝不写入。重新生成需要显式开启，因为会改写自身基准的测试，会让第二次运行在已被第一次改过的数据上变绿：
 
-- `ManagedSurfaceCaptureTest` 把文件与枚举对比。重新生成命令：`mvn -Dtest=ManagedSurfaceCaptureTest#capture test`。
-- `SurfaceRegistryApiTest` 双向对比 public 与 WebShell 路由和已发布的 OpenAPI 文档。
+```bash
+mvn -Dtest=ManagedSurfaceCaptureTest -Dcapability.parity.capture=true test
+```
 
-TypeScript 测试解析 `SurfaceRegistry.java` 获取路由集合。副本与枚举不一致时两侧都会失败。
+TypeScript 测试也会解析 `SurfaceRegistry.java`，副本与枚举不一致时失败。该检查只在 `packages/cli` 测试运行时执行，因此注册表改动会令两侧都失败。
 
 ## 边界
 
 - 矩阵不判断某条路径是否应复制另一条路径。
 - internal writer 路由不在 OpenAPI 文档中。只有注册表列出它们。
-- `managed only` 列列出没有旧标签的 Managed 能力。初始内容为 tail events 路由。
+- `managed only` 列由推导得出：列出副本中没有任何 `managed` 行引用的路由标签。排除集合记录某个标签为何不算缺口，且其中每一项都必须指向副本真实记录的标签。新挂载且没有旧标签、也没有排除理由的路由会出现在该列，这正是 #15075 要求的信号。该列当前为空。
 
 ## 验收
 
