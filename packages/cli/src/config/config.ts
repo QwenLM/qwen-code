@@ -913,6 +913,10 @@ export async function parseArguments(): Promise<CliArgs> {
     const { reviewCommand } = await import('../commands/review.js');
     yargsInstance.command(reviewCommand);
   }
+  if (rawArgv.includes('autofix-pr')) {
+    const { autofixPrCommand } = await import('../commands/autofix-pr.js');
+    yargsInstance.command(autofixPrCommand);
+  }
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -949,6 +953,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
+      result._[0] === 'autofix-pr' ||
       result._[0] === 'sessions' ||
       result._[0] === 'daemon' ||
       result._[0] === 'agents' ||
