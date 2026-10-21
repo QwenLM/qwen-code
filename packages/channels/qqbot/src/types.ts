@@ -24,6 +24,8 @@ export const Intent = {
 export interface QQMessageAttachment {
   url: string;
   content_type?: string;
+  /** Present on `content_type: voice`: the SILK-converted WAV file URL. */
+  voice_wav_url?: string;
   filename?: string;
   size?: number;
   width?: number;

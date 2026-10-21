@@ -32,6 +32,16 @@ interface CleanupDescriptor {
   fileHistoryTurnId: string;
 }
 
+function cleanupIdentity(promptId: string, runtimeSessionId: string) {
+  const originalId = `hosted-cleanup:${promptId}:${runtimeSessionId}`;
+  const cleanupId =
+    Buffer.byteLength(`${originalId}:confirmed`) >
+    MANAGED_SESSION_LIMITS.maxIdBytes
+      ? `hosted-cleanup:${createHash('sha256').update(originalId).digest('hex')}`
+      : originalId;
+  return { originalId, cleanupId };
+}
+
 async function commitCleanup(
   session: ManagedSession,
   cleanupId: string,
@@ -78,13 +88,10 @@ export async function oweHostedTurnCleanup(
   broker: HostedWorkspaceBroker,
 ): Promise<void> {
   if (!broker.runtime) return;
-  const originalId = `hosted-cleanup:${promptId}:${broker.runtimeSessionId}`;
-  let cleanupId = originalId;
-  if (
-    Buffer.byteLength(`${cleanupId}:confirmed`) >
-    MANAGED_SESSION_LIMITS.maxIdBytes
-  )
-    cleanupId = `hosted-cleanup:${createHash('sha256').update(cleanupId).digest('hex')}`;
+  const { originalId, cleanupId } = cleanupIdentity(
+    promptId,
+    broker.runtimeSessionId,
+  );
   const existing = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .findLast(
@@ -126,6 +133,53 @@ export async function oweHostedTurnCleanup(
     Buffer.from(JSON.stringify(descriptor)),
   );
   await commitCleanup(session, cleanupId, ref, 'owed');
+}
+
+export async function confirmReplacedHostedTurnOwner(
+  session: ManagedSession,
+  promptId: string,
+  broker: HostedWorkspaceBroker,
+  options: HostedWorkspaceBrokerOptions,
+): Promise<boolean> {
+  if (!broker.runtime) return false;
+  const { originalId, cleanupId } = cleanupIdentity(
+    promptId,
+    broker.runtimeSessionId,
+  );
+  const existing = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast(
+      (event) =>
+        event.kind === 'hosted.cleanup' &&
+        [originalId, cleanupId].includes(event.payload['cleanupId'] as string),
+    );
+  if (existing?.payload['state'] !== 'owed') return false;
+  const descriptor = await readDescriptor(
+    session,
+    existing.payload['descriptorRef'],
+  );
+  if (
+    descriptor.promptId !== promptId ||
+    descriptor.runtimeSessionId !== broker.runtimeSessionId
+  )
+    throw new Error('Invalid cleanup owner.');
+  if (descriptor.workspaceGeneration !== broker.runtime.workspaceGeneration)
+    throw new Error('Original Workspace generation changed.');
+  if (
+    descriptor.bindingId === broker.runtime.bindingId &&
+    descriptor.generation === broker.runtime.generation &&
+    descriptor.workspaceGeneration === broker.runtime.workspaceGeneration
+  )
+    return false;
+  await new HostedWorkspaceBroker(
+    options,
+    descriptor.sessionKey,
+    descriptor.runtimeSessionId,
+  ).release({
+    bindingId: descriptor.bindingId,
+    generation: descriptor.generation,
+  });
+  return true;
 }
 
 async function readDescriptor(

@@ -1059,6 +1059,7 @@ describe('snapshotToTask', () => {
   it('preserves persisted lineage fields across the restart boundary', () => {
     const task = snapshotToTask({
       runId: 'wf_lineage',
+      parentSessionId: 'original-chat',
       sourceRunId: 'wf_origin',
       startMode: 'retry',
       meta: null,
@@ -1075,6 +1076,7 @@ describe('snapshotToTask', () => {
       endTime: 1_700_000_005_000,
     });
 
+    expect(task.parentSessionId).toBe('original-chat');
     expect(task.sourceRunId).toBe('wf_origin');
     expect(task.startMode).toBe('retry');
   });

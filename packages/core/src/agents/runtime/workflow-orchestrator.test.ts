@@ -47,7 +47,7 @@ import {
   type JournalEntry,
   type WorkflowJournal,
 } from './workflow-journal.js';
-import { resolveBuiltinToolName } from '../../tools/tool-names.js';
+import { resolveBuiltinToolName, ToolNames } from '../../tools/tool-names.js';
 import { fnCall, fnResponse } from '../../test-utils/model-fixtures.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
@@ -2073,6 +2073,23 @@ describe('createProductionDispatch', () => {
     ]);
   });
 
+  // #13858 S1: the hosted workflow child's subagents carry no tools at
+  // all — the fast path must declare an empty list instead of the
+  // ordinary '*' floor, so no tool-bearing agent() can run against this
+  // Harness's own host from inside a managed child.
+  it('refuseSubagentTools declares an empty tool list on the fast path', async () => {
+    await createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    )('hello', { label: 'h1' });
+    expect(created[0]!.toolConfig?.tools).toEqual([]);
+    expect(created[0]!.toolConfig?.disallowedTools).toEqual([]);
+  });
+
   // T10 (PR #4732 R1): a non-GOAL terminate mode must throw; otherwise
   // `await agent(...)` resolves to '' on user cancel and the script runs on.
   it.each([['CANCELLED'], ['MAX_TURNS'], ['TIMEOUT'], ['ERROR']])(
@@ -2948,6 +2965,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     options?: {
       runConfigOverrides?: unknown;
       modelConfigOverrides?: unknown;
+      toolConfigOverride?: unknown;
       taskName?: string;
       subagentId?: string;
     };
@@ -3081,6 +3099,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             eventEmitter?: unknown;
             runConfigOverrides?: unknown;
             modelConfigOverrides?: unknown;
+            toolConfigOverride?: unknown;
             taskName?: string;
             subagentId?: string;
           },
@@ -3096,6 +3115,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             options: {
               runConfigOverrides: options?.runConfigOverrides,
               modelConfigOverrides: options?.modelConfigOverrides,
+              toolConfigOverride: options?.toolConfigOverride,
               taskName: options?.taskName,
               subagentId: options?.subagentId,
             },
@@ -3462,7 +3482,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         .trim()
         .split('\n')
         .map((line) => JSON.parse(line) as Record<string, unknown>);
-      return { calls, records };
+      const meta = JSON.parse(
+        fs.readFileSync(
+          path.join(sessionDir, names[0]!.replace(/\.jsonl$/, '.meta.json')),
+          'utf8',
+        ),
+      );
+      return { calls, records, meta };
     } finally {
       fs.rmSync(transcriptDir, { recursive: true, force: true });
     }
@@ -3522,12 +3548,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // records could not be correlated by agentName with AgentTool launches of
   // the same agentType.
   it('stamps the resolved agentType name in the transcript when a label is also set', async () => {
-    const { calls, records } = await transcriptOf(
+    const { calls, records, meta } = await transcriptOf(
       { lookup: codeReviewer, onCreate: ends('review-output') },
       'review chunk 1 of 3',
       { agentType: 'Code-Reviewer', label: 'chunk-1' },
     );
     expect(calls[0]!.config.name).toBe('code-reviewer');
+    expect(meta.agentType).toBe('code-reviewer');
     expect(records[0]!['agentName']).toBe(calls[0]!.config.name);
   });
 
@@ -3869,6 +3896,98 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         expect.arrayContaining(['agent', 'ask_user_question']),
       );
     });
+
+    // #13858 S1: a host refusing this run's tools (the managed workflow
+    // child) denies every requested tool by its own name at narrow time —
+    // the call is refused with the named reason, never provisioning a
+    // subagent on the wrong host.
+    it('refuseSubagentTools refuses a tool-bearing agent by name before provisioning', async () => {
+      const mgr = dispatchVia(
+        {},
+        'scan',
+        { tools: ['run_shell_command'] },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      await expect(mgr.result).rejects.toThrow(
+        /tools no workflow subagent may use/,
+      );
+      expect(mgr.calls).toHaveLength(0);
+    });
+
+    // #13858 R4-1: a dispatch that names no tools still takes the override
+    // path for any dispatch-affecting option. The definition allowlist
+    // cannot carry an empty list (the manager reads [] as "inherit
+    // everything" and converts it to '*'), so the refusing host hands the
+    // manager the runtime list itself. hosted-workflow-turn.integration.test
+    // pins the same through the real manager.
+    it('refuseSubagentTools declares an empty tool list on the override path', async () => {
+      const { calls } = await dispatched(
+        {},
+        'scan',
+        { model: 'qwen3-coder-plus' },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.options?.toolConfigOverride).toEqual({
+        tools: [],
+        disallowedTools: [],
+      });
+    });
+
+    it('refuseSubagentTools keeps only structured_output for a schema dispatch', async () => {
+      const mgr = dispatchVia(
+        {},
+        'scan',
+        { schema: { type: 'object' } },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      // The fake agent never answers through structured_output; only its
+      // declaration matters here.
+      await mgr.result.catch(() => undefined);
+      expect(mgr.calls).toHaveLength(1);
+      expect(mgr.calls[0]!.options?.toolConfigOverride).toEqual({
+        tools: [ToolNames.STRUCTURED_OUTPUT],
+        disallowedTools: [],
+      });
+    });
+
+    it.each([
+      [{ agentType: 'Explore' }, 'agentType'],
+      [{ isolation: 'worktree' as const }, 'isolation'],
+      [{ workingDir: '/elsewhere' }, 'workingDir'],
+    ])(
+      'refuseSubagentTools refuses %o before resolving anything on this host',
+      async (opts, name) => {
+        const lookup = vi.fn(async () => null);
+        const mgr = dispatchVia(
+          { lookup },
+          'scan',
+          opts,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+        );
+        await expect(mgr.result).rejects.toThrow(
+          `agent({${name}}): unavailable in this workflow`,
+        );
+        expect(lookup).not.toHaveBeenCalled();
+        expect(mgr.calls).toHaveLength(0);
+      },
+    );
 
     it.each([
       [
@@ -5128,6 +5247,106 @@ describe('createProductionDispatch — subagent transcripts', () => {
     expect(names[0]).toBe(`agent-${recs[0]!['agentId'] as string}.jsonl`);
   });
 
+  it.each([
+    {
+      label: '\u001b[31mReviewer\u001b[0m\u0000\u0085',
+      prompt: '\u001b[32mInspect\u001b[0m\u0007\u007f',
+      expectedName: 'Reviewer',
+      expectedPrompt: 'Inspect',
+    },
+    {
+      label: 'a'.repeat(500),
+      prompt: 'p'.repeat(5000),
+      expectedName: 'a'.repeat(200),
+      expectedPrompt: 'p'.repeat(4096),
+    },
+    {
+      label: '\u001b[31m\u0000\u001b[0m',
+      prompt: '\u0000\u0007',
+      expectedName: 'workflow-agent',
+      expectedPrompt: '',
+    },
+  ])(
+    'bounds display metadata without changing the execution prompt: $expectedName',
+    async ({ label, prompt, expectedName, expectedPrompt }) => {
+      await createProductionDispatch(transcriptConfig())(prompt, { label });
+      const name = fs
+        .readdirSync(sessionDir())
+        .find((n) => n.endsWith('.meta.json'))!;
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(sessionDir(), name), 'utf8'),
+      );
+      expect(meta).toMatchObject({
+        agentType: expectedName,
+        description: expectedPrompt,
+      });
+      expect(partsOf(recordsIn(transcriptNames()[0]!)[0]!)).toEqual([
+        { text: prompt },
+      ]);
+      expect(created[0]!.name).toBe(label);
+      expect(created[0]!.prompt).toBe(prompt);
+    },
+  );
+
+  it('persists a resolvable foreground agent identity and lifecycle', async () => {
+    const readMeta = () => {
+      const name = fs
+        .readdirSync(sessionDir())
+        .find((n) => n.endsWith('.meta.json'))!;
+      return JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8'));
+    };
+    nextExecuteHook.value = async () => {
+      expect(readMeta()).toMatchObject({
+        parentSessionId: 'sess-1',
+        status: 'running',
+        isBackgrounded: false,
+        workflowOwner: { pid: process.pid, hostname: os.hostname() },
+        description: 'Inspect the workflow',
+      });
+    };
+    await createProductionDispatch(transcriptConfig())('Inspect the workflow', {
+      label: 'Inspector',
+    });
+    const meta = readMeta();
+    expect(meta).toMatchObject({ agentType: 'Inspector', status: 'completed' });
+    expect(meta.agentId).toBe(recordsIn(transcriptNames()[0]!)[0]!['agentId']);
+  });
+
+  it('persists cancellation without making the workflow child resumable', async () => {
+    const controller = new AbortController();
+    nextExecuteHook.value = async () => {
+      controller.abort();
+      nextTerminateMode.value = 'CANCELLED';
+    };
+    await expect(
+      createProductionDispatch(transcriptConfig(), controller.signal)(
+        'Inspect',
+        {},
+      ),
+    ).rejects.toThrow(/CANCELLED/);
+    const name = fs
+      .readdirSync(sessionDir())
+      .find((n) => n.endsWith('.meta.json'))!;
+    expect(
+      JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8')),
+    ).toMatchObject({ status: 'cancelled', isBackgrounded: false });
+  });
+
+  it('persists failed dispatch metadata when execution throws', async () => {
+    nextExecuteHook.value = async () => {
+      throw new Error('model unavailable');
+    };
+    await expect(
+      createProductionDispatch(transcriptConfig())('Inspect', {}),
+    ).rejects.toThrow('model unavailable');
+    const name = fs
+      .readdirSync(sessionDir())
+      .find((n) => n.endsWith('.meta.json'))!;
+    expect(
+      JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8')).status,
+    ).toBe('failed');
+  });
+
   // An empty prompt seeds no user record, so it is refused before any
   // transcript starts.
   it('rejects an empty or non-string prompt before attaching a transcript', async () => {
@@ -5231,6 +5450,19 @@ describe('createProductionDispatch — subagent transcripts', () => {
       expect(records[i]!['parentUuid']).toBe(records[i - 1]!['uuid']);
       expect(records[i]!['agentId']).toBe(records[0]!['agentId']);
     }
+    const metaNames = fs
+      .readdirSync(sessionDir())
+      .filter((name) => name.endsWith('.meta.json'));
+    expect(metaNames).toHaveLength(1);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(sessionDir(), metaNames[0]!), 'utf8'),
+      ),
+    ).toMatchObject({
+      agentId: records[0]!['agentId'],
+      status: 'completed',
+      isBackgrounded: false,
+    });
     expect(created).toHaveLength(2);
     expect(created.map((call) => call.agentId)).toEqual([
       records[0]!['agentId'],

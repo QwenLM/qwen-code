@@ -11,6 +11,12 @@ import type { HostedHarnessCapabilities } from './types.js';
 
 export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
+export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
+  'QWEN_HOSTED_LIFECYCLE_V2_PROFILES';
+const LIFECYCLE_V2_PROFILES = [
+  'hosted-workspace-shell/1',
+  'hosted-workspace-mcp/1',
+] as const;
 export const HOSTED_HARNESS_PROTOCOL_VERSION = 1 as const;
 export const HOSTED_HARNESS_PROTOCOL_HEADER = 'X-Qwen-Harness-Protocol-Version';
 export const HOSTED_HARNESS_BOOT_ID_HEADER = 'X-Qwen-Harness-Boot-Id';
@@ -29,7 +35,23 @@ export function isHostedHarnessCapabilityDigest(value: string): boolean {
 export function createHostedHarnessContract(
   capabilityDigest: string,
   bootId: string = randomUUID(),
+  lifecycleV2Profiles: readonly string[] = (
+    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''
+  )
+    .split(',')
+    .filter(Boolean),
 ): HostedHarnessContract {
+  if (
+    lifecycleV2Profiles.some(
+      (profile) =>
+        !(LIFECYCLE_V2_PROFILES as readonly string[]).includes(profile),
+    ) ||
+    new Set(lifecycleV2Profiles).size !== lifecycleV2Profiles.length
+  ) {
+    throw new Error(
+      `${HOSTED_LIFECYCLE_V2_PROFILES_ENV} must list exact supported profiles once.`,
+    );
+  }
   if (!isHostedHarnessCapabilityDigest(capabilityDigest)) {
     throw new Error(
       `${HOSTED_HARNESS_CAPABILITY_DIGEST_ENV} must be sha256:<64 lowercase hex characters>.`,
@@ -46,10 +68,22 @@ export function createHostedHarnessContract(
     bootId: bootId.toLowerCase(),
     capabilityDigest,
     lifecycleProtocolVersion: 1,
+    lifecycleV2Profiles: Object.freeze([...lifecycleV2Profiles]),
     titleProtocolVersion: 1,
     features: Object.freeze([
       'hosted_approval_resume_v1',
       'hosted_model_round_recovery_v1',
+      'model-selection/1',
+      'approval-selection/1',
+      'live-approval-selection/1',
+      'agent-definition-approval-selection/1',
+      'plan-mode/1',
+      'input-attachments/1',
+      'session-skills/1',
+      'session-skills/2',
+      // GET /session/:id/events writes keepalive comments while no event
+      // is committed, so a client may bound a stream by its silence.
+      'event-keepalive/1',
     ]),
   });
 }

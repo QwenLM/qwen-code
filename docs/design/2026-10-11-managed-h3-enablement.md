@@ -166,9 +166,11 @@ family's:
 A watch that ends on its own — its process exits — settles its row at the
 next observation and its monitor_run record through the existing publisher
 finalize; the hold ends and the next routine release succeeds. The two
-Harness-side bounds (`idle_timeout_ms`, `max_events`) end the loop's
-observing but cannot stop the worker's watch, so they park the record
-rather than settle it and the hold ends at the Session close's drain (§6).
+Harness-side bounds (`idle_timeout_ms`, `max_events`) stop the worker's
+watch through the client control route's `monitor-stop` and settle the
+record only on the worker's exit evidence, which also settles the hold row;
+a stop the worker cannot prove parks the record until the watch's own end
+or the Session close's drain settles it (§6, #13896).
 
 ### D3. Turn settle treats `runtime_session_held` as the designed hold
 
@@ -329,14 +331,15 @@ projection is removed (mutation-checked).
   path — refusal, park, `runtime_lost` at close — is pinned by a fault
   gate and is untouched by D1/D3; the new `runtime_session_held` code
   exists so the designed hold never rides that path.
-- **A Monitor auto-stop cannot prove its own stop.** The quota and idle
-  windows run in the Harness while the watch runs in the worker, and the
-  client control route admits MCP and Hook operations only — there is no
-  Harness-side `monitor-stop`. An auto-stop therefore parks the record on
-  the `runtime_lost` line rather than settle `max_events` or
-  `idle_timeout`, and the watch itself ends at the Session close's drain,
-  which does reach it. Nothing claims a stop the worker never confirmed;
-  the cost is a watch that outlives its task record until the close.
+- **A Monitor auto-stop settles only on the worker's exit evidence.** The
+  quota and idle windows run in the Harness while the watch runs in the
+  worker. Since #13896 the client control route admits `monitor-status` /
+  `monitor-stop` for the Session's own watches, and an auto-stop settles
+  `max_events` or `idle_timeout` only when the worker answers `exited`,
+  which also settles the watch's hold row. A stop the worker cannot prove
+  parks the record on the `runtime_lost` line until the watch's own end or
+  the Session close's drain settles it. See
+  [Monitor auto-stop evidence](2026-10-11-managed-monitor-auto-stop-evidence.md).
 - **#13846 is in flight** and edits `managed-session-records.ts`; whoever
   merges second renumbers around the other.
 
@@ -383,7 +386,6 @@ projection is removed (mutation-checked).
    status beyond the current fields (the hold is visible through the task
    surface today; a dedicated field is a product call, not required here).
 3. The A7 rebuild driver's scheduling stays with the W-series mount work.
-4. Giving a Monitor auto-stop its own remote exit evidence — admitting
-   `ManagedMonitorProtocol` operations on the client control route and
-   having the remote executor's terminate wait for the worker's exit —
-   stays future work; §6 records the parked-record interim.
+4. Resolved by #13896: a Monitor auto-stop gets its own remote exit
+   evidence through the client control route; see
+   [Monitor auto-stop evidence](2026-10-11-managed-monitor-auto-stop-evidence.md).

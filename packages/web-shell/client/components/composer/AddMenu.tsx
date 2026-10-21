@@ -27,6 +27,7 @@ import {
   escapeAtReferenceText,
   EXTENSIONS_PROVIDER_ID,
   FILE_PROVIDER_ID,
+  MCP_RESOURCES_PROVIDER_ID,
   sanitizeInsertText,
 } from '../../hooks/useAtMentionSources';
 import type {
@@ -205,7 +206,7 @@ function SearchableProviderSubmenu({
       className={
         mobile
           ? 'flex w-full flex-col gap-2'
-          : 'flex w-52 max-w-[calc(100vw-1rem)] flex-col gap-1 p-1 sm:w-72'
+          : 'flex w-52 max-w-[min(calc(100vw-1rem),var(--radix-dropdown-menu-content-available-width))] flex-col gap-1 p-1 sm:w-72'
       }
     >
       {placeholder ? (
@@ -257,10 +258,11 @@ function SearchableProviderSubmenu({
                   : item.description) && provider.id !== FILE_PROVIDER_ID ? (
                   <span
                     className={
-                      mobile
+                      mobile || provider.id === MCP_RESOURCES_PROVIDER_ID
                         ? '[overflow-wrap:anywhere] text-xs text-muted-foreground'
                         : 'hidden truncate text-xs text-muted-foreground sm:block'
                     }
+                    title={item.description}
                   >
                     {provider.id === EXTENSIONS_PROVIDER_ID
                       ? item.detail

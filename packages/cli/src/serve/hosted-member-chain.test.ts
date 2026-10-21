@@ -4,22 +4,49 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const planGate = vi.hoisted(() => ({ enabled: false }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_plan' && planGate.enabled) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
+import type { ChildSessionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import type { SessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import {
   teamJoinBody,
   teamLifecycleBody,
   teamOpenBody,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
 import {
+  MEMBER_MESSAGE_ID_PREFIX,
   broadcastMessageId,
   broadcastRunId,
+  firstInputOpensWithMemberPreamble,
   hasPlanModeBlock,
   hostedCallKey,
+  hostedNeverStarted,
   hostedPromptKey,
   inputBodyText,
   isSentInstruction,
+  memberMessageId,
   memberPlanModeRequired,
+  memberPreambleIdentity,
   teamMemberPreamble,
 } from './hosted-member-chain.js';
 
@@ -82,6 +109,17 @@ describe('plan mode (H4e-b3a, decisions 5 and 9)', () => {
       true,
     );
     expect(isSentInstruction(required + 'other', sent)).toBe(false);
+  });
+
+  it('advertises submission only while the plan domain is enabled', () => {
+    planGate.enabled = true;
+    try {
+      expect(teamMemberPreamble(alice, true)).toContain('exit_plan_mode');
+      expect(teamMemberPreamble(alice)).not.toContain('exit_plan_mode');
+    } finally {
+      planGate.enabled = false;
+    }
+    expect(teamMemberPreamble(alice, true)).not.toContain('exit_plan_mode');
   });
 
   it('reads the attribute only on an unescaped well-formed line', () => {
@@ -250,5 +288,168 @@ describe('broadcast ids (H4e-b2 decision 4)', () => {
     const wake = 'msg_x:message:accept:notify';
     expect(hostedPromptKey(wake)).toMatch(/^[0-9a-f]{16}$/);
     expect(broadcastRunId(wake, 'c', 1)).toBe(broadcastRunId(wake, 'c', 1));
+  });
+
+  it('collapses a blocked notification turn as a child acceptance is collapsed', () => {
+    // #14387: the blocked notification's wake turn embeds the run it
+    // settled (`<run>:blocked:notify`) exactly as an acceptance does.
+    // Keyed verbatim, each blocked hop appends a whole run id to the next
+    // launch — 66, 111, 156 chars for a 36-char Turn id and a 29-char
+    // call id — and the third create meets the 128-char lineage bound.
+    const callId = 'call-0123456789abcdef01234567';
+    const promptId = 'b3f0c1a2-4d5e-4f60-8a91-b2c3d4e5f607';
+    const run = hostedCallKey(promptId, callId);
+    expect(run).toHaveLength(66);
+    const blocked = `${run}:blocked:notify`;
+    expect(hostedPromptKey(blocked)).toMatch(/^[0-9a-f]{16}$/);
+    const hops = [hostedCallKey(blocked, callId)];
+    hops.push(hostedCallKey(`${hops[0]}:blocked:notify`, callId));
+    hops.push(hostedCallKey(`${hops[1]}:blocked:notify`, callId));
+    // Every blocked hop stays at the acceptance's bounded length.
+    expect(hops.map((hop) => hop.length)).toEqual([46, 46, 46]);
+    expect(hostedCallKey(`${run}:accept:notify`, callId)).toHaveLength(46);
+  });
+
+  it('keeps child calls from a crash continuation inside the lineage bound', () => {
+    const turnId = `wake-recovery:${'a'.repeat(64)}`;
+    expect(hostedPromptKey(turnId)).toMatch(/^[0-9a-f]{16}$/);
+    expect(hostedCallKey(turnId, 'call-0123456789abcdef01234567')).toHaveLength(
+      46,
+    );
+  });
+});
+
+describe('member-message ids (H4e-b3 decision 8, b3c)', () => {
+  it('live where no send, broadcast or command id can reach them', () => {
+    const id = memberMessageId({
+      leadSessionId: 'lead',
+      commandId: 'cmd_x',
+      position: 2,
+    });
+    expect(id).toMatch(/^msgc_[0-9a-f]{32}$/);
+    // The minter and its consumers read the one prefix constant, or the
+    // member caps silently stop bounding (R1-9).
+    expect(id.startsWith(MEMBER_MESSAGE_ID_PREFIX)).toBe(true);
+    // Separate leads, commands and positions.
+    expect(
+      new Set([
+        id,
+        memberMessageId({
+          leadSessionId: 'lead-2',
+          commandId: 'cmd_x',
+          position: 2,
+        }),
+        memberMessageId({
+          leadSessionId: 'lead',
+          commandId: 'cmd_y',
+          position: 2,
+        }),
+        memberMessageId({
+          leadSessionId: 'lead',
+          commandId: 'cmd_x',
+          position: 3,
+        }),
+      ]).size,
+    ).toBe(4);
+    expect(
+      broadcastMessageId({
+        senderSessionId: 'lead',
+        turnId: 't',
+        callId: 'c',
+        position: 2,
+      }),
+    ).toMatch(/^msgb_/);
+  });
+});
+
+describe('member messages lift the preamble sentences (b3c decision 8)', () => {
+  const alice = { name: 'alice', teamName: 'review' };
+
+  it('stops forbidding member messages once commands are enabled', () => {
+    const preamble = teamMemberPreamble(alice);
+    expect(preamble).not.toContain('cannot message');
+    expect(preamble).not.toContain('task board');
+    expect(preamble).toContain('use send_message with to "parent"');
+  });
+
+  it('separates the plan-mode sentence with exactly one space', () => {
+    const preamble = teamMemberPreamble(alice, true);
+    expect(preamble).toContain(' plan-mode="required"');
+    const body = preamble.split('\n')[1]!;
+    expect(body).toContain(
+      'You are in plan mode until the leader approves your plan:',
+    );
+    // The junction itself stands: a zero-space composition would glue
+    // "instruction" straight onto "You", and only / {2}/ never notices.
+    expect(body).toContain('next instruction. You are in plan mode');
+    expect(body).not.toMatch(/ {2}/);
+  });
+
+  it('ends the default commands-enabled body without trailing whitespace (R1-11)', () => {
+    const body = teamMemberPreamble(alice).split('\n')[1]!;
+    expect(body).not.toMatch(/\s$/);
+  });
+});
+
+describe('the member preamble identity (b3c decision 5)', () => {
+  const alice = { name: 'alice', teamName: 'review' };
+  const identity = { name: 'alice', team: 'review' };
+
+  it('agrees with the boolean gate on every cut (R1-9)', () => {
+    for (const input of [
+      teamMemberPreamble(alice),
+      '[review the change]\n\n' + teamMemberPreamble(alice),
+      'earlier work happened.\nYour next instruction: ' +
+        teamMemberPreamble(alice, true) +
+        'do the work',
+      'plain text',
+      'nothing to [see] here',
+    ]) {
+      expect(firstInputOpensWithMemberPreamble(input)).toBe(
+        memberPreambleIdentity(input) !== undefined,
+      );
+    }
+  });
+
+  it('reads the member from the launch envelope and the continuation marker', () => {
+    expect(memberPreambleIdentity(teamMemberPreamble(alice))).toEqual(identity);
+    expect(
+      memberPreambleIdentity(
+        '[review the change]\n\n' + teamMemberPreamble(alice),
+      ),
+    ).toEqual(identity);
+    expect(
+      memberPreambleIdentity(
+        'earlier work happened.\nYour next instruction: ' +
+          teamMemberPreamble(alice, true) +
+          'do the work',
+      ),
+    ).toEqual(identity);
+    expect(memberPreambleIdentity('plain text')).toBeUndefined();
+  });
+});
+
+describe('never-started notes (b3c decision 8)', () => {
+  it('leave member messages out of the lost-messages count', () => {
+    const run = {
+      childRunId: 'run-1',
+      predecessorChildRunId: 'run-0',
+      stopReason: 'creation_failed',
+      run: { state: 'failed' },
+    } as unknown as ChildSessionRun;
+    const msgc = {
+      messageId: 'msgc_x',
+      childRunId: 'run-1',
+    } as unknown as SessionMessage;
+    const lead = {
+      messageId: 'msg_y',
+      childRunId: 'run-1',
+    } as unknown as SessionMessage;
+    const other = {
+      messageId: 'msg_z',
+      childRunId: 'run-2',
+    } as unknown as SessionMessage;
+    expect(hostedNeverStarted(run, [msgc, lead, other]).lostMessages).toBe(1);
+    expect(hostedNeverStarted(run, [msgc]).lostMessages).toBe(0);
   });
 });

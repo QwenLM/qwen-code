@@ -192,6 +192,19 @@ async function transcriptSubtypes(
 }
 
 describe('managed session record sink', () => {
+  it('round-trips resumed attempt identities through the managed projection', async () => {
+    const harness = await createHarness();
+    const attempt = record({
+      type: 'system',
+      subtype: 'turn_attempt',
+      promptId: 'client-1',
+      daemonPromptId: 'daemon-2',
+    });
+    await harness.sink.write(attempt);
+    expect(await harness.sink.project()).toEqual([attempt]);
+    await harness.close();
+  });
+
   it('carries the record shapes the projection can reproduce', async () => {
     const harness = await createHarness();
     expect(harness.sink.canCarry(record({ type: 'user' }))).toBe(true);

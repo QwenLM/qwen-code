@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { FunctionDeclaration } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import {
   parseMcpConfiguration,
   parseMcpOperation,
@@ -111,6 +112,33 @@ export class HostedMcpSession {
     return this.acquired;
   }
 
+  /**
+   * The recovery-blocked turn's handback of this Session-scoped mount
+   * (#13800), under the claim of the acquire that holds it now. Only MCP
+   * work proven settled lets it go — the Broker cannot see an MCP
+   * operation, nor a Hook run that shares this owner (`hookWorkUnproven`)
+   * — and its next acquire claims the mount again (a lookup that finds it
+   * gone re-acquires). The owner stays booked as acquired, so the close
+   * still runs the full release.
+   */
+  mountHandback(
+    hookWorkUnproven: () => boolean,
+  ): (() => Promise<void>) | undefined {
+    const claim = this.broker.mountClaim();
+    if (claim === undefined) return undefined;
+    return async () => {
+      if (
+        this.initializing ||
+        this.refreshing > 0 ||
+        this.configuring.size > 0 ||
+        this.recoveryBlocked ||
+        hookWorkUnproven()
+      )
+        throw new Error('MCP work on the Workspace mount is unproven.');
+      await this.broker.releaseMount(claim);
+    };
+  }
+
   private grantsRenewed = false;
   private readonly bindings = new Map<
     string,
@@ -122,7 +150,7 @@ export class HostedMcpSession {
   >();
 
   constructor(
-    options: HostedWorkspaceBrokerOptions,
+    private readonly options: HostedWorkspaceBrokerOptions,
     private readonly session: ManagedSession,
     readonly servers: readonly HostedMcpServerPin[],
   ) {
@@ -508,7 +536,7 @@ export class HostedMcpSession {
       catalog.discovery.tools === 'partial'
         ? catalog.tools.map((tool) => ({
             name: this.toolName(catalog, tool.name),
-            description: tool.description,
+            description: `MCP server: ${JSON.stringify(catalog.serverId)}\nMCP tool: ${JSON.stringify(tool.name)}${tool.description ? `\n${tool.description}` : ''}`,
             parametersJsonSchema: tool.inputSchema,
           }))
         : [],
@@ -738,6 +766,11 @@ export class HostedMcpSession {
   }
 
   async close(): Promise<void> {
+    await this.reconcileEffects();
+    await this.closeResources();
+  }
+
+  async reconcileEffects(): Promise<void> {
     if (this.initializing || this.refreshing || this.configuring.size)
       throw new HostedMcpRecoveryRequiredError();
     for (const entry of this.session.authority.extensionRecordsInDomain(
@@ -788,10 +821,28 @@ export class HostedMcpSession {
       };
       await this.commitConfiguration(cancelled);
     }
+  }
+
+  async closeResources(): Promise<void> {
+    if (
+      this.hasPendingOperations() ||
+      this.configurations().some(
+        (entry) =>
+          !['settled', 'failed', 'cancelled'].includes(entry.run.state),
+      )
+    )
+      throw new HostedMcpRecoveryRequiredError();
     const configurations = this.configurations().filter(
       (entry) => entry.releaseState !== 'released',
     );
-    if (!this.acquired && !configurations.length) return;
+    const hookOwner = this.session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .some(
+        (entry) =>
+          parseHookExecution(entry.record).runtimeSessionId ===
+            this.broker.runtimeSessionId && entry.run.runtime !== null,
+      );
+    if (!this.acquired && !configurations.length && !hookOwner) return;
     if (
       configurations.some(
         (entry) =>
@@ -805,6 +856,7 @@ export class HostedMcpSession {
       } catch (cause) {
         // Older writers did not persist drain receipts before owner release.
         if (
+          this.options.lifecycleAuthority?.() ||
           !(cause instanceof HostedWorkspaceBrokerRejection) ||
           cause.status !== 409 ||
           ![
@@ -905,7 +957,37 @@ export class HostedMcpSession {
     const previouslyAcquired = this.acquired;
     this.acquired = true;
     try {
-      await this.broker.acquire();
+      if (this.options.lifecycleAuthority?.()) {
+        const pins = [
+          ...this.configurations()
+            .filter(
+              (entry) =>
+                entry.runtimeSessionId === this.broker.runtimeSessionId,
+            )
+            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : [])),
+          ...this.session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .filter(
+              (entry) =>
+                parseHookExecution(entry.record).runtimeSessionId ===
+                this.broker.runtimeSessionId,
+            )
+            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : [])),
+        ];
+        const expected = pins[0];
+        if (
+          !expected ||
+          pins.some(
+            (pin) =>
+              pin.runtimeBindingId !== expected.runtimeBindingId ||
+              pin.generation !== expected.generation,
+          )
+        )
+          throw new HostedMcpRecoveryRequiredError();
+        await this.broker.acquire(expected);
+      } else {
+        await this.broker.acquire();
+      }
     } catch (cause) {
       if (cause instanceof HostedWorkspaceBrokerRejection)
         this.acquired = previouslyAcquired;

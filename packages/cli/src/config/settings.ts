@@ -211,6 +211,30 @@ export enum SettingScope {
   SystemDefaults = 'SystemDefaults',
 }
 
+function mergeTrustCheckSettings(
+  systemDefaults: Settings,
+  user: Settings,
+  system: Settings,
+): Settings {
+  return customDeepMerge(
+    getMergeStrategyForPath,
+    {},
+    systemDefaults,
+    user,
+    system,
+  ) as Settings;
+}
+
+export function getOperatorTrustSettings(
+  settings: Pick<LoadedSettings, 'forScope'>,
+): Settings {
+  return mergeTrustCheckSettings(
+    settings.forScope(SettingScope.SystemDefaults).settings,
+    settings.forScope(SettingScope.User).settings,
+    settings.forScope(SettingScope.System).settings,
+  );
+}
+
 export interface CheckpointingSettings {
   enabled?: boolean;
 }
@@ -1557,20 +1581,15 @@ function readSettingsLayers(
   // answer the final merged settings (and `loadCliConfig`'s `trustedFolder`)
   // use; the workspace scope stays out, since a workspace file that only a
   // trusted workspace may contribute cannot decide its own trust.
-  const initialTrustCheckSettings = customDeepMerge(
-    getMergeStrategyForPath,
-    {},
+  const initialTrustCheckSettings = mergeTrustCheckSettings(
     systemDefaultSettings,
     userSettings,
     systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??
-    isWorkspaceTrusted(
-      initialTrustCheckSettings as Settings,
-      undefined,
-      realWorkspaceDir,
-    ).isTrusted ??
+    isWorkspaceTrusted(initialTrustCheckSettings, undefined, realWorkspaceDir)
+      .isTrusted ??
     false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.

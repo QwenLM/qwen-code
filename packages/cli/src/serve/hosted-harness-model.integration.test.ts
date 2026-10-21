@@ -49,6 +49,16 @@ beforeEach(async () => {
         })}\n\n`,
       );
     }
+    res.write(
+      `data: ${JSON.stringify({
+        id: 'fixture',
+        object: 'chat.completion.chunk',
+        created: 0,
+        model: 'pr12713-fixture',
+        choices: [],
+        usage: { prompt_tokens: 37, completion_tokens: 11, total_tokens: 48 },
+      })}\n\n`,
+    );
     res.end('data: [DONE]\n\n');
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -73,11 +83,13 @@ beforeEach(async () => {
             id: 'definition-model',
             envKey: 'OPENAI_API_KEY',
             baseUrl: `http://127.0.0.1:${address.port}/v1`,
+            generationConfig: { contextWindowSize: 32_768 },
           },
           {
             id: 'pr12713-fixture',
             envKey: 'OPENAI_API_KEY',
             baseUrl: `http://127.0.0.1:${address.port}/v1`,
+            generationConfig: { contextWindowSize: 65_536 },
           },
         ],
       },
@@ -90,7 +102,12 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  await rm(root, { recursive: true, force: true });
+  await rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 50,
+  });
 });
 
 function record(type: 'user' | 'assistant', text: string): ChatRecord {
@@ -124,6 +141,80 @@ it('completes a real hosted no-tool text turn', async () => {
   await expect(turn()).resolves.toMatchObject({ text: 'HOSTED_TEXT_OK' });
   expect(requests).toHaveLength(1);
   expect(requests[0]?.tools ?? []).toEqual([]);
+});
+
+it('persists normalized provider prompt usage with the resolved configured capacity', async () => {
+  const complete = vi.fn().mockResolvedValue(undefined);
+  await runHostedHarnessTextTurn({
+    sessionId: randomUUID(),
+    cwd: root,
+    history: [],
+    prompt: 'CURRENT_PROMPT',
+    promptId: randomUUID(),
+    signal: AbortSignal.timeout(15_000),
+    modelScope: {
+      bindBudget: vi.fn(),
+      evaluate: vi.fn(),
+      beginMainAttempt: vi.fn().mockResolvedValue(complete),
+    },
+  });
+  expect(complete).toHaveBeenCalledWith(true, [
+    expect.objectContaining({
+      promptTokenCount: 37,
+      candidatesTokenCount: 11,
+      totalTokenCount: 48,
+      contextWindowSize: 65_536,
+    }),
+  ]);
+});
+
+it('changes the next request model and capacity while retaining Session history', async () => {
+  const sessionId = randomUUID();
+  const first = await runHostedHarnessTextTurn({
+    sessionId,
+    cwd: root,
+    history: [],
+    prompt: 'FIRST_MODEL_MESSAGE',
+    promptId: randomUUID(),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const complete = vi.fn().mockResolvedValue(undefined);
+  const result = await runHostedHarnessTextTurn({
+    sessionId,
+    cwd: root,
+    history: [
+      record('user', 'FIRST_MODEL_MESSAGE'),
+      record('assistant', first.text),
+    ],
+    prompt: 'SECOND_MODEL_MESSAGE',
+    promptId: randomUUID(),
+    signal: AbortSignal.timeout(15_000),
+    modelSelection: { modelId: 'definition-model', revision: 1 },
+    modelScope: {
+      bindBudget: vi.fn(),
+      evaluate: vi.fn(),
+      beginMainAttempt: vi.fn().mockResolvedValue(complete),
+    },
+  });
+  expect(result.model).toBe('definition-model');
+  expect(requests.map((request) => request.model)).toEqual([
+    'pr12713-fixture',
+    'definition-model',
+  ]);
+  expect(requests[1]?.messages).toContainEqual({
+    role: 'user',
+    content: [{ type: 'text', text: 'FIRST_MODEL_MESSAGE' }],
+  });
+  expect(requests[1]?.messages).toContainEqual({
+    role: 'assistant',
+    content: 'HOSTED_TEXT_OK',
+  });
+  expect(complete).toHaveBeenCalledWith(true, [
+    expect.objectContaining({
+      promptTokenCount: 37,
+      contextWindowSize: 32_768,
+    }),
+  ]);
 });
 
 it('retains real provider reasoning Parts for the next no-tool request', async () => {

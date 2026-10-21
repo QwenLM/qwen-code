@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync('.github/workflows/serve-ab.yml', 'utf8');
 
@@ -744,12 +745,13 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     },
   );
 
-  it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
+  it.skipIf(!hasGnuRealpath || !arePermissionBitsEnforced())(
     'fails closed when the corrupt workspace cannot be unlinked',
     () => {
       // A swallowed `rm -f` failure would let the mkdir and the wipe run on
-      // a path that is still a symlink. Root bypasses the mode bits, so the
-      // fixture cannot produce the refusal there.
+      // a path that is still a symlink. Root with its DAC capabilities
+      // bypasses the mode bits, so the fixture cannot produce the refusal
+      // there.
       const parent = mkdtempSync(join(tmpdir(), 'serve-ab-heal-perm-'));
       const outside = mkdtempSync(join(tmpdir(), 'serve-ab-heal-outside-'));
       const ws = join(parent, 'repo');

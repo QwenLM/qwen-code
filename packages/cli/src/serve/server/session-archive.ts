@@ -915,6 +915,7 @@ export async function archiveDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   resolveConflicts?: boolean;
+  requireIdle?: boolean;
   assertCanMutate?: () => void;
 }): Promise<DaemonArchiveSessionsResult> {
   const {
@@ -924,6 +925,7 @@ export async function archiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
     resolveConflicts = false,
+    requireIdle = false,
     assertCanMutate,
   } = params;
   const uniqueSessionIds = [
@@ -942,9 +944,13 @@ export async function archiveDaemonSessions(params: {
           try {
             await bridge.closeSession(sessionId, undefined, {
               requireAgentClose: true,
+              requireIdle,
             });
           } catch (error) {
-            if (!isSessionNotFoundError(error)) {
+            if (
+              !isSessionNotFoundError(error) ||
+              (error as SessionNotFoundError).code === 'session_closing'
+            ) {
               return {
                 kind: 'error' as const,
                 error,

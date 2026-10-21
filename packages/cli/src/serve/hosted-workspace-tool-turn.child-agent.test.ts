@@ -17,7 +17,10 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
-import { MANAGED_CHILD_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import {
+  MANAGED_CHILD_LIMITS,
+  decodeChildLaunchEnvelope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   HookEventName,
@@ -29,11 +32,14 @@ import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
   HOSTED_AGENT_WORKTREE_TOOL,
+  HOSTED_AGENT_SNAPSHOT_TOOL,
   HOSTED_CHILD_MOUNT_REFUSALS,
   HOSTED_TEAM_AGENT_TOOL,
   HOSTED_TEAM_AGENT_WORKTREE_TOOL,
+  HOSTED_TEAM_AGENT_SNAPSHOT_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedApprovalWaiters } from './hosted-tool-approval.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import {
   hostedShellLaneAttachesChildAgents,
@@ -125,6 +131,7 @@ function createTurn(
   attachChildAgents = true,
   hooksSession?: HostedHookSession,
   profile: HostedWorkspaceToolProfile = 'hosted-workspace-team-lead/1',
+  childSnapshots = false,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -165,6 +172,7 @@ function createTurn(
               funnel: children,
               depth,
               childWorkspaces,
+              childSnapshots,
               queueConsumption: (childRunId) => consumption.push(childRunId),
             },
           }
@@ -217,6 +225,16 @@ async function executeAgent(
     'model',
     signal,
   );
+}
+
+function cancelWhenChildWaits(abort: AbortController): void {
+  // Acceptance polling starts only after child admission has committed.
+  const readAcceptance = children.acceptance.bind(children);
+  vi.spyOn(children, 'acceptance').mockImplementationOnce((childRunId) => {
+    const acceptance = readAcceptance(childRunId);
+    abort.abort();
+    return acceptance;
+  });
 }
 
 beforeEach(async () => {
@@ -383,19 +401,187 @@ it('refuses a worktree launch on a host without child Workspaces before any reco
   );
 });
 
-it('refuses an isolation other than worktree as an argument error', async () => {
-  for (const isolation of ['snapshot', 'shared', true]) {
+it('refuses an isolation other than worktree or snapshot as an argument error', async () => {
+  for (const isolation of ['shared', 'readonly', true]) {
     const responses = await executeAgent(
-      createTurn(0, undefined, 'prompt', false, true),
+      createTurn(
+        0,
+        undefined,
+        'prompt',
+        false,
+        true,
+        true,
+        undefined,
+        undefined,
+        true,
+      ),
       call({ description: 'audit', prompt: 'review', isolation }),
     );
     expect(JSON.stringify(responses)).toContain(
-      'isolation must be \\"worktree\\" or omitted',
+      'isolation must be \\"worktree\\", \\"snapshot\\" or omitted',
     );
   }
+  // A host that does not serve snapshots names only what it serves.
+  const worktreeOnly = await executeAgent(
+    createTurn(0, undefined, 'prompt', false, true),
+    call({ description: 'audit', prompt: 'review', isolation: 'readonly' }),
+  );
+  expect(JSON.stringify(worktreeOnly)).toContain(
+    'isolation must be \\"worktree\\" or omitted',
+  );
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );
+});
+
+// #13753 I3: `snapshot` joins the enum only where the host serves
+// snapshots beside child Workspaces; the flag alone changes nothing.
+it('declares snapshot isolation only on a host that serves snapshots and child Workspaces', async () => {
+  const signal = new AbortController().signal;
+  const agentOf = async (turn: HostedWorkspaceToolTurn) =>
+    (await turn.declarations(signal)).find((tool) => tool.name === 'agent');
+  expect(
+    await agentOf(
+      createTurn(
+        0,
+        undefined,
+        'prompt',
+        false,
+        true,
+        true,
+        undefined,
+        undefined,
+        true,
+      ),
+    ),
+  ).toBe(HOSTED_AGENT_SNAPSHOT_TOOL);
+  expect(
+    await agentOf(
+      createTurn(
+        0,
+        undefined,
+        'prompt',
+        false,
+        false,
+        true,
+        undefined,
+        undefined,
+        true,
+      ),
+    ),
+  ).toBe(HOSTED_AGENT_TOOL);
+  expect(await agentOf(createTurn(0, undefined, 'prompt', false, true))).toBe(
+    HOSTED_AGENT_WORKTREE_TOOL,
+  );
+  for (const [tool, base] of [
+    [HOSTED_AGENT_SNAPSHOT_TOOL, HOSTED_AGENT_WORKTREE_TOOL],
+    [HOSTED_TEAM_AGENT_SNAPSHOT_TOOL, HOSTED_TEAM_AGENT_WORKTREE_TOOL],
+  ] as const) {
+    expect(tool.description).toContain('With isolation "worktree"');
+    expect(tool.description).toContain('With isolation "snapshot"');
+    expect(tool.description!.startsWith(base.description!)).toBe(true);
+    expect(tool.parametersJsonSchema).toMatchObject({
+      properties: { isolation: { enum: ['worktree', 'snapshot'] } },
+    });
+    expect(
+      Object.keys(
+        (tool.parametersJsonSchema as { properties: object }).properties,
+      ),
+    ).toEqual(
+      Object.keys(
+        (base.parametersJsonSchema as { properties: object }).properties,
+      ),
+    );
+  }
+  expect(HOSTED_TEAM_AGENT_SNAPSHOT_TOOL.parametersJsonSchema).toMatchObject({
+    properties: { name: { type: 'string' } },
+  });
+  // Only the team's declaration, which takes a member name, says a member
+  // cannot be a snapshot.
+  const memberNote = 'A team member (name) cannot run as a snapshot.';
+  expect(HOSTED_TEAM_AGENT_SNAPSHOT_TOOL.description).toContain(memberNote);
+  expect(HOSTED_AGENT_SNAPSHOT_TOOL.description).not.toContain(memberNote);
+});
+
+// #13753 I3: the read profile declares its two read tools even on a turn
+// that has a Shell lane and its own child orchestration at depth 0, so the
+// refusal of the Agent tool rests on the profile, not on missing lanes.
+it('declares only the read tools on the read profile, whatever the turn has', async () => {
+  const reader = createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    true,
+    true,
+    undefined,
+    'hosted-workspace-read/1',
+    true,
+  );
+  expect(
+    (await reader.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    ),
+  ).toEqual(['read_file', 'glob']);
+  await expect(
+    executeAgent(reader, call({ description: 'audit', prompt: 'review' })),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+it('refuses a snapshot launch on a host without snapshots before any record', async () => {
+  const withoutSnapshots = await executeAgent(
+    createTurn(0, undefined, 'prompt', false, true),
+    call({ description: 'audit', prompt: 'review', isolation: 'snapshot' }),
+  );
+  expect(JSON.stringify(withoutSnapshots)).toContain(
+    'does not serve read-only snapshot children',
+  );
+  // Without child Workspaces the snapshot flag counts for nothing.
+  const withoutWorkspaces = await executeAgent(
+    createTurn(
+      0,
+      undefined,
+      'prompt',
+      false,
+      false,
+      true,
+      undefined,
+      undefined,
+      true,
+    ),
+    call(
+      { description: 'audit', prompt: 'review', isolation: 'snapshot' },
+      'call-2',
+    ),
+  );
+  expect(JSON.stringify(withoutWorkspaces)).toContain(
+    'does not serve isolated child Workspaces',
+  );
+  // Neither refusal steers a read-only request to a child that can write.
+  for (const refused of [withoutSnapshots, withoutWorkspaces])
+    expect(JSON.stringify(refused)).not.toContain('to share this Workspace.');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+it('records a snapshot launch on a host that serves snapshots', async () => {
+  const turn = snapshotCapableTurn();
+  await executeAgent(
+    turn,
+    call({ description: 'reader', prompt: 'review', isolation: 'snapshot' }),
+  );
+  expect(children.record('prompt:call-1')?.workspaceMode).toBe('snapshot');
+  // Serving snapshots changes no default: a launch naming no isolation
+  // still runs shared.
+  await executeAgent(
+    turn,
+    call({ description: 'writer', prompt: 'fix it' }, 'call-2'),
+  );
+  expect(children.record('prompt:call-2')?.workspaceMode).toBe('shared');
 });
 
 it('records the launch isolation and replays it after the capability is gone', async () => {
@@ -422,11 +608,30 @@ it('records the launch isolation and replays it after the capability is gone', a
   );
 });
 
+/** A turn on a host that serves both worktrees and snapshots. */
+function snapshotCapableTurn(): HostedWorkspaceToolTurn {
+  return createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    true,
+    true,
+    undefined,
+    undefined,
+    true,
+  );
+}
+
 async function foregroundWorktreeAnswer(
   result: string,
   receipt: Buffer,
+  isolation: 'worktree' | 'snapshot' = 'worktree',
 ): Promise<string> {
-  const turn = createTurn(0, undefined, 'prompt', false, true);
+  const turn =
+    isolation === 'snapshot'
+      ? snapshotCapableTurn()
+      : createTurn(0, undefined, 'prompt', false, true);
   const childRunId = 'prompt:call-1';
   const driving = (async () => {
     for (;;) {
@@ -452,13 +657,13 @@ async function foregroundWorktreeAnswer(
           description: 'audit the diff',
           prompt: 'review the change',
           run_in_background: false,
-          isolation: 'worktree',
+          isolation,
         }),
       ),
       driving,
     ])
   )[0];
-  expect(children.record(childRunId)?.workspaceMode).toBe('worktree');
+  expect(children.record(childRunId)?.workspaceMode).toBe(isolation);
   return (
     (responses[0]?.functionResponse?.response as { output?: string })?.output ??
     JSON.stringify(responses)
@@ -501,11 +706,14 @@ it('ends a foreground worktree answer with its merge outcome', async () => {
 });
 
 async function foregroundFailure(
-  isolated: boolean,
+  isolation: 'worktree' | 'snapshot' | undefined,
   started: boolean,
   cancelled = false,
 ): Promise<string> {
-  const turn = createTurn(0, undefined, 'prompt', false, true);
+  const turn =
+    isolation === 'snapshot'
+      ? snapshotCapableTurn()
+      : createTurn(0, undefined, 'prompt', false, true);
   const childRunId = 'prompt:call-1';
   const driving = (async () => {
     for (;;) {
@@ -535,7 +743,7 @@ async function foregroundFailure(
           description: 'audit the diff',
           prompt: 'review the change',
           run_in_background: false,
-          ...(isolated ? { isolation: 'worktree' } : {}),
+          ...(isolation ? { isolation } : {}),
         }),
       ),
       driving,
@@ -549,7 +757,7 @@ async function foregroundFailure(
 // Workspace. The line covers a merge that conflicted or was pinned away
 // too: it must never say the work landed.
 it('ends a started worktree child failure with the workspace line', async () => {
-  const answer = await foregroundFailure(true, true);
+  const answer = await foregroundFailure('worktree', true);
   expect(answer).toContain('Child agent run failed (child_failed).');
   expect(answer).toContain(
     "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
@@ -558,7 +766,7 @@ it('ends a started worktree child failure with the workspace line', async () => 
 });
 
 it('ends a started worktree child cancellation with the workspace line', async () => {
-  const answer = await foregroundFailure(true, true, true);
+  const answer = await foregroundFailure('worktree', true, true);
   expect(answer).toContain('Child agent run cancelled (stop_requested).');
   expect(answer).toContain(
     "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
@@ -566,13 +774,40 @@ it('ends a started worktree child cancellation with the workspace line', async (
 });
 
 it('adds no workspace line to a worktree child that never started', async () => {
-  const answer = await foregroundFailure(true, false);
+  const answer = await foregroundFailure('worktree', false);
   expect(answer).toContain('Child agent run failed (creation_failed).');
   expect(answer).not.toContain('[child workspace]');
 });
 
 it('adds no workspace line to a failed shared child', async () => {
-  const answer = await foregroundFailure(false, true);
+  const answer = await foregroundFailure(undefined, true);
+  expect(answer).toContain('Child agent run failed (child_failed).');
+  expect(answer).not.toContain('[child workspace]');
+});
+
+// #13753 I3: a snapshot is always discarded and its receipt has no
+// workspace member, so a foreground snapshot answer, or a started
+// snapshot's failure, carries no workspace line.
+it('adds no workspace line to a foreground snapshot answer', async () => {
+  const answer = await foregroundWorktreeAnswer(
+    'child result',
+    Buffer.from(
+      JSON.stringify({
+        childSessionId: '550e8400-e29b-41d4-a716-446655440001',
+        turnId: 'turn-1',
+        status: 'completed',
+        completedAt: 1,
+      }),
+      'utf8',
+    ),
+    'snapshot',
+  );
+  expect(answer).toContain('child result');
+  expect(answer).not.toContain('[child workspace]');
+});
+
+it('adds no workspace line to a started snapshot child failure', async () => {
+  const answer = await foregroundFailure('snapshot', true);
   expect(answer).toContain('Child agent run failed (child_failed).');
   expect(answer).not.toContain('[child workspace]');
 });
@@ -1120,7 +1355,7 @@ it('a cancelled turn abandons the answer but never the committed child', async (
   const turn = createTurn();
   const abort = new AbortController();
   const childRunId = `prompt:call-1`;
-  setTimeout(() => abort.abort(), 200);
+  cancelWhenChildWaits(abort);
   const responses = await executeAgent(
     turn,
     call({
@@ -1143,7 +1378,7 @@ it('a cancelled turn abandons the answer but never the committed child', async (
 it('a cancelled turn never admits children queued behind its abandoned wait', async () => {
   const turn = createTurn();
   const abort = new AbortController();
-  setTimeout(() => abort.abort(), 200);
+  cancelWhenChildWaits(abort);
   const batch = await turn.execute(
     [
       call(
@@ -1436,17 +1671,20 @@ const resultEvents = [
 
 it.each(
   resultEvents.flatMap((eventName) =>
-    [false, true].map((background) => ({ eventName, background })),
+    ['command', 'http', 'function'].flatMap((type) =>
+      [false, true].map((background) => ({ eventName, type, background })),
+    ),
   ),
 )(
-  'refuses restored $eventName command Hooks before child admission (background=$background)',
-  async ({ eventName, background }) => {
+  'refuses restored $eventName $type Hooks before child admission (background=$background)',
+  async ({ eventName, type, background }) => {
     const hooks = await restoredHooks({
       eventName,
-      config: { type: 'command' },
+      config: { type: type as 'command' | 'http' | 'function' },
     });
     const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
+      expect(hooks.hasMountableToolResultHooks).toBe(true);
       const result = await executeAgent(
         turn,
         call({
@@ -1500,22 +1738,14 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
   }
 });
 
-// The type/eligibility filter and the event filter are orthogonal, so the
-// controls exercise the five ineligible shapes on one event and the event
+// The eligibility filter and the event filter are orthogonal, so the
+// controls exercise the three ineligible shapes on one event and the event
 // filter on the single off-event row. The refusal side above already sweeps
-// all three result events.
+// every non-prompt type across all three result events.
 const admissionControls: Array<
   Pick<ManagedHookDescriptor, 'eventName' | 'config'> &
     Partial<ManagedHookDescriptor>
 > = [
-  {
-    eventName: HookEventName.PostToolUse,
-    config: { type: 'http' as const },
-  },
-  {
-    eventName: HookEventName.PostToolUse,
-    config: { type: 'function' as const },
-  },
   {
     eventName: HookEventName.PostToolUse,
     config: { type: HookType.Prompt, prompt: 'check' },
@@ -1547,6 +1777,7 @@ it.each([false, true])(
       original.getCatalog()!,
     );
     const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
+    const childSession = children;
     try {
       expect(original.hasMountableToolResultHooks).toBe(true);
       await original.fire(
@@ -1563,26 +1794,30 @@ it.each([false, true])(
       await original.close();
       await hooks.ensureReady();
       expect(hooks.mountHeld).toBe(false);
-      const result = executeAgent(
-        turn,
-        call({
-          description: 'audit',
-          prompt: 'review',
-          run_in_background: background,
-        }),
-      );
-      if (!background) {
-        await vi.waitFor(() =>
-          expect(children.record('prompt:call-1')).toBeDefined(),
-        );
-        await children.settleFailed('prompt:call-1', {
-          stopReason: 'creation_failed',
-          reason: null,
-          started: false,
-        });
-      }
-      expect(JSON.stringify(await result)).not.toContain(mountRefusal);
-      expect(children.record('prompt:call-1')).toBeDefined();
+      const [result] = await Promise.all([
+        executeAgent(
+          turn,
+          call({
+            description: 'audit',
+            prompt: 'review',
+            run_in_background: background,
+          }),
+        ),
+        (async () => {
+          if (background) return;
+          await vi.waitFor(
+            () => expect(childSession.record('prompt:call-1')).toBeDefined(),
+            { timeout: 10_000 },
+          );
+          await childSession.settleFailed('prompt:call-1', {
+            stopReason: 'creation_failed',
+            reason: null,
+            started: false,
+          });
+        })(),
+      ]);
+      expect(JSON.stringify(result)).not.toContain(mountRefusal);
+      expect(childSession.record('prompt:call-1')).toBeDefined();
       expect(
         broker.hookControl.mock.calls.filter(
           ([operation]) => operation.kind === 'hook-execute',
@@ -1672,27 +1907,32 @@ it.each(
       duration: 1,
       output: {},
     }));
+    const childSession = children;
     try {
-      const result = executeAgent(
-        turn,
-        call({
-          description: 'audit',
-          prompt: 'review',
-          run_in_background: background,
-        }),
-      );
-      if (!background) {
-        await vi.waitFor(() =>
-          expect(children.record('prompt:call-1')).toBeDefined(),
-        );
-        await children.settleFailed('prompt:call-1', {
-          stopReason: 'creation_failed',
-          reason: null,
-          started: false,
-        });
-      }
-      expect(JSON.stringify(await result)).not.toContain(mountRefusal);
-      expect(children.record('prompt:call-1')).toBeDefined();
+      const [result] = await Promise.all([
+        executeAgent(
+          turn,
+          call({
+            description: 'audit',
+            prompt: 'review',
+            run_in_background: background,
+          }),
+        ),
+        (async () => {
+          if (background) return;
+          await vi.waitFor(
+            () => expect(childSession.record('prompt:call-1')).toBeDefined(),
+            { timeout: 10_000 },
+          );
+          await childSession.settleFailed('prompt:call-1', {
+            stopReason: 'creation_failed',
+            reason: null,
+            started: false,
+          });
+        })(),
+      ]);
+      expect(JSON.stringify(result)).not.toContain(mountRefusal);
+      expect(childSession.record('prompt:call-1')).toBeDefined();
     } finally {
       await turn.finish();
       await hooks.close();
@@ -1908,11 +2148,103 @@ it('refuses a foreground agent call whose PreToolUse Hook took the mount', async
   );
 });
 
+// A PermissionRequest Hook runs after the call's PreToolUse and may take
+// the mount there: the admission after the last Hook still refuses.
+it('refuses a foreground agent call whose PermissionRequest Hook took the mount', async () => {
+  const fireEvents: string[] = [];
+  const turn = createTurnWithOwnerMount(
+    'hooks',
+    false,
+    (hook, eventName) => {
+      if (eventName === HookEventName.PermissionRequest) hook.mountHeld = true;
+    },
+    fireEvents,
+    defaultApproval(),
+  );
+  const refused = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: false,
+    }),
+  );
+  expect(fireEvents.slice(0, 2)).toEqual([
+    HookEventName.PreToolUse,
+    HookEventName.PermissionRequest,
+  ]);
+  expect(JSON.stringify(refused)).toContain(mountRefusal);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+// The launch reads the input the Hooks left: its envelope carries the final
+// prompt and description, and the final run_in_background picks how its
+// result returns. An agent-only batch still binds no parent mount.
+it('launches a child agent from the input its Hooks left', async () => {
+  const model = {
+    description: 'model task',
+    prompt: 'model prompt',
+    run_in_background: false,
+  };
+  const pre = { ...model, description: 'pre task', prompt: 'pre prompt' };
+  const final = {
+    description: 'final task',
+    prompt: 'final prompt',
+    run_in_background: true,
+  };
+  const inputs: unknown[] = [];
+  const turn = createTurnWithOwnerMount(
+    'hooks',
+    false,
+    (_hook, eventName, fields) => {
+      inputs.push(fields['tool_input']);
+      if (eventName === HookEventName.PreToolUse)
+        return { hookSpecificOutput: { updatedInput: pre } };
+      if (eventName === HookEventName.PermissionRequest)
+        return {
+          hookSpecificOutput: {
+            decision: { behavior: 'allow', updatedInput: final },
+          },
+        };
+      return undefined;
+    },
+    undefined,
+    defaultApproval(),
+  );
+  const responses = await executeAgent(turn, call(model));
+  expect(inputs.slice(0, 2)).toEqual([model, pre]);
+  const record = children.record('prompt:call-1')!;
+  expect(record.completion).toBe('sent');
+  expect(
+    decodeChildLaunchEnvelope(await session.resources.read(record.inputRef)),
+  ).toMatchObject({ description: 'final task', prompt: 'final prompt' });
+  expect(JSON.stringify(responses)).toContain('started in the background');
+  // The Turn's own acquisition binds its file history; none happened.
+  expect(broker.fileHistory).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+function defaultApproval(): ConstructorParameters<
+  typeof HostedWorkspaceToolTurn
+>[8] {
+  return {
+    settings: { mode: 'default', timeoutMs: 60_000 },
+    waiters: new HostedApprovalWaiters(),
+  };
+}
+
 function createTurnWithOwnerMount(
   owner: 'hooks' | 'mcp',
   held: boolean,
-  onFire?: (sessionOwner: { mountHeld: boolean }) => void,
+  onFire?: (
+    sessionOwner: { mountHeld: boolean },
+    eventName: string,
+    fields: Record<string, unknown>,
+  ) => unknown,
   fireEvents?: string[],
+  approval?: ConstructorParameters<typeof HostedWorkspaceToolTurn>[8],
 ): HostedWorkspaceToolTurn {
   const ownerBroker = new (HostedWorkspaceBroker as unknown as new (
     ...args: unknown[]
@@ -1929,10 +2261,13 @@ function createTurnWithOwnerMount(
     refresh: () => Promise.resolve(),
     tools: () => [],
     toolInput: () => undefined,
-    fire: (eventName: string) => {
+    fire: (
+      eventName: string,
+      _occurrenceId: string,
+      fields: Record<string, unknown>,
+    ) => {
       fireEvents?.push(eventName);
-      onFire?.(sessionOwner);
-      return Promise.resolve([]);
+      return Promise.resolve(onFire?.(sessionOwner, eventName, fields) ?? []);
     },
     close: () => Promise.resolve(),
   };
@@ -1948,7 +2283,7 @@ function createTurnWithOwnerMount(
       resources: session.resources,
       assertWritable: async () => undefined,
     },
-    undefined,
+    approval,
     {
       profile: 'hosted-workspace-shell/1',
       childAgents: {
