@@ -664,6 +664,21 @@ export function resolveDaemonTelemetryRoute(
   ) {
     return { route: 'GET /workspace/:id/session-info' };
   }
+  const workspaceArtifactLibrary = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/artifact-library(\/[^/]+)?$/,
+  );
+  if (
+    workspaceArtifactLibrary?.[1] &&
+    ((req.method === 'GET' && !workspaceArtifactLibrary[2]) ||
+      (req.method === 'DELETE' && workspaceArtifactLibrary[2]))
+  ) {
+    return {
+      route:
+        `${req.method} /workspaces/:workspace/session/:id/artifact-library` +
+        (req.method === 'DELETE' ? '/:artifactId' : ''),
+      sessionId: decodePathSegment(workspaceArtifactLibrary[1]),
+    };
+  }
   const workspaceTranscript = path.match(
     /^\/workspaces\/[^/]+\/session\/([^/]+)\/transcript$/,
   );

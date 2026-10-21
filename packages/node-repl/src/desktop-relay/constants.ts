@@ -22,8 +22,8 @@ export const DESKTOP_RELAY_LABEL = 'com.qwencode.desktop-relay';
  */
 export const DESKTOP_RELAY_SERVER_NAME = 'desktop-node-repl';
 
-/** Kept equal to the SDK version the bundled computer-use skill pins. */
-export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.20.11';
+/** Same version as the standalone runtime and its SDK dependency. */
+export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.26.0';
 
 /**
  * The daemon drops `/acp` frames above 10 MB; leave room for the
@@ -31,14 +31,8 @@ export const DESKTOP_RELAY_CUA_SDK_VERSION = '0.20.11';
  */
 export const MAX_RELAYED_REPLY_BYTES = 9 * 1024 * 1024;
 
-/**
- * Below the daemon's 30 s per-message round-trip limit on the reverse channel
- * (`CLIENT_MCP_MESSAGE_TIMEOUT_MS` in packages/core), so a relayed call's
- * reply fits its frame: a longer yield would time the frame out while the
- * cell kept driving the desktop. A local stdio node_repl keeps its own 60 s
- * maximum (`MAX_YIELD_TIME_MS` in mcp-server.ts).
- */
-export const MAX_RELAYED_YIELD_TIME_MS = 25_000;
+/** Leaves cancellation grace and transport time within the daemon's 30 s limit. */
+export const MAX_RELAYED_TIMEOUT_MS = 20_000;
 
 export function defaultRelayHome(): string {
   return path.join(os.homedir(), '.qwen', 'desktop-relay');
