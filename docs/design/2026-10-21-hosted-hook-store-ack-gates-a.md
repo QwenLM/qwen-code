@@ -31,7 +31,7 @@ commit of a settled Hook.
 
 Expectations:
 
-- One physical Hook call, in the fixture evidence and in the model request.
+- One physical call in the fixture evidence, and one settled result.
 - The durable record is `settled` with a result, despite the lost ack.
 - The later status read returns `settled` without a second call.
 
