@@ -102,9 +102,9 @@ console.log(
 // park the reads rather than fail — no error, the child alive and blocked
 // on write, the hold within the cap and no longer growing, nothing
 // delivered while paused — and resume() must deliver the whole stream
-// byte-exact, after which the child exits naturally, the master fd is
-// released, and the host event loop drains (the fixture never calls
-// process.exit on its success path).
+// without loss or duplication (the OS pty's CR jitter aside), after which
+// the child exits naturally, the master fd is released, and the host event
+// loop drains (the fixture never calls process.exit on its success path).
 const parkFixtureSource = `
 import * as fs from 'node:fs';
 import { loadPty } from ${JSON.stringify(getPtyModulePath)};
@@ -190,9 +190,13 @@ if (exits !== 1) {
 let expected = '';
 for (let i = 0; i < LINES; i += 1) expected += 'P' + i + '\\r\\n';
 expected += 'PARK_DONE\\r\\n';
-if (output !== expected) {
+// macOS's pty driver occasionally emits an extra CR before LF (the same
+// jitter a plain script(1) probe shows), so collapse repeated CRs before LF
+// rather than requiring OS-level byte identity.
+const normalized = output.replace(/\\r+\\n/g, '\\r\\n');
+if (normalized !== expected) {
   console.error(
-    'resumed stream is not byte-exact: got ' + output.length +
+    'resumed stream lost or duplicated data: got ' + output.length +
       ' chars, expected ' + expected.length,
   );
   process.exit(1);
@@ -533,7 +537,7 @@ describe.skipIf(!bunAvailable || process.platform === 'win32')(
     });
 
     it(
-      'parks a paused flood at the cap and resumes it byte-exact',
+      'parks a paused flood at the cap and resumes it without loss',
       { timeout: 60_000 },
       () => {
         const result = spawnSync(bunBin, [fixturePath], {
