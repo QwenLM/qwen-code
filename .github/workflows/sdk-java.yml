@@ -704,8 +704,9 @@ jobs:
           fi
           # Seed from the host-shared repo (cache-restored on hosted runners)
           # so it and the egress proxy keep paying off for the job-local copy.
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
-          # The shell owns the lock; Maven children must not extend its lifetime.
+          # The shell owns the lock; every child closes fd 9 so a surviving
+          # process cannot hold the flock after a canceled step.
+          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null 9>&- || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 9>&-
           cd packages/managed-agent-server
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
@@ -724,9 +725,9 @@ jobs:
           # (the hosted-only cache no longer restores it), so create it
           # before the write-back or every job re-resolves through the
           # egress proxy instead of bootstrapping the shared repository.
-          mkdir -p "${HOME}/.m2/repository"
-          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
-            | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
+          mkdir -p "${HOME}/.m2/repository" 9>&-
+          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-agent-server -cf - . 9>&- \
+            | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - 9>&- \
             || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or

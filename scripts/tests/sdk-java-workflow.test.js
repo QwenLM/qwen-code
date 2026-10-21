@@ -130,7 +130,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('keeps the host lock out of every Maven child', () => {
+  it('keeps the host lock out of every child command', () => {
     const jobs = parse(workflow).jobs;
     const lockedSteps = ['test', 'mysql-integration'].flatMap((name) =>
       jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
@@ -139,10 +139,24 @@ describe('SDK Java self-hosted workflow guards', () => {
     // lock-bearing steps are the test job's and this job's single one.
     expect(lockedSteps).toHaveLength(2);
     for (const s of lockedSteps) {
-      const commands = s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm);
-      expect(commands?.length, s.name).toBeGreaterThan(0);
-      for (const command of commands) {
-        expect(command.trim(), s.name).toMatch(/ 9>&-$/);
+      // A child that inherits fd 9 keeps the flock after a canceled step
+      // kills the shell: the queue head then waits out its whole budget
+      // behind a process no job owns (run 39625253277).
+      const firstChild = ['cp ', 'mvn ']
+        .map((command) => s.run.indexOf(command))
+        .filter((index) => index >= 0)
+        .sort((a, b) => a - b)[0];
+      expect(firstChild, s.name).toBeGreaterThan(-1);
+      const children = s.run
+        .slice(firstChild)
+        .replace(/\\\n/g, ' ')
+        .split('\n')
+        .flatMap((line) => line.split('|'))
+        .map((line) => line.trim())
+        .filter((line) => /^(cp|mkdir|mvn|tar) /.test(line));
+      expect(children.length, s.name).toBeGreaterThan(0);
+      for (const command of children) {
+        expect(command, s.name).toMatch(/ 9>&-$/);
       }
     }
   });
