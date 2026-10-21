@@ -320,8 +320,8 @@ placeholder watermarks (`replayFloorSequence: 0`,
 ## 7. Validation
 
 - The Managed Agent server's full test suite and Checkstyle pass.
-- `ManagedAgentMySqlIT` passes against `mariadb:10.11.18`, the image CI uses,
-  and against `mysql:8.4`.
+- `ManagedAgentMySqlIT` has passed against both `mariadb:10.11.18` and
+  `mysql:8.4`.
 - The packaged Spring Boot jar migrates a MariaDB database to V15, which shows
   that Flyway finds the Java migration inside the jar.
 - Mutations each fail the matching test: ignoring `Last-Event-ID`, skipping the

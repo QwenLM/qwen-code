@@ -569,8 +569,25 @@
                                  67.2 s): healthy 9862 s, fork 10462 s, Verify
                                  185 minutes. The FG11d close-in-flight refusal
                                  cell adds 9 s (2x its measured 4.5 s): healthy
-                                 9871 s, fork 10471 s, Verify 185 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10471</forkedProcessTimeoutInSeconds>
+                                 9871 s, fork 10471 s, Verify 185 minutes. The
+                                 FG13f MessageDisplay reload cell adds 150 s:
+                                 healthy 10021 s, fork 10621 s, Verify 188
+                                 minutes. The FG12d cancel-before-dispatch cell
+                                 adds 18 s (2x its measured 9.1 s): healthy
+                                 10039 s, fork 10639 s, Verify 188 minutes. The
+                                 FG11d retry-reuse cell adds 11 s (2x its
+                                 measured 5.3 s): healthy 10050 s, fork 10650 s,
+                                 Verify 188 minutes. The FG12d Spring-restart
+                                 owner-release cell adds 24 s (2x its measured
+                                 11.9 s): healthy 10074 s, fork 10674 s. The
+                                 FG11d settled-outcome cell adds 9 s (2x its
+                                 measured 4.5 s): healthy 10083 s, fork 10683 s,
+                                 Verify 189 minutes. The FG13a result store
+                                 ack-loss cell adds 150 s: healthy 10233 s, fork
+                                 10833 s, Verify 191 minutes. The FG13a dispatch
+                                 ack-loss cell adds 150 s: healthy 10383 s, fork
+                                 10983 s, Verify 194 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10983</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

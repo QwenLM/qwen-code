@@ -78,6 +78,10 @@ public class PublicAgentController {
                     "unsupported_feature",
                     "Phase 1 streams through the Session events route.");
         }
+        if (selection == null && request.skills() != null && !request.skills().isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
+                    "Session Skills require a bound Workspace.");
+        }
         CommandAdmission admission = selection == null
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         idempotencyKey, request.agentId(),
@@ -86,7 +90,7 @@ public class PublicAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null,
-                        request.metadata(), request.input(), selection);
+                        request.metadata(), request.input(), selection, null, null, request.skills());
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)

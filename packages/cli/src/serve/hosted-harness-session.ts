@@ -153,11 +153,14 @@ import {
   HostedModelRoundLimitError,
   HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
+  hostedToolOutputBudget,
 } from './hosted-harness-model.js';
 import { hostedToolProgress } from './hosted-tool-progress.js';
 import {
   HostedSkillCatalog,
   readHostedSkills,
+  parseSessionSkillsRef,
+  sameSessionSkillsRef,
 } from './hosted-skill-catalog.js';
 import {
   parseHostedWorkflowLaunchBlock,
@@ -479,6 +482,7 @@ interface HostedSession {
   storeBaseUrl: string;
   definition: Record<string, unknown> | null;
   agentDefinition?: HostedAgentDefinition;
+  sessionSkillsRef?: ManagedSessionDurableRef;
   skills?: HostedSkillCatalog;
   clientId: string;
   cwd: string;
@@ -2313,6 +2317,13 @@ async function verifyWorkspaceRestore(
     }
     if (ref.kind === 'managed-definition') {
       const definition = object(JSON.parse(bytes.toString('utf8')));
+      const sessionSkills = parseSessionSkillsRef(
+        definition?.['sessionSkillsRef'],
+      );
+      if (sessionSkills) {
+        await readRef(sessionSkills);
+        await readHostedSkills(sessionSkills, resources);
+      }
       const pin = parseHostedAgentDefinition(definition?.['agentDefinition']);
       if (pin?.instructionsRef) {
         await readRef(pin.instructionsRef);
@@ -3303,7 +3314,10 @@ async function executeHostedTurn(
           type: 'assistant' | 'tool_result',
           parts: Part[],
           model: string,
-          identity?: { uuid: string; timestamp: string },
+          identity?: Pick<
+            ChatRecord,
+            'uuid' | 'timestamp' | 'clientInitiatedSkills'
+          >,
         ) =>
           record(session, sessionId, type, parentUuid, {
             daemonPromptId: promptId,
@@ -3316,7 +3330,10 @@ async function executeHostedTurn(
           type: 'assistant' | 'tool_result',
           parts: Part[],
           model: string,
-          identity?: { uuid: string; timestamp: string },
+          identity?: Pick<
+            ChatRecord,
+            'uuid' | 'timestamp' | 'clientInitiatedSkills'
+          >,
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant' && deltas) {
@@ -3380,6 +3397,8 @@ async function executeHostedTurn(
                 },
               )
             : undefined;
+        if (toolTurn && session.skills)
+          toolTurn.setToolOutputBudget(hostedToolOutputBudget(session.cwd));
         if (resumeApproval) {
           if (!toolTurn)
             throw new HostedToolRecoveryRequiredError(
@@ -3729,7 +3748,9 @@ export function registerHostedHarnessSessionRoutes(
     const body = object(req.body);
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
     let agentDefinition: HostedAgentDefinition | undefined;
+    let sessionSkillsRef: ManagedSessionDurableRef | undefined;
     try {
+      sessionSkillsRef = parseSessionSkillsRef(body?.['sessionSkillsRef']);
       agentDefinition = parseHostedAgentDefinition(
         body?.['agentDefinition'],
         create,
@@ -3764,8 +3785,9 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (
-      (agentDefinition?.skillsRef !== undefined &&
-        (!toolProfile || !brokerOptions)) ||
+      ((agentDefinition?.skillsRef !== undefined ||
+        sessionSkillsRef !== undefined) &&
+        ((create && !toolProfile) || !brokerOptions)) ||
       (toolProfile !== undefined &&
         ((!isHostedWorkspaceProfile(toolProfile) &&
           toolProfile !== HOSTED_MCP_PROFILE) ||
@@ -3912,6 +3934,14 @@ export function registerHostedHarnessSessionRoutes(
       resident &&
       !create &&
       !sameHostedAgentDefinition(resident.agentDefinition, agentDefinition)
+    ) {
+      error(res, 409, 'hosted_agent_definition_conflict');
+      return;
+    }
+    if (
+      resident &&
+      !create &&
+      !sameSessionSkillsRef(resident.sessionSkillsRef, sessionSkillsRef)
     ) {
       error(res, 409, 'hosted_agent_definition_conflict');
       return;
@@ -4538,6 +4568,7 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(agentDefinition ? { agentDefinition } : {}),
+                  ...(sessionSkillsRef ? { sessionSkillsRef } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(foregroundOnly ? { foregroundOnly: true } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
@@ -4595,23 +4626,28 @@ export function registerHostedHarnessSessionRoutes(
         ),
       );
       let savedAgentDefinition: HostedAgentDefinition | undefined;
+      let savedSessionSkillsRef: ManagedSessionDurableRef | undefined;
       let skills: HostedSkillCatalog | undefined;
       try {
         savedAgentDefinition = parseHostedAgentDefinition(
           definition?.['agentDefinition'],
         );
+        savedSessionSkillsRef = parseSessionSkillsRef(
+          definition?.['sessionSkillsRef'],
+        );
+        if (!sameSessionSkillsRef(savedSessionSkillsRef, sessionSkillsRef))
+          throw new Error('Session Skills reference changed.');
         if (!sameHostedAgentDefinition(savedAgentDefinition, agentDefinition))
           throw new Error('Agent definition identity changed.');
         await readHostedAgentInstructions(
           savedAgentDefinition,
           managed.resources,
         );
-        if (savedAgentDefinition?.skillsRef)
+        const effectiveSkillsRef =
+          savedSessionSkillsRef ?? savedAgentDefinition?.skillsRef;
+        if (effectiveSkillsRef)
           skills = new HostedSkillCatalog(
-            await readHostedSkills(
-              savedAgentDefinition.skillsRef,
-              managed.resources,
-            ),
+            await readHostedSkills(effectiveSkillsRef, managed.resources),
           );
       } catch {
         await managed.close();
@@ -4701,6 +4737,9 @@ export function registerHostedHarnessSessionRoutes(
         storeBaseUrl: store.baseUrl,
         definition,
         agentDefinition: savedAgentDefinition,
+        ...(savedSessionSkillsRef
+          ? { sessionSkillsRef: savedSessionSkillsRef }
+          : {}),
         ...(skills ? { skills } : {}),
         clientId: randomUUID(),
         cwd,
@@ -8735,7 +8774,10 @@ export function registerHostedHarnessSessionRoutes(
           type: 'assistant' | 'tool_result',
           parts: Part[],
           model: string,
-          identity?: { uuid: string; timestamp: string },
+          identity?: Pick<
+            ChatRecord,
+            'uuid' | 'timestamp' | 'clientInitiatedSkills'
+          >,
         ) =>
           record(session, sessionId, type, parentUuid, {
             daemonPromptId: promptId,
@@ -8748,7 +8790,10 @@ export function registerHostedHarnessSessionRoutes(
           type: 'assistant' | 'tool_result',
           parts: Part[],
           model: string,
-          identity?: { uuid: string; timestamp: string },
+          identity?: Pick<
+            ChatRecord,
+            'uuid' | 'timestamp' | 'clientInitiatedSkills'
+          >,
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant') {
@@ -8800,6 +8845,8 @@ export function registerHostedHarnessSessionRoutes(
                 ?.planMode === true,
           },
         );
+        if (session.skills)
+          toolTurn.setToolOutputBudget(hostedToolOutputBudget(session.cwd));
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {
           // The agent wait (#13708): fold every run the checkpoint still
