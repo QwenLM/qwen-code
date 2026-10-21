@@ -3257,6 +3257,31 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     );
   });
 
+  it('drops a summary cut off mid-snapshot by a server that lowered max_tokens', async () => {
+    // vLLM serves `prompt + max_tokens > window` by lowering max_tokens to
+    // the room the prompt leaves instead of rejecting the request. The
+    // reported count then stays below the budget requested, so the threshold
+    // guard cannot fire; the unclosed snapshot is the sign of the cut.
+    mockVllmBackend(WINDOW, false, {
+      text: '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+    });
+
+    const result = await compressChars(182_000, 45_000);
+
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+  });
+
+  it('keeps a complete summary that uses no snapshot tags', async () => {
+    mockVllmBackend(WINDOW, false, { text: 'Goal: port the parser. Done.' });
+
+    const result = await compressChars(182_000, 45_000);
+
+    expectCompressed(result);
+  });
+
   describe('computeCompactionOutputBudget', () => {
     it('returns the fixed ceiling when the window has ample room', () => {
       expect(computeCompactionOutputBudget(10_000, 128_000)).toBe(
@@ -3301,15 +3326,20 @@ describe('issue #9455: compression requests fit the receiving window', () => {
   /**
    * Counts each request at `ratio` times the local char/4 estimate (a real
    * tokenizer bills dense CJK text well above it) and rejects
-   * `prompt + max_tokens > window` with `rejection(prompt)`.
+   * `prompt + max_tokens > window` with `rejection(prompt)`. `window` is the
+   * server's real window, which a self-hosted deployment can set below the
+   * configured one.
    */
   function mockBackend(
     o: {
       ratio?: number;
+      window?: number;
+      outputTokens?: number;
       rejection?: (promptTokens: number) => Error;
       alwaysReject?: boolean;
     } = {},
   ) {
+    const window = o.window ?? WINDOW;
     const generateText = vi.fn(async (opts: GenerateTextOptions) => {
       const contents = opts.contents as Content[];
       const systemText =
@@ -3324,17 +3354,20 @@ describe('issue #9455: compression requests fit the receiving window', () => {
         (opts.config as { maxOutputTokens?: number } | undefined)
           ?.maxOutputTokens ?? 0;
       sent.push({ contents, promptTokens, maxOutputTokens });
-      if (o.alwaysReject || promptTokens + maxOutputTokens > WINDOW) {
+      if (o.alwaysReject || promptTokens + maxOutputTokens > window) {
         throw (
           o.rejection?.(promptTokens) ??
           new Error(
-            `prompt is too long: ${promptTokens} tokens > ${WINDOW} maximum`,
+            `prompt is too long: ${promptTokens} tokens > ${window} maximum`,
           )
         );
       }
       return {
         text: '<state_snapshot>summary</state_snapshot>',
-        usage: { promptTokenCount: promptTokens, candidatesTokenCount: 2_000 },
+        usage: {
+          promptTokenCount: promptTokens,
+          candidatesTokenCount: o.outputTokens ?? 2_000,
+        },
       };
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -3363,6 +3396,21 @@ describe('issue #9455: compression requests fit the receiving window', () => {
     history.push(modelText('done'));
     return history;
   }
+
+  function configureWindow(contextWindowSize: number) {
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'test-model',
+      contextWindowSize,
+    });
+  }
+
+  /** vLLM's wording when the prompt alone exceeds its window. */
+  const vllmRejection = (window: number) => (promptTokens: number) =>
+    new Error(
+      `This model's maximum context length is ${window} tokens. However, ` +
+        `your prompt contains ${promptTokens} input tokens, which exceeds ` +
+        `this limit even without any output tokens.`,
+    );
 
   function compressHistory(
     history: Content[],
@@ -3477,14 +3525,87 @@ describe('issue #9455: compression requests fit the receiving window', () => {
 
   it('fails locally with INPUT_TOO_LARGE when nothing fits the window', async () => {
     const generateText = mockBackend();
-    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
-      model: 'test-model',
-      contextWindowSize: 4_000,
-    });
+    configureWindow(2_048);
 
     const result = await compressHistory(toolSession(10, 12_000), 40_000);
 
     expect(generateText).not.toHaveBeenCalled();
+    expectNoNewHistory(
+      result,
+      CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    );
+  });
+
+  it('leaves a small window a quarter of it for the summary', async () => {
+    // A fixed 4,096-token minimum would take a 4K window whole, so the
+    // minimum scales down to a quarter of the window.
+    mockBackend({ window: 4_000, outputTokens: 600 });
+    configureWindow(4_000);
+
+    const result = await compressHistory(toolSession(10, 12_000), 40_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.maxOutputTokens).toBeGreaterThanOrEqual(1_000);
+    expect(
+      sent[0]!.promptTokens + sent[0]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(4_000);
+    expect(textOf(sent[0]!.contents)).toContain(
+      'original request: port the parser',
+    );
+  });
+
+  it('retries a 16K window without dropping the user messages', async () => {
+    // The #14953 review trace: a 16K window billing 2.5x the estimate. The
+    // retry used to reserve the full 20K output budget, which sized its
+    // input below zero and sent a condensed block holding only a truncation
+    // marker; its max_tokens, sized from the uncorrected estimate, would
+    // also have overflowed the window.
+    configureWindow(16_384);
+    mockBackend({ ratio: 2.5, window: 16_384 });
+    const history = toolSession(8, 4_000, [
+      modelText('noted'),
+      userText('also handle CRLF line endings'),
+    ]);
+
+    const result = await compressHistory(history, 20_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    const retry = sent[1]!;
+    expect(textOf(retry.contents)).toContain(
+      'original request: port the parser',
+    );
+    expect(textOf(retry.contents)).toContain('also handle CRLF line endings');
+    expect(retry.promptTokens + retry.maxOutputTokens).toBeLessThanOrEqual(
+      16_384,
+    );
+    expectWellFormed(retry.contents);
+  });
+
+  it('sizes the retry for the window the rejection reports', async () => {
+    // A self-hosted server whose real window is below the configured one:
+    // the rejection is the first place that window appears.
+    mockBackend({ window: 16_384, rejection: vllmRejection(16_384) });
+
+    const result = await compressHistory(toolSession(20, 6_000), 40_000);
+
+    expectCompressed(result);
+    expect(sent).toHaveLength(2);
+    expect(
+      sent[1]!.promptTokens + sent[1]!.maxOutputTokens,
+    ).toBeLessThanOrEqual(16_384);
+    expect(textOf(sent[1]!.contents)).toContain(
+      'original request: port the parser',
+    );
+  });
+
+  it('refuses locally when the reported window cannot hold a retry', async () => {
+    mockBackend({ window: 2_048, rejection: vllmRejection(2_048) });
+
+    const result = await compressHistory(toolSession(20, 6_000), 40_000);
+
+    expect(sent).toHaveLength(1);
     expectNoNewHistory(
       result,
       CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,

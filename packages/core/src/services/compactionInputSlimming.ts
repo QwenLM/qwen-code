@@ -528,7 +528,8 @@ const CONDENSED_NOTE_RESERVE_CHARS = 512;
  * on a model turn, so no function call is separated from its response and the
  * roles keep alternating after the quote block. The newest model turn is kept
  * even when it alone exceeds the budget; the caller re-checks the result.
- * Undefined when no model turn can start the kept turns.
+ * Undefined when no model turn can start the kept turns, or when the budget
+ * cannot hold any of the user's words.
  */
 export function condenseToUserMessages(
   history: Content[],
@@ -564,24 +565,18 @@ export function condenseToUserMessages(
   );
   // The oldest message may use whatever the newer ones leave, and at least
   // half the budget when they need more.
+  const firstCap = Math.max(
+    0,
+    Math.min(
+      CONDENSED_FIRST_MESSAGE_MAX_CHARS,
+      Math.max(Math.floor(quoteBudget / 2), quoteBudget - totalLength(newer)),
+    ),
+  );
+  // A budget that cannot hold any of the oldest message would cut every quote
+  // to its truncation marker, leaving a block without the user's words.
+  if (oldest !== undefined && firstCap === 0) return undefined;
   const first =
-    oldest === undefined
-      ? []
-      : [
-          quoteUserMessage(
-            oldest,
-            Math.max(
-              0,
-              Math.min(
-                CONDENSED_FIRST_MESSAGE_MAX_CHARS,
-                Math.max(
-                  Math.floor(quoteBudget / 2),
-                  quoteBudget - totalLength(newer),
-                ),
-              ),
-            ),
-          ),
-        ];
+    oldest === undefined ? [] : [quoteUserMessage(oldest, firstCap)];
   const kept: string[] = [];
   let used = totalLength(first);
   for (let i = newer.length - 1; i >= 0; i--) {

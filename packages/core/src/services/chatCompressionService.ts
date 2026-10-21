@@ -71,11 +71,42 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
 
 /**
- * Smallest output budget a cold compression request is sent with. Below it a
- * `<state_snapshot>` is almost always cut off, so a request that cannot leave
- * this much room is reduced first and not sent if it still cannot (#9455).
+ * Smallest output budget a cold compression request is sent with on windows
+ * of 16K and up. Below it a `<state_snapshot>` is almost always cut off, so a
+ * request that cannot leave this much room is reduced first and not sent if
+ * it still cannot (#9455). Smaller windows need a quarter of the window
+ * instead (minCompactionOutputTokens): a fixed 4,096 would take half of an 8K
+ * window and all of a 4K one.
  */
 export const MIN_COMPACTION_OUTPUT_TOKENS = 4_096;
+
+function minCompactionOutputTokens(window: number): number {
+  return Math.min(MIN_COMPACTION_OUTPUT_TOKENS, Math.floor(window / 4));
+}
+
+/**
+ * Output room a reduced cold request is sized to leave: a quarter of the
+ * window, up to the full output budget. It is never below
+ * minCompactionOutputTokens, so a reduction that reaches its target passes
+ * that minimum.
+ */
+function compactionOutputReserve(window: number): number {
+  return Math.min(COMPACT_MAX_OUTPUT_TOKENS, Math.floor(window / 4));
+}
+
+/** What a cold compression request is sized against. */
+interface ColdRequestSizing {
+  /** The receiving model's window, or the smaller one a rejection reported. */
+  window: number;
+  /** Tokens a provider counted per locally estimated token; 1 until one has. */
+  tokensPerEstimate: number;
+}
+
+type OverflowRetry =
+  | { kind: 'retry'; history: Content[]; sizing: ColdRequestSizing }
+  // The rejection was a context overflow, but no reduction fits the window.
+  | { kind: 'too-large' }
+  | { kind: 'none' };
 
 /**
  * Size, relative to a request just rejected for context length, that the one
@@ -455,6 +486,13 @@ function hasStateSnapshot(summary: string): boolean {
   );
 }
 
+/** Whether the summary was cut off inside the `<state_snapshot>` it opened. */
+function hasUnclosedStateSnapshot(summary: string): boolean {
+  const stripped = stripAnalysisBlock(summary);
+  const start = stripped.lastIndexOf('<state_snapshot>');
+  return start >= 0 && !stripped.includes('</state_snapshot>', start);
+}
+
 export class ChatCompressionService {
   async compress(
     chat: LlmChat,
@@ -828,9 +866,21 @@ export class ChatCompressionService {
       fixedColdTokens;
     // Clamp the output budget to the receiving model's remaining window so
     // `prompt + max_tokens <= window` holds even on small-window
-    // deployments (issue #7960).
-    const coldBudgetFor = (history: Content[]) =>
-      computeCompactionOutputBudget(estimateColdRequest(history), budgetWindow);
+    // deployments (issue #7960). A retry after a context-length rejection
+    // scales the estimate by the provider's own count, so the budget fits
+    // the room the request really leaves.
+    const initialSizing: ColdRequestSizing = {
+      window: budgetWindow,
+      tokensPerEstimate: 1,
+    };
+    const coldBudgetFor = (
+      history: Content[],
+      sizing: ColdRequestSizing = initialSizing,
+    ) =>
+      computeCompactionOutputBudget(
+        Math.ceil(estimateColdRequest(history) * sizing.tokensPerEstimate),
+        sizing.window,
+      );
     // Tool output is truncated first, then older turns are condensed to the
     // user's own messages: those are the one part of the history the summary
     // cannot recover from anywhere else (#9455).
@@ -851,44 +901,60 @@ export class ChatCompressionService {
       );
     };
     // A context-length rejection means the estimate ran low for this request.
-    // The size the provider reported for it, or a fixed step when it names
-    // none, sizes one smaller retry that still leaves the full output budget.
+    // The window it reports (a self-hosted server's can be below the one
+    // configured) and the ratio of the provider's count to the estimate size
+    // one smaller retry and its output budget alike; without counts the
+    // retry is a fixed step smaller.
     const shrinkAfterOverflow = (
       error: unknown,
       rejected: Content[],
-    ): Content[] | undefined => {
+    ): OverflowRetry => {
       const overflow = getContextLengthExceededInfo(error);
-      if (!overflow.isExceeded) return undefined;
+      if (!overflow.isExceeded) return { kind: 'none' };
       const rejectedTokens = estimateColdRequest(rejected);
-      const measuredTarget = overflow.actualTokens
-        ? Math.floor(
-            ((budgetWindow -
-              COMPACT_MAX_OUTPUT_TOKENS -
-              COMPACTION_BUDGET_SAFETY_MARGIN) *
-              rejectedTokens) /
-              overflow.actualTokens,
-          )
-        : Infinity;
+      const sizing: ColdRequestSizing = {
+        window:
+          overflow.limitKind === 'total' && overflow.limitTokens
+            ? Math.min(budgetWindow, overflow.limitTokens)
+            : budgetWindow,
+        // char/4 under-counts, so a count below the estimate is not taken as
+        // room to grow the output budget.
+        tokensPerEstimate: overflow.actualTokens
+          ? Math.max(1, overflow.actualTokens / rejectedTokens)
+          : 1,
+      };
       const retry = reduceColdInput(
         Math.min(
-          measuredTarget,
+          Math.floor(
+            (sizing.window -
+              compactionOutputReserve(sizing.window) -
+              COMPACTION_BUDGET_SAFETY_MARGIN) /
+              sizing.tokensPerEstimate,
+          ),
           Math.floor(rejectedTokens * OVERFLOW_RETRY_SHRINK),
         ),
       );
-      return estimateColdRequest(retry) < rejectedTokens &&
-        coldBudgetFor(retry) >= MIN_COMPACTION_OUTPUT_TOKENS
-        ? retry
-        : undefined;
+      if (
+        coldBudgetFor(retry, sizing) < minCompactionOutputTokens(sizing.window)
+      ) {
+        return { kind: 'too-large' };
+      }
+      return estimateColdRequest(retry) < rejectedTokens
+        ? { kind: 'retry', history: retry, sizing }
+        : { kind: 'none' };
     };
-    const runColdCompression = (history: Content[]) => {
-      coldOutputBudget = coldBudgetFor(history);
+    const runColdCompression = (
+      history: Content[],
+      sizing: ColdRequestSizing,
+    ) => {
+      coldOutputBudget = coldBudgetFor(history, sizing);
       if (coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS) {
         config
           .getDebugLogger()
           .debug(
             `[chat-compression] output budget clamped to ${coldOutputBudget} ` +
               `(estimated input ${estimateColdRequest(history)}, ` +
-              `effectiveWindow ${budgetWindow}, ` +
+              `effectiveWindow ${sizing.window}, ` +
               `ceiling ${opts.observedServerCeiling ?? 'none'})`,
           );
       }
@@ -1097,18 +1163,16 @@ export class ChatCompressionService {
           );
       }
       let coldHistory = slim.slimmedHistory;
-      if (coldBudgetFor(coldHistory) < MIN_COMPACTION_OUTPUT_TOKENS) {
+      let coldSizing = initialSizing;
+      const minOutputTokens = minCompactionOutputTokens(budgetWindow);
+      if (coldBudgetFor(coldHistory) < minOutputTokens) {
         coldInputReduced = true;
-        // Leave the summary a quarter of the window, between the minimum and
-        // the full output budget.
-        const outputReserve = Math.max(
-          MIN_COMPACTION_OUTPUT_TOKENS,
-          Math.min(COMPACT_MAX_OUTPUT_TOKENS, Math.floor(budgetWindow / 4)),
-        );
         coldHistory = reduceColdInput(
-          budgetWindow - outputReserve - COMPACTION_BUDGET_SAFETY_MARGIN,
+          budgetWindow -
+            compactionOutputReserve(budgetWindow) -
+            COMPACTION_BUDGET_SAFETY_MARGIN,
         );
-        if (coldBudgetFor(coldHistory) < MIN_COMPACTION_OUTPUT_TOKENS) {
+        if (coldBudgetFor(coldHistory) < minOutputTokens) {
           config
             .getDebugLogger()
             .warn(
@@ -1130,24 +1194,32 @@ export class ChatCompressionService {
       }
       for (let attempt = 0; summaryResult === undefined; attempt++) {
         try {
-          summaryResult = await runColdCompression(coldHistory);
+          summaryResult = await runColdCompression(coldHistory, coldSizing);
         } catch (error) {
           if (abortSignal.aborted) throw error;
-          const retryHistory =
-            attempt === 0 ? shrinkAfterOverflow(error, coldHistory) : undefined;
-          if (!retryHistory) {
+          const retry: OverflowRetry =
+            attempt === 0
+              ? shrinkAfterOverflow(error, coldHistory)
+              : { kind: 'none' };
+          if (retry.kind !== 'retry') {
+            const tooLarge = retry.kind === 'too-large';
             config
               .getDebugLogger()
               .warn(
-                `[chat-compression] compression side-query failed: ${String(error)}`,
+                tooLarge
+                  ? `[chat-compression] compression side-query exceeded the ` +
+                      `context window and no smaller request fits it; not ` +
+                      `retrying: ${String(error)}`
+                  : `[chat-compression] compression side-query failed: ${String(error)}`,
               );
             return {
               newHistory: null,
               info: {
                 originalTokenCount,
                 newTokenCount: originalTokenCount,
-                compressionStatus:
-                  CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+                compressionStatus: tooLarge
+                  ? CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
+                  : CompressionStatus.COMPRESSION_FAILED_API_ERROR,
               },
             };
           }
@@ -1159,7 +1231,8 @@ export class ChatCompressionService {
                 `${String(error)}`,
             );
           coldInputReduced = true;
-          coldHistory = retryHistory;
+          coldHistory = retry.history;
+          coldSizing = retry.sizing;
         }
       }
     }
@@ -1273,29 +1346,41 @@ export class ChatCompressionService {
         },
       };
     }
-    // The threshold comparison above cannot detect cap-hits when the budget
-    // was clamped and the count is a local estimate: output never exceeds
-    // the requested budget and the estimator tops out at ~1.5x actual tokens,
-    // so below ~2/3 of the ceiling the estimate can never reach the fixed
-    // threshold. Gate that path on snapshot well-formedness instead — a
-    // summary truncated at the clamped cap lacks the closing
-    // </state_snapshot> tag, while a complete one carries it (the directive
-    // requires the XML, and the cache-sharing path gates on the same check).
+    // The threshold comparison above cannot detect every cap-hit, so gate on
+    // snapshot well-formedness too: a complete summary closes the
+    // <state_snapshot> the directive asks for (the cache-sharing path gates
+    // on the same check).
+    // - A summary that opens <state_snapshot> and never closes it was cut
+    //   off, whatever capped it. A server that lowers max_tokens to the room
+    //   the prompt leaves instead of rejecting the request (vLLM does)
+    //   reports a count below the budget requested, out of the threshold's
+    //   reach. A summary without the tags is left alone here.
+    // - When the budget was clamped and the count is a local estimate, output
+    //   never exceeds the requested budget and the estimator tops out at
+    //   ~1.5x actual tokens, so below ~2/3 of the ceiling the estimate can
+    //   never reach the fixed threshold. That path also drops a summary
+    //   without a closed snapshot.
+    const cutMidSnapshot = hasUnclosedStateSnapshot(summary);
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
-      outputCountIsEstimated &&
-      coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS &&
-      !hasStateSnapshot(summary)
+      (cutMidSnapshot ||
+        (outputCountIsEstimated &&
+          coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS &&
+          !hasStateSnapshot(summary)))
     ) {
       config
         .getDebugLogger()
         .warn(
-          `[chat-compression] summary lacks a closed <state_snapshot> while ` +
-            `the output budget was clamped (${coldOutputBudget}) and the ` +
-            `output count is a local estimate; dropping ` +
-            `potentially-truncated result. This counts as a compression ` +
-            `failure for the per-chat circuit breaker.`,
+          cutMidSnapshot
+            ? `[chat-compression] summary opens <state_snapshot> but never ` +
+                `closes it; dropping truncated result. This counts as a ` +
+                `compression failure for the per-chat circuit breaker.`
+            : `[chat-compression] summary lacks a closed <state_snapshot> ` +
+                `while the output budget was clamped (${coldOutputBudget}) ` +
+                `and the output count is a local estimate; dropping ` +
+                `potentially-truncated result. This counts as a compression ` +
+                `failure for the per-chat circuit breaker.`,
         );
       return {
         newHistory: null,

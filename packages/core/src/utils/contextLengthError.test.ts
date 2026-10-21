@@ -131,6 +131,32 @@ describe('contextLengthError', () => {
     expect(info.limitKind).toBe('total');
   });
 
+  it('parses the input token count from vLLM wording', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        "This model's maximum context length is 16384 tokens. However, your prompt contains 25000 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.",
+      ),
+    );
+
+    expect(info.isExceeded).toBe(true);
+    expect(info.actualTokens).toBe(25000);
+    expect(info.limitTokens).toBe(16384);
+    expect(info.limitKind).toBe('total');
+  });
+
+  it('keeps vLLM "contains at least N" limit-only: the count is a tokenization cut-off', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        "This model's maximum context length is 16384 tokens. However, your prompt contains at least 16385 input tokens, which exceeds this limit even without any output tokens.",
+      ),
+    );
+
+    expect(info.isExceeded).toBe(true);
+    expect(info.actualTokens).toBeUndefined();
+    expect(info.limitTokens).toBe(16384);
+    expect(info.limitKind).toBe('total');
+  });
+
   it('marks an input token-count maximum as an input bound', () => {
     const info = getContextLengthExceededInfo(
       new Error(

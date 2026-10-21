@@ -1135,6 +1135,23 @@ describe('compactionInputSlimming', () => {
       expect(blockText(condensed[0]!)).toContain('please continue');
     });
 
+    it("returns undefined rather than a block without the user's words", () => {
+      // A budget at or below zero (a retry sized for a window too small to
+      // hold it) used to cut the oldest quote to its truncation marker and
+      // drop the rest, leaving no user text in the condensed block.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'original request: build the parser' }],
+        },
+        ...toolRound(1, 20_000),
+        { role: 'model', parts: [{ text: 'done' }] },
+      ];
+
+      expect(condenseToUserMessages(history, -7_424)).toBeUndefined();
+      expect(condenseToUserMessages(history, 0)).toBeUndefined();
+    });
+
     it('returns undefined when no model turn can start the kept tail', () => {
       expect(
         condenseToUserMessages([{ role: 'user', parts: [{ text: 'q' }] }], 10),
