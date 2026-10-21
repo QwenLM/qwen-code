@@ -15,6 +15,7 @@
  * bun-pty.node-bun.test.ts.
  */
 
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_CONCURRENT_WEB_TERMINALS } from '../services/web-terminal-registry.js';
@@ -795,6 +796,57 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(exits).toBe(0);
+  }, 20_000);
+
+  it('kills a foreground job in its own process group when a limit trips', async () => {
+    // An interactive shell runs the job in a new process group, and this job
+    // ignores SIGTERM and SIGHUP: signalling only the leader and the leader's
+    // group would leave it running after the failure is reported.
+    const job = `perl -e '$SIG{TERM}=$SIG{HUP}="IGNORE"; print "JOB $$\\n"; sleep 60'`;
+    const pty = track(
+      spawn(
+        '/bin/bash',
+        ['--norc', '--noprofile', '-i', '-c', `${job}; echo after`],
+        { limits: { writeQueueBytes: 4096 } },
+      ),
+    );
+    const { errors } = nextError(pty);
+    let output = '';
+    pty.onData((data) => {
+      output += data;
+    });
+    expect(await waitFor(() => /JOB \d+\r?\n/.test(output))).toBe(true);
+    const jobPid = Number(/JOB (\d+)/.exec(output)![1]);
+    const psField = (field: string): string =>
+      spawnSync('ps', ['-o', `${field}=`, '-p', String(jobPid)], {
+        encoding: 'utf8',
+      }).stdout.trim();
+    // A reparented zombie still answers kill(pid, 0) until it is reaped.
+    const jobLive = (): boolean => {
+      try {
+        process.kill(jobPid, 0);
+      } catch {
+        return false;
+      }
+      return !psField('stat').startsWith('Z');
+    };
+    try {
+      expect(Number(psField('pgid'))).not.toBe(pty.pid);
+
+      pty.write(Buffer.alloc(8192));
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.code).toBe('QWEN_PTY_WRITE_LIMIT');
+      // SIGTERM is ignored; the SIGKILL pass after the grace period must
+      // still reach the job by ownership.
+      expect(await waitFor(() => !jobLive(), 5_000)).toBe(true);
+      expect(await waitForChildGone(pty)).toBe(true);
+    } finally {
+      try {
+        process.kill(jobPid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
   }, 20_000);
 
   it('delivers the reaped exit and skips the signal volley when a limit trips after the native exit', async (ctx) => {

@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import type { Terminal } from '@xterm/headless';
 import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
+import { collectPtyProcessTree } from '../utils/pty-process-tree.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
@@ -190,50 +191,7 @@ function killPtyTree(pty: WebTerminalPty): void {
     }
   } else {
     if (pty.pid > 1) {
-      const scopeColumn =
-        process.platform === 'linux'
-          ? 'sid='
-          : process.platform === 'darwin'
-            ? 'tdev='
-            : undefined;
-      const processes = spawnSync(
-        'ps',
-        ['-A', '-o', scopeColumn ? `pid=,ppid=,${scopeColumn}` : 'pid=,ppid='],
-        {
-          encoding: 'utf8',
-          maxBuffer: 8 * 1024 * 1024,
-          timeout: 2_000,
-        },
-      );
-      const rows = (processes.stdout?.split('\n') ?? []).flatMap((line) => {
-        const [pidText, parentPidText, scope] = line.trim().split(/\s+/);
-        const pid = Number(pidText);
-        const parentPid = Number(parentPidText);
-        return Number.isInteger(pid) && Number.isInteger(parentPid)
-          ? [{ pid, parentPid, scope }]
-          : [];
-      });
-      const rootScope = rows.find(({ pid }) => pid === pty.pid)?.scope;
-      const targets = new Set([pty.pid]);
-      let found = true;
-      while (found) {
-        found = false;
-        for (const { pid, parentPid, scope } of rows) {
-          if (
-            pid > 1 &&
-            !targets.has(pid) &&
-            (targets.has(parentPid) ||
-              (rootScope !== undefined &&
-                rootScope !== '0' &&
-                rootScope !== '??' &&
-                scope === rootScope))
-          ) {
-            targets.add(pid);
-            found = true;
-          }
-        }
-      }
-      for (const pid of [...targets].reverse()) {
+      for (const pid of collectPtyProcessTree(pty.pid).pids.reverse()) {
         try {
           process.kill(pid, 'SIGKILL');
         } catch {

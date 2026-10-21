@@ -68,6 +68,10 @@ import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { getErrorMessage } from './errors.js';
+import {
+  collectPtyProcessTree,
+  type PtyProcessTree,
+} from './pty-process-tree.js';
 
 /** Mirrors `@lydell/node-pty`'s `IPtyForkOptions` (POSIX subset). */
 export interface BunPtyForkOptions {
@@ -904,24 +908,42 @@ export class BunPtyProcess extends EventEmitter {
     }
     this.discardPausedHold();
     this.clearWriteQueue();
-    const signalTree = (sig: NodeJS.Signals): void => {
+    // Signal what the pty owns, not only the leader's process group: an
+    // interactive shell runs each foreground job in its own group, so a job
+    // that ignores SIGTERM would outlive both passes. The tree is listed
+    // while the leader is unreaped, so its session and tty still name it.
+    const tree = collectPtyProcessTree(this.pid);
+    const signalTree = (sig: NodeJS.Signals, owned: PtyProcessTree): void => {
       try {
         process.kill(-this.pid, sig);
       } catch {
         // Process group already gone.
       }
-      if (this.exited) return;
-      try {
-        process.kill(this.pid, sig);
-      } catch {
-        // Leader already gone.
+      for (const pid of owned.pids) {
+        // A reaped leader's pid may already belong to another process.
+        if (pid === this.pid && this.exited) continue;
+        try {
+          process.kill(pid, sig);
+        } catch {
+          // Already gone.
+        }
       }
     };
-    signalTree('SIGTERM');
+    signalTree('SIGTERM', tree);
     // Unref'd: the SIGKILL is a safety net for children that ignore SIGTERM.
     // If the host drains earlier, SIGTERM already did the job; keeping the
-    // loop alive for the grace period would only delay it.
-    setTimeout(() => signalTree('SIGKILL'), RESOURCE_KILL_GRACE_MS).unref();
+    // loop alive for the grace period would only delay it. The tree is
+    // listed again for it: members forked during the grace period, and jobs
+    // the session still holds after its leader died, are found by scope;
+    // earlier members are kept only while they are still the same process.
+    setTimeout(
+      () =>
+        signalTree(
+          'SIGKILL',
+          collectPtyProcessTree(this.pid, tree, this.exited),
+        ),
+      RESOURCE_KILL_GRACE_MS,
+    ).unref();
     this.closeFd();
     this.reportError(error);
   }

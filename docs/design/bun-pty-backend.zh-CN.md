@@ -130,9 +130,12 @@ exit 照常上报）。
 
 **写队列**仍是显式失败：排队待写的输入超过单 pty 1 MiB 或进程级 8 MiB
 时，以 `QWEN_PTY_WRITE_LIMIT` 终止该 pty，而不是确认一个并不存在的背压。
-终止时按真实归属杀死子进程树（进程组 + pid，先 SIGTERM，500 ms 宽限后
-SIGKILL），关闭 master fd，终结所有排空路径（重试定时器、挂起的 exit、
-保持区、写队列）。失败之后 `write` 与 `resize` 均为 no-op（与其上层的
+终止时按真实归属杀死子进程树：主进程、其进程组、其后代，以及其会话
+（Linux `sid`）或控制终端（macOS `tdev`）上的所有进程——在主进程尚未被回收
+时由 `ps` 列出。这份列表包括交互式 shell 放在独立进程组里的前台作业。先发
+SIGTERM；500 ms 宽限后对重新列出的进程发 SIGKILL，早先的成员只有在仍是同一
+进程（启动时间相同）时才保留，因此不会向被复用的 pid 发信号。随后关闭
+master fd，终结所有排空路径（重试定时器、挂起的 exit、保持区、写队列）。失败之后 `write` 与 `resize` 均为 no-op（与其上层的
 registry 守卫一致），在途读取迟到的字节既不投递也不重新计入（已释放
 的）保持预算，`resume()` 重放会在第一个终止本 pty 的数据监听器处停止。
 随后在 `error` 事件上恰好投递一次结构化 `PtyLimitError`，带稳定 `code`
@@ -235,8 +238,9 @@ node-pty 包（"getPty() 在 Bun 下返回 null"）。现在 `bun` flavor 也一
   子进程存活、保持区不超上限且不再增长，随后 `resume()` 逐字节交付全部
   输出且子进程仍可交互；停读中被杀的子进程仍恰好上报一次退出、全部预算
   释放；预算内洪流经 pause/resume 后逐字节一致；进程级上限让触及它的
-  pty 恰好在总额处停读，两个 pty 均不失败且都无损重放；写队列上限以 `QWEN_PTY_WRITE_LIMIT` 终止（不伪造
-  背压确认）；活跃 pty 上限以 `QWEN_PTY_ACTIVE_LIMIT` 拒绝下一次
+  pty 恰好在总额处停读，两个 pty 均不失败且都无损重放；写队列上限以
+  `QWEN_PTY_WRITE_LIMIT` 终止（不伪造背压确认），并回收交互式 shell 在独立
+  进程组中运行、忽略 TERM/HUP 的前台作业；活跃 pty 上限以 `QWEN_PTY_ACTIVE_LIMIT` 拒绝下一次
   `spawn`，关闭后槽位释放；预算计数可经 `getPtyBudgetStats()` 观察。
   fd 生命周期套件（`defers the fd close while a read is still owned by the
 threadpool` 与 `defers the fd close while a write is still owned by the

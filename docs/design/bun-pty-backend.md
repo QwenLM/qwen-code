@@ -162,10 +162,15 @@ and resume-after-exit replays nothing.
 The **write queue** keeps an explicit failure: queued, not-yet-written input
 beyond 1 MiB per pty or 8 MiB process-wide terminates the pty with
 `QWEN_PTY_WRITE_LIMIT` instead of acknowledging backpressure that does not
-exist. Termination kills the child process tree by real ownership (process
-group and pid, SIGTERM, then SIGKILL after a 500 ms grace), closes the
-master fd, and ends every drain path (retry timer, pending exit, hold, write
-queue). After the failure, `write` and `resize` are no-ops (matching the
+exist. Termination kills the child process tree by real ownership: the
+leader, its process group, its descendants, and every process in its session
+(Linux `sid`) or on its controlling tty (macOS `tdev`), as listed by `ps`
+while the leader is still unreaped. That list covers the foreground jobs an
+interactive shell runs in their own process groups. SIGTERM goes first; after
+a 500 ms grace, SIGKILL goes to a fresh listing, which keeps earlier members
+only while they are still the same process (same start time), so a recycled
+pid is never signalled. The backend then closes the master fd and ends every
+drain path (retry timer, pending exit, hold, write queue). After the failure, `write` and `resize` are no-ops (matching the
 registry guards above them), held bytes still in flight from an in-flight
 read are neither delivered nor re-charged, and a `resume()` replay stops at
 the first data listener that terminates the pty. Exactly one structured
@@ -299,7 +304,9 @@ null`, process title, `clear()`, plus the pause-lifecycle regressions:
   pause/resume; the process-wide cap parks the pty that reaches it, exactly
   at the total, while neither pty fails and both replay losslessly; the
   write-queue cap terminates with
-  `QWEN_PTY_WRITE_LIMIT` (no fabricated backpressure ack); the active-pty
+  `QWEN_PTY_WRITE_LIMIT` (no fabricated backpressure ack) and reaps an
+  interactive shell's TERM/HUP-ignoring foreground job that runs in its own
+  process group; the active-pty
   cap rejects the next `spawn` with `QWEN_PTY_ACTIVE_LIMIT` and frees the
   slot on close; and the budget counters are observable via
   `getPtyBudgetStats()`. The fd-lifetime suite (`defers the fd close while

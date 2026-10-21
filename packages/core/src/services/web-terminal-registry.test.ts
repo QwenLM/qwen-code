@@ -1300,10 +1300,10 @@ describe('WebTerminalRegistry', () => {
               '-A',
               '-o',
               process.platform === 'linux'
-                ? 'pid=,ppid=,sid='
+                ? 'pid=,ppid=,sid=,lstart='
                 : process.platform === 'darwin'
-                  ? 'pid=,ppid=,tdev='
-                  : 'pid=,ppid=',
+                  ? 'pid=,ppid=,tdev=,lstart='
+                  : 'pid=,ppid=,lstart=',
             ],
             expect.objectContaining({
               encoding: 'utf8',
