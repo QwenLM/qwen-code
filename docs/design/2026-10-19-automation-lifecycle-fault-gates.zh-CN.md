@@ -49,10 +49,15 @@ retire、retire 之后无 slot fire），FG11b 钉住账本周围的存储故障
 
 - 被取消的 run 依据其已提交的证明进入 `cancelled`，occurrence 恰好结算一次；
 - schedule、未来 slot、兄弟 run 与前台工作不受影响；
-- 在任何尝试之前被取消的排队 input 结算且不调用模型。自然完成的 run 保留其结果
-  已交付：结算之后到达的取消被 `409 task_action_unavailable`（`The task does not
-accept a cancellation now.`）拒绝，run 保持 `completed`、occurrence 保持
-  `fired`；
+- 在任何尝试之前被取消的排队 input 结算且不调用模型——两条公开点火路径都不会在
+  开启的 Turn 之后形成排队 run，因此那一支没有可执行的对象：当 Session 正在跑本
+  定义的 Turn 时，第二次手动 fire 被 `409 automation_run_skipped`（`The manual run
+was skipped: overlap.`）拒绝，该决定以 `skipped`/`overlap`、attempts 为 0 落库，
+  其后不提交 run、也不起 Turn——已交付：
+  `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql`；
+- 自然完成的 run 保留其结果——已交付：结算之后到达的取消被
+  `409 task_action_unavailable`（`The task does not accept a cancellation now.`）
+  拒绝，run 保持 `completed`、occurrence 保持 `fired`；
 - `cancel-stops-only-the-target` 已交付：把 wake turn 扣在模型上时，公开 task
   cancel 让 task 与 run 在一秒内结算为 `cancelled`，schedule 保持 `live`；反之在
   收到 `202` 后立刻释放模型，turn 会先跑完——本格避开的正是这个顺序。
@@ -86,6 +91,13 @@ accept a cancellation now.`）拒绝，run 保持 `completed`、occurrence 保�
   注册在 guard 不自启用的宿主上生效。四者齐备后关闭会完成，下一个 slot 记
   `skipped`/`session_not_active`。turn 在飞时的关闭请求被 `409 turn_active` 拒绝，
   这正是排队输入那一支的边界：队列的命运由 turn 决定，从不由关闭决定。
+- 排队输入那一支的边界在准入，而不在某条取消路径：Session 正在跑本定义的 Turn 时，
+  第二次手动 fire 被 `409 automation_run_skipped` + `overlap` 拒绝，并以
+  `skipped`/`overlap`、attempts 为 0 落库，不提交 run。两处准入判断都回答
+  `overlap`——开启的 Turn 与定义自身的 overlap 策略——因此
+  `fg11dSecondFireIsRefusedWhileTheFirstRunsOnMySql` 钉的是这个回答，而不是它出自
+  哪一处。与另一个 turn 在同一瞬间被准入的 fire 属本车道不钉的竞态；只有这种 fire
+  才会留下队列，也才是该支唯一可被执行的形态。
 - task cancel 需要投影的任务 id，而不是 run 记录 id：传 `arun_…` 会得到
   `task_not_found`，而 `GET /v1/agents/sessions/{id}/tasks` 返回的 id 会被
   接受。把 wake turn 一直扣在模型上时，取消会赢：task 与 run 都在一秒内结算为
