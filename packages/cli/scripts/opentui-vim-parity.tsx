@@ -348,7 +348,8 @@ try {
   let admit = false;
   let setModal!: (value: boolean) => void;
   let getComposerBuffer!: () => VimBuffer | null;
-  let composerHandle!: OpenTuiComposerHandle;
+  let getComposerHandle!: () => OpenTuiComposerHandle | null;
+  let getComposerMode!: () => string;
   let toggleVim!: () => Promise<boolean>;
   let setFocus!: (value: boolean) => void;
   function Composer() {
@@ -363,13 +364,12 @@ try {
       () => createVimBuffer(() => liveBuffer.current!),
       [],
     );
-    const { handleInput, vimModeEnabled } = useVim(buffer, (text) => {
+    const { handleInput, vimModeEnabled, mode } = useVim(buffer, (text) => {
       void composer.current?.submitDraft?.(text);
     });
     getComposerBuffer = () => liveBuffer.current;
-    useLayoutEffect(() => {
-      if (composer.current) composerHandle = composer.current;
-    });
+    getComposerHandle = () => composer.current;
+    getComposerMode = () => mode;
     useKeyboard(() => {
       decoded++;
     });
@@ -461,6 +461,11 @@ try {
     null,
     'unmounted composer buffer is not retained',
   );
+  assert.equal(
+    getComposerHandle(),
+    null,
+    'unmounted composer handle is not retained',
+  );
   assert.match(ui!.captureCharFrame(), /Owned modal/);
   await composerInput('dwp.');
   assert.equal(clipboardCalls.length, writes, 'modal keys never reach Vim');
@@ -469,10 +474,15 @@ try {
     (node): node is TextareaRenderable => node instanceof TextareaRenderable,
   )!;
   assert(native);
+  assert(getComposerHandle(), 'remounted composer handle is attached');
+  assert(getComposerBuffer(), 'remounted composer buffer is attached');
   await change(() => {
-    composerHandle.setText('a b c d');
+    getComposerHandle()!.setText('a b c d');
     getComposerBuffer()!.vimMoveToLineStart();
   });
+  assert.equal(getComposerHandle()!.getText(), 'a b c d');
+  assert.equal(getComposerBuffer()!.text, 'a b c d');
+  assert.equal(native.plainText, 'a b c d');
   await composerInput('w');
   assert.deepEqual(
     native.logicalCursor,
@@ -498,7 +508,7 @@ try {
     ['\x1bx', '甲🙂e', 2],
     ['\x1baZ', '甲🙂e\u0301Z', 5],
   ] as const) {
-    await change(() => composerHandle.setText(''));
+    await change(() => getComposerHandle()!.setText(''));
     await composerInput('i甲🙂e\u0301');
     assert.deepEqual(getComposerBuffer()!.cursor, [0, 4]);
     assert.deepEqual(
@@ -506,7 +516,19 @@ try {
       { row: 0, col: 5, offset: 5 },
       'full combining cluster has five display cells',
     );
-    await composerInput(suffix);
+    const beforeSuffix = decoded;
+    if (suffix.startsWith('\x1b')) {
+      await composerInput('\x1b');
+      assert.equal(getComposerMode(), 'NORMAL');
+      await composerInput(suffix.slice(1));
+    } else {
+      await composerInput(suffix);
+    }
+    assert.equal(
+      decoded,
+      beforeSuffix + [...suffix].length,
+      'real composer Unicode sequence event count',
+    );
     assert.equal(native.plainText, expected, 'real composer Unicode text');
     assert.deepEqual(
       getComposerBuffer()!.cursor,
@@ -522,7 +544,7 @@ try {
       suffix === '\x1bx' ? 3 : 4,
     ]);
   }
-  await change(() => composerHandle.setText(''));
+  await change(() => getComposerHandle()!.setText(''));
   await composerInput('i👨‍👩‍👧‍👦');
   assert.deepEqual(getComposerBuffer()!.cursor, [0, 7]);
   assert.deepEqual(
@@ -537,7 +559,7 @@ try {
   await change(async () => {
     assert.equal(await toggleVim(), false);
   });
-  await change(() => composerHandle.setText('甲🙂e\u0301'));
+  await change(() => getComposerHandle()!.setText('甲🙂e\u0301'));
   await composerInput('Z');
   assert.equal(
     native.plainText,
@@ -561,7 +583,7 @@ try {
     assert.equal(await toggleVim(), false);
   });
 
-  await change(() => composerHandle.setText('abcd'));
+  await change(() => getComposerHandle()!.setText('abcd'));
   await change(() => ui!.mockInput.pressKey('HOME'));
   await change(() => ui!.mockInput.pressArrow('right', { shift: true }));
   await change(() => ui!.mockInput.pressArrow('right', { shift: true }));
@@ -585,7 +607,7 @@ try {
   await change(() => ui!.mockInput.pressKey('z', { ctrl: true, shift: true }));
   assert.equal(native.plainText, 'Zcd');
 
-  await change(() => composerHandle.setText('abcd'));
+  await change(() => getComposerHandle()!.setText('abcd'));
   await act(async () => {
     await ui!.mockMouse.click(native.x + 1, native.y);
   });
@@ -597,7 +619,7 @@ try {
   );
   await composerInput('Z');
   assert.equal(native.plainText, 'aZbcd');
-  await change(() => composerHandle.setText('abcd'));
+  await change(() => getComposerHandle()!.setText('abcd'));
   await act(async () => {
     await ui!.mockMouse.drag(native.x, native.y, native.x + 2, native.y);
   });
@@ -615,7 +637,7 @@ try {
   await composerInput('Z');
   assert.equal(native.plainText, '甲🙂e\u0301Zcd');
 
-  await change(() => composerHandle.setText('unchanged'));
+  await change(() => getComposerHandle()!.setText('unchanged'));
   await change(() => setFocus(false));
   await change(() => ui!.mockInput.pressKey('X'));
   assert.equal(
@@ -627,7 +649,7 @@ try {
   await composerInput('Z');
   assert.equal(native.plainText, 'unchangedZ');
   await change(() => {
-    composerHandle.setText('甲🙂e\u0301');
+    getComposerHandle()!.setText('甲🙂e\u0301');
     getComposerBuffer()!.vimMoveLeft(1);
   });
   const beforeNoopScroll = native.cursorOffset;
@@ -647,7 +669,7 @@ try {
   const scrollText = Array.from({ length: 20 }, (_, i) => `line${i}`).join(
     '\n',
   );
-  await change(() => composerHandle.setText(scrollText));
+  await change(() => getComposerHandle()!.setText(scrollText));
   const beforeScroll = native.cursorOffset;
   await change(() => ui!.mockMouse.scroll(native.x, native.y, 'up'));
   const scrolledOffset = native.cursorOffset;
@@ -664,7 +686,7 @@ try {
   );
   await change(() => ui!.mockInput.pressKey('z', { ctrl: true }));
   assert.equal(native.plainText, scrollText);
-  await change(() => composerHandle.setText('甲🙂e\u0301'.repeat(20)));
+  await change(() => getComposerHandle()!.setText('甲🙂e\u0301'.repeat(20)));
   const logicalBeforeResize = [...getComposerBuffer()!.cursor];
   for (const width of [20, 60, 40]) {
     await change(() => ui!.resize(width, 12));
