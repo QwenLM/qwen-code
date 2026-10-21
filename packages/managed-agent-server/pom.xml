@@ -579,13 +579,18 @@
                                  measured 5.3 s): healthy 10050 s, fork 10650 s,
                                  Verify 188 minutes. The FG12d Spring-restart
                                  owner-release cell adds 24 s (2x its measured
-                                 11.9 s): healthy 10074 s, fork 10674 s, and the
-                                 188-minute step still wraps (11274 s of fork
-                                 plus wrap, 6 s of margin). The FG11d
-                                 settled-outcome cell adds 9 s (2x its measured
-                                 4.5 s): healthy 10083 s, fork 10683 s, Verify
-                                 189 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10683</forkedProcessTimeoutInSeconds>
+                                 11.9 s): healthy 10074 s, fork 10674 s. The
+                                 FG11d settled-outcome cell adds 9 s (2x its
+                                 measured 4.5 s): healthy 10083 s, fork 10683 s,
+                                 Verify 189 minutes. The FG13a result store
+                                 ack-loss cell adds 150 s: healthy 10233 s, fork
+                                 10833 s, Verify 191 minutes. The FG13a dispatch
+                                 ack-loss cell adds 150 s: healthy 10383 s, fork
+                                 10983 s, Verify 194 minutes. The FG13a
+                                 registration-settle ack-loss cell adds 150 s:
+                                 healthy 10533 s, fork 11133 s, Verify 196
+                                 minutes. -->
+                            <forkedProcessTimeoutInSeconds>11133</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
