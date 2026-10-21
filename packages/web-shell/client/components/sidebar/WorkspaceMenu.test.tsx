@@ -315,4 +315,44 @@ describe('WorkspaceMenu', () => {
       )?.disabled,
     ).toBe(true);
   });
+
+  it('renders Pin workspace when the workspace is not pinned', async () => {
+    const togglePin = vi.fn();
+    await render(
+      <WorkspaceMenu
+        workspace={{ ...workspace, isPinned: false }}
+        actions={{ togglePin }}
+      />,
+    );
+    const items = await open();
+    expect(labels(items)).toEqual(['Pin workspace']);
+    await act(async () => {
+      click(items[0]!);
+      await Promise.resolve();
+    });
+    expect(togglePin).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders Unpin workspace when the workspace is pinned', async () => {
+    const togglePin = vi.fn();
+    await render(
+      <WorkspaceMenu
+        workspace={{ ...workspace, isPinned: true }}
+        actions={{ togglePin }}
+      />,
+    );
+    const items = await open();
+    expect(labels(items)).toEqual(['Unpin workspace']);
+  });
+
+  it('places Pin workspace before Rename in the primary section', async () => {
+    await render(
+      <WorkspaceMenu
+        workspace={{ ...workspace, isPinned: false }}
+        actions={{ togglePin: vi.fn(), rename: vi.fn(), copyPath: vi.fn() }}
+      />,
+    );
+    const items = await open();
+    expect(labels(items)).toEqual(['Pin workspace', 'Rename…', 'Copy path']);
+  });
 });

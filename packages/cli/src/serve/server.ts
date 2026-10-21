@@ -2775,6 +2775,7 @@ export function createServeApp(
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+    workspaceRegistrationStore: deps.workspaceRegistrationStore,
     agentCollaborationEnabledFor: (workspaceCwd) =>
       agentCollaborationRoutesMounted &&
       isAgentCollaborationEnabledFor(workspaceCwd),

@@ -511,6 +511,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_display_name',
       'scratch_workspace_registration',
       'workspace_runtime_removal',
+      'workspace_pinning',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_runtime',
       ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
