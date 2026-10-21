@@ -131,6 +131,27 @@ Example:
 }
 ```
 
+On Windows the global tool is installed as a `cmd` shim under
+`%USERPROFILE%\.dotnet\tools`. Qwen Code starts servers without a shell, so a
+bare `roslyn-language-server` is found by `where` but fails to spawn. Use the
+shell form there:
+
+```json
+{
+  "csharp": {
+    "command": "cmd",
+    "args": ["/c", "roslyn-language-server", "--stdio", "--autoLoadProjects"],
+    "extensionToLanguage": {
+      ".cs": "csharp"
+    }
+  }
+}
+```
+
+An absolute path to the real executable under
+`%USERPROFILE%\.dotnet\tools\.store\roslyn-language-server\<version>\...`
+works as well.
+
 ### Configuration Options
 
 #### Required Fields
