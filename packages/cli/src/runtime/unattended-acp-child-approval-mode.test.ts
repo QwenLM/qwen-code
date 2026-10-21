@@ -116,6 +116,26 @@ describe('tryParseApprovalModePin', () => {
 });
 
 describe('hasExplicitApprovalModeCliArg', () => {
+  it('treats an --approval-mode default flag as an explicit process-wide pin', () => {
+    expect(
+      hasExplicitApprovalModeCliArg([
+        'node',
+        'qwen',
+        'serve',
+        '--approval-mode',
+        'default',
+      ]),
+    ).toBe(true);
+    expect(
+      hasExplicitApprovalModeCliArg([
+        'node',
+        'qwen',
+        'serve',
+        '--approval-mode=default',
+      ]),
+    ).toBe(true);
+  });
+
   it('detects --approval-mode, --yolo, and -y', () => {
     expect(hasExplicitApprovalModeCliArg(['node', 'qwen', '--acp'])).toBe(
       false,

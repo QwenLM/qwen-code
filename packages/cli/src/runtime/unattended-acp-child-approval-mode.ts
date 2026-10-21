@@ -73,9 +73,16 @@ export function tryParseApprovalModePin(
 
 /**
  * True when the process argv carries an explicit approval-mode choice
- * (`--approval-mode` / `--yolo` / `-y`). Used with
- * `config.getApprovalModeRevision() > 0` to distinguish an operator-chosen
- * DEFAULT from the implicit ACP birth default.
+ * (`--approval-mode` / `--yolo` / `-y`).
+ *
+ * The flag is a process-wide operator pin: it applies to every session hosted
+ * in that process, so `qwen serve --approval-mode default` (or
+ * `qwen --acp --approval-mode default`) makes every unattended child keep
+ * DEFAULT instead of elevating the implicit ACP ask-default to AUTO. A
+ * per-session choice is only visible through
+ * `config.getApprovalModeRevision() > 0` (a live `session/set_mode`); use both
+ * to distinguish an operator-chosen DEFAULT from the implicit ACP birth
+ * default.
  */
 export function hasExplicitApprovalModeCliArg(
   argv: readonly string[] = process.argv,
