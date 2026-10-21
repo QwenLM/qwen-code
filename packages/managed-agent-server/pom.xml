@@ -564,8 +564,12 @@
                                  cleanup and its regression add 60 s:
                                  healthy 9578 s, fork 10178 s, Verify 180
                                  minutes with margin above the 10778-second
+                                 fork-plus-wrap sum. The FG11d close-queued
+                                 cell adds 134 s (2x its measured 67.2 s):
+                                 healthy 9712 s, fork 10312 s, Verify 182
+                                 minutes with margin above the 10912-second
                                  fork-plus-wrap sum. -->
-                            <forkedProcessTimeoutInSeconds>10178</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>10312</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

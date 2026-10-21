@@ -76,6 +76,9 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import { selectForkHistory } from '../tools/agent/fork-subagent.js';
+import { composePostCompactHistory } from '../services/postCompactAttachments.js';
+import { detectTurnInterruption } from './turn-interruption.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -1160,6 +1163,53 @@ describe('LlmChat', async () => {
       } finally {
         vi.unstubAllEnvs();
       }
+    });
+
+    it('keeps anonymous input outside context after a saved request JSON round trip', async () => {
+      const compacted = await composePostCompactHistory([], 'Summary.');
+      const input = userText(
+        'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+      );
+      const route = { model: 'test-model', authType: AuthType.USE_GEMINI };
+      mockGeneratorConfig();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: route,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [...compacted, input],
+          config: {},
+        },
+        history: [...compacted, input],
+        contextPrefixLength: 2,
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(route),
+        promptTokensForClamp: 15,
+      };
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      await drain(
+        await chat.sendPreparedMessageStream(
+          JSON.parse(JSON.stringify(saved)),
+          'prompt',
+          new AbortController().signal,
+          async (prepared) => {
+            expect(prepared.contextPrefixLength).toBe(2);
+            expect(detectTurnInterruption(chat.getHistory())).toEqual({
+              kind: 'interrupted_prompt',
+              parts: input.parts,
+            });
+          },
+        ),
+      );
+      expect(streamMock().mock.calls[0][0]).toMatchObject(saved.request);
     });
 
     it('keeps externalized images live while refusing lossy prepared replay', async () => {
@@ -5044,6 +5094,36 @@ describe('LlmChat', async () => {
   describe('completed tool boundary', () => {
     const result = content('user', fnResponse('update_goal', {}, 'ended'));
     const fresh = () => structuredClone(result);
+
+    it.each([
+      [0, 0, undefined],
+      [1, 1, 69],
+      [49, 49, 21],
+      [50, 50, 20],
+      [100, 70, 0],
+    ] as const)(
+      'windows meaningful history with count %s without crossing the completed boundary',
+      (count, length, first) => {
+        const history = [
+          userText('Completed goal.'),
+          content('model', fnCall('update_goal', {}, 'ended')),
+          fresh(),
+          ...Array.from({ length: 70 }, (_, i) =>
+            i % 2 ? modelText(`Entry ${i}`) : userText(`Entry ${i}`),
+          ),
+        ];
+        chat.setHistory(history, ['ended']);
+        const window = chat.getHistoryForRecovery(count);
+        expect(window).toHaveLength(length);
+        expect(window[0]?.parts).toEqual(
+          first === undefined ? undefined : [{ text: `Entry ${first}` }],
+        );
+        expect(window.at(-1)?.parts).toEqual(
+          length ? [{ text: 'Entry 69' }] : undefined,
+        );
+        expect(chat.getHistory()).toEqual(history);
+      },
+    );
 
     it.each(['summary', 'fast'] as const)(
       'preserves and records completed boundaries through %s compression',
@@ -10333,6 +10413,122 @@ describe('LlmChat', async () => {
   });
 
   describe('stripOrphanedUserEntriesFromHistory', () => {
+    const compressedWithImage = () =>
+      composePostCompactHistory(
+        [
+          {
+            role: 'user',
+            parts: [{ inlineData: { mimeType: 'image/png', data: 'AA==' } }],
+          },
+        ],
+        'Summary.',
+        { maxFiles: 0 },
+      );
+    it('keeps real turns in numeric forks before attachment curation merges them', async () => {
+      const compacted = await composePostCompactHistory([], 'Summary.', {
+        maxFiles: 0,
+        planModeActive: true,
+      });
+      const pending = userText('A real follow-up.');
+      const done = modelText('Done.');
+      chat.setHistory([...compacted, pending, done]);
+      expect(selectForkHistory(chat.getHistoryForForkWindow(), 1)).toEqual([
+        pending,
+        done,
+      ]);
+      expect(JSON.stringify(chat.getHistory())).toBe(
+        JSON.stringify([...compacted, pending, done]),
+      );
+      chat.setHistory(compacted);
+      expect(JSON.stringify(chat.getHistoryForForkWindow())).toBe(
+        JSON.stringify(compacted),
+      );
+    });
+
+    it('preserves the original compressed layout in constructors and history replacement', async () => {
+      const compacted = await compressedWithImage();
+      const wire = JSON.stringify(compacted);
+      const restored = new LlmChat(mockConfig, {}, compacted);
+      for (const target of [restored, chat]) {
+        target.setHistory(compacted);
+        expect(detectTurnInterruption(target.getHistory())).toEqual({
+          kind: 'none',
+        });
+        expect(target.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+        expect(JSON.stringify(target.getHistory())).toBe(wire);
+      }
+      expect(compacted).toHaveLength(3);
+      restored.truncateHistory(2);
+      const input = userText('Real failed input after truncation.');
+      restored.addHistory(input);
+      expect(restored.stripOrphanedUserEntriesFromHistory()).toEqual([input]);
+    });
+
+    it.each([
+      '<background-tasks>\nExplain this tag.',
+      'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+    ])(
+      'preserves context while replaying real heading-shaped input: %s',
+      async (text) => {
+        const compacted = await compressedWithImage();
+        const pending = userText(text);
+        chat.setHistory([...compacted, pending]);
+        expect(detectTurnInterruption(chat.getHistory())).toEqual({
+          kind: 'interrupted_prompt',
+          parts: pending.parts,
+        });
+        expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([pending]);
+        expect(chat.getHistory()).toEqual(compacted);
+        expect(detectTurnInterruption(chat.getHistory())).toEqual({
+          kind: 'none',
+        });
+      },
+    );
+
+    it.each([0, 48, 49, 60, 200])(
+      'keeps recovery consistent with full history and retains all %s notifications and agent replies',
+      async (count) => {
+        const compacted = await compressedWithImage();
+        const notifications = Array.from({ length: count }, () =>
+          userText('<task-notification>Done.</task-notification>'),
+        );
+        const agent = userText(
+          formatAgentMessageModelText({
+            displayText: 'done',
+            author: { agentId: 'agent-1', name: 'worker' },
+            runId: 'run-1',
+            status: 'completed',
+          }),
+        );
+        const pending = userText('Real failed input.');
+        const call = content('model', fnCall('read_file', {}, 'pending-call'));
+        const tails = [
+          notifications,
+          [pending, ...notifications],
+          [pending, ...notifications, agent],
+          [pending, ...notifications, agent, ...notifications],
+          [call, ...notifications, agent],
+        ];
+        const expectedKinds = [
+          'none',
+          'interrupted_prompt',
+          'none',
+          count ? 'interrupted_prompt' : 'none',
+          'interrupted_turn',
+        ];
+        for (const [index, tail] of tails.entries()) {
+          chat.setHistory([...compacted, ...tail]);
+          const full = detectTurnInterruption(chat.getHistory());
+          const window = chat.getHistoryForRecovery(50);
+          expect(window).toHaveLength(tail.length);
+          const bounded = detectTurnInterruption(window);
+          expect(full.kind).toBe(expectedKinds[index]);
+          expect(bounded.kind).toBe(full.kind);
+          expect(bounded).toEqual(full);
+        }
+      },
+    );
+
     const earlier = () => [
       userText('earlier prompt'),
       modelText('earlier response'),
