@@ -774,12 +774,13 @@ jobs:
     # fork to 10471 s; the FG13f MessageDisplay reload cell adds 150 s, moving
     # the fork to 10621 s and Verify to 188 minutes; the FG12d
     # cancel-before-dispatch cell adds 18 s, moving the fork to 10639 s; the
-    # FG13a result store ack-loss cell adds 150 s, moving the fork to 10789 s
-    # and Verify to 190 minutes; the FG13a dispatch ack-loss cell adds 150 s,
-    # moving the fork to 10939 s and Verify to 193 minutes; the FG13a
+    # FG11d retry-reuse cell adds 11 s, moving the fork to 10650 s; the FG13a
+    # result store ack-loss cell adds 150 s, moving the fork to 10800 s and
+    # Verify to 190 minutes; the FG13a dispatch ack-loss cell adds 150 s,
+    # moving the fork to 10950 s and Verify to 193 minutes; the FG13a
     # registration-settle ack-loss cell adds 150 s, moving the fork to
-    # 11089 s and Verify to 195 minutes, wrapping fork +
-    # 600 s plus margin (11689 s of
+    # 11100 s and Verify to 195 minutes, wrapping fork + 600 s plus margin
+    # (11700 s of
     # fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
@@ -885,7 +886,7 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11089 s, so the step wraps to fork + 600 s plus margin (195 min).
+        # 11100 s, so the step wraps to fork + 600 s plus margin (195 min).
         timeout-minutes: 195
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'

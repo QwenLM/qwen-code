@@ -33,10 +33,11 @@
 
 ## 接缝
 
-`StoreFaultGate.armAck(phase, record)` 设定一种模式：`inspect` 不抛错，
-`afterApply` 在 store 提交返回之后抛错。故障 store 只在
-`super.apply`/`super.applyNative` 成功之后调用 `afterApply`，所以调用方看到
-失败时记录已经持久化。
+`StoreFaultGate.armAck(phase, record)` 设定一种模式：`inspect` 不抛错。故障
+store 在该模式启用时注册一个 `TransactionSynchronization` 回调，`afterApply`
+在 `afterCommit` 中抛错。此时事务管理器已经提交，所以调用方看到的是「记录已
+落库、确认丢失」而不是回滚——若在 `apply` 内部报告故障，它仍处在
+`ManagedSessionStore.commit` 的事务里，会把写入一起撤销。
 
 `StoreFaultGateTest` 钉住该模式：提交前钩子静默、提交后钩子抛错、plan marker
 不被匹配。

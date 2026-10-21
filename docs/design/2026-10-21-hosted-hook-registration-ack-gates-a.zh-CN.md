@@ -38,7 +38,8 @@ catalog 格丢弃 worker 的 `hook-catalog` 回复，让第一次准入在注册
 `StoreFaultGate.Phase.HOOK_REGISTRATION_SETTLED` 在 `hook_registration` 域的
 `run.state` 为 `settled` 时命中；目标 id 是 `registrationId`。注入缝的域白名单
 新增 `hook_registration`，否则该提交根本不会被检查。`armAck` 与其他格同一
-分割：`inspect` 静默，`afterApply` 在 store 提交返回之后抛错。
+分割：`inspect` 静默，`afterApply` 在事务的 after-commit 回调里抛错，所以
+调用方看到失败时结算已经落库。
 
 `StoreFaultGateTest` 钉住该阶段：准入提交不被命中，确认模式下只有结算提交
 触发故障。

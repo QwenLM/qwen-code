@@ -38,9 +38,12 @@ Expectations:
 ## Seam
 
 `StoreFaultGate.armAck(phase, record)` sets a mode where `inspect` does not
-throw and `afterApply` throws after the store's commit returns. The faulting
-store calls `afterApply` only after `super.apply`/`super.applyNative` succeeds,
-so the record is durable at the moment the caller sees the failure.
+throw. The faulting store registers a `TransactionSynchronization` callback
+while the mode is armed, and `afterApply` throws from `afterCommit`. The
+transaction manager has already committed at that point, so the caller sees a
+lost acknowledgement over a durable record instead of a rollback — reporting
+from `apply` itself would sit inside `ManagedSessionStore.commit`'s
+transaction and undo the write.
 
 `StoreFaultGateTest` pins the mode: the pre-commit hook stays silent, the
 post-commit hook throws, and the plan marker is not matched.

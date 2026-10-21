@@ -47,8 +47,9 @@ Expectations:
 `hook_registration` domain when `run.state` is `settled`; the target id is the
 `registrationId`. The seam's domain allowlist now admits `hook_registration`,
 so the commit is inspected at all. `armAck` keeps the same split as the other
-cells: `inspect` stays silent and `afterApply` throws after the store's commit
-returns.
+cells: `inspect` stays silent, and `afterApply` throws from the transaction's
+after-commit callback, so the settle is durable when the caller sees the
+failure.
 
 `StoreFaultGateTest` pins the phase: the admission commit is not matched, and
 in ack mode the fault lands only on the settle.
