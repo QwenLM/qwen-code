@@ -43,6 +43,23 @@ final class HostedGateTestSupport {
     private HostedGateTestSupport() {
     }
 
+    static String quote(String text) {
+        return "'" + text.replace("'", "'\"'\"'") + "'";
+    }
+
+    static String camel(String key) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < key.length(); i++) {
+            char c = key.charAt(i);
+            if (c == '_' && i + 1 < key.length()) {
+                out.append(Character.toUpperCase(key.charAt(++i)));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
     // The tenant-pinned authentication filter (FG6e's and FG8's probes
     // carried it verbatim apart from the fixture name;
     // HostedPublicWorkspaceIT's header-driven variant is a different
