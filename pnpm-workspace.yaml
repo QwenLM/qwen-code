@@ -3,6 +3,7 @@
 # channel join the pnpm layout silently while npm still ignores it.
 packages:
   - 'packages/*'
+  - 'packages/cua-driver/typescript'
   - 'packages/channels/base'
   - 'packages/channels/dingtalk'
   - 'packages/channels/dws'
