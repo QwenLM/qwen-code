@@ -2,6 +2,8 @@
 
 [English](2026-10-17-managed-definition-approval-selection.md) | [简体中文](2026-10-17-managed-definition-approval-selection.zh-CN.md)
 
+支持 `live-approval-selection/1` 时，[执行中审批扩展](2026-10-20-managed-live-approval.zh-CN.md) 取代本文仅空闲时修改、下一轮生效的限制。准入快照保持不可变；当前权限检查读取持久化 Session 选择。旧提供方保留本文的基线行为。
+
 ## 状态与目标
 
 基于 2026-10-17 的 `dac04ed35` 调研实现。本文记录已确认的设计、兼容性约束和验证要求；本地验证结果记录在下文，部署测试通道与 macOS 证据分别说明。
