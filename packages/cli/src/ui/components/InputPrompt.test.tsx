@@ -7,6 +7,7 @@
 
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
+import { useState } from 'react';
 import type { InputPromptProps } from './InputPrompt.js';
 import {
   InputPrompt,
@@ -497,6 +498,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('send this', {
         deferUntilIdle: false,
         submittedPrompt: 'send this',
+        displayText: 'send this',
+        humanInput: { text: 'send this' },
       });
     });
     unmount();
@@ -517,6 +520,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('restored prompt', {
         deferUntilIdle: false,
         submittedPrompt: 'restored prompt',
+        displayText: 'restored prompt',
+        humanInput: { text: 'restored prompt' },
       });
     });
     expect(
@@ -566,6 +571,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('send this later', {
         deferUntilIdle: true,
         submittedPrompt: 'send this later',
+        displayText: 'send this later',
+        humanInput: { text: 'send this later' },
       });
     });
     expect(props.buffer.setText).toHaveBeenCalledWith('');
@@ -1267,6 +1274,8 @@ describe('InputPrompt', () => {
           expect(props.onSubmit).toHaveBeenCalledWith('ship it', {
             deferUntilIdle: false,
             submittedPrompt: 'ship it',
+            displayText: 'ship it',
+            humanInput: { text: 'ship it' },
           });
           expect(onPromptSuggestionDismiss).toHaveBeenCalled();
         } finally {
@@ -1593,6 +1602,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('ls -l', {
       deferUntilIdle: false,
       submittedPrompt: 'ls -l',
+      displayText: 'ls -l',
+      humanInput: { text: 'ls -l' },
     });
     unmount();
   });
@@ -1622,6 +1633,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('some text', {
       deferUntilIdle: false,
       submittedPrompt: 'some text',
+      displayText: 'some text',
+      humanInput: { text: 'some text' },
     });
     unmount();
   });
@@ -1803,6 +1816,8 @@ describe('InputPrompt', () => {
           {
             deferUntilIdle: false,
             submittedPrompt: 'describe this image',
+            displayText: 'describe this image',
+            humanInput: { text: 'describe this image' },
           },
         );
       });
@@ -2996,6 +3011,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
       deferUntilIdle: false,
       submittedPrompt: '/clear',
+      displayText: '/clear',
+      humanInput: { text: '/clear' },
     });
     unmount();
   });
@@ -3020,6 +3037,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/quit', {
       deferUntilIdle: false,
       submittedPrompt: '/quit',
+      displayText: '/quit',
+      humanInput: { text: '/quit' },
     });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
@@ -3071,6 +3090,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/export', {
       deferUntilIdle: false,
       submittedPrompt: '/export',
+      displayText: '/export',
+      humanInput: { text: '/export' },
     });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
@@ -3107,6 +3128,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/export md', {
       deferUntilIdle: false,
       submittedPrompt: '/export md',
+      displayText: '/export md',
+      humanInput: { text: '/export md' },
     });
     unmount();
   });
@@ -3805,6 +3828,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
       deferUntilIdle: false,
       submittedPrompt: '/memory',
+      displayText: '/memory',
+      humanInput: { text: '/memory' },
     });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmountFinal();
@@ -3833,6 +3858,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
       deferUntilIdle: false,
       submittedPrompt: '/memory',
+      displayText: '/memory',
+      humanInput: { text: '/memory' },
     });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
@@ -4117,6 +4144,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history', {
       deferUntilIdle: false,
       submittedPrompt: 'a prompt from history',
+      displayText: 'a prompt from history',
+      humanInput: { text: 'a prompt from history' },
     });
     expect(mockInputHistory.resetHistoryNav).toHaveBeenCalled();
     unmount();
@@ -4139,6 +4168,8 @@ describe('InputPrompt', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
       deferUntilIdle: false,
       submittedPrompt: '/clear',
+      displayText: '/clear',
+      humanInput: { text: '/clear' },
     });
     unmount();
   });
@@ -4191,6 +4222,8 @@ describe('InputPrompt', () => {
       {
         deferUntilIdle: false,
         submittedPrompt: '@context.txt Inspect this context.',
+        displayText: '@context.txt Inspect this context.',
+        humanInput: { text: '@context.txt Inspect this context.' },
       },
     );
     unmount();
@@ -5111,6 +5144,8 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith('test command', {
           deferUntilIdle: false,
           submittedPrompt: 'test command',
+          displayText: 'test command',
+          humanInput: { text: 'test command' },
         });
       } finally {
         vi.useRealTimers();
@@ -5135,6 +5170,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('normal command', {
         deferUntilIdle: false,
         submittedPrompt: 'normal command',
+        displayText: 'normal command',
+        humanInput: { text: 'normal command' },
       });
 
       unmount();
@@ -5424,6 +5461,8 @@ describe('InputPrompt', () => {
       expect(props.onSubmit).toHaveBeenCalledWith('echo hello', {
         deferUntilIdle: false,
         submittedPrompt: 'echo hello',
+        displayText: 'echo hello',
+        humanInput: { text: 'echo hello' },
       });
       expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
       expect(
@@ -5619,6 +5658,11 @@ describe('InputPrompt', () => {
             deferUntilIdle: false,
             submittedPrompt:
               '<system-reminder>generated</system-reminder>\nuser text',
+            displayText:
+              '<system-reminder>generated</system-reminder>\nuser text',
+            humanInput: {
+              text: '<system-reminder>generated</system-reminder>\nuser text',
+            },
           },
         );
       });
@@ -5960,7 +6004,69 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith(markedPaste(largeContent), {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
+          displayText: '[Pasted Content 1001 chars]',
+          humanInput: { text: largeContent },
+          pasteExpansions: new Map([
+            ['[Pasted Content 1001 chars]', largeContent],
+          ]),
         });
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
+    });
+
+    it('reserves restored paste IDs and keeps edited bodies after another same-size paste', async () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const originalBody = 'workflow payload'.padEnd(1200, 'x');
+      const nextBody = 'ultracode payload'.padEnd(1200, 'y');
+      const literal = '<system-reminder>user literal</system-reminder>';
+      mockBuffer.text = `${literal}\n${placeholder}\nappend instruction`;
+      mockBuffer.lines = mockBuffer.text.split('\n');
+      mockBuffer.cursor = [2, 'append instruction'.length];
+      function RestoredDraft() {
+        const [pendingPastes, setPendingPastes] = useState(
+          new Map([[placeholder, originalBody]]),
+        );
+        return (
+          <InputPrompt
+            {...props}
+            pendingPastes={pendingPastes}
+            onPendingPastesChange={setPendingPastes}
+          />
+        );
+      }
+      const { stdin, unmount } = renderWithProviders(<RestoredDraft />);
+      await wait();
+      vi.useFakeTimers();
+      try {
+        act(() => stdin.write(`\x1b[200~${nextBody}\x1b[201~`));
+        await flush();
+        expect(mockBuffer.insert).toHaveBeenCalledWith(`${placeholder} #2`, {
+          paste: false,
+        });
+        const edited = `${literal}\n${placeholder}\nappend instruction ${placeholder} #2`;
+        mockBuffer.text = edited;
+        mockBuffer.lines = edited.split('\n');
+        mockBuffer.cursor = [2, mockBuffer.lines[2].length];
+        await advanceTimers(500);
+        act(() => stdin.write('\r'));
+        await flush();
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          `${literal}\n${originalBody}\nappend instruction ${nextBody}`,
+          {
+            deferUntilIdle: false,
+            submittedPrompt: edited,
+            displayText: edited,
+            humanInput: {
+              text: `${literal}\n${originalBody}\nappend instruction ${nextBody}`,
+            },
+            pasteExpansions: new Map([
+              [placeholder, originalBody],
+              [`${placeholder} #2`, nextBody],
+            ]),
+          },
+        );
       } finally {
         vi.useRealTimers();
         unmount();
@@ -6008,6 +6114,15 @@ describe('InputPrompt', () => {
             deferUntilIdle: false,
             submittedPrompt:
               '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
+            displayText:
+              '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
+            humanInput: {
+              text: `${secondPaste}\n${firstPaste}`,
+            },
+            pasteExpansions: new Map([
+              ['[Pasted Content 1001 chars]', firstPaste],
+              ['[Pasted Content 1001 chars] #2', secondPaste],
+            ]),
           },
         );
       } finally {
@@ -6049,6 +6164,11 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
           deferUntilIdle: false,
           submittedPrompt: '[Pasted Content 1001 chars]',
+          displayText: '[Pasted Content 1001 chars]',
+          humanInput: { text: largeContent },
+          pasteExpansions: new Map([
+            ['[Pasted Content 1001 chars]', largeContent],
+          ]),
         });
       } finally {
         vi.useRealTimers();

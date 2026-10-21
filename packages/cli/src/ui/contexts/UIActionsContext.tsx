@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import type React from 'react';
 import { createContext, useContext } from 'react';
 import { type Key } from '../hooks/useKeypress.js';
 import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
@@ -83,6 +85,9 @@ export interface UIActions {
     options?: {
       deferUntilIdle?: boolean;
       submittedPrompt?: string;
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      pasteExpansions?: ReadonlyMap<string, string>;
     },
   ) => void;
   // The composer registers its own submit path (large-paste expansion, epoch
@@ -91,6 +96,7 @@ export interface UIActions {
   registerPromptSubmit?: (handler: ((value: string) => void) | null) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
+  setPendingPastes?: React.Dispatch<React.SetStateAction<Map<string, string>>>;
   popAllQueuedMessages: () => string | null;
   invalidateSubmittedPromptProvenance: () => void;
   // Welcome back dialog

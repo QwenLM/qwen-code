@@ -5,7 +5,16 @@
  */
 
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useRef,
+} from 'react';
+import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 import { Box, Text } from 'ink';
 import {
   SuggestionsDisplay,
@@ -177,26 +186,7 @@ export function classifyPastedImagePaths(pasted: string): {
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
 
-export function expandPendingPastePlaceholders(
-  value: string,
-  pendingPastes: ReadonlyMap<string, string>,
-): string {
-  if (pendingPastes.size === 0) {
-    return value;
-  }
-  const placeholders = Array.from(pendingPastes.keys()).sort(
-    (a, b) => b.length - a.length,
-  );
-  const escapedPlaceholders = placeholders.map((placeholderValue) =>
-    placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-  );
-  const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
-  return value.replace(
-    placeholderRegex,
-    (matchedPlaceholder) =>
-      pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
-  );
-}
+export { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 
 /**
  * Frame a collapsed paste for the model, describing where it came from and what
@@ -310,8 +300,15 @@ export interface InputPromptProps {
     options?: {
       deferUntilIdle?: boolean;
       submittedPrompt?: string;
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      pasteExpansions?: ReadonlyMap<string, string>;
     },
   ) => void;
+  pendingPastes?: Map<string, string>;
+  onPendingPastesChange?: React.Dispatch<
+    React.SetStateAction<Map<string, string>>
+  >;
   userMessages: readonly string[];
   onClearScreen: () => void;
   config: Config;
@@ -365,6 +362,8 @@ const LARGE_PASTE_LINE_THRESHOLD = 10;
 export const InputPrompt: React.FC<InputPromptProps> = ({
   buffer,
   onSubmit,
+  pendingPastes: controlledPendingPastes,
+  onPendingPastesChange,
   userMessages,
   onClearScreen,
   config,
@@ -479,9 +478,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const clipboardUnavailableShownRef =
     sessionClipboardUnavailableShownRef ?? localClipboardUnavailableShownRef;
   // Large paste placeholder handling
-  const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
-    new Map(),
-  );
+  const [localPendingPastes, setLocalPendingPastes] = useState<
+    Map<string, string>
+  >(new Map());
+  const pendingPastes = controlledPendingPastes ?? localPendingPastes;
+  const setPendingPastes = onPendingPastesChange ?? setLocalPendingPastes;
   // Track active placeholder IDs for each charCount to enable reuse
   const activePlaceholderIds = useRef<Map<number, Set<number>>>(new Map());
 
@@ -498,6 +499,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     },
     [],
   );
+
+  useLayoutEffect(() => {
+    const ids = new Map<number, Set<number>>();
+    for (const placeholder of pendingPastes.keys()) {
+      const parsed = parsePlaceholder(placeholder);
+      if (!parsed) continue;
+      const active = ids.get(parsed.charCount) ?? new Set<number>();
+      active.add(parsed.id);
+      ids.set(parsed.charCount, active);
+    }
+    activePlaceholderIds.current = ids;
+  }, [pendingPastes, parsePlaceholder]);
 
   // Free a placeholder ID when deleted so it can be reused
   const freePlaceholderId = useCallback((charCount: number, id: number) => {
@@ -780,7 +793,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const clearPendingPastes = useCallback(() => {
     setPendingPastes(new Map());
     activePlaceholderIds.current.clear();
-  }, []);
+  }, [setPendingPastes]);
 
   // Ref to inputHistory.resetHistoryNav, populated after useInputHistory runs.
   // Needed because handleSubmitAndClear is passed into useInputHistory as
@@ -795,6 +808,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       submitEpochRef.current += 1;
       // Expand any large paste placeholders to their full content before submitting
       const submittedPrompt = submittedValue;
+      const pasteExpansions =
+        pendingPastes.size > 0 ? new Map(pendingPastes) : undefined;
       let finalValue = submittedValue;
       if (pendingPastes.size > 0) {
         // The framing decision is made here, not at paste time: the map holds
@@ -813,6 +828,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             : framePasteExpansion(finalValue, pendingPastes);
         clearPendingPastes();
       }
+      const humanInput = { text: finalValue };
       if (shellModeActive) {
         shellHistory.addCommandToHistory(finalValue);
       }
@@ -829,7 +845,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
       clearPromptStash(targetDir);
-      onSubmit(finalValue, { deferUntilIdle, submittedPrompt });
+      onSubmit(finalValue, {
+        deferUntilIdle,
+        submittedPrompt,
+        displayText: submittedValue,
+        humanInput,
+        ...(pasteExpansions ? { pasteExpansions } : {}),
+      });
 
       // Reset history navigation so the next Up-arrow starts from the newest
       // entry rather than advancing from whatever index the user picked.
@@ -984,7 +1006,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       buffer.insert(placeholder, { paste: false });
       return true;
     },
-    [buffer, nextLargePastePlaceholder],
+    [buffer, nextLargePastePlaceholder, setPendingPastes],
   );
 
   // Promote a paste that is purely image-file path(s) (e.g. a terminal/clipboard
@@ -2297,6 +2319,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       uiActions,
       pasteWorkaround,
       pendingPastes,
+      setPendingPastes,
       parsePlaceholder,
       freePlaceholderId,
       agentTabBarFocused,
