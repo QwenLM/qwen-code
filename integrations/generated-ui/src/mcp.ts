@@ -10,11 +10,14 @@ import {
 } from '@modelcontextprotocol/ext-apps/server';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { APP_URI, createShowResult, showInputSchema } from './contracts.js';
+import type { BUNDLED_APP_URI } from './contracts.js';
 
 const invalidDocument =
   'INVALID_DOCUMENT: Supply a complete generated view within the documented field and 24,000-byte result limits.';
 
-export function createGeneratedUiServer(): McpServer {
+export function createGeneratedUiServer(
+  appUri: typeof APP_URI | typeof BUNDLED_APP_URI = APP_URI,
+): McpServer {
   const server = new McpServer({ name: 'generated-ui', version: '1.0.0' });
   server.registerTool(
     'generated_ui_show',
@@ -30,7 +33,7 @@ export function createGeneratedUiServer(): McpServer {
         idempotentHint: true,
         openWorldHint: false,
       },
-      _meta: { ui: { resourceUri: APP_URI, visibility: ['model'] } },
+      _meta: { ui: { resourceUri: appUri, visibility: ['model'] } },
     },
     async (input) => {
       try {
@@ -54,12 +57,12 @@ export function createGeneratedUiServer(): McpServer {
   registerAppResource(
     server,
     'Generated UI',
-    APP_URI,
+    appUri,
     { _meta: { ui } },
     async () => ({
       contents: [
         {
-          uri: APP_URI,
+          uri: appUri,
           mimeType: RESOURCE_MIME_TYPE,
           text: await readFile(new URL('./app.html', import.meta.url), 'utf8'),
           _meta: { ui },
