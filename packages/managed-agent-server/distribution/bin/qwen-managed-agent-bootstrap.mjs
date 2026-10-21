@@ -61,10 +61,8 @@ export function renderServerEnv(secrets, applicationConfigPath) {
     'QWEN_MANAGED_AGENT_HARNESS_BASE_URL=http://127.0.0.1:4170',
     `QWEN_MANAGED_AGENT_HARNESS_TOKEN=${secrets.token}`,
     `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST=${secrets.digest}`,
-    '# Startup refuses a Harness without the store; the store is this server.',
-    'QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=true',
-    'QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL=http://127.0.0.1:8080',
-    'QWEN_MANAGED_AGENT_WORKSPACE_ID=reference-workspace',
+    '# The Session Store workspace ID derives from this existing directory.',
+    'QWEN_MANAGED_AGENT_WORKSPACE_CWD=/srv/qwen-workspace',
     `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN=${secrets.brokerToken}`,
     `SPRING_CONFIG_ADDITIONAL_LOCATION='file:${applicationConfigPath}'`,
     '',
@@ -169,7 +167,9 @@ async function main() {
   console.log(
     `Wrote ${files.map(([name]) => path.join(directory, name)).join(', ')}`,
   );
-  console.log('Fill in SPRING_DATASOURCE_PASSWORD, then run:');
+  console.log(
+    'Fill in SPRING_DATASOURCE_PASSWORD, create the Workspace directory, then run:',
+  );
   console.log('  bin/qwen-managed-agent-server --check');
 }
 
