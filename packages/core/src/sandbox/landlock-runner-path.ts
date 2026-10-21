@@ -51,7 +51,9 @@ export function resolveLandlockRunner(requestedPath?: string): string {
   if (!existsSync(requested))
     throw new Error(`Landlock helper is missing: ${requested}`);
   const runner = realpathSync(requested);
-  // npm archives strip executable bits from files outside the bin entries.
+  // pnpm-packed releases (0.24.4–0.25.3) shipped every non-`bin` entry as
+  // 0644 — only those installs need the bit restored, and a read-only or
+  // root-owned install cannot be chmod'ed by the running user at all (#12668).
   if (requestedPath === undefined && (statSync(runner).mode & 0o111) === 0)
     chmodSync(runner, 0o755);
   return runner;

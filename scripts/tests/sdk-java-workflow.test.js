@@ -131,21 +131,87 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
+  it('keeps the host lock out of every Maven child', () => {
+    const jobs = parse(workflow).jobs;
+    const lockedSteps = ['test', 'mysql-integration'].flatMap((name) =>
+      jobs[name].steps.filter((s) => s.run?.includes('sdk-java-tests.lock')),
+    );
+    // The MariaDB lane's two Maven steps are one step now (#14903), so the
+    // lock-bearing steps are the test job's and this job's single one.
+    expect(lockedSteps).toHaveLength(2);
+    for (const s of lockedSteps) {
+      const commands = s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm);
+      expect(commands?.length, s.name).toBeGreaterThan(0);
+      for (const command of commands) {
+        expect(command.trim(), s.name).toMatch(/ 9>&-$/);
+      }
+    }
+  });
+
+  it.skipIf(process.platform !== 'linux')(
+    'retains serialization while Maven runs and releases it with a surviving child',
+    () => {
+      const jobs = parse(workflow).jobs;
+      const commands = ['test', 'mysql-integration'].flatMap((name) =>
+        jobs[name].steps.flatMap((s) =>
+          s.run?.includes('sdk-java-tests.lock')
+            ? (s.run.replace(/\\\n/g, ' ').match(/^\s*mvn .+$/gm) ?? [])
+            : [],
+        ),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-'));
+      try {
+        for (const command of commands) {
+          const result = spawnSync(
+            'bash',
+            [
+              '-e',
+              '-c',
+              `
+              trap 'kill "\${child_pid:-}" 2>/dev/null || true' EXIT
+              exec 9>"$LOCK_FILE"
+              flock --nonblock 9
+              mvn() {
+                sleep 30 </dev/null >/dev/null 2>&1 &
+                child_pid=$!
+              }
+              ${command}
+              if flock --nonblock "$LOCK_FILE" true; then exit 91; fi
+              exec 9>&-
+              flock --nonblock "$LOCK_FILE" true
+              kill -0 "$child_pid"
+            `,
+            ],
+            {
+              encoding: 'utf8',
+              timeout: 5000,
+              env: { ...process.env, LOCK_FILE: join(dir, 'tests.lock') },
+            },
+          );
+          expect(result.error, command).toBeUndefined();
+          expect(result.status, command + result.stderr).toBe(0);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('runs Broker tests from the combined Server after installing the SDK on self-hosted Java 21', () => {
     const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
     expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
-      'mvn --batch-mode --no-transfer-progress clean test\n' +
+      'mvn --batch-mode --no-transfer-progress clean test 9>&-\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
-        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +
+        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 9>&-\n' +
         '            cd ../../managed-agent-server\n' +
         '            # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
         '            if [ "${TIER}" = "fast" ]; then\n' +
-        '              mvn --batch-mode --no-transfer-progress clean test\n' +
+        '              mvn --batch-mode --no-transfer-progress clean test 9>&-\n' +
         '            else\n' +
-        `              mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+        `              mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test 9>&-\n` +
         '            fi\n' +
         '          fi',
     );
@@ -647,10 +713,10 @@ describe('SDK Java Flyway re-check of open PRs', () => {
 
 // #13623: three main runs lost their GitHub-hosted lanes to runner-queue
 // starvation — every failed job recorded zero steps and no assigned runner
-// while the pool legs passed. The MariaDB lane is pool-safe (per-job service
+// while the pool legs passed. The MySQL lane is pool-safe (per-job
 // container, no host installs), so its trusted runs route to the ECS pool the
 // way the flyway guard's do; untrusted fork PRs stay hosted.
-describe('SDK Java MariaDB lane on the ECS pool', () => {
+describe('SDK Java MySQL lane on the ECS pool', () => {
   it('routes trusted mysql-integration runs to the pool', () => {
     const block = job('mysql-integration');
     for (const fragment of [
@@ -677,42 +743,217 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     expect(block).not.toContain('refs/pull/');
   });
 
-  it('keeps the MariaDB service on a random host port', () => {
-    // A fixed 3306:3306 mapping collides between jobs sharing one pool host;
-    // the steps read the mapped port from job.services.mariadb.ports.
-    const parsed = parse(workflow);
-    expect(parsed.jobs['mysql-integration'].services.mariadb.ports).toEqual([
-      '3306/tcp',
-    ]);
-    const block = job('mysql-integration');
-    expect(block).not.toContain('3306:3306');
-    expect(block).not.toContain('127.0.0.1:3306');
-    expect(
-      block.match(
-        /MYSQL_PORT: "\$\{\{ job\.services\.mariadb\.ports\['3306'\] \}\}"/g,
-      ),
-    ).toHaveLength(1);
-    // The consumer is the link that carries the random port into the tests:
-    // the mvn line must interpolate ${MYSQL_PORT}, or the declaration is
-    // dead and the fixed-port collision returns. hosted-harness-mysql's two
-    // -Dmysql.url lines read job.services.mysql and live outside this block.
-    expect(
-      block.match(
-        /-Dmysql\.url="jdbc:mysql:\/\/127\.0\.0\.1:\$\{MYSQL_PORT\}\//g,
-      ),
-    ).toHaveLength(1);
-  });
-
-  it('keeps the MariaDB datadir on tmpfs so a pool run strands no anonymous volume', () => {
-    // mariadb declares VOLUME /var/lib/mysql, and the runner's service
-    // teardown is `docker rm --force` without -v: an unmounted datadir
-    // leaks one anonymous volume per pool run. tmpfs dies with the
-    // container, cancelled runs included.
-    const mariadb = parse(workflow).jobs['mysql-integration'].services.mariadb;
-    expect(mariadb.options).toContain(
+  it('starts pool MySQL without native AIO and carries its random port into Maven', () => {
+    const mysql = parse(workflow).jobs['mysql-integration'];
+    expect(mysql.services).toBeUndefined();
+    expect(mysql.env.MYSQL_CONTAINER).toBe(
+      'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
+    );
+    const start = mysql.steps.find(
+      (s) => s.name === 'Start MySQL without native AIO',
+    );
+    const configure = mysql.steps.find(
+      (s) => s.name === 'Configure MySQL packet budget for large-object tests',
+    );
+    const verify = mysql.steps.find((s) =>
+      s.run?.includes('-Pmysql-integration'),
+    );
+    const cleanup = mysql.steps.at(-1);
+    expect(start.shell).toBe('bash');
+    expect(start.run).toContain(
+      'mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin',
+    );
+    expect(start.run).toContain("--publish '127.0.0.1::3306'");
+    expect(start.run).toContain(
       '--mount type=tmpfs,destination=/var/lib/mysql',
     );
+    // The lane's only consumer is the JDBC URL below, which owns its schema
+    // through createDatabaseIfNotExist; a declared-but-unconsumed database
+    // here would invite dropping that flag and dying on first connect.
+    expect(start.run).not.toContain('MYSQL_DATABASE');
+    expect(start.run).toContain("--env MYSQL_ROOT_PASSWORD='runtime-broker'");
+    expect(start.run).toContain('for attempt in {1..60}');
+    expect(start.run).toContain('sleep 2');
+    expect(start.run).toContain(
+      'mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent',
+    );
+    expect(start.run).toContain(
+      'echo "MYSQL_PORT=${MYSQL_PORT}" >> "${GITHUB_ENV}"',
+    );
+    expect(configure.env?.MYSQL_CONTAINER).toBeUndefined();
+    expect(configure.run).toContain('docker exec "${MYSQL_CONTAINER}" sh -c');
+    expect(configure.run).toContain(
+      'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root',
+    );
+    expect(configure.run).toContain('SET GLOBAL max_allowed_packet=134217728');
+    expect(verify.env.MYSQL_PORT).toBeUndefined();
+    expect(verify.run).toContain(
+      '-Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false"',
+    );
+    expect(mysql.steps.indexOf(start)).toBeLessThan(
+      mysql.steps.indexOf(configure),
+    );
+    expect(mysql.steps.indexOf(configure)).toBeLessThan(
+      mysql.steps.indexOf(verify),
+    );
+    expect(cleanup.name).toBe('Remove the MySQL container');
+    // The shell probe below cannot establish Actions cancellation scheduling.
+    expect(cleanup.if).toBe('${{ always() }}');
+    expect(cleanup.shell).toBe('bash');
+    expect(job('mysql-integration')).not.toMatch(/job\.services|mariadb/i);
   });
+
+  it.skipIf(process.platform === 'win32').each(['ready', 'dead', 'timeout'])(
+    'executes MySQL startup and consumers with a %s container',
+    (mode) => {
+      const mysql = parse(workflow).jobs['mysql-integration'];
+      const start = mysql.steps.find(
+        (s) => s.name === 'Start MySQL without native AIO',
+      );
+      const configure = mysql.steps.find(
+        (s) =>
+          s.name === 'Configure MySQL packet budget for large-object tests',
+      );
+      const verify = mysql.steps.find((s) =>
+        s.run?.includes('-Pmysql-integration'),
+      );
+      // The step also stages the SDK with `-DskipTests install`, so pick the
+      // integration command rather than the step's first Maven line.
+      const command = verify.run
+        .replace(/\\\n/g, ' ')
+        .match(/^\s*mvn .*-Pmysql-integration.*$/m)[0];
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-mysql-'));
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            `
+          attempts=0
+          docker() {
+            printf 'DOCKER<%s>\\n' "$*" >> "$TRACE"
+            case "$1" in
+              run) return 0 ;;
+              exec)
+                if [[ "$3" == mysqladmin ]]; then
+                  attempts=$((attempts + 1))
+                  [[ "$MODE" == ready && "$attempts" -eq 3 ]]
+                else
+                  [[ "$3" == sh && "$5" == *'SET GLOBAL max_allowed_packet=134217728'* ]]
+                fi ;;
+              inspect)
+                if [[ "$3" == *State.Running* ]]; then
+                  [[ "$MODE" == dead ]] && echo false || echo true
+                else
+                  echo 43219
+                fi ;;
+              logs) echo MYSQL_FAILURE_LOG ;;
+              *) return 92 ;;
+            esac
+          }
+          sleep() { printf 'SLEEP<%s>\\n' "$*" >> "$TRACE"; }
+          ${start?.run}
+          ${configure?.run}
+          set -a
+          source "$GITHUB_ENV"
+          set +a
+          mvn() { printf 'MAVEN<%s>\\n' "$@"; }
+          ${command}
+        `,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              MODE: mode,
+              MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-123-2',
+              GITHUB_ENV: join(dir, 'env'),
+              TRACE: join(dir, 'trace'),
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        const trace = readFileSync(join(dir, 'trace'), 'utf8');
+        expect(trace).toContain(
+          'run --detach --name qwen-code-sdk-java-mysql-123-2 --publish 127.0.0.1::3306 --mount type=tmpfs,destination=/var/lib/mysql --env MYSQL_ROOT_PASSWORD=runtime-broker mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin',
+        );
+        if (mode === 'ready') {
+          expect(result.status, result.stderr).toBe(0);
+          expect(readFileSync(join(dir, 'env'), 'utf8')).toBe(
+            'MYSQL_PORT=43219\n',
+          );
+          expect(trace.match(/SLEEP<2>/g)).toHaveLength(2);
+          expect(result.stdout).toContain(
+            'MAVEN<-Dmysql.url=jdbc:mysql://127.0.0.1:43219/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false>',
+          );
+          expect(result.stdout).not.toContain('MYSQL_FAILURE_LOG');
+        } else {
+          expect(result.status, result.stderr).toBe(1);
+          expect(result.stdout).toContain('MYSQL_FAILURE_LOG');
+          expect(existsSync(join(dir, 'env'))).toBe(false);
+          expect(trace.match(/exec .* mysqladmin/g)).toHaveLength(
+            mode === 'dead' ? 1 : 60,
+          );
+          expect(trace.match(/SLEEP<2>/g) ?? []).toHaveLength(
+            mode === 'dead' ? 0 : 59,
+          );
+          expect(result.stdout).not.toContain('MAVEN<');
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it
+    .skipIf(process.platform === 'win32')
+    .each(['exists', 'missing', 'removal-fails'])(
+    'executes owned MySQL cleanup when the container %s',
+    (mode) => {
+      const cleanup = parse(workflow).jobs['mysql-integration'].steps.at(-1);
+      const result = spawnSync(
+        'bash',
+        [
+          '-e',
+          '-c',
+          `
+        docker() {
+          printf 'DOCKER<%s>\\n' "$*"
+          if [[ "$1" == inspect ]]; then [[ "$MODE" != missing ]];
+          elif [[ "$1" == rm ]]; then [[ "$MODE" != removal-fails ]];
+          else return 92; fi
+        }
+        ${cleanup.run}
+      `,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 5000,
+          env: {
+            ...process.env,
+            MODE: mode,
+            MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-123-2',
+          },
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        result.stdout.includes(
+          'DOCKER<rm --force qwen-code-sdk-java-mysql-123-2>',
+        ),
+      ).toBe(mode !== 'missing');
+      expect(
+        result.stdout.includes(
+          '::warning::could not remove qwen-code-sdk-java-mysql-123-2; the host cleanup service reaps it within ~48h',
+        ),
+      ).toBe(mode === 'removal-fails');
+    },
+  );
 
   it('holds the per-host sdk-java lock once around both Maven runs', () => {
     // Derived from the parsed steps, not a string count: the install and

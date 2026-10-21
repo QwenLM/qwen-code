@@ -52,7 +52,7 @@ sdk_java_lock_acquire() {
   : >"${ticket}"
   exec 8>&-
 
-  local start=${SECONDS} head name pid mtime age remaining last_log=-60 blocking
+  local start=${SECONDS} head name pid mtime age remaining last_log=-60 blocking head_hint=0
   local promoted=$((rank == 0)) promoted_ticket keepalive acquired
   while true; do
     # Drop tickets whose owner is gone. A waiter waiting its turn re-touches
@@ -105,6 +105,13 @@ sdk_java_lock_acquire() {
         return 0
       fi
       blocking=1
+      # A head that cannot take the lock is starved by an unticketed holder;
+      # name it once here instead of waiting out the budget to find it.
+      if ((head_hint == 0)); then
+        head_hint=1
+        echo "::warning::head of the queue as ticket ${seq} but the lock is held; holder visible from this host:"
+        sdk_java_lock_holder_hint "${lock}"
+      fi
     fi
     if ((SECONDS - start - last_log >= 60)); then
       last_log=$((SECONDS - start))
@@ -139,11 +146,30 @@ sdk_java_lock_acquire() {
     if ((SECONDS - start >= wait_seconds)); then
       rm -f "${ticket}"
       echo "::error::sdk-java host lock not acquired within $((wait_seconds / 60)) minutes as queue ticket ${seq}; head of queue is ${head##*/}"
+      echo "holder of ${lock} at timeout:"
+      sdk_java_lock_holder_hint "${lock}"
       return 1
     fi
     touch "${ticket}"
     sleep 2
   done
+}
+
+# Best-effort: report who currently holds the lock file. The ticket queue
+# only orders ticketed waiters; a holder that never took a ticket (a stray
+# process left by a canceled job, or the fallback path of a resumed release
+# tag) starves the head while every waiter reports itself as head of queue.
+# /proc/locks is host-local: an empty answer while the wait budget burns
+# means the holder lives on ANOTHER machine sharing this HOME -- that
+# negative result is the hint, not a probe failure.
+sdk_java_lock_holder_hint() {
+  local lock="$1"
+  if command -v lslocks >/dev/null 2>&1; then
+    lslocks --output PID,TYPE,COMMAND,PATH 2>/dev/null | grep -F -- "${lock}" && return 0
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser -v "${lock}" 2>&1 && return 0
+  fi
+  echo '(no holder visible from this host)'
 }
 
 if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
