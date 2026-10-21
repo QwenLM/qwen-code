@@ -21,12 +21,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -487,9 +485,15 @@ class HostedProcessCrashIT {
         }
 
         private Map<String, Object> owner() throws Exception {
-            return jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+            return jdbc.queryForMap("SELECT m.binding_id, m.runtime_generation, m.runtime_session_id,"
+                    + " m.execution_storage_key, m.execution_exclusive, o.storage_key, o.holder_key, o.maintenance_id"
+                    + " FROM ma_runtime_session m JOIN ma_storage s ON s.tenant_id = m.tenant_id"
+                    + " AND s.physical_key = m.execution_storage_key"
+                    + " JOIN ma_storage_owner o ON o.storage_key = s.physical_key"
+                    + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?"
+                    + " AND m.harness_session_id = ?",
                     com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
-                    tenant, "storage");
+                    tenant, "storage", ready.path("sessionId").asText());
         }
 
         private void captureOwner(Map<String, Object> execution) throws Exception {
@@ -506,9 +510,10 @@ class HostedProcessCrashIT {
             assertThat(owner.get("binding_id")).isEqualTo(execution.get("binding_id"));
             assertThat(owner.get("runtime_generation")).isEqualTo(execution.get("runtime_generation"));
             assertThat(owner.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
-            assertThat(owner.get("holder_key")).isEqualTo(sha256((execution.get("binding_id") + "\u0000"
-                    + execution.get("runtime_generation") + "\u0000" + execution.get("runtime_session_id"))
-                    .getBytes(StandardCharsets.UTF_8)));
+            assertThat(owner.get("execution_storage_key")).isEqualTo(owner.get("storage_key"));
+            assertThat(owner.get("execution_exclusive")).isEqualTo(false);
+            assertThat(owner.get("holder_key")).isNull();
+            assertThat(owner.get("maintenance_id")).isNull();
         }
 
         private void assertLedger(JsonNode report) throws Exception {
@@ -669,10 +674,6 @@ class HostedProcessCrashIT {
             assertThat(System.nanoTime()).as(description).isLessThan(deadline);
             Thread.sleep(20);
         }
-    }
-
-    private static String sha256(byte[] bytes) throws Exception {
-        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     }
 
     private static String required(String key) {
