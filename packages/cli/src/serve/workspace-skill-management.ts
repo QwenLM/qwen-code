@@ -1,7 +1,9 @@
-import { promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
+import { createWriteStream, promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { Transform, type Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 
 import { SkillManager, Storage, type Config } from '@qwen-code/qwen-code-core';
@@ -27,18 +29,29 @@ export interface WorkspaceSkillMutationResult {
   deleted?: boolean;
 }
 
-interface SkillPackageFile {
-  relativePath: string;
-  content: Buffer;
-}
-
-const MAX_FILES = 128;
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_TOTAL_BYTES = 6 * 1024 * 1024;
+// Largest raw ZIP that fits in the 10 MiB JSON body:
+// 3 * floor((10 * 1024 * 1024 - 330) / 4).
+export const MAX_ZIP_ARCHIVE_BYTES = 7_864_071;
+export const MAX_FILE_BYTES = 32 * 1024 * 1024;
+export const MAX_PACKAGE_BYTES = 64 * 1024 * 1024;
+export const MAX_FILES = 2000;
 const MAX_PATH_LENGTH = 512;
 const MAX_PATH_DEPTH = 16;
+const PACKAGE_TOO_MANY = 'Skill package has too many files (max 2000)';
+const ZIP_TOO_MANY = 'Skill ZIP contains too many files (max 2000)';
 export const MAX_WORKSPACE_SKILL_NAME_LENGTH = 256;
 const execFileAsync = promisify(execFile);
+
+interface PackageState {
+  count: number;
+  totalBytes: number;
+  paths: Set<string>;
+}
+
+interface StagedFile {
+  normalized: string;
+  target: string;
+}
 
 export class WorkspaceSkillManagementError extends Error {
   constructor(
@@ -83,10 +96,10 @@ function decodeBase64(value: string): Buffer {
     skillError('invalid_skill_source', 'Invalid base64 skill content');
   }
   const content = Buffer.from(value, 'base64');
-  if (content.length > MAX_TOTAL_BYTES) {
+  if (content.length > MAX_ZIP_ARCHIVE_BYTES) {
     skillError(
       'skill_package_too_large',
-      'Skill package exceeds the allowed size',
+      'Skill ZIP exceeds the allowed archive size',
       413,
     );
   }
@@ -120,68 +133,46 @@ function isPlatformMetadataPath(value: string): boolean {
     );
 }
 
-function normalizePackageFiles(files: SkillPackageFile[]): SkillPackageFile[] {
-  files = files.filter((file) => !isPlatformMetadataPath(file.relativePath));
-  if (!files.length || files.length > MAX_FILES) {
+function beginStagedFile(
+  staging: string,
+  relativePath: string,
+  state: PackageState,
+  tooManyMessage: string,
+): StagedFile | undefined {
+  if (isPlatformMetadataPath(relativePath)) return undefined;
+  const normalized = normalizeRelativePath(relativePath);
+  if (state.paths.has(normalized)) {
     skillError(
       'invalid_skill_package',
-      'Skill package has an invalid file count',
+      `Duplicate skill file path: ${normalized}`,
     );
   }
-  let normalized = files.map((file) => ({
-    relativePath: normalizeRelativePath(file.relativePath),
-    content: file.content,
-  }));
-  if (!normalized.some((file) => file.relativePath === 'SKILL.md')) {
-    const roots = new Set(
-      normalized.map((file) => file.relativePath.split('/')[0]),
-    );
-    if (roots.size !== 1) {
-      skillError(
-        'skill_manifest_missing',
-        'Skill package must contain a root SKILL.md',
-      );
-    }
-    const [root] = roots;
-    normalized = normalized.map((file) => ({
-      ...file,
-      relativePath: file.relativePath.slice(root.length + 1),
-    }));
+  if (state.count >= MAX_FILES) {
+    skillError('skill_too_many_files', tooManyMessage);
   }
-  const seen = new Set<string>();
-  let totalBytes = 0;
-  for (const file of normalized) {
-    file.relativePath = normalizeRelativePath(file.relativePath);
-    if (seen.has(file.relativePath)) {
-      skillError(
-        'invalid_skill_package',
-        `Duplicate skill file path: ${file.relativePath}`,
-      );
-    }
-    seen.add(file.relativePath);
-    if (file.content.length > MAX_FILE_BYTES) {
-      skillError(
-        'skill_package_too_large',
-        `Skill file is too large: ${file.relativePath}`,
-        413,
-      );
-    }
-    totalBytes += file.content.length;
-    if (totalBytes > MAX_TOTAL_BYTES) {
-      skillError(
-        'skill_package_too_large',
-        'Skill package exceeds the allowed size',
-        413,
-      );
-    }
-  }
-  if (!seen.has('SKILL.md')) {
-    skillError(
-      'skill_manifest_missing',
-      'Skill package must contain a root SKILL.md',
-    );
-  }
-  return normalized;
+  return {
+    normalized,
+    target: path.join(staging, ...normalized.split('/')),
+  };
+}
+
+function commitStagedFile(
+  normalized: string,
+  bytes: number,
+  state: PackageState,
+): void {
+  state.paths.add(normalized);
+  state.count += 1;
+  state.totalBytes += bytes;
+}
+
+async function prepareTarget(
+  target: string,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
+  assertGenerationOpen?.();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  assertGenerationOpen?.();
 }
 
 function githubRequestError(
@@ -206,14 +197,22 @@ function githubRequestError(
   );
 }
 
-async function fetchBytes(url: string, githubToken?: string): Promise<Buffer> {
-  const response = await fetch(url, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'qwen-code',
-      ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
-    },
-  });
+function githubHeaders(githubToken?: string): Record<string, string> {
+  return {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'qwen-code',
+    ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
+  };
+}
+
+async function writeGitHubFile(
+  url: string,
+  staged: StagedFile,
+  state: PackageState,
+  githubToken: string | undefined,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
+  const response = await fetch(url, { headers: githubHeaders(githubToken) });
   if (!response.ok) {
     throw githubRequestError(
       'github_skill_download_failed',
@@ -223,27 +222,61 @@ async function fetchBytes(url: string, githubToken?: string): Promise<Buffer> {
   }
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > MAX_FILE_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
     skillError('skill_package_too_large', 'Skill file is too large', 413);
   }
-  if (!response.body) return Buffer.alloc(0);
+  if (
+    Number.isFinite(declared) &&
+    state.totalBytes + declared > MAX_PACKAGE_BYTES
+  ) {
+    await response.body?.cancel().catch(() => undefined);
+    skillError(
+      'skill_package_too_large',
+      'Skill package exceeds the allowed size',
+      413,
+    );
+  }
+  await prepareTarget(staged.target, assertGenerationOpen);
+  if (!response.body) {
+    await fs.writeFile(staged.target, '');
+    commitStagedFile(staged.normalized, 0, state);
+    return;
+  }
   const reader = response.body.getReader();
-  const chunks: Buffer[] = [];
+  const handle = await fs.open(staged.target, 'w');
   let size = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_FILE_BYTES) {
+      if (
+        size > MAX_FILE_BYTES ||
+        state.totalBytes + size > MAX_PACKAGE_BYTES
+      ) {
         await reader.cancel().catch(() => undefined);
-        skillError('skill_package_too_large', 'Skill file is too large', 413);
+        skillError(
+          'skill_package_too_large',
+          size > MAX_FILE_BYTES
+            ? 'Skill file is too large'
+            : 'Skill package exceeds the allowed size',
+          413,
+        );
       }
-      chunks.push(Buffer.from(value));
+      let offset = 0;
+      while (offset < value.byteLength) {
+        const result = await handle.write(value.subarray(offset));
+        if (result.bytesWritten <= 0) {
+          throw new Error('Failed to write Skill file');
+        }
+        offset += result.bytesWritten;
+      }
     }
   } finally {
     reader.releaseLock();
+    await handle.close();
   }
-  return Buffer.concat(chunks, size);
+  commitStagedFile(staged.normalized, size, state);
 }
 
 async function downloadGitHubDirectory(
@@ -251,14 +284,13 @@ async function downloadGitHubDirectory(
   repo: string,
   ref: string,
   directory: string,
+  staging: string,
+  state: PackageState,
   githubToken?: string,
+  assertGenerationOpen?: () => void,
   relativeRoot = '',
   depth = 0,
-  state: { files: SkillPackageFile[]; totalBytes: number } = {
-    files: [],
-    totalBytes: 0,
-  },
-): Promise<SkillPackageFile[]> {
+): Promise<void> {
   if (depth > MAX_PATH_DEPTH)
     skillError('invalid_skill_package', 'GitHub Skill is nested too deeply');
   const encodedDirectory = directory
@@ -267,13 +299,7 @@ async function downloadGitHubDirectory(
     .map(encodeURIComponent)
     .join('/');
   const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents${encodedDirectory ? `/${encodedDirectory}` : ''}?ref=${encodeURIComponent(ref)}`;
-  const response = await fetch(apiUrl, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'qwen-code',
-      ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
-    },
-  });
+  const response = await fetch(apiUrl, { headers: githubHeaders(githubToken) });
   if (!response.ok) {
     throw githubRequestError(
       'github_api_failed',
@@ -293,16 +319,19 @@ async function downloadGitHubDirectory(
     const relativePath = relativeRoot
       ? `${relativeRoot}/${itemName}`
       : itemName;
+    if (isPlatformMetadataPath(relativePath)) continue;
     if (itemType === 'dir') {
       await downloadGitHubDirectory(
         owner,
         repo,
         ref,
         itemPath,
+        staging,
+        state,
         githubToken,
+        assertGenerationOpen,
         relativePath,
         depth + 1,
-        state,
       );
     } else if (itemType === 'file') {
       const downloadUrl = record['download_url'];
@@ -318,21 +347,22 @@ async function downloadGitHubDirectory(
           502,
         );
       }
-      const content = await fetchBytes(downloadUrl, githubToken);
-      state.files.push({ relativePath, content });
-      state.totalBytes += content.length;
-      if (state.files.length > MAX_FILES)
-        skillError('invalid_skill_package', 'Skill package has too many files');
-      if (state.totalBytes > MAX_TOTAL_BYTES) {
-        skillError(
-          'skill_package_too_large',
-          'Skill package exceeds the allowed size',
-          413,
-        );
-      }
+      const staged = beginStagedFile(
+        staging,
+        relativePath,
+        state,
+        PACKAGE_TOO_MANY,
+      );
+      if (!staged) continue;
+      await writeGitHubFile(
+        downloadUrl,
+        staged,
+        state,
+        githubToken,
+        assertGenerationOpen,
+      );
     }
   }
-  return state.files;
 }
 
 async function downloadGitHubDirectoryWithGit(
@@ -340,7 +370,10 @@ async function downloadGitHubDirectoryWithGit(
   repo: string,
   ref: string,
   directory: string,
-): Promise<SkillPackageFile[]> {
+  staging: string,
+  state: PackageState,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
   const checkout = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-git-'));
   try {
     await execFileAsync(
@@ -371,7 +404,12 @@ async function downloadGitHubDirectoryWithGit(
         { timeout: 30_000, maxBuffer: 1024 * 1024 },
       );
     }
-    return await filesFromFolder(path.join(checkout, directory));
+    await copyFolder(
+      path.join(checkout, directory),
+      staging,
+      state,
+      assertGenerationOpen,
+    );
   } catch (error) {
     if (error instanceof WorkspaceSkillManagementError) throw error;
     throw new WorkspaceSkillManagementError(
@@ -384,10 +422,17 @@ async function downloadGitHubDirectoryWithGit(
   }
 }
 
-async function downloadGitHubSkill(
-  sourceUrl: string,
-  githubToken?: string,
-): Promise<SkillPackageFile[]> {
+type GitHubSkillPlan =
+  | { kind: 'raw'; url: string }
+  | {
+      kind: 'tree';
+      owner: string;
+      repo: string;
+      ref: string;
+      directory: string;
+    };
+
+function resolveGitHubSkill(sourceUrl: string): GitHubSkillPlan {
   let url: URL;
   try {
     url = new URL(sourceUrl);
@@ -400,12 +445,7 @@ async function downloadGitHubSkill(
     if (!url.pathname.endsWith('/SKILL.md')) {
       skillError('invalid_skill_source', 'GitHub URL must point to SKILL.md');
     }
-    return [
-      {
-        relativePath: 'SKILL.md',
-        content: await fetchBytes(url.toString(), githubToken),
-      },
-    ];
+    return { kind: 'raw', url: url.toString() };
   }
   if (url.hostname !== 'github.com') {
     skillError('invalid_skill_source', 'Only GitHub Skill URLs are supported');
@@ -452,13 +492,49 @@ async function downloadGitHubSkill(
   ) {
     skillError('invalid_skill_source', 'Invalid GitHub Skill URL path');
   }
-  try {
-    return await downloadGitHubDirectory(
-      owner,
-      repo,
-      ref,
-      directory,
+  return { kind: 'tree', owner, repo, ref, directory };
+}
+
+async function downloadGitHubSkill(
+  sourceUrl: string,
+  staging: string,
+  state: PackageState,
+  githubToken?: string,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
+  const plan = resolveGitHubSkill(sourceUrl);
+  if (plan.kind === 'raw') {
+    const staged = beginStagedFile(
+      staging,
+      'SKILL.md',
+      state,
+      PACKAGE_TOO_MANY,
+    );
+    if (!staged) {
+      skillError(
+        'invalid_skill_package',
+        'Skill package has an invalid file count',
+      );
+    }
+    await writeGitHubFile(
+      plan.url,
+      staged,
+      state,
       githubToken,
+      assertGenerationOpen,
+    );
+    return;
+  }
+  try {
+    await downloadGitHubDirectory(
+      plan.owner,
+      plan.repo,
+      plan.ref,
+      plan.directory,
+      staging,
+      state,
+      githubToken,
+      assertGenerationOpen,
     );
   } catch (error) {
     if (
@@ -468,7 +544,15 @@ async function downloadGitHubSkill(
     ) {
       throw error;
     }
-    return downloadGitHubDirectoryWithGit(owner, repo, ref, directory);
+    await downloadGitHubDirectoryWithGit(
+      plan.owner,
+      plan.repo,
+      plan.ref,
+      plan.directory,
+      staging,
+      state,
+      assertGenerationOpen,
+    );
   }
 }
 
@@ -481,85 +565,38 @@ function openZip(content: Buffer): Promise<ZipFile> {
   });
 }
 
-function readZipEntry(zipFile: ZipFile, entry: Entry): Promise<Buffer> {
+function openZipStream(zipFile: ZipFile, entry: Entry): Promise<Readable> {
   return new Promise((resolve, reject) => {
     zipFile.openReadStream(entry, (error, stream) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      const chunks: Buffer[] = [];
-      let size = 0;
-      stream.on('data', (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > MAX_FILE_BYTES) {
-          stream.destroy(
-            new WorkspaceSkillManagementError(
-              'skill_package_too_large',
-              `Skill ZIP entry is too large: ${entry.fileName}`,
-              413,
-            ),
-          );
-        } else {
-          chunks.push(chunk);
-        }
-      });
-      stream.on('error', reject);
-      stream.on('end', () => resolve(Buffer.concat(chunks)));
+      if (error) reject(error);
+      else resolve(stream);
     });
   });
 }
 
-async function filesFromZip(content: Buffer): Promise<SkillPackageFile[]> {
-  const zipFile = await openZip(content);
-  const files: SkillPackageFile[] = [];
-  let totalBytes = 0;
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (error?: unknown) => {
-      if (settled) return;
-      settled = true;
-      zipFile.close();
-      if (error) reject(error);
-      else resolve(files);
-    };
-    zipFile.on('error', finish);
-    zipFile.on('entry', (entry: Entry) => {
-      const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
-      const fileType = mode & 0xf000;
-      if (fileType === 0xa000) {
-        finish(new Error('Skill ZIP contains a symbolic link'));
-        return;
-      }
-      if (entry.generalPurposeBitFlag & 1) {
-        finish(new Error('Encrypted Skill ZIP entries are not supported'));
-        return;
-      }
-      if (entry.fileName.endsWith('/') || fileType === 0x4000) {
-        zipFile.readEntry();
-        return;
-      }
-      if (files.length >= MAX_FILES) {
-        finish(
-          new WorkspaceSkillManagementError(
-            'invalid_skill_package',
-            'Skill ZIP contains too many files',
-          ),
-        );
-        return;
-      }
-      if (entry.uncompressedSize > MAX_FILE_BYTES) {
-        finish(
+async function writeZipEntry(
+  zipFile: ZipFile,
+  entry: Entry,
+  target: string,
+  totalBytes: number,
+): Promise<number> {
+  const stream = await openZipStream(zipFile, entry);
+  let size = 0;
+  const guard = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      size += chunk.length;
+      if (size > MAX_FILE_BYTES) {
+        callback(
           new WorkspaceSkillManagementError(
             'skill_package_too_large',
-            'Skill ZIP entry exceeds the allowed size',
+            `Skill ZIP entry is too large: ${entry.fileName}`,
             413,
           ),
         );
         return;
       }
-      if (totalBytes + entry.uncompressedSize > MAX_TOTAL_BYTES) {
-        finish(
+      if (totalBytes + size > MAX_PACKAGE_BYTES) {
+        callback(
           new WorkspaceSkillManagementError(
             'skill_package_too_large',
             'Skill ZIP expands beyond the allowed size',
@@ -568,19 +605,72 @@ async function filesFromZip(content: Buffer): Promise<SkillPackageFile[]> {
         );
         return;
       }
-      void readZipEntry(zipFile, entry).then((entryContent) => {
-        totalBytes += entryContent.length;
-        if (totalBytes > MAX_TOTAL_BYTES) {
-          finish(
-            new WorkspaceSkillManagementError(
-              'skill_package_too_large',
-              'Skill ZIP expands beyond the allowed size',
-              413,
-            ),
-          );
-          return;
-        }
-        files.push({ relativePath: entry.fileName, content: entryContent });
+      callback(null, chunk);
+    },
+  });
+  await pipeline(stream, guard, createWriteStream(target));
+  return size;
+}
+
+async function filesFromZip(
+  content: Buffer,
+  staging: string,
+  state: PackageState,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
+  const zipFile = await openZip(content);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      zipFile.close();
+      if (error) reject(error);
+      else resolve();
+    };
+    const writeEntry = async (entry: Entry) => {
+      const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
+      const fileType = mode & 0xf000;
+      if (fileType === 0xa000) {
+        throw new Error('Skill ZIP contains a symbolic link');
+      }
+      if (entry.generalPurposeBitFlag & 1) {
+        throw new Error('Encrypted Skill ZIP entries are not supported');
+      }
+      if (entry.fileName.endsWith('/') || fileType === 0x4000) return;
+      const staged = beginStagedFile(
+        staging,
+        entry.fileName,
+        state,
+        ZIP_TOO_MANY,
+      );
+      if (!staged) return;
+      if (entry.uncompressedSize > MAX_FILE_BYTES) {
+        skillError(
+          'skill_package_too_large',
+          'Skill ZIP entry exceeds the allowed size',
+          413,
+        );
+      }
+      if (state.totalBytes + entry.uncompressedSize > MAX_PACKAGE_BYTES) {
+        skillError(
+          'skill_package_too_large',
+          'Skill ZIP expands beyond the allowed size',
+          413,
+        );
+      }
+      await prepareTarget(staged.target, assertGenerationOpen);
+      const written = await writeZipEntry(
+        zipFile,
+        entry,
+        staged.target,
+        state.totalBytes,
+      );
+      commitStagedFile(staged.normalized, written, state);
+    };
+    zipFile.on('error', finish);
+    zipFile.on('entry', (entry: Entry) => {
+      void writeEntry(entry).then(() => {
         if (!settled) zipFile.readEntry();
       }, finish);
     });
@@ -589,38 +679,7 @@ async function filesFromZip(content: Buffer): Promise<SkillPackageFile[]> {
   });
 }
 
-async function filesFromSource(
-  source: WorkspaceSkillInstallSource,
-  githubToken?: string,
-): Promise<SkillPackageFile[]> {
-  try {
-    if (source.type === 'github')
-      return normalizePackageFiles(
-        await downloadGitHubSkill(source.url, githubToken),
-      );
-    if (source.type === 'folder')
-      return normalizePackageFiles(await filesFromFolder(source.path));
-    const archive = decodeBase64(source.contentBase64);
-    return normalizePackageFiles(await filesFromZip(archive));
-  } catch (error) {
-    if (error instanceof WorkspaceSkillManagementError) throw error;
-    const code =
-      source.type === 'github'
-        ? 'github_skill_download_failed'
-        : source.type === 'folder'
-          ? 'invalid_skill_folder'
-          : 'invalid_skill_package';
-    throw new WorkspaceSkillManagementError(
-      code,
-      error instanceof Error ? error.message : String(error),
-      source.type === 'github' ? 502 : 400,
-    );
-  }
-}
-
-async function filesFromFolder(
-  folderPath: string,
-): Promise<SkillPackageFile[]> {
+async function validatedFolderRoot(folderPath: string): Promise<string> {
   if (!path.isAbsolute(folderPath)) {
     skillError('invalid_skill_folder', 'Skill folder path must be absolute');
   }
@@ -637,8 +696,16 @@ async function filesFromFolder(
       'Skill folder path must point to a directory',
     );
   }
-  const files: SkillPackageFile[] = [];
-  let totalBytes = 0;
+  return root;
+}
+
+async function copyFolder(
+  folderPath: string,
+  staging: string,
+  state: PackageState,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
+  const root = await validatedFolderRoot(folderPath);
   const visit = async (directory: string, relativeRoot = '', depth = 0) => {
     if (depth > MAX_PATH_DEPTH)
       skillError('invalid_skill_package', 'Skill folder is nested too deeply');
@@ -655,14 +722,20 @@ async function filesFromFolder(
         );
       }
       if (entry.isDirectory()) {
+        if (isPlatformMetadataPath(relativePath)) continue;
         await visit(absolutePath, relativePath, depth + 1);
         continue;
       }
       if (!entry.isFile())
         skillError('unsafe_skill_path', 'Skill folder contains a special file');
-      if (files.length >= MAX_FILES) {
-        skillError('invalid_skill_package', 'Skill package has too many files');
-      }
+      if (isPlatformMetadataPath(relativePath)) continue;
+      const staged = beginStagedFile(
+        staging,
+        relativePath,
+        state,
+        PACKAGE_TOO_MANY,
+      );
+      if (!staged) continue;
       const stats = await fs.lstat(absolutePath);
       if (stats.isSymbolicLink() || !stats.isFile()) {
         skillError('unsafe_skill_path', 'Skill folder contains an unsafe file');
@@ -670,30 +743,144 @@ async function filesFromFolder(
       if (stats.size > MAX_FILE_BYTES) {
         skillError(
           'skill_package_too_large',
-          `Skill file is too large: ${relativePath}`,
+          `Skill file is too large: ${staged.normalized}`,
           413,
         );
       }
-      totalBytes += stats.size;
-      if (totalBytes > MAX_TOTAL_BYTES) {
+      if (state.totalBytes + stats.size > MAX_PACKAGE_BYTES) {
         skillError(
           'skill_package_too_large',
           'Skill package exceeds the allowed size',
           413,
         );
       }
-      const content = await fs.readFile(absolutePath);
-      if (content.length !== stats.size) {
+      await prepareTarget(staged.target, assertGenerationOpen);
+      await fs.copyFile(absolutePath, staged.target);
+      const copied = await fs.lstat(staged.target);
+      if (copied.size !== stats.size) {
         skillError(
           'invalid_skill_package',
-          `Skill file changed while reading: ${relativePath}`,
+          `Skill file changed while reading: ${staged.normalized}`,
         );
       }
-      files.push({ relativePath, content });
+      commitStagedFile(staged.normalized, copied.size, state);
     }
   };
   await visit(root);
-  return files;
+}
+
+async function finalizeStagedPackage(
+  staging: string,
+  state: PackageState,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
+  if (state.paths.size === 0) {
+    skillError(
+      'invalid_skill_package',
+      'Skill package has an invalid file count',
+    );
+  }
+  if (state.paths.has('SKILL.md')) return;
+  const roots = new Set(
+    [...state.paths].map((filePath) => filePath.split('/')[0]),
+  );
+  if (roots.size !== 1) {
+    skillError(
+      'skill_manifest_missing',
+      'Skill package must contain a root SKILL.md',
+    );
+  }
+  const [root] = roots;
+  if (!root) {
+    skillError(
+      'skill_manifest_missing',
+      'Skill package must contain a root SKILL.md',
+    );
+  }
+  const stripped = new Set<string>();
+  for (const filePath of state.paths) {
+    const next = normalizeRelativePath(filePath.slice(root.length + 1));
+    if (stripped.has(next)) {
+      skillError('invalid_skill_package', `Duplicate skill file path: ${next}`);
+    }
+    stripped.add(next);
+  }
+  const rootPath = path.join(staging, root);
+  const rootStats = await fs.lstat(rootPath);
+  if (!rootStats.isDirectory()) {
+    skillError(
+      'skill_manifest_missing',
+      'Skill package must contain a root SKILL.md',
+    );
+  }
+  const children = await fs.readdir(rootPath);
+  let holdingName = '.qwen-skill-strip';
+  while (children.includes(holdingName)) holdingName = `${holdingName}-x`;
+  const holding = path.join(staging, holdingName);
+  assertGenerationOpen?.();
+  await fs.rename(rootPath, holding);
+  for (const child of children) {
+    assertGenerationOpen?.();
+    await fs.rename(path.join(holding, child), path.join(staging, child));
+  }
+  await fs.rmdir(holding);
+  state.paths.clear();
+  for (const filePath of stripped) state.paths.add(filePath);
+  if (!state.paths.has('SKILL.md')) {
+    skillError(
+      'skill_manifest_missing',
+      'Skill package must contain a root SKILL.md',
+    );
+  }
+}
+
+async function stageSkillSource(
+  source: WorkspaceSkillInstallSource,
+  staging: string,
+  githubToken: string | undefined,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
+  const state: PackageState = { count: 0, totalBytes: 0, paths: new Set() };
+  try {
+    if (source.type === 'github') {
+      await downloadGitHubSkill(
+        source.url,
+        staging,
+        state,
+        githubToken,
+        assertGenerationOpen,
+      );
+    } else if (source.type === 'folder') {
+      await copyFolder(source.path, staging, state, assertGenerationOpen);
+    } else {
+      await filesFromZip(
+        decodeBase64(source.contentBase64),
+        staging,
+        state,
+        assertGenerationOpen,
+      );
+    }
+    await finalizeStagedPackage(staging, state, assertGenerationOpen);
+  } catch (error) {
+    if (error instanceof WorkspaceSkillManagementError) throw error;
+    if (
+      error instanceof Error &&
+      error.name === 'WorkspaceGenerationClosedError'
+    ) {
+      throw error;
+    }
+    const code =
+      source.type === 'github'
+        ? 'github_skill_download_failed'
+        : source.type === 'folder'
+          ? 'invalid_skill_folder'
+          : 'invalid_skill_package';
+    throw new WorkspaceSkillManagementError(
+      code,
+      error instanceof Error ? error.message : String(error),
+      source.type === 'github' ? 502 : 400,
+    );
+  }
 }
 
 function skillBaseDir(workspace: string, scope: WorkspaceSkillScope): string {
@@ -773,7 +960,13 @@ export async function installWorkspaceSkill(
   assertGenerationOpen?.();
   const skillName = validateWorkspaceSkillName(request.name);
   rejectInstallArtifactSkillName(skillName);
-  const files = await filesFromSource(request.source, githubToken);
+  if (
+    request.source.type === 'folder' &&
+    !path.isAbsolute(request.source.path)
+  ) {
+    skillError('invalid_skill_folder', 'Skill folder path must be absolute');
+  }
+  if (request.source.type === 'github') resolveGitHubSkill(request.source.url);
   const baseDir = skillBaseDir(workspace, request.scope);
   assertGenerationOpen?.();
   await ensureDirectoryWithoutSymlinks(baseDir, assertGenerationOpen);
@@ -794,13 +987,12 @@ export async function installWorkspaceSkill(
   let movedExisting = false;
   let committedStaging = false;
   try {
-    for (const file of files) {
-      const target = path.join(staging, ...file.relativePath.split('/'));
-      assertGenerationOpen?.();
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      assertGenerationOpen?.();
-      await fs.writeFile(target, file.content);
-    }
+    await stageSkillSource(
+      request.source,
+      staging,
+      githubToken,
+      assertGenerationOpen,
+    );
     const skillFile = path.join(staging, 'SKILL.md');
     let parsed: ReturnType<SkillManager['parseSkillContent']>;
     try {

@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 
 import archiver from 'archiver';
 import { Storage } from '@qwen-code/qwen-code-core';
@@ -9,6 +9,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deleteWorkspaceSkill,
   installWorkspaceSkill,
+  MAX_FILE_BYTES,
+  MAX_FILES,
+  MAX_PACKAGE_BYTES,
+  MAX_ZIP_ARCHIVE_BYTES,
 } from './workspace-skill-management.js';
 
 const temporaryDirectories: string[] = [];
@@ -34,6 +38,90 @@ async function zip(files: Record<string, string>): Promise<string> {
   await archive.finalize();
   await complete;
   return Buffer.concat(chunks).toString('base64');
+}
+
+function zeroStream(bytes: number): Readable {
+  let remaining = bytes;
+  return new Readable({
+    read() {
+      if (remaining === 0) {
+        this.push(null);
+        return;
+      }
+      const size = Math.min(remaining, 64 * 1024);
+      remaining -= size;
+      this.push(Buffer.alloc(size));
+    },
+  });
+}
+
+async function zipSized(
+  files: Array<{ name: string; content?: string; bytes?: number }>,
+): Promise<string> {
+  const output = new PassThrough();
+  const chunks: Buffer[] = [];
+  output.on('data', (chunk: Buffer) => chunks.push(chunk));
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.pipe(output);
+  for (const file of files) {
+    archive.append(
+      file.bytes === undefined ? (file.content ?? '') : zeroStream(file.bytes),
+      { name: file.name },
+    );
+  }
+  const complete = new Promise<void>((resolve, reject) => {
+    output.on('end', resolve);
+    output.on('error', reject);
+    archive.on('error', reject);
+  });
+  await archive.finalize();
+  await complete;
+  return Buffer.concat(chunks).toString('base64');
+}
+
+async function createSparseFile(filePath: string, size: number): Promise<void> {
+  const handle = await fs.open(filePath, 'w');
+  try {
+    await handle.truncate(size);
+  } finally {
+    await handle.close();
+  }
+}
+
+function githubSkillListing(): Response {
+  return new Response(
+    JSON.stringify([
+      {
+        name: 'SKILL.md',
+        path: 'SKILL.md',
+        type: 'file',
+        download_url:
+          'https://raw.githubusercontent.com/owner/repo/main/SKILL.md',
+      },
+    ]),
+    { status: 200 },
+  );
+}
+
+async function expectNoPartialInstall(
+  workspace: string,
+  skillName: string,
+): Promise<void> {
+  const qwen = path.join(workspace, '.qwen');
+  const entries = await fs
+    .readdir(qwen)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+  expect(
+    entries.filter(
+      (entry) => entry.includes('.installing-') || entry.includes('.backup-'),
+    ),
+  ).toEqual([]);
+  await expect(
+    fs.access(path.join(qwen, 'skills', skillName)),
+  ).rejects.toThrow();
 }
 
 async function temporaryDirectory(label: string): Promise<string> {
@@ -430,12 +518,14 @@ describe('workspace Skill management', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('stops reading an oversized GitHub Skill file', async () => {
+  it('installs a GitHub Skill file above the previous 2 MiB cap', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
-    const oversizedBody = new ReadableStream<Uint8Array>({
+    const payload = Buffer.from(
+      skillMarkdown('sized-skill').padEnd(2 * 1024 * 1024 + 1, 'x'),
+    );
+    const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new Uint8Array(2 * 1024 * 1024));
-        controller.enqueue(new Uint8Array(1));
+        controller.enqueue(payload);
         controller.close();
       },
     });
@@ -443,21 +533,49 @@ describe('workspace Skill management', () => {
       'fetch',
       vi
         .fn()
-        .mockResolvedValueOnce(
-          new Response(
-            JSON.stringify([
-              {
-                name: 'SKILL.md',
-                path: 'SKILL.md',
-                type: 'file',
-                download_url:
-                  'https://raw.githubusercontent.com/owner/repo/main/SKILL.md',
-              },
-            ]),
-            { status: 200 },
-          ),
-        )
-        .mockResolvedValueOnce(new Response(oversizedBody, { status: 200 })),
+        .mockResolvedValueOnce(githubSkillListing())
+        .mockResolvedValueOnce(new Response(body, { status: 200 })),
+    );
+
+    const result = await installWorkspaceSkill(workspace, {
+      name: 'sized-skill',
+      scope: 'workspace',
+      source: {
+        type: 'github',
+        url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+      },
+    });
+
+    await expect(fs.stat(result.installedPath!)).resolves.toMatchObject({
+      size: payload.length,
+    });
+  });
+
+  it('rejects a GitHub Skill file from content-length before reading it', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    let read = false;
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(githubSkillListing())
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          headers: {
+            get: (name: string) =>
+              name.toLowerCase() === 'content-length'
+                ? String(MAX_FILE_BYTES + 1)
+                : null,
+          },
+          body: {
+            cancel: async () => undefined,
+            getReader: () => {
+              read = true;
+              throw new Error('body should not be read');
+            },
+          },
+        }),
     );
 
     await expect(
@@ -471,8 +589,49 @@ describe('workspace Skill management', () => {
       }),
     ).rejects.toMatchObject({
       code: 'skill_package_too_large',
+      message: 'Skill file is too large',
       statusCode: 413,
     });
+    expect(read).toBe(false);
+    await expectNoPartialInstall(workspace, 'large-github-skill');
+  });
+
+  it('cancels a GitHub Skill file one byte over the per-file cap', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (cancelled) return;
+        controller.enqueue(new Uint8Array(MAX_FILE_BYTES + 1));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(githubSkillListing())
+        .mockResolvedValueOnce(new Response(body, { status: 200 })),
+    );
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'large-github-skill',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_package_too_large',
+      message: 'Skill file is too large',
+      statusCode: 413,
+    });
+    expect(cancelled).toBe(true);
+    await expectNoPartialInstall(workspace, 'large-github-skill');
   });
 
   it('rejects a symbolic link as the source folder', async () => {
@@ -491,50 +650,49 @@ describe('workspace Skill management', () => {
     ).rejects.toMatchObject({ code: 'invalid_skill_folder' });
   });
 
-  it('reports an expanded ZIP entry over the limit as too large', async () => {
+  it('installs a ZIP entry larger than the previous 2 MiB file cap', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const asset = 'x'.repeat(2 * 1024 * 1024 + 1);
+
+    const result = await installWorkspaceSkill(workspace, {
+      name: 'large-skill',
+      scope: 'workspace',
+      source: {
+        type: 'zip',
+        contentBase64: await zip({
+          'large-skill/SKILL.md': skillMarkdown('large-skill'),
+          'large-skill/asset.txt': asset,
+        }),
+      },
+    });
 
     await expect(
-      installWorkspaceSkill(workspace, {
-        name: 'large-skill',
-        scope: 'workspace',
-        source: {
-          type: 'zip',
-          contentBase64: await zip({
-            'large-skill/SKILL.md': skillMarkdown('large-skill'),
-            'large-skill/asset.txt': 'x'.repeat(2 * 1024 * 1024 + 1),
-          }),
-        },
-      }),
-    ).rejects.toMatchObject({
-      code: 'skill_package_too_large',
-      statusCode: 413,
-    });
+      fs.stat(path.join(path.dirname(result.installedPath!), 'asset.txt')),
+    ).resolves.toMatchObject({ size: asset.length });
   });
 
-  it('reports a ZIP whose total expanded content is over the limit', async () => {
+  it('installs a ZIP whose expanded content exceeds the previous 6 MiB cap', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
     const largeFile = 'x'.repeat(1_600_000);
 
-    await expect(
-      installWorkspaceSkill(workspace, {
-        name: 'large-total-skill',
-        scope: 'workspace',
-        source: {
-          type: 'zip',
-          contentBase64: await zip({
-            'large-total-skill/SKILL.md': skillMarkdown('large-total-skill'),
-            'large-total-skill/one.txt': largeFile,
-            'large-total-skill/two.txt': largeFile,
-            'large-total-skill/three.txt': largeFile,
-            'large-total-skill/four.txt': largeFile,
-          }),
-        },
-      }),
-    ).rejects.toMatchObject({
-      code: 'skill_package_too_large',
-      statusCode: 413,
+    const result = await installWorkspaceSkill(workspace, {
+      name: 'large-total-skill',
+      scope: 'workspace',
+      source: {
+        type: 'zip',
+        contentBase64: await zip({
+          'large-total-skill/SKILL.md': skillMarkdown('large-total-skill'),
+          'large-total-skill/one.txt': largeFile,
+          'large-total-skill/two.txt': largeFile,
+          'large-total-skill/three.txt': largeFile,
+          'large-total-skill/four.txt': largeFile,
+        }),
+      },
     });
+
+    await expect(
+      fs.stat(path.join(path.dirname(result.installedPath!), 'four.txt')),
+    ).resolves.toMatchObject({ size: largeFile.length });
   });
 
   it('keeps the existing Skill when replacement validation fails', async () => {
@@ -753,5 +911,333 @@ describe('workspace Skill management', () => {
     await expect(
       fs.readFile(installed.installedPath!, 'utf8'),
     ).resolves.not.toContain('Replacement instructions.');
+  });
+
+  it('fits the largest ZIP archive in the 10 MiB JSON body', () => {
+    const jsonLimit = 10 * 1024 * 1024;
+    const envelope = JSON.stringify({
+      name: 'n'.repeat(256),
+      scope: 'workspace',
+      source: { type: 'zip', contentBase64: '' },
+    });
+    const envelopeBytes = Buffer.byteLength(envelope);
+    expect(envelopeBytes).toBe(330);
+    expect(MAX_ZIP_ARCHIVE_BYTES).toBe(
+      3 * Math.floor((jsonLimit - envelopeBytes) / 4),
+    );
+    const base64Length = (bytes: number) => 4 * Math.ceil(bytes / 3);
+    expect(
+      envelopeBytes + base64Length(MAX_ZIP_ARCHIVE_BYTES),
+    ).toBeLessThanOrEqual(jsonLimit);
+    expect(
+      envelopeBytes + base64Length(MAX_ZIP_ARCHIVE_BYTES + 1),
+    ).toBeGreaterThan(jsonLimit);
+  });
+
+  it('rejects a ZIP archive one byte over the transport ceiling', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'archive-skill',
+        scope: 'workspace',
+        source: {
+          type: 'zip',
+          contentBase64: Buffer.alloc(MAX_ZIP_ARCHIVE_BYTES + 1).toString(
+            'base64',
+          ),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_package_too_large',
+      message: 'Skill ZIP exceeds the allowed archive size',
+      statusCode: 413,
+    });
+    await expectNoPartialInstall(workspace, 'archive-skill');
+  });
+
+  it('accepts a ZIP archive at the transport ceiling before unzipping', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'archive-skill',
+        scope: 'workspace',
+        source: {
+          type: 'zip',
+          contentBase64: Buffer.alloc(MAX_ZIP_ARCHIVE_BYTES).toString('base64'),
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_skill_package' });
+    await expectNoPartialInstall(workspace, 'archive-skill');
+  });
+
+  it('rejects a ZIP entry one byte over the per-file cap', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'bomb-skill',
+        scope: 'workspace',
+        source: {
+          type: 'zip',
+          contentBase64: await zipSized([
+            {
+              name: 'bomb-skill/SKILL.md',
+              content: skillMarkdown('bomb-skill'),
+            },
+            { name: 'bomb-skill/asset.bin', bytes: MAX_FILE_BYTES + 1 },
+          ]),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_package_too_large',
+      message: 'Skill ZIP entry exceeds the allowed size',
+      statusCode: 413,
+    });
+    await expectNoPartialInstall(workspace, 'bomb-skill');
+  });
+
+  it('rejects a ZIP that expands past the package cap', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const skill = skillMarkdown('bomb-skill');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'bomb-skill',
+        scope: 'workspace',
+        source: {
+          type: 'zip',
+          contentBase64: await zipSized([
+            { name: 'bomb-skill/SKILL.md', content: skill },
+            { name: 'bomb-skill/one.bin', bytes: MAX_FILE_BYTES },
+            {
+              name: 'bomb-skill/two.bin',
+              bytes:
+                MAX_PACKAGE_BYTES +
+                1 -
+                MAX_FILE_BYTES -
+                Buffer.byteLength(skill),
+            },
+          ]),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_package_too_large',
+      message: 'Skill ZIP expands beyond the allowed size',
+      statusCode: 413,
+    });
+    await expectNoPartialInstall(workspace, 'bomb-skill');
+  });
+
+  it('installs a folder file above the previous 2 MiB cap', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    const asset = Buffer.alloc(2 * 1024 * 1024 + 1, 0x78);
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('folder-skill'),
+    );
+    await fs.writeFile(path.join(source, 'asset.bin'), asset);
+
+    const result = await installWorkspaceSkill(workspace, {
+      name: 'folder-skill',
+      scope: 'workspace',
+      source: { type: 'folder', path: source },
+    });
+
+    await expect(
+      fs.stat(path.join(path.dirname(result.installedPath!), 'asset.bin')),
+    ).resolves.toMatchObject({ size: asset.length });
+  });
+
+  it('installs a folder file at the per-file cap', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('cap-skill'),
+    );
+    await createSparseFile(path.join(source, 'asset.bin'), MAX_FILE_BYTES);
+
+    const result = await installWorkspaceSkill(workspace, {
+      name: 'cap-skill',
+      scope: 'workspace',
+      source: { type: 'folder', path: source },
+    });
+
+    await expect(
+      fs.stat(path.join(path.dirname(result.installedPath!), 'asset.bin')),
+    ).resolves.toMatchObject({ size: MAX_FILE_BYTES });
+  });
+
+  it('rejects a sparse folder file one byte over the per-file cap', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('cap-skill'),
+    );
+    await createSparseFile(path.join(source, 'asset.bin'), MAX_FILE_BYTES + 1);
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'cap-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_package_too_large',
+      message: 'Skill file is too large: asset.bin',
+      statusCode: 413,
+    });
+    await expectNoPartialInstall(workspace, 'cap-skill');
+  });
+
+  it('rejects sparse folder files one byte over the package cap', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    const skill = skillMarkdown('budget-skill');
+    const skillBytes = Buffer.byteLength(skill);
+    await fs.writeFile(path.join(source, 'SKILL.md'), skill);
+    await createSparseFile(path.join(source, 'one.bin'), MAX_FILE_BYTES);
+    await createSparseFile(
+      path.join(source, 'two.bin'),
+      MAX_PACKAGE_BYTES + 1 - MAX_FILE_BYTES - skillBytes,
+    );
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'budget-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_package_too_large',
+      message: 'Skill package exceeds the allowed size',
+      statusCode: 413,
+    });
+    await expectNoPartialInstall(workspace, 'budget-skill');
+  });
+
+  it('installs 129 folder files', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('many-skill'),
+    );
+    for (let index = 0; index < 128; index += 1) {
+      await fs.writeFile(path.join(source, `file-${index}.txt`), 'x');
+    }
+
+    const result = await installWorkspaceSkill(workspace, {
+      name: 'many-skill',
+      scope: 'workspace',
+      source: { type: 'folder', path: source },
+    });
+
+    const installed = await fs.readdir(path.dirname(result.installedPath!));
+    expect(installed).toHaveLength(129);
+  });
+
+  it('installs a folder of 2000 files and rejects 2001', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const accepted = await temporaryDirectory('qwen-skill-source-');
+    const rejected = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(accepted, 'SKILL.md'),
+      skillMarkdown('count-skill'),
+    );
+    await fs.writeFile(
+      path.join(rejected, 'SKILL.md'),
+      skillMarkdown('count-skill'),
+    );
+    for (let index = 0; index < MAX_FILES - 1; index += 1) {
+      await fs.writeFile(path.join(accepted, `file-${index}.txt`), 'x');
+      await fs.writeFile(path.join(rejected, `file-${index}.txt`), 'x');
+    }
+    await fs.writeFile(path.join(rejected, 'overflow.txt'), 'x');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'count-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: accepted },
+      }),
+    ).resolves.toMatchObject({ skillName: 'count-skill' });
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'count-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: rejected },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_too_many_files',
+      message: 'Skill package has too many files (max 2000)',
+      statusCode: 400,
+    });
+  });
+
+  it('rejects a ZIP with 2001 files and ignores platform metadata', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const accepted: Record<string, string> = {
+      'count-skill/SKILL.md': skillMarkdown('count-skill'),
+      '__MACOSX/count-skill/._SKILL.md': 'junk',
+      'count-skill/.DS_Store': 'junk',
+      'count-skill/._notes': 'junk',
+    };
+    for (let index = 0; index < MAX_FILES - 1; index += 1) {
+      accepted[`count-skill/file-${index}.txt`] = 'x';
+    }
+
+    const result = await installWorkspaceSkill(workspace, {
+      name: 'count-skill',
+      scope: 'workspace',
+      source: { type: 'zip', contentBase64: await zip(accepted) },
+    });
+    const installed = await fs.readdir(path.dirname(result.installedPath!));
+    expect(installed).toHaveLength(MAX_FILES);
+    expect(installed).not.toContain('.DS_Store');
+    expect(installed).not.toContain('__MACOSX');
+    expect(installed).not.toContain('._notes');
+
+    accepted['count-skill/overflow.txt'] = 'x';
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'count-skill',
+        scope: 'workspace',
+        source: { type: 'zip', contentBase64: await zip(accepted) },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_too_many_files',
+      message: 'Skill ZIP contains too many files (max 2000)',
+      statusCode: 400,
+    });
+    await expect(fs.access(result.installedPath!)).resolves.toBeUndefined();
+    const entries = await fs.readdir(path.join(workspace, '.qwen'));
+    expect(
+      entries.filter(
+        (entry) => entry.includes('.installing-') || entry.includes('.backup-'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('rejects an empty folder', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'empty-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      }),
+    ).rejects.toMatchObject({
+      code: 'invalid_skill_package',
+      message: 'Skill package has an invalid file count',
+    });
+    await expectNoPartialInstall(workspace, 'empty-skill');
   });
 });
