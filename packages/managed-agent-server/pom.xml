@@ -574,8 +574,11 @@
                                  healthy 10021 s, fork 10621 s, Verify 188
                                  minutes. The FG12d cancel-before-dispatch cell
                                  adds 18 s (2x its measured 9.1 s): healthy
-                                 10039 s, fork 10639 s, Verify 188 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10639</forkedProcessTimeoutInSeconds>
+                                 10039 s, fork 10639 s, Verify 188 minutes. The
+                                 FG11d retry-reuse cell adds 11 s (2x its
+                                 measured 5.3 s): healthy 10050 s, fork 10650 s,
+                                 Verify 188 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10650</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
