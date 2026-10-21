@@ -49,6 +49,8 @@ import {
   nextLivePromptId,
   type WaitingCallInfo,
 } from './live-session.js';
+import { getSessionBusyReason } from '../utils/session-busy.js';
+import { StreamingState } from '../types.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
@@ -120,6 +122,7 @@ export interface OpenTuiSubmitOptions {
 }
 
 export interface OpenTuiLiveTurn {
+  readSessionBusyReason(): string | null;
   items: readonly LiveHistoryItem[];
   streaming: boolean;
   /**
@@ -424,7 +427,18 @@ export function useOpenTuiLiveTurn(
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  const readSessionBusyReason = useCallback(() => {
+    const client = config.getLlmClient();
+    return getSessionBusyReason(
+      StreamingState.Idle,
+      [],
+      false,
+      client.isInitialized() && client.getChat().isCompressing(),
+    );
+  }, [config]);
+
   return {
+    readSessionBusyReason,
     items,
     streaming,
     streamingCharsRef,

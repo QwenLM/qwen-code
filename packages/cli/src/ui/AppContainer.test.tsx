@@ -1050,6 +1050,73 @@ describe('AppContainer State Management', () => {
     });
   };
 
+  describe('session busy diagnostics', () => {
+    it.each([
+      ['awaiting_approval', 'is awaiting approval'],
+      ['executing', 'is executing'],
+      ['success', 'has not been submitted'],
+    ])('reads the current %s tool from the stream', (status, expected) => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.Responding,
+        pendingToolCalls: [{ request: { name: 'shell' }, status }],
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)![12];
+      expect(actions.readSessionBusyReason!()).toContain(`tool "shell"`);
+      expect(actions.readSessionBusyReason!()).toContain(expected);
+    });
+
+    it.each([false, true])('reads incoming model content: %s', (receiving) => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.Responding,
+        isReceivingContent: receiving,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)![12];
+      expect(actions.readSessionBusyReason!()).toContain(
+        receiving ? 'streaming a response' : 'no response content arriving',
+      );
+    });
+
+    it('reads compaction activity live without a render', () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(-1)![12];
+      const readReason = actions.readSessionBusyReason!;
+      let compressing = true;
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        ...mockConfig.getLlmClient(),
+        isInitialized: () => true,
+        getChat: () => ({ isCompressing: () => compressing }),
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      expect(readReason()).toContain('context compaction');
+      compressing = false;
+      expect(readReason()).toBeNull();
+    });
+  });
+
   describe('worktree branch wiring', () => {
     it('rejects direct worktree removal in tool sandbox', async () => {
       vi.spyOn(mockConfig, 'getShellExecutionSandbox').mockReturnValue({

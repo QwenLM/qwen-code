@@ -7,6 +7,32 @@
 // Traductions françaises pour Qwen Code CLI
 
 export default {
+  'Cannot branch: {{reason}}': 'Impossible de créer une branche : {{reason}}',
+  'Cannot fork: {{reason}}': 'Impossible de créer un fork : {{reason}}',
+  'Cannot change directory: {{reason}}':
+    'Impossible de changer de répertoire : {{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    'l’outil « {{tool}} » attend une approbation. Traitez l’approbation en attente.',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    'un sous-agent attend une approbation. Traitez l’approbation en attente.',
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    'l’outil « {{tool}} » est en cours d’exécution. Attendez la fin de son exécution.',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    'l’outil « {{tool}} » est planifié. Attendez la fin de son exécution.',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    'l’outil « {{tool}} » est en cours de validation. Attendez la fin de la validation.',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    'le résultat de l’outil « {{tool}} » n’a pas encore été envoyé au modèle. Attendez son envoi ou appuyez sur Échap pour annuler le tour.',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    'le modèle transmet une réponse. Attendez la fin ou appuyez sur Échap pour annuler.',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    'une requête au modèle est en cours, sans contenu de réponse reçu. Attendez la fin ou appuyez sur Échap pour annuler.',
+  'context compaction is in progress. Wait for it to finish.':
+    'le contexte est en cours de compression. Attendez la fin.',
+  'a slash command is still running. Wait for it to finish.':
+    'une commande slash est encore en cours d’exécution. Attendez la fin.',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'une réponse ou un appel d’outil est en cours. Attendez la fin ou traitez l’appel d’outil en attente.',
   // ============================================================================
   // Aide / Composants UI
   // ============================================================================
@@ -968,8 +994,6 @@ export default {
     'Lancer un agent en arrière-plan qui hérite de toute la conversation',
   'Please provide a directive. Usage: /fork <directive>':
     'Veuillez fournir une directive. Utilisation : /fork <directive>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    "Impossible de créer un fork pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
   'Cannot fork before the first conversation turn.':
     'Impossible de créer un fork avant le premier tour de conversation.',
   'The agent tool is unavailable; cannot fork.':
@@ -979,8 +1003,6 @@ export default {
     "L'utilisateur a lancé un fork en arrière-plan via /fork : {{directive}}",
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     "Fork lancé dans un agent en arrière-plan. Il hérite de cette conversation et s'exécute sans bloquer — suivez-le dans le panneau des tâches en arrière-plan ; il fera un rapport une fois terminé.",
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    "Impossible de créer une branche pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
   'No conversation to branch.':
     'Aucune conversation à dupliquer dans une branche.',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':

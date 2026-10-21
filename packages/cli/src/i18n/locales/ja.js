@@ -7,6 +7,32 @@
 // Japanese translations for Qwen Code CLI
 
 export default {
+  'Cannot branch: {{reason}}': '分岐できません：{{reason}}',
+  'Cannot fork: {{reason}}': 'フォークできません：{{reason}}',
+  'Cannot change directory: {{reason}}':
+    'ディレクトリを変更できません：{{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    'ツール「{{tool}}」が承認を待っています。保留中の承認に対応してください。',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    'サブエージェントが承認を待っています。保留中の承認に対応してください。',
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    'ツール「{{tool}}」を実行中です。完了を待ってください。',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    'ツール「{{tool}}」は実行待ちです。完了を待ってください。',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    'ツール「{{tool}}」を検証中です。完了を待ってください。',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    'ツール「{{tool}}」の結果はまだモデルに送信されていません。送信を待つか、Esc キーでターンをキャンセルしてください。',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    'モデルが応答をストリーミング中です。完了を待つか、Esc キーでキャンセルしてください。',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    'モデルへのリクエストが進行中ですが、応答内容はまだ届いていません。完了を待つか、Esc キーでキャンセルしてください。',
+  'context compaction is in progress. Wait for it to finish.':
+    'コンテキストを圧縮中です。完了を待ってください。',
+  'a slash command is still running. Wait for it to finish.':
+    'スラッシュコマンドを実行中です。完了を待ってください。',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '応答またはツール呼び出しが進行中です。完了を待つか、保留中のツール呼び出しに対応してください。',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -675,8 +701,6 @@ export default {
     '会話全体を引き継ぐバックグラウンドエージェントを起動する',
   'Please provide a directive. Usage: /fork <directive>':
     '指示を入力してください。使用法: /fork <指示>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    '応答またはツール呼び出しの処理中はフォークできません。完了するか、保留中のツール呼び出しを解決してください。',
   'Cannot fork before the first conversation turn.':
     '最初の会話ターンの前にはフォークできません。',
   'The agent tool is unavailable; cannot fork.':
@@ -686,8 +710,6 @@ export default {
     'ユーザーが /fork でバックグラウンドフォークを起動しました: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     'バックグラウンドエージェントにフォークしました。この会話を引き継ぎ、ブロックせずに実行されます — バックグラウンドタスクパネルで追跡でき、完了時に報告します。',
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    '応答またはツール呼び出しの処理中は分岐できません。完了するか、保留中のツール呼び出しを解決してください。',
   'No conversation to branch.': '分岐できる会話がありません。',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     'ツール呼び出しを復元します。これにより、会話とファイルの履歴はそのツール呼び出しが提案された時点の状態に戻ります',

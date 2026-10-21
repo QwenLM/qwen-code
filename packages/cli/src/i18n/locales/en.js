@@ -8,6 +8,31 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    'tool "{{tool}}" is executing. Wait for it to finish.',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    'tool "{{tool}}" is scheduled. Wait for it to finish.',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    'tool "{{tool}}" is validating. Wait for it to finish.',
+  'Cannot branch: {{reason}}': 'Cannot branch: {{reason}}',
+  'Cannot fork: {{reason}}': 'Cannot fork: {{reason}}',
+  'Cannot change directory: {{reason}}': 'Cannot change directory: {{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    'tool "{{tool}}" is awaiting approval. Resolve the pending approval.',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    'a subagent is awaiting approval. Resolve the pending approval.',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    'the model is streaming a response. Wait for it to finish or press Esc to cancel.',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.',
+  'context compaction is in progress. Wait for it to finish.':
+    'context compaction is in progress. Wait for it to finish.',
+  'a slash command is still running. Wait for it to finish.':
+    'a slash command is still running. Wait for it to finish.',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'Cannot disable an extension-provided MCP server here.':
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':
@@ -1301,8 +1326,6 @@ export default {
     'Spawn a background agent that inherits the full conversation',
   'Please provide a directive. Usage: /fork <directive>':
     'Please provide a directive. Usage: /fork <directive>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'Cannot fork before the first conversation turn.':
     'Cannot fork before the first conversation turn.',
   'The agent tool is unavailable; cannot fork.':
@@ -1314,8 +1337,6 @@ export default {
     'User launched a background fork via /fork: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.',
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
   'No conversation to branch.': 'No conversation to branch.',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested',

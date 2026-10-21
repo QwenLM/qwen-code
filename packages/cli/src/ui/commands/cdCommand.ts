@@ -15,6 +15,7 @@ import {
   TrustLevel,
 } from '../../config/trustedFolders.js';
 import { t } from '../../i18n/index.js';
+import { getSessionBusyMessage } from '../utils/session-busy.js';
 
 const MAX_PENDING_TRUST_CONFIRMATIONS = 50;
 const pendingTrustedPathConfirmations = new Map<string, string>();
@@ -68,12 +69,12 @@ export const cdCommand: SlashCommand = {
       };
     }
 
-    if (context.ui.isIdleRef.current === false) {
+    const busyMessage = getSessionBusyMessage(context, 'change directory');
+    if (busyMessage) {
       return {
         type: 'message' as const,
         messageType: 'error' as const,
-        content:
-          'Cannot change directory while a response or tool call is in progress.',
+        content: busyMessage,
       };
     }
 

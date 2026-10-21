@@ -152,7 +152,7 @@ describe('cdCommand', () => {
 
     expect(result.type).toBe('message');
     expect(result.messageType).toBe('error');
-    expect(result.content).toContain('Cannot change directory while');
+    expect(result.content).toContain('Cannot change directory:');
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
   });
 
@@ -179,6 +179,18 @@ describe('cdCommand', () => {
     expect(result.type).toBe('message');
     expect(result.messageType).toBe('error');
     expect(result.content).toContain('restrictive sandbox');
+    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+  });
+
+  it('reports the live blocker without relocating the session', async () => {
+    context.ui.readSessionBusyReason = () =>
+      'tool "run_shell_command" is executing. Wait for it to finish.';
+    const result = await cdCommand.action!(context, nextDir);
+    expect(result).toMatchObject({
+      messageType: 'error',
+      content:
+        'Cannot change directory: tool "run_shell_command" is executing. Wait for it to finish.',
+    });
     expect(relocateWorkingDirectory).not.toHaveBeenCalled();
   });
 

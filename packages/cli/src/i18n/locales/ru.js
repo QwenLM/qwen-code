@@ -8,6 +8,32 @@
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
 export default {
+  'Cannot branch: {{reason}}': 'Невозможно создать ветку: {{reason}}',
+  'Cannot fork: {{reason}}': 'Невозможно создать fork: {{reason}}',
+  'Cannot change directory: {{reason}}':
+    'Невозможно сменить каталог: {{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    'инструмент «{{tool}}» ожидает подтверждения. Обработайте ожидающий запрос на подтверждение.',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    'субагент ожидает подтверждения. Обработайте ожидающий запрос на подтверждение.',
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    'инструмент «{{tool}}» выполняется. Дождитесь завершения.',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    'инструмент «{{tool}}» запланирован. Дождитесь завершения.',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    'инструмент «{{tool}}» проходит проверку. Дождитесь завершения.',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    'результат инструмента «{{tool}}» ещё не отправлен модели. Дождитесь отправки или нажмите Esc, чтобы отменить ход.',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    'модель передаёт ответ. Дождитесь завершения или нажмите Esc для отмены.',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    'запрос к модели выполняется, но содержимое ответа ещё не поступает. Дождитесь завершения или нажмите Esc для отмены.',
+  'context compaction is in progress. Wait for it to finish.':
+    'выполняется сжатие контекста. Дождитесь завершения.',
+  'a slash command is still running. Wait for it to finish.':
+    'команда с косой чертой ещё выполняется. Дождитесь завершения.',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'ответ или вызов инструмента ещё обрабатывается. Дождитесь завершения или обработайте ожидающий вызов инструмента.',
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
@@ -910,8 +936,6 @@ export default {
     'Запустить фонового агента, который наследует весь разговор',
   'Please provide a directive. Usage: /fork <directive>':
     'Укажите инструкцию. Использование: /fork <инструкция>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'Нельзя создать fork, пока выполняется ответ или вызов инструмента. Дождитесь завершения или обработайте ожидающий вызов инструмента.',
   'Cannot fork before the first conversation turn.':
     'Нельзя создать fork до первого сообщения в разговоре.',
   'The agent tool is unavailable; cannot fork.':
@@ -921,8 +945,6 @@ export default {
     'Пользователь запустил фоновый fork через /fork: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     'Создан fork в фоновом агенте. Он наследует этот разговор и работает без блокировки — отслеживайте его на панели фоновых задач; он сообщит результат после завершения.',
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'Нельзя создать ветку, пока выполняется ответ или вызов инструмента. Дождитесь завершения или обработайте ожидающий вызов инструмента.',
   'No conversation to branch.': 'Нет разговора для создания ветки.',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     'Восстановить вызов инструмента. Это вернет историю разговора и файлов к состоянию на момент, когда был предложен этот вызов инструмента',

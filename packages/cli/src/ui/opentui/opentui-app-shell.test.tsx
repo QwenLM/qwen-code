@@ -493,6 +493,29 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
+  it('updates the host busy reader without reconstructing the dispatcher', async () => {
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+    };
+    const { rerender } = render(
+      <OpenTuiApp
+        {...props}
+        readSessionBusyReason={() => 'context compaction is in progress.'}
+      />,
+    );
+    await act(async () => {});
+    const host = mocks.state.host as OpenTuiAppHost;
+    expect(host.readSessionBusyReason()).toContain('compaction');
+    rerender(<OpenTuiApp {...props} readSessionBusyReason={() => null} />);
+    expect(mocks.state.host).toBe(host);
+    expect(host.readSessionBusyReason()).toBeNull();
+    expect(mocks.state.dispatcherConstructions).toBe(1);
+  });
+
   it('builds one host, and one dispatcher, across re-renders', async () => {
     const props = {
       config: CONFIG,

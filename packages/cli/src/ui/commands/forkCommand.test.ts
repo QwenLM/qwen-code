@@ -117,6 +117,19 @@ describe('forkCommand', () => {
     expect(mockBuild).not.toHaveBeenCalled();
   });
 
+  it('reports the live blocker without launching an agent', async () => {
+    mockContext.ui.readSessionBusyReason = () =>
+      'context compaction is in progress. Wait for it to finish.';
+    const result = await forkCommand.action!(mockContext, 'do something');
+    expect(result).toMatchObject({
+      messageType: 'error',
+      content:
+        'Cannot fork: context compaction is in progress. Wait for it to finish.',
+    });
+    expect(mockBuild).not.toHaveBeenCalled();
+    expect(mockAddHistory).not.toHaveBeenCalled();
+  });
+
   it('refuses to fork before the first conversation turn', async () => {
     const fresh = createMockCommandContext({
       services: {

@@ -104,6 +104,19 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
   };
   const idle = { wasIdleBeforeDispatch: true };
 
+  it('reads a live busy reason through the host without losing its receiver', () => {
+    const host = createFakeHost();
+    let reason: string | null = 'context compaction is in progress.';
+    host.readSessionBusyReason = function () {
+      expect(this).toBe(host);
+      return reason;
+    };
+    const context = createOpenTuiCommandContext(host, services, idle);
+    expect(context.ui.readSessionBusyReason?.()).toContain('compaction');
+    reason = null;
+    expect(context.ui.readSessionBusyReason?.()).toBeNull();
+  });
+
   it('clear() runs the ink sequence minus clearScreen, ending with setSessionName(null)', () => {
     const host = createFakeHost();
     const context = createOpenTuiCommandContext(host, services, idle);

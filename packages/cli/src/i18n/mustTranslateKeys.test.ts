@@ -9,6 +9,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setLanguageAsync, t } from './index.js';
 import { SUPPORTED_LANGUAGES } from './languages.js';
+import { getSessionBusyReason } from '../ui/utils/session-busy.js';
+import { StreamingState } from '../ui/types.js';
 import { MUST_TRANSLATE_KEYS } from './mustTranslateKeys.js';
 import { BuiltinCommandLoader } from '../services/BuiltinCommandLoader.js';
 import { advisorCommand } from '../ui/commands/advisor-command.js';
@@ -27,7 +29,7 @@ import type { SlashCommand } from '../ui/commands/types.js';
 const FORK_COMMAND_REQUIRED_KEYS = [
   'Spawn a background agent that inherits the full conversation',
   'Please provide a directive. Usage: /fork <directive>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
+  'Cannot fork: {{reason}}',
   'Cannot fork before the first conversation turn.',
   'The agent tool is unavailable; cannot fork.',
   'Failed to launch fork: {{error}}',
@@ -115,6 +117,43 @@ describe('must-translate locale coverage', () => {
       const untranslated = MUST_TRANSLATE_KEYS.filter((key) => t(key) === key);
 
       expect(untranslated).toEqual([]);
+      const placeholders = (text: string) =>
+        [...text.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]).sort();
+      const mismatched = MUST_TRANSLATE_KEYS.filter(
+        (key) =>
+          JSON.stringify(placeholders(t(key))) !==
+          JSON.stringify(placeholders(key)),
+      );
+      expect(mismatched).toEqual([]);
+    },
+    SLOW_LOCALE_TEST_TIMEOUT_MS,
+  );
+
+  it.each(NON_ENGLISH_LANGUAGES)(
+    'translates composed busy messages and tool states in %s',
+    async (language) => {
+      await setLanguageAsync(language.code);
+      const compaction = getSessionBusyReason(
+        StreamingState.Idle,
+        [],
+        false,
+        true,
+      );
+      expect(compaction).not.toBeNull();
+      expect(compaction).not.toContain('context compaction');
+      expect(
+        t('Cannot fork: {{reason}}', { reason: compaction! }),
+      ).not.toContain('Cannot fork');
+      for (const status of ['executing', 'scheduled', 'validating'] as const) {
+        const message = getSessionBusyReason(
+          StreamingState.Responding,
+          [{ request: { name: 'shell' }, status }],
+          false,
+        );
+        expect(message).toContain('shell');
+        expect(message).not.toContain('{{');
+        expect(message).not.toContain(`is ${status}`);
+      }
     },
     SLOW_LOCALE_TEST_TIMEOUT_MS,
   );

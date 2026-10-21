@@ -7,6 +7,31 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    '工具“{{tool}}”正在执行。请等待完成。',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    '工具“{{tool}}”已排队。请等待完成。',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    '工具“{{tool}}”正在验证。请等待完成。',
+  'Cannot branch: {{reason}}': '无法创建分支：{{reason}}',
+  'Cannot fork: {{reason}}': '无法分支：{{reason}}',
+  'Cannot change directory: {{reason}}': '无法切换目录：{{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    '工具“{{tool}}”正在等待批准。请处理待审批请求。',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    '子智能体正在等待批准。请处理待审批请求。',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    '工具“{{tool}}”的结果尚未提交给模型。请等待提交，或按 Esc 取消本轮。',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    '模型正在流式输出。请等待完成，或按 Esc 取消。',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    '模型请求仍在进行，但当前没有响应内容到达。请等待完成，或按 Esc 取消。',
+  'context compaction is in progress. Wait for it to finish.':
+    '正在压缩上下文。请等待压缩完成。',
+  'a slash command is still running. Wait for it to finish.':
+    '斜杠命令仍在运行。请等待其完成。',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '响应或工具调用仍在进行。请等待完成，或处理待确认的工具调用。',
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',
@@ -1261,8 +1286,6 @@ export default {
     '启动继承完整对话的后台智能体',
   'Please provide a directive. Usage: /fork <directive>':
     '请提供指令。用法：/fork <指令>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    '响应或工具调用正在进行时无法分支。请等待其完成或处理待确认的工具调用。',
   'Cannot fork before the first conversation turn.': '首次对话轮次前无法分支。',
   'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；无法分支。',
   'Failed to launch fork: {{error}}': '启动分支失败：{{error}}',
@@ -1271,8 +1294,6 @@ export default {
     '用户通过 /fork 启动了后台分支：{{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     '已分支到后台智能体。它会继承此对话并以非阻塞方式运行，可在后台任务面板中跟踪；完成后会回报结果。',
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    '响应或工具调用正在进行时无法分支。请等待其完成或处理待确认的工具调用。',
   'No conversation to branch.': '没有可分支的对话。',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     '恢复某次工具调用。这将把对话与文件历史重置到提出该工具调用建议时的状态',

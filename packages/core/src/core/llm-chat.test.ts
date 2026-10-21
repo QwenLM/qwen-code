@@ -12384,6 +12384,31 @@ describe('LlmChat', async () => {
   // covers LlmChat's per-chat state: the consecutiveFailures breaker, token
   // counts, history replacement and conditional telemetry mirroring.
   describe('tryCompress (per-chat state)', () => {
+    it.each(['resolve', 'reject'] as const)(
+      'tracks compression while the service is pending and clears on %s',
+      async (outcome) => {
+        let resolve!: (value: ReturnType<typeof compressResult>) => void;
+        let reject!: (error: Error) => void;
+        vi.spyOn(ChatCompressionService.prototype, 'compress').mockReturnValue(
+          new Promise((res, rej) => {
+            resolve = res;
+            reject = rej;
+          }),
+        );
+        expect(chat.isCompressing()).toBe(false);
+        const pending = chat.tryCompress('busy-diagnostics');
+        expect(chat.isCompressing()).toBe(true);
+        if (outcome === 'resolve') {
+          resolve(compressResult(CompressionStatus.NOOP));
+          await pending;
+        } else {
+          reject(new Error('cancelled'));
+          await expect(pending).rejects.toThrow('cancelled');
+        }
+        expect(chat.isCompressing()).toBe(false);
+      },
+    );
+
     /** Mock the service at the boundary with a canned result. */
     const mockCompressionService = (result: 'compressed' | 'failed-inflated') =>
       mockCompress(

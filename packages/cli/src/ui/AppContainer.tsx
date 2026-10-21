@@ -35,6 +35,7 @@ import {
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { MessageType, StreamingState } from './types.js';
+import { getSessionBusyReason } from './utils/session-busy.js';
 import {
   type EditorType,
   type Config,
@@ -1504,6 +1505,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useLlmStream).
   const isIdleRef = useRef(true);
+  const sessionBusyReasonRef = useRef<() => string | null>(() => null);
   // Live content-area height, kept in a ref so useLlmStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -2171,6 +2173,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       clearPendingState: () => clearPendingStateRef.current(),
+      readSessionBusyReason: () => sessionBusyReasonRef.current(),
     }),
     [
       openAuthDialog,
@@ -2543,6 +2546,15 @@ export const AppContainer = (props: AppContainerProps) => {
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
   isIdleRef.current = streamingState === StreamingState.Idle;
+  sessionBusyReasonRef.current = () => {
+    const client = config.getLlmClient();
+    return getSessionBusyReason(
+      streamingState,
+      pendingToolCalls ?? [],
+      isReceivingContent,
+      client.isInitialized() && client.getChat().isCompressing(),
+    );
+  };
 
   useEffect(() => {
     if (streamingState === StreamingState.Idle) {

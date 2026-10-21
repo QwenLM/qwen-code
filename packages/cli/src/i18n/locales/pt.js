@@ -7,6 +7,33 @@
 // Portuguese translations for Qwen Code CLI (pt-BR)
 
 export default {
+  'Cannot branch: {{reason}}':
+    'Não é possível criar uma ramificação: {{reason}}',
+  'Cannot fork: {{reason}}': 'Não é possível criar um fork: {{reason}}',
+  'Cannot change directory: {{reason}}':
+    'Não é possível alterar o diretório: {{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    'a ferramenta “{{tool}}” aguarda aprovação. Resolva a aprovação pendente.',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    'um subagente aguarda aprovação. Resolva a aprovação pendente.',
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    'a ferramenta “{{tool}}” está em execução. Aguarde a conclusão.',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    'a ferramenta “{{tool}}” está agendada. Aguarde a conclusão.',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    'a ferramenta “{{tool}}” está em validação. Aguarde a conclusão.',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    'o resultado da ferramenta “{{tool}}” ainda não foi enviado ao modelo. Aguarde o envio ou pressione Esc para cancelar o turno.',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    'o modelo está transmitindo uma resposta. Aguarde a conclusão ou pressione Esc para cancelar.',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    'há uma solicitação ao modelo em andamento sem conteúdo de resposta chegando. Aguarde a conclusão ou pressione Esc para cancelar.',
+  'context compaction is in progress. Wait for it to finish.':
+    'a compactação do contexto está em andamento. Aguarde a conclusão.',
+  'a slash command is still running. Wait for it to finish.':
+    'um comando de barra ainda está em execução. Aguarde a conclusão.',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'há uma resposta ou chamada de ferramenta em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -900,8 +927,6 @@ export default {
     'Iniciar um agente em segundo plano que herda toda a conversa',
   'Please provide a directive. Usage: /fork <directive>':
     'Forneça uma diretiva. Uso: /fork <diretiva>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'Não é possível criar um fork enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
   'Cannot fork before the first conversation turn.':
     'Não é possível criar um fork antes da primeira rodada da conversa.',
   'The agent tool is unavailable; cannot fork.':
@@ -911,8 +936,6 @@ export default {
     'O usuário iniciou um fork em segundo plano via /fork: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     'Fork criado em um agente em segundo plano. Ele herda esta conversa e roda sem bloquear — acompanhe no painel de tarefas em segundo plano; ele informará quando terminar.',
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'Não é possível ramificar enquanto uma resposta ou chamada de ferramenta está em andamento. Aguarde a conclusão ou resolva a chamada de ferramenta pendente.',
   'No conversation to branch.': 'Não há conversa para ramificar.',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     'Restaurar uma chamada de ferramenta. Isso redefinirá o histórico da conversa e dos arquivos para o estado em que a chamada da ferramenta foi sugerida',

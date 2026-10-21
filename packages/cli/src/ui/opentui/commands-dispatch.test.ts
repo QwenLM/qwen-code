@@ -1704,6 +1704,24 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
     }
   });
 
+  it('real /cd reports a live compaction reason before changing directories', async () => {
+    const relocateWorkingDirectory = vi.fn();
+    const host = createFakeHost();
+    host.readSessionBusyReason = () =>
+      'context compaction is in progress. Wait for it to finish.';
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      realCdServices(relocateWorkingDirectory),
+      [cdCommand],
+    );
+    await dispatcher.handle(`/cd ${os.tmpdir()}`);
+    expect(relocateWorkingDirectory).not.toHaveBeenCalled();
+    expect(host.items.at(-1)).toMatchObject({
+      type: 'error',
+      text: 'Cannot change directory: context compaction is in progress. Wait for it to finish.',
+    });
+  });
+
   it('real /cd is refused and nothing relocates when the host was busy before dispatch', async () => {
     const targetDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'qwen-cd-dispatch-'),
@@ -1724,7 +1742,7 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
       expect(relocateWorkingDirectory).not.toHaveBeenCalled();
       expect(host.items.at(-1)).toMatchObject({
         type: 'error',
-        text: 'Cannot change directory while a response or tool call is in progress.',
+        text: 'Cannot change directory: a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
       });
     } finally {
       fs.rmSync(targetDir, { recursive: true, force: true });
@@ -1809,7 +1827,7 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
       expect(relocateWorkingDirectory).not.toHaveBeenCalled();
       expect(host.items.at(-1)).toMatchObject({
         type: 'error',
-        text: 'Cannot change directory while a response or tool call is in progress.',
+        text: 'Cannot change directory: a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.',
       });
     }));
 

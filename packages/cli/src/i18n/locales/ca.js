@@ -7,6 +7,32 @@
 // Traduccions en català per al CLI de Qwen Code per Jordi Mas i Hernàndez <jmas@softcatala.org>
 
 export default {
+  'Cannot branch: {{reason}}': 'No es pot bifurcar: {{reason}}',
+  'Cannot fork: {{reason}}': 'No es pot crear una bifurcació: {{reason}}',
+  'Cannot change directory: {{reason}}':
+    'No es pot canviar de directori: {{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    'l’eina «{{tool}}» espera aprovació. Resoleu l’aprovació pendent.',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    'un subagent espera aprovació. Resoleu l’aprovació pendent.',
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    'l’eina «{{tool}}» s’està executant. Espereu que acabi.',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    'l’eina «{{tool}}» està programada. Espereu que acabi.',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    'l’eina «{{tool}}» s’està validant. Espereu que acabi.',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    'el resultat de l’eina «{{tool}}» encara no s’ha enviat al model. Espereu que s’enviï o premeu Esc per cancel·lar el torn.',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    'el model està transmetent una resposta. Espereu que acabi o premeu Esc per cancel·lar.',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    'hi ha una petició al model en curs sense que arribi contingut de resposta. Espereu que acabi o premeu Esc per cancel·lar.',
+  'context compaction is in progress. Wait for it to finish.':
+    's’està compactant el context. Espereu que acabi.',
+  'a slash command is still running. Wait for it to finish.':
+    'encara s’està executant una ordre de barra. Espereu que acabi.',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resoleu la crida pendent.',
   // ============================================================================
   // Ajuda / Components de la interfície
   // ============================================================================
@@ -942,8 +968,6 @@ export default {
     'Inicia un agent en segon pla que hereta tota la conversa',
   'Please provide a directive. Usage: /fork <directive>':
     'Proporcioneu una directiva. Ús: /fork <directiva>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    "No es pot crear una bifurcació mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
   'Cannot fork before the first conversation turn.':
     'No es pot crear una bifurcació abans del primer torn de conversa.',
   'The agent tool is unavailable; cannot fork.':
@@ -954,8 +978,6 @@ export default {
     "L'usuari ha iniciat una bifurcació en segon pla amb /fork: {{directive}}",
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     "S'ha bifurcat a un agent en segon pla. Hereta aquesta conversa i s'executa sense bloquejar — feu-ne el seguiment al tauler de tasques en segon pla; informarà quan acabi.",
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    "No es pot bifurcar mentre hi ha una resposta o una crida a una eina en curs. Espereu que acabi o resolgueu la crida a l'eina pendent.",
   'No conversation to branch.': 'No hi ha cap conversa per bifurcar.',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     "Restaurar una crida a una eina. Això restablirà la conversa i l'historial de fitxers a l'estat en què es trobaven quan es va suggerir la crida a l'eina",

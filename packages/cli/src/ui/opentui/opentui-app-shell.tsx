@@ -174,6 +174,7 @@ export interface OpenTuiAppProps {
   // --- Batch 6: live-turn + confirmation wiring ---------------------------
   /** A live model turn is in flight (composer Esc interrupts, footer spins). */
   streaming?: boolean;
+  readSessionBusyReason?: () => string | null;
   /** Live output-character count behind the indicator's token estimate. */
   streamingCharsRef?: RefObject<number>;
   /** False while waiting on the API (↑), true once content arrives (↓). */
@@ -242,6 +243,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     streaming,
     streamingCharsRef,
     isReceivingContent,
+    readSessionBusyReason,
     onInterrupt,
     approvalMode,
     messageQueue,
@@ -536,6 +538,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     };
   }, [onTranscriptReset, onTranscriptEvent]);
 
+  const busyReasonReaderRef = useRef(readSessionBusyReason);
+  busyReasonReaderRef.current = readSessionBusyReason;
+
   const host = useMemo(
     () =>
       new OpenTuiAppHost({
@@ -545,6 +550,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         transcript,
         confirmations,
         onChange: () => {},
+        readSessionBusyReason: () => busyReasonReaderRef.current?.() ?? null,
         toggleVimEnabled: () => onToggleVim?.() ?? Promise.resolve(false),
         reloadCommands: () => reloadRef.current?.() ?? undefined,
         startNewSession: (sessionId: string) => {

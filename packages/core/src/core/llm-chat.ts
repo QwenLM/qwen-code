@@ -2297,6 +2297,12 @@ function stripTrailingSessionStartContextBlock(
 }
 
 export class LlmChat {
+  private activeCompressions = 0;
+
+  isCompressing(): boolean {
+    return this.activeCompressions > 0;
+  }
+
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
@@ -2870,23 +2876,28 @@ export class LlmChat {
         `estimated=${originalTokenCountIsEstimated}`,
     );
     const service = new ChatCompressionService();
-    const { newHistory, info } = await service.compress(this, {
-      promptId,
-      force,
-      config: this.config,
-      consecutiveFailures: this.consecutiveFailures,
-      originalTokenCount,
-      pendingUserMessage: options?.pendingUserMessage,
-      precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
-      observedServerCeiling: options?.observedServerCeiling,
-      observedServerCeilingKind: options?.observedServerCeilingKind,
-      requestRouteKey: options?.requestRouteKey,
-      requestGenerationConfig: options?.requestGenerationConfig,
-      trigger: options?.trigger,
-      customInstructions: options?.customInstructions,
-      requestPayloadTooLarge: options?.requestPayloadTooLarge,
-      signal,
-    });
+    this.activeCompressions++;
+    const { newHistory, info } = await service
+      .compress(this, {
+        promptId,
+        force,
+        config: this.config,
+        consecutiveFailures: this.consecutiveFailures,
+        originalTokenCount,
+        pendingUserMessage: options?.pendingUserMessage,
+        precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
+        observedServerCeiling: options?.observedServerCeiling,
+        observedServerCeilingKind: options?.observedServerCeilingKind,
+        requestRouteKey: options?.requestRouteKey,
+        requestGenerationConfig: options?.requestGenerationConfig,
+        trigger: options?.trigger,
+        customInstructions: options?.customInstructions,
+        requestPayloadTooLarge: options?.requestPayloadTooLarge,
+        signal,
+      })
+      .finally(() => {
+        this.activeCompressions--;
+      });
     // The service owns the compression outcome; LlmChat owns the input
     // provenance. Expose it so UIs can mark estimated banner numbers
     // instead of presenting cross-path scale changes as lost context

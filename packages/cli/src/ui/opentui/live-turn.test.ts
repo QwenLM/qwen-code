@@ -249,6 +249,23 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(onComplete).toHaveBeenCalledOnce();
   });
 
+  it('reads compaction live while session commands wait for idle turns', () => {
+    let compacting = false;
+    const config = {
+      getLlmClient: () => ({
+        isInitialized: () => true,
+        getChat: () => ({ isCompressing: () => compacting }),
+      }),
+    } as unknown as Config;
+    const { result } = renderHook(() => useOpenTuiLiveTurn({ config }));
+    const readReason = result.current.readSessionBusyReason;
+    expect(readReason()).toBeNull();
+    compacting = true;
+    expect(readReason()).toContain('context compaction');
+    compacting = false;
+    expect(readReason()).toBeNull();
+  });
+
   it('fires onComplete once when a turn completes without an abort', async () => {
     const { result } = renderHook(() =>
       useOpenTuiLiveTurn({ config: {} as Config }),

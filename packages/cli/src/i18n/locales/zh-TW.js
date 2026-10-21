@@ -9,6 +9,31 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    '工具「{{tool}}」正在執行。請等待完成。',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    '工具「{{tool}}」已排程。請等待完成。',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    '工具「{{tool}}」正在驗證。請等待完成。',
+  'Cannot branch: {{reason}}': '無法建立分支：{{reason}}',
+  'Cannot fork: {{reason}}': '無法分支：{{reason}}',
+  'Cannot change directory: {{reason}}': '無法切換目錄：{{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    '工具「{{tool}}」正在等待批准。請處理待審批請求。',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    '子智能體正在等待批准。請處理待審批請求。',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    '工具「{{tool}}」的結果尚未提交給模型。請等待提交，或按 Esc 取消本輪。',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    '模型正在串流輸出。請等待完成，或按 Esc 取消。',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    '模型請求仍在進行，但目前沒有回應內容到達。請等待完成，或按 Esc 取消。',
+  'context compaction is in progress. Wait for it to finish.':
+    '正在壓縮上下文。請等待壓縮完成。',
+  'a slash command is still running. Wait for it to finish.':
+    '斜線命令仍在執行。請等待其完成。',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '回應或工具呼叫仍在進行。請等待完成，或處理待確認的工具呼叫。',
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
@@ -1183,8 +1208,6 @@ export default {
     '啟動繼承完整對話的背景智能體',
   'Please provide a directive. Usage: /fork <directive>':
     '請提供指令。用法：/fork <指令>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
   'Cannot fork before the first conversation turn.': '首次對話輪次前無法分支。',
   'The agent tool is unavailable; cannot fork.': 'Agent 工具不可用；無法分支。',
   'Failed to launch fork: {{error}}': '啟動分支失敗：{{error}}',
@@ -1193,8 +1216,6 @@ export default {
     '使用者透過 /fork 啟動了背景分支：{{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     '已分支到背景智能體。它會繼承此對話並以非阻塞方式執行，可在背景任務面板中追蹤；完成後會回報結果。',
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    '回應或工具呼叫正在進行時無法分支。請等待其完成或處理待確認的工具呼叫。',
   'No conversation to branch.': '沒有可分支的對話。',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     '恢復某次工具調用。這將把對話與檔案歷史重置到提出該工具調用建議時的狀態',

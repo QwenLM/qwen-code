@@ -88,6 +88,7 @@ export interface OpenTuiAppHostDeps {
   confirmations: OpenTuiConfirmationBridge;
   /** Signals the shell to re-read (drives `useSyncExternalStore`). */
   onChange(): void;
+  readSessionBusyReason?(): string | null;
   toggleVimEnabled(): Promise<boolean>;
   reloadCommands(): void | Promise<void>;
   /** UI-side session rotation (new chat id + SessionStats refresh). */
@@ -362,6 +363,10 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
   /** No command dispatch or model turn in flight; sampled before dispatch. */
   isIdle(): boolean {
     return !this.processing && !this.streaming;
+  }
+
+  readSessionBusyReason(): string | null {
+    return this.deps.readSessionBusyReason?.() ?? null;
   }
 
   isStreaming(): boolean {

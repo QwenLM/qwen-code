@@ -8,6 +8,33 @@
 // Deutsche Übersetzungen für Qwen Code CLI
 
 export default {
+  'Cannot branch: {{reason}}': 'Verzweigung nicht möglich: {{reason}}',
+  'Cannot fork: {{reason}}':
+    'Hintergrund-Fork kann nicht erstellt werden: {{reason}}',
+  'Cannot change directory: {{reason}}':
+    'Verzeichniswechsel nicht möglich: {{reason}}',
+  'tool "{{tool}}" is awaiting approval. Resolve the pending approval.':
+    'Das Werkzeug „{{tool}}“ wartet auf Genehmigung. Bearbeiten Sie die ausstehende Genehmigung.',
+  'a subagent is awaiting approval. Resolve the pending approval.':
+    'Ein Unteragent wartet auf Genehmigung. Bearbeiten Sie die ausstehende Genehmigung.',
+  'tool "{{tool}}" is executing. Wait for it to finish.':
+    'Das Werkzeug „{{tool}}“ wird ausgeführt. Warten Sie, bis es fertig ist.',
+  'tool "{{tool}}" is scheduled. Wait for it to finish.':
+    'Das Werkzeug „{{tool}}“ ist eingeplant. Warten Sie, bis es fertig ist.',
+  'tool "{{tool}}" is validating. Wait for it to finish.':
+    'Das Werkzeug „{{tool}}“ wird validiert. Warten Sie, bis es fertig ist.',
+  'the result of tool "{{tool}}" has not been submitted to the model. Wait for submission or press Esc to cancel the turn.':
+    'Das Ergebnis des Werkzeugs „{{tool}}“ wurde noch nicht an das Modell gesendet. Warten Sie auf die Übermittlung oder drücken Sie Esc, um den Turn abzubrechen.',
+  'the model is streaming a response. Wait for it to finish or press Esc to cancel.':
+    'Das Modell überträgt eine Antwort. Warten Sie auf den Abschluss oder drücken Sie Esc zum Abbrechen.',
+  'a model request is in progress with no response content arriving. Wait for it to finish or press Esc to cancel.':
+    'Eine Modellanfrage läuft, aber es treffen noch keine Antwortinhalte ein. Warten Sie auf den Abschluss oder drücken Sie Esc zum Abbrechen.',
+  'context compaction is in progress. Wait for it to finish.':
+    'Der Kontext wird komprimiert. Warten Sie auf den Abschluss.',
+  'a slash command is still running. Wait for it to finish.':
+    'Ein Slash-Befehl wird noch ausgeführt. Warten Sie auf den Abschluss.',
+  'a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    'Eine Antwort oder ein Werkzeugaufruf läuft. Warten Sie auf den Abschluss oder bearbeiten Sie den ausstehenden Werkzeugaufruf.',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -895,8 +922,6 @@ export default {
     'Einen Hintergrund-Agenten starten, der die gesamte Unterhaltung übernimmt',
   'Please provide a directive. Usage: /fork <directive>':
     'Bitte geben Sie eine Anweisung an. Verwendung: /fork <Anweisung>',
-  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'Während eine Antwort oder ein Tool-Aufruf läuft, kann kein Hintergrund-Fork erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
   'Cannot fork before the first conversation turn.':
     'Vor der ersten Gesprächsrunde kann kein Fork erstellt werden.',
   'The agent tool is unavailable; cannot fork.':
@@ -907,8 +932,6 @@ export default {
     'Benutzer hat über /fork einen Hintergrund-Fork gestartet: {{directive}}',
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
     'In einen Hintergrund-Agenten verzweigt. Er übernimmt diese Unterhaltung und läuft ohne zu blockieren — verfolgen Sie ihn im Hintergrundaufgaben-Panel; er meldet sich nach Abschluss zurück.',
-  'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
-    'Während eine Antwort oder ein Tool-Aufruf läuft, kann keine Verzweigung erstellt werden. Warten Sie, bis der Vorgang abgeschlossen ist, oder bearbeiten Sie den ausstehenden Tool-Aufruf.',
   'No conversation to branch.': 'Keine Unterhaltung zum Verzweigen vorhanden.',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     'Einen Tool-Aufruf wiederherstellen. Dadurch werden Konversations- und Dateiverlauf auf den Zustand zurückgesetzt, in dem der Tool-Aufruf vorgeschlagen wurde',
