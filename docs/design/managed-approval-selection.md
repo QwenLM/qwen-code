@@ -2,6 +2,8 @@
 
 [English](managed-approval-selection.md) | [简体中文](managed-approval-selection.zh-CN.md)
 
+The [live approval extension](2026-10-20-managed-live-approval.md) supersedes this document's idle-only and next-Turn restrictions when `live-approval-selection/1` is available. Admission snapshots remain immutable; current permission checks read the durable Session selection. Older providers retain this baseline behavior.
+
 ## Status and scope
 
 Implemented in this change, based on the Managed WebShell approval selector and model selection work. Linux deployment acceptance remains pending. Built-in, public, Workspace-bound `qwen-code` Sessions may choose `default`, `auto-edit`, or `yolo` at creation and change their next Turn's policy while idle. Stored AgentDefinitions retain their compiled creation policy; [eligible existing Sessions may now override later user Turns](2026-10-17-managed-definition-approval-selection.md) when the Harness also supports `agent-definition-approval-selection/1`. Deployment defaults, Shell admission, tool families, Runtime privileges, and recovery refusal semantics remain unchanged.

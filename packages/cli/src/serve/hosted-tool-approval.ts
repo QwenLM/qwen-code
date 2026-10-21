@@ -281,12 +281,14 @@ export class HostedApprovalWaiters {
     expiresAt: number,
     signal: AbortSignal,
     isFinal: () => boolean,
+    onPoll?: () => Promise<void>,
   ): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
     let poll: NodeJS.Timeout | undefined;
     let onAbort: () => void = () => undefined;
     try {
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
+        let polling = false;
         this.waiting.set(requestId, resolve);
         onAbort = resolve;
         signal.addEventListener('abort', onAbort, { once: true });
@@ -294,6 +296,19 @@ export class HostedApprovalWaiters {
         timer.unref();
         poll = setInterval(() => {
           if (isFinal()) resolve();
+          else if (
+            onPoll &&
+            !polling &&
+            !signal.aborted &&
+            Date.now() < expiresAt
+          ) {
+            polling = true;
+            void onPoll()
+              .catch(reject)
+              .finally(() => {
+                polling = false;
+              });
+          }
         }, WAIT_POLL_MS);
         poll.unref();
         // An answer may have landed before the waiter was registered.
@@ -516,4 +531,42 @@ export async function resolveHostedAction(
   }
   waiters.notify(requestId);
   return { status: 200, body: { requestId, state: 'decided', optionId } };
+}
+
+export function hostedLiveApprovalPoll(
+  session: ManagedSession,
+  waiters: HostedApprovalWaiters,
+  options: HostedActionOptions,
+  readSettings: () => Promise<HostedApprovalSettings>,
+  signal: AbortSignal,
+  globProfile = false,
+  isBlocked: () => boolean = () => false,
+): () => Promise<void> {
+  return async () => {
+    if (isBlocked())
+      throw new Error('Hosted approval policy is recovery blocked.');
+    const settings = await readSettings();
+    if (isBlocked())
+      throw new Error('Hosted approval policy is recovery blocked.');
+    if (
+      signal.aborted ||
+      session.authority.writesStopped ||
+      session.authority.action(options.requestId)?.state !== 'requested' ||
+      hostedApprovalAsks(settings, options.toolName, globProfile)
+    )
+      return;
+    const result = await resolveHostedAction(
+      session,
+      waiters,
+      options.requestId,
+      {
+        optionId: 'allow',
+        inputRevision: options.inputRevision,
+        policyRevision: options.policyRevision,
+      },
+      () => signal.aborted || isBlocked(),
+    );
+    if (result.status !== 200 && result.status !== 409)
+      throw new Error(`Hosted live approval failed: ${result.code}`);
+  };
 }

@@ -482,8 +482,17 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         const gate = managedRuntimeDispatchGate(
           this.authority.sessionHeader.sessionKey,
         );
+        // A settled binding needs no handoff: resolving it returns early, so
+        // handing it off would only re-insert an already-settled id that
+        // pruning may have evicted, as a handed-off entry that never settles.
+        const settled = new Set(
+          (authorization.checkpoint.tools?.items ?? [])
+            .filter((item) => item.state === 'settled')
+            .map((item) => item.executionCallId),
+        );
         for (const binding of authorization.checkpoint.runtime?.bindings ??
           []) {
+          if (settled.has(binding.executionCallId)) continue;
           gate.handoff(binding.executionCallId);
         }
       }
