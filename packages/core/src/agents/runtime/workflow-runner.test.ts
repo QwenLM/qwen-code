@@ -2545,6 +2545,8 @@ describe('WorkflowRunner', () => {
       dispatch: unused,
     });
 
+    expect(registry.get(handle.runId)?.parentSessionId).toBe('runner-turn');
+
     await expect(handle.completion).resolves.toMatchObject({
       ok: true,
       outcome: { result: 250_000 },

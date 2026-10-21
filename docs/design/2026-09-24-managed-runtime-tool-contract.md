@@ -154,7 +154,7 @@ the mounted worker handlers.
 Run `npx vitest run src/serve/managed-runtime-attestation-contract.test.ts src/serve/managed-runtime-attestation-worker.test.ts src/serve/managed-runtime-tool-worker.test.ts` in
 `packages/cli` and
 `mvn test -Dtest=ManagedRuntimeAttestationConformanceTest` in
-`packages/sdk-java/runtime-broker`. The TypeScript suite validates the shared
+`packages/managed-agent-server`. The TypeScript suite validates the shared
 fixtures, schema mutations, exact gate admission, and real tool execution.
 The Java suite consumes the same contract files.
 
@@ -191,7 +191,7 @@ messages identify the operation and applicable limit. Server failures are
 retryable; other HTTP failures are terminal.
 
 Run `mvn test` and `mvn checkstyle:check` in
-`packages/sdk-java/runtime-broker`. HTTP fixture replays verify the canonical
+`packages/managed-agent-server`. HTTP fixture replays verify the canonical
 requests, success and unknown answers, malformed references and responses,
 route-specific request limits, and tool results above 16 KiB through 1 MiB.
 The worker handlers described below serve these routes.

@@ -520,6 +520,51 @@ describe('Turn', () => {
       });
     });
 
+    // The interactive and non-interactive formatters only ever see the
+    // StructuredError built here — the original Error (and with it `.headers`)
+    // is discarded at this point. A bodyless 400 from a strict
+    // OpenAI-compatible backend therefore has to carry its provider request id
+    // out through this value, or the user is left with only
+    // "[API Error: 400 status code (no body)]" and nothing to quote.
+    // See https://github.com/QwenLM/qwen-code/issues/14115
+    describe('request id on the Error event', () => {
+      const REQUEST_ID = 'a30a1854-1925-4da8-8803-73fee2865116';
+
+      it('carries x-request-id from a real Headers instance', async () => {
+        const headers = new Headers();
+        headers.set('x-request-id', REQUEST_ID);
+        const error = Object.assign(new Error('400 status code (no body)'), {
+          status: 400,
+          headers,
+        });
+
+        const events = await runFailing(error);
+        const errorEvent = events[0] as ServerLlmErrorEvent;
+
+        expect(errorEvent.type).toBe(LlmEventType.Error);
+        expect(errorEvent.value.error.requestId).toBe(REQUEST_ID);
+      });
+
+      it('carries x-request-id from a plain header record', async () => {
+        const error = Object.assign(new Error('400 status code (no body)'), {
+          status: 400,
+          headers: { 'X-Request-Id': REQUEST_ID },
+        });
+
+        const events = await runFailing(error);
+        const errorEvent = events[0] as ServerLlmErrorEvent;
+
+        expect(errorEvent.value.error.requestId).toBe(REQUEST_ID);
+      });
+
+      it('omits requestId when the error carries no x-request-id', async () => {
+        const events = await runFailing(new Error('400 status code (no body)'));
+        const errorEvent = events[0] as ServerLlmErrorEvent;
+
+        expect(errorEvent.value.error).not.toHaveProperty('requestId');
+      });
+    });
+
     it('preserves the status of friendly forbidden errors', async () => {
       const events = await runFailing({
         response: {

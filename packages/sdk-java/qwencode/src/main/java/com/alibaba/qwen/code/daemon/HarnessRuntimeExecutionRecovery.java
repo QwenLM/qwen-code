@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.daemon;
 
 import java.util.Map;
+import java.util.Objects;
 
 /** One durable Runtime execution observed while loading a Hosted Harness. */
 public final class HarnessRuntimeExecutionRecovery {
@@ -16,6 +17,10 @@ public final class HarnessRuntimeExecutionRecovery {
             String executionCallId, String runtimeSessionId,
             String progressCursor, String outcome,
             Map<String, Object> status) {
+        if ("known".equals(outcome)) {
+            Objects.requireNonNull(status,
+                    "status required for known outcome");
+        }
         this.functionCallId = functionCallId;
         this.toolName = toolName;
         this.executionCallId = executionCallId;

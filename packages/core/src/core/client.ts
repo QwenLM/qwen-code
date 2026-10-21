@@ -5,10 +5,19 @@
  */
 
 import type { LlmPreparedRequestCallback } from './llm-chat.js';
+import {
+  resolveWorkflowIntent,
+  type HumanPromptInput,
+  type WorkflowIntentTrigger,
+} from './workflow-intent.js';
+import { isTopLevelSession } from '../agents/runtime/agent-context.js';
+import { logWorkflowKeyword } from '../telemetry/loggers.js';
+import { WorkflowKeywordEvent } from '../telemetry/types.js';
 
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
+  type HookExecutionOwner,
 } from '../hooks/hook-execution-context.js';
 
 // External dependencies
@@ -259,6 +268,14 @@ export interface SendMessageOptions {
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
+  humanInput?: HumanPromptInput;
+  onWorkflowIntentApplied?: (trigger: WorkflowIntentTrigger) => void;
+  /**
+   * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
+   * place of running UserPromptSubmit again. It is spent by the UserQuery with
+   * the prompt id it was issued for; any other use throws.
+   */
+  promptAdmission?: UserPromptAdmission;
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
@@ -298,6 +315,24 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+}
+
+/** UserPromptSubmit's verdict on a prompt, taken before the prompt expands. */
+export interface UserPromptAdmission {
+  readonly blocked: boolean;
+}
+
+interface UserPromptSubmitDecision {
+  /** Set when a hook blocked the prompt or stopped execution. */
+  blockReason?: string;
+  additionalContext?: string;
+}
+
+interface IssuedUserPromptAdmission extends UserPromptSubmitDecision {
+  prompt: string;
+  promptId: string;
+  sessionId: string;
+  owner: HookExecutionOwner | undefined;
 }
 
 export interface SteerInput {
@@ -505,6 +540,10 @@ export class LlmClient {
   private shutdownRequested = false;
   private readonly settledSteerInputs = new WeakSet<SteerInput>();
   private readonly interactionStartTypes = new Map<string, SendMessageType>();
+  private readonly userPromptAdmissions = new WeakMap<
+    UserPromptAdmission,
+    IssuedUserPromptAdmission
+  >();
 
   private readonly loopDetector: LoopDetectionService;
   private readonly toolExplorationBudget = new ToolExplorationBudget();
@@ -747,6 +786,14 @@ export class LlmClient {
 
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
+  }
+
+  /**
+   * Marks replayed content as already injected. Only for parts another chat
+   * already reported (speculation accept); see `LlmChat.markToolResultsInjected`.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    this.getChat().markToolResultsInjected(contents);
   }
 
   getChat(): LlmChat {
@@ -1978,6 +2025,7 @@ export class LlmClient {
     this.config.getMemoryManager().resetMemoryBodyStateForSession();
     this.cachedGitStatus = undefined;
     await this.refreshSystemInstruction();
+    const gitStatus = this.getCachedGitStatus();
     this.getChat().addHistory({
       role: 'user',
       parts: [
@@ -1986,6 +2034,7 @@ export class LlmClient {
             `The session's working directory has changed from ${oldDir} to ${newDir} via /cd. ` +
             `The startup directory context above is stale. All tool calls and relative paths now resolve from ${newDir}.`,
         },
+        ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
     });
     await this.addDirectoryContext();
@@ -2000,9 +2049,9 @@ export class LlmClient {
       return null;
     }
     if (this.cachedGitStatus === undefined) {
-      // Mirror claude-code: append git status (branch + recent commits) to the
-      // system prompt so the main agent treats version history as authoritative
-      // context, not background noise. Only injected when cwd is a git repo.
+      // Git status (branch + recent commits) for the main agent's startup
+      // prelude, so it treats version history as authoritative context.
+      // Only injected when cwd is a git repo.
       this.cachedGitStatus = getRecentGitStatus(this.config.getCwd());
     }
     return this.cachedGitStatus;
@@ -2020,18 +2069,20 @@ export class LlmClient {
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
     };
-    // Record the stable → context layers (everything before the volatile
-    // gitStatus/autoMemory tail) as the cross-session-stable system prefix.
-    // The Anthropic converter splits the outgoing system prompt at this
-    // boundary and puts an early cache breakpoint on the stable part, so
-    // new sessions (different git status) and in-session memory saves
-    // don't re-bill it. Recorded on every rebuild so it tracks
-    // memory/model/mode changes; consumers match via `startsWith` and fail
-    // open when it goes stale.
+    // Record the stable → context layers (everything before the autoMemory
+    // tail) as the cross-session-stable system prefix. The Anthropic
+    // converter splits the outgoing system prompt at this boundary and puts
+    // an early cache breakpoint on the stable part. Recorded on every
+    // rebuild so it tracks memory/model/mode changes; consumers match via
+    // `startsWith` and fail open when it goes stale.
+    //
+    // The git snapshot is deliberately not a layer here: it changes whenever
+    // the repository does, and providers that only cache at the end of the
+    // system message (DashScope) would lose the whole system prompt across
+    // sessions. It is announced in the startup prelude instead.
     this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
     return assembleSystemPrompt({
       ...stableLayers,
-      gitStatus: this.getCachedGitStatus(),
       autoMemory: this.config.getAutoMemoryPrompt(),
     });
   }
@@ -2056,6 +2107,8 @@ export class LlmClient {
     const remaining = currentHistory.slice(startupLength);
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
+      undefined,
+      { gitStatus: this.getCachedGitStatus() },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2094,6 +2147,8 @@ export class LlmClient {
 
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
+      undefined,
+      { gitStatus: this.getCachedGitStatus() },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2776,7 +2831,10 @@ export class LlmClient {
       );
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
-        () => getInitialChatHistory(this.config, extraHistory),
+        () =>
+          getInitialChatHistory(this.config, extraHistory, {
+            gitStatus: this.getCachedGitStatus(),
+          }),
       );
       this.config
         .getMemoryManager()
@@ -3476,6 +3534,97 @@ export class LlmClient {
     });
   }
 
+  /**
+   * Runs UserPromptSubmit on a prompt before the caller expands it, so a block
+   * also stops the expansion. The prompt's first UserQuery send takes the
+   * result as `promptAdmission` and applies it instead of running the hook on
+   * the expanded text, so hooks registered during the expansion do not check
+   * this prompt, even when none was configured here.
+   */
+  async admitUserPrompt(
+    prompt: string,
+    promptId: string,
+  ): Promise<UserPromptAdmission> {
+    const owner = captureHookExecutionOwner(this.config);
+    const messageBus = this.config.getMessageBus();
+    const decision =
+      !this.config.getDisableAllHooks() &&
+      messageBus &&
+      this.config.hasHooksForEvent('UserPromptSubmit')
+        ? await this.requestUserPromptSubmit(
+            messageBus,
+            owner,
+            prompt,
+            prompt.trim().length > 0 ? prompt : undefined,
+          )
+        : {};
+    const admission: UserPromptAdmission = Object.freeze({
+      blocked: decision.blockReason !== undefined,
+    });
+    this.userPromptAdmissions.set(admission, {
+      ...decision,
+      prompt,
+      promptId,
+      sessionId: this.config.getSessionId(),
+      owner,
+    });
+    return admission;
+  }
+
+  private takeUserPromptAdmission(
+    admission: UserPromptAdmission,
+    messageType: SendMessageType,
+    promptId: string,
+  ): IssuedUserPromptAdmission {
+    const issued = this.userPromptAdmissions.get(admission);
+    this.userPromptAdmissions.delete(admission);
+    const owner = captureHookExecutionOwner(this.config);
+    if (
+      !issued ||
+      messageType !== SendMessageType.UserQuery ||
+      issued.promptId !== promptId ||
+      issued.sessionId !== this.config.getSessionId() ||
+      issued.owner?.runtimeId !== owner?.runtimeId ||
+      issued.owner?.sessionId !== owner?.sessionId ||
+      issued.owner?.agentId !== owner?.agentId
+    ) {
+      throw new Error('UserPromptSubmit admission does not match this prompt');
+    }
+    return issued;
+  }
+
+  private async requestUserPromptSubmit(
+    messageBus: NonNullable<ReturnType<Config['getMessageBus']>>,
+    owner: HookExecutionOwner | undefined,
+    prompt: string,
+    submittedPrompt: string | undefined,
+  ): Promise<UserPromptSubmitDecision> {
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
+        eventName: 'UserPromptSubmit',
+        input: {
+          prompt,
+          ...(submittedPrompt !== undefined
+            ? { submitted_prompt: submittedPrompt }
+            : {}),
+        },
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+    );
+    const hookOutput = response.output
+      ? createHookOutput('UserPromptSubmit', response.output)
+      : undefined;
+    if (hookOutput?.isBlockingDecision() || hookOutput?.shouldStopExecution()) {
+      return { blockReason: hookOutput.getEffectiveReason() };
+    }
+    return { additionalContext: hookOutput?.getAdditionalContext() };
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     callerSignal: AbortSignal,
@@ -3486,6 +3635,21 @@ export class LlmClient {
       SendMessageType.UserQuery,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    const humanInput =
+      messageType === SendMessageType.UserQuery &&
+      !options?.isConcurrentSideQuery &&
+      isTopLevelSession() &&
+      options?.humanInput
+        ? { text: options.humanInput.text }
+        : undefined;
+    const onWorkflowIntentApplied = options?.onWorkflowIntentApplied;
+    if (options && (options.humanInput || onWorkflowIntentApplied)) {
+      options = {
+        ...options,
+        humanInput: undefined,
+        onWorkflowIntentApplied: undefined,
+      };
+    }
     const startsInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Retry ||
@@ -3866,7 +4030,23 @@ export class LlmClient {
     try {
       hooksEnabled = !this.config.getDisableAllHooks();
       messageBus = this.config.getMessageBus();
-      if (
+      const submittedPrompt =
+        messageType === SendMessageType.UserQuery &&
+        typeof options?.submittedPrompt === 'string' &&
+        options.submittedPrompt.trim().length > 0
+          ? options.submittedPrompt
+          : undefined;
+      let verdict: (UserPromptSubmitDecision & { prompt: string }) | undefined;
+      if (options?.promptAdmission) {
+        const { promptAdmission } = options;
+        // Spent here: the continuation sends below re-spread `options`.
+        options = { ...options, promptAdmission: undefined };
+        verdict = this.takeUserPromptAdmission(
+          promptAdmission,
+          messageType,
+          prompt_id,
+        );
+      } else if (
         messageType !== SendMessageType.Retry &&
         messageType !== SendMessageType.Steer &&
         messageType !== SendMessageType.Cron &&
@@ -3882,37 +4062,19 @@ export class LlmClient {
         this.config.hasHooksForEvent('UserPromptSubmit')
       ) {
         const promptText = preHookUserPromptText ?? partToString(request);
-        const submittedPrompt =
-          messageType === SendMessageType.UserQuery &&
-          typeof options?.submittedPrompt === 'string' &&
-          options.submittedPrompt.trim().length > 0
-            ? options.submittedPrompt
-            : undefined;
-        const response = await messageBus.request<
-          HookExecutionRequest,
-          HookExecutionResponse
-        >(
-          {
-            type: MessageBusType.HOOK_EXECUTION_REQUEST,
-            owner: captureHookExecutionOwner(this.config),
-            eventName: 'UserPromptSubmit',
-            input: {
-              prompt: promptText,
-              ...(submittedPrompt !== undefined
-                ? { submitted_prompt: submittedPrompt }
-                : {}),
-            },
-          },
-          MessageBusType.HOOK_EXECUTION_RESPONSE,
-        );
-        const hookOutput = response.output
-          ? createHookOutput('UserPromptSubmit', response.output)
-          : undefined;
+        verdict = {
+          prompt: promptText,
+          ...(await this.requestUserPromptSubmit(
+            messageBus,
+            captureHookExecutionOwner(this.config),
+            promptText,
+            submittedPrompt,
+          )),
+        };
+      }
 
-        if (
-          hookOutput?.isBlockingDecision() ||
-          hookOutput?.shouldStopExecution()
-        ) {
+      if (verdict) {
+        if (verdict.blockReason !== undefined) {
           if (goalPermit) {
             userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
@@ -3952,8 +4114,8 @@ export class LlmClient {
           yield {
             type: LlmEventType.UserPromptSubmitBlocked,
             value: {
-              reason: hookOutput.getEffectiveReason(),
-              originalPrompt: promptText,
+              reason: verdict.blockReason,
+              originalPrompt: verdict.prompt,
             },
           };
           // A blocked send never reaches the history push: settle the
@@ -3969,9 +4131,7 @@ export class LlmClient {
         // distinguishable from user-authored text in model history, resume,
         // and offline transcript analysis. `getAdditionalContext()` escapes
         // `<`/`>`, so hook output cannot forge the closing tag.
-        // `promptText` is declared above this block so assignment here cannot
-        // hit a TDZ if the surrounding Goal try/catch is later reshuffled.
-        const additionalContext = hookOutput?.getAdditionalContext();
+        const additionalContext = verdict.additionalContext;
         if (additionalContext) {
           const requestArray = Array.isArray(request) ? request : [request];
           request = [
@@ -3980,7 +4140,7 @@ export class LlmClient {
           ];
           if (messageType === SendMessageType.UserQuery) {
             userPromptRecordPayload = {
-              displayText: submittedPrompt ?? promptText,
+              displayText: submittedPrompt ?? verdict.prompt,
               hookContext: additionalContext,
             };
           }
@@ -4676,6 +4836,15 @@ export class LlmClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      if (!signal.aborted) {
+        const workflowIntent = resolveWorkflowIntent(this.config, humanInput);
+        if (workflowIntent) {
+          requestToSend.unshift({ text: workflowIntent.reminder });
+          logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
+          onWorkflowIntentApplied?.(workflowIntent.trigger);
+        }
+      }
+
       if (
         messageType === SendMessageType.Retry ||
         messageType === SendMessageType.Cron ||
@@ -4740,7 +4909,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             await arenaAgentClient?.reportError('Loop detected');
             this.lastApiCompletionTimestamp = Date.now();
@@ -5047,7 +5218,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
@@ -5084,7 +5257,9 @@ export class LlmClient {
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: LlmEventType.LoopDetected,
-              ...(loopType && { value: { loopType } }),
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');

@@ -35,6 +35,7 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -518,7 +519,7 @@ export interface DaemonSessionActions {
     requestStartedAt?: number,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
-  continueSession(): Promise<void>;
+  continueSession(options?: { confirmCancellation?: string }): Promise<void>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
    * immediately with the `promptId`. The daemon queues the prompt in its
@@ -531,6 +532,13 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  refreshModels(
+    beforeRefresh?: (target: {
+      workspaceCwd: string;
+      sessionId?: string;
+    }) => void | Promise<void>,
+  ): Promise<void>;
+
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
@@ -702,6 +710,7 @@ export interface DaemonSessionActions {
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
+  getTaskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus>;
   getWorkflowTasks(
     opts?: GetTasksActionOptions,
   ): Promise<DaemonSessionWorkflowTasksStatus>;

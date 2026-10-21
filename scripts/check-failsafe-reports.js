@@ -23,7 +23,10 @@ const isHosted = (className) => /^Hosted.*IT$/.test(className);
 const isGate = (className) => /^Hosted.*Gate$/.test(className);
 const [family, ...modules] = process.argv.slice(2);
 const optIn =
-  family === 'o4-mysql' || family === 'o4-oss' || family === 'event-transport';
+  family === 'o4-mysql' ||
+  family === 'o4-oss' ||
+  family === 'event-transport' ||
+  family === 'event-transport-multi-node';
 const inFamily = new Map([
   ['hosted', isHosted],
   ['non-hosted', (className) => /IT$/.test(className) && !isHosted(className)],
@@ -31,10 +34,14 @@ const inFamily = new Map([
   ['o4-mysql', (className) => className === 'O4MySqlGate'],
   ['o4-oss', (className) => className === 'O4OssGate'],
   ['event-transport', (className) => className === 'EventTransportBrokerGate'],
+  [
+    'event-transport-multi-node',
+    (className) => className === 'EventTransportMultiNodeGate',
+  ],
 ]).get(family);
 if (!inFamily || modules.length === 0) {
   console.error(
-    'usage: node scripts/check-failsafe-reports.js hosted|non-hosted|hosted-gates|o4-mysql|o4-oss|event-transport <maven-module-dir>...',
+    'usage: node scripts/check-failsafe-reports.js hosted|non-hosted|hosted-gates|o4-mysql|o4-oss|event-transport|event-transport-multi-node <maven-module-dir>...',
   );
   process.exit(2);
 }

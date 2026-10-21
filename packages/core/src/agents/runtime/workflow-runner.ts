@@ -540,6 +540,7 @@ export class WorkflowRunner {
       const registration: WorkflowTaskRegistration = {
         runId,
         toolUseId: options.toolUseId,
+        parentSessionId: config.getSessionId?.(),
         ...(workflowName ? { workflowName } : {}),
         ...(sourceRef ? { sourceRef } : {}),
         meta: null,

@@ -93,7 +93,7 @@ The task projection maps a `workflow` run to task kind `workflow`. `child_accept
 - `packages/core/src/managed-runtime/managed-child-operations.ts`: `maxLaunchesPerScope`, `launchedInScope` and the `budget_exhausted` refusal.
 - `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json`: the `workflow` template, 15 cases and 9 successor pairs, the agent counterpart `agent-start-without-definition`, and the unknown-kind witnesses repointed to `kind: "unregistered"`. `managed-extension-projection-v1.fixtures.json`: `child_run.workflow → workflow`.
 - `packages/cli/src/serve/hosted-child-agent-session.ts` (`launchedChildRunsOf`; `activeChildRunsOf` counts both kinds), `hosted-workspace-tool-turn.ts` (passes the launch count) and `hosted-harness-session.ts` (the restore skips every child Session kind).
-- `packages/sdk-java/managed-agent-server`: `ManagedExtensionRecords` (dispatch, `requireChildSession`, the pin rule, the task kind), `ManagedExtensionRecordStore` (the three cross-record rules per child Session), `ChildResultRelayStore` (the relay page and the cascade scoped to `child_agent`).
+- `packages/managed-agent-server`: `ManagedExtensionRecords` (dispatch, `requireChildSession`, the pin rule, the task kind), `ManagedExtensionRecordStore` (the three cross-record rules per child Session), `ChildResultRelayStore` (the relay page and the cascade scoped to `child_agent`).
 - Tests beside each file in both languages; this design in both languages, plus a scope note in the H4 framing, H4a and H4b designs.
 
 ## Validation

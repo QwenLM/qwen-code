@@ -16,7 +16,7 @@
 //    guard to keep covering the package. Deleting the added line changes
 //    neither the guard's output nor its exit code, so only this file notices.
 //
-// 2. The daily Desktop job must agree on the crate directory across its
+// 2. The Desktop release gate must agree on the crate directory across its
 //    presence guard, cache and working directories, and retain release tests.
 //
 // The npm/pnpm mirror of the negation list is already pinned by
@@ -70,7 +70,8 @@ const ci = parseYaml(read('.github', 'workflows', 'ci.yml'));
 const desktop = parseYaml(
   read('.github', 'workflows', 'desktop-packaging-check.yml'),
 );
-const desktopJob = desktop.jobs.desktop_shell;
+const release = parseYaml(read('.github', 'workflows', 'desktop-release.yml'));
+const desktopJob = release.jobs.desktop_shell;
 const stepNamed = (name) =>
   desktopJob.steps.find((step) => step.name === name) ??
   desktopJob.steps.find((step) => String(step.uses ?? '').includes(name));
@@ -124,10 +125,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
   const filterStep = desktopJob.steps.find((step) => step.id === 'filter');
   const filterRun = String(filterStep?.run ?? '');
 
-  it('still carries the Cargo.toml existence guard, and it clears changed', () => {
-    // Manual dispatch may select a ref that predates the desktop crate.
-    // The condition is only half the guard: without the assignment inside its
-    // own body, every gated step still runs against a crate that is not there.
+  it('fails when the release commit does not contain the desktop crate', () => {
     const guardBody =
       /! -f \S+\/src-tauri\/Cargo\.toml \]\]; then\n([\s\S]*?)\n[ \t]*fi/u.exec(
         filterRun,
@@ -138,16 +136,16 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     ).toBeDefined();
     expect(
       guardBody,
-      'the Cargo.toml guard no longer sets changed=false inside its own body, so a head without the crate runs every gated step and reports a missing working directory as a failure of the PR',
-    ).toMatch(/^\s*changed=false\s*$/mu);
+      'a release commit without the desktop crate must fail the gate',
+    ).toMatch(/^\s*exit 1\s*$/mu);
   });
 
   it('names one existing crate directory in every step', () => {
     const guardPath = /! -f (\S+)\/src-tauri\/Cargo\.toml/u.exec(
       filterRun,
     )?.[1];
-    // The notice names the crate's src-tauri, not the package directory.
-    const noticePath = /::notice::(\S+) is absent from this head/u
+    // The error names the crate's src-tauri, not the package directory.
+    const noticePath = /::error::(\S+) is absent from the release commit/u
       .exec(filterRun)?.[1]
       .replace(/\/src-tauri$/u, '');
 
@@ -163,7 +161,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
 
     const sites = {
       'Cargo.toml guard': guardPath,
-      'guard ::notice::': noticePath,
+      'guard ::error::': noticePath,
       'rust-cache workspaces': cacheRoot,
       ...Object.fromEntries(
         workingDirs.map((dir, index) => [`working-directory[${index}]`, dir]),
@@ -186,18 +184,55 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     const crateDir = sites['Cargo.toml guard'];
     expect(
       existsSync(join(root, crateDir, 'src-tauri', 'Cargo.toml')),
-      `${crateDir}/src-tauri/Cargo.toml does not exist, so every gated step in desktop_shell skips and the job reports success having compiled nothing.`,
+      `${crateDir}/src-tauri/Cargo.toml does not exist, so the release gate cannot test the desktop crate.`,
     ).toBe(true);
   });
 
   it('runs daily or manually without registering PR desktop jobs', () => {
     expect(ci.jobs.desktop_shell).toBeUndefined();
+    expect(desktop.jobs.desktop_shell).toBeUndefined();
+    expect(desktop.jobs.package.uses).toBe(
+      './.github/workflows/desktop-release.yml',
+    );
+    expect(desktop.jobs.package.with.dry_run).toBe(true);
     expect(Object.keys(desktop.on).sort()).toEqual([
       'schedule',
       'workflow_dispatch',
     ]);
     expect(desktop.on.schedule).toEqual([{ cron: '0 16 * * *' }]);
     expect(desktopJob.defaults.run.shell).toBe('bash');
+  });
+
+  it('gates publication on parallel checks of the same release commit', () => {
+    expect(desktopJob.needs).toBe('prepare');
+    expect(desktopJob.if).toBe(
+      "${{ needs.prepare.outputs.already_published != 'true' }}",
+    );
+    expect(desktopJob.strategy.matrix.os).toEqual([
+      'ubuntu-22.04',
+      'windows-2022',
+    ]);
+    expect(desktopJob['continue-on-error']).toBeUndefined();
+    // The shell lane runs in parallel with build; publish joins on both, so
+    // a failed shell check blocks publication without serializing ahead of
+    // the 120-minute build that runs the same tests on every matrix entry.
+    expect(release.jobs.build.needs).toBe('prepare');
+    expect(release.jobs.publish.needs).toEqual([
+      'prepare',
+      'desktop_shell',
+      'build',
+    ]);
+    for (const name of ['desktop_shell', 'build', 'publish']) {
+      const checkout = release.jobs[name].steps.find((step) =>
+        step.uses?.startsWith('actions/checkout@'),
+      );
+      expect(checkout.with.ref).toBe(
+        '${{ needs.prepare.outputs.qwen_code_sha }}',
+      );
+    }
+    expect(release.jobs.build.env.QWEN_CODE_COMMIT).toBe(
+      '${{ needs.prepare.outputs.qwen_code_sha }}',
+    );
   });
 
   it('runs release tests whenever the desktop crate is present', () => {

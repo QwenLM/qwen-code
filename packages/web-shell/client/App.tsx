@@ -1,4 +1,9 @@
 import {
+  beginLocalCommand,
+  finishLocalCommand,
+  clearPendingLocalCommands,
+} from './utils/message-deletion';
+import {
   createComposerTagForItem,
   fileReferenceInsertText,
   FILE_PROVIDER_ID,
@@ -109,6 +114,7 @@ import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
 import {
+  SESSION_ARCHIVE_BATCH_SIZE,
   SESSION_LIST_PAGE_SIZE,
   SESSION_LIVE_STATE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
@@ -131,6 +137,7 @@ import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
 import { useModelConfigurations } from './hooks/useModelConfigurations';
+import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -199,7 +206,12 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { EXECUTION_APPROVAL_MODES, parsePlanCommand } from './utils/planMode';
+import {
+  nextApprovalMode,
+  parsePlanCommand,
+  type WebShellApprovalMode,
+} from './utils/planMode';
+import { useApprovalModes } from './hooks/useApprovalModes';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -353,6 +365,7 @@ import {
   navigateToDaemon,
 } from './config/daemon';
 import { Button } from './components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
 import { isDesktopShell } from './utils/externalOpen';
 import {
   isPluginShadowPanel,
@@ -439,6 +452,7 @@ import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
 import {
+  shellTaskPanelTitle,
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
@@ -512,6 +526,7 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellCustomization,
   type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
@@ -559,7 +574,6 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MODES_CYCLE = EXECUTION_APPROVAL_MODES;
 const MAX_TOASTS = 4;
 const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
@@ -1339,6 +1353,8 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Refresh and persist the host catalog before Qwen reloads models. No return data is required. */
+  onRefreshModels?: WebShellCustomization['onRefreshModels'];
   /** Native settings-page presentation. Does not restrict commands or daemon access. */
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
@@ -1459,6 +1475,8 @@ export interface WebShellProps {
    * needs them. Plan must be explicitly included.
    */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
+  allowedApprovalModes?: readonly WebShellApprovalMode[];
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -1539,8 +1557,8 @@ export interface WebShellProps {
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /**
-   * Controls whether the composer's file-upload entry points (drag-and-drop
-   * and the @ panel upload item) are enabled. Does not disable attachments.
+   * Controls composer uploads (drag-and-drop and the @ panel upload item)
+   * and Files tree drag-and-drop uploads. Does not disable attachments.
    * Works alongside the daemon's
    * `workspace_file_upload` capability, not instead of it: `false` force-
    * disables upload even when the daemon advertises the capability, while
@@ -1552,13 +1570,14 @@ export interface WebShellProps {
    */
   fileDropAction?: 'upload' | 'attach';
   /**
-   * Directory that drag-and-dropped files upload into, **relative to the
+   * Directory that composer-dropped files upload into, **relative to the
    * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
    * `'uploads'`, `'uploads/images'`, or omit it to upload into the
    * workspace root (the default). A leading-slash path like `'/uploads'`
    * is rejected by the daemon as outside the workspace. The directory
    * (including intermediate components) is created automatically on upload
-   * when it does not exist.
+   * when it does not exist. Files tree drops use the explicit tree destination
+   * instead of this setting.
    */
   fileUploadDirectory?: string;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
@@ -1807,6 +1826,21 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
 ];
+/**
+ * Right-panel entries that work without a session; the empty new-task page
+ * offers only these.
+ */
+const EMPTY_STATE_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
+  'files',
+  'terminal',
+  'webPreview',
+];
+/**
+ * Key prefix backing the empty new-task page's panel state: one draft entry
+ * per workspace, migrated to the session's key when the first prompt
+ * materializes one.
+ */
+const DRAFT_PANEL_KEY_PREFIX = 'draft\0';
 /**
  * One trajectory tab per session, so re-opening an already-open one reveals it
  * rather than stacking a second. Shared with the entry, which hides itself
@@ -2531,6 +2565,15 @@ function findReviewChangesByToolCallIds(
   );
 }
 
+function getEvictedArtifactPanelStateKeys(keys: Iterable<string>): string[] {
+  const entries = [...keys];
+  return [false, true].flatMap((draft) =>
+    entries
+      .filter((key) => key.startsWith(DRAFT_PANEL_KEY_PREFIX) === draft)
+      .slice(0, -MAX_ARTIFACT_PANEL_SESSION_STATES),
+  );
+}
+
 function readStoredArtifactPanelStates(
   key: string,
 ): Record<string, ArtifactPanelPersistedState> {
@@ -2546,9 +2589,7 @@ function readStoredArtifactPanelStates(
     if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
     delete storedStates['v'];
     const result: Record<string, ArtifactPanelPersistedState> = {};
-    for (const [sessionKey, value] of Object.entries(storedStates).slice(
-      -MAX_ARTIFACT_PANEL_SESSION_STATES,
-    )) {
+    for (const [sessionKey, value] of Object.entries(storedStates)) {
       if (!value || typeof value !== 'object') continue;
       const state = value as Record<string, unknown>;
       if (typeof state['open'] !== 'boolean') continue;
@@ -2565,6 +2606,11 @@ function readStoredArtifactPanelStates(
           : [],
       };
     }
+    for (const evictedKey of getEvictedArtifactPanelStateKeys(
+      Object.keys(result),
+    )) {
+      delete result[evictedKey];
+    }
     return result;
   } catch {
     // localStorage can be unavailable in private or embedded contexts.
@@ -2578,10 +2624,10 @@ function writeStoredArtifactPanelStates(
 ): void {
   if (typeof window === 'undefined') return;
   try {
-    while (Object.keys(states).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
-      const oldestSessionKey = Object.keys(states)[0];
-      if (!oldestSessionKey) break;
-      delete states[oldestSessionKey];
+    for (const evictedKey of getEvictedArtifactPanelStateKeys(
+      Object.keys(states),
+    )) {
+      delete states[evictedKey];
     }
     window.localStorage.setItem(key, JSON.stringify({ v: 1, ...states }));
   } catch (error) {
@@ -2817,6 +2863,20 @@ interface SideTaskCatalogState {
   parentSessionId?: string;
   items: SideTaskListItem[];
   loaded: boolean;
+}
+
+export function canArchiveSideTaskSummary(
+  session: Pick<
+    DaemonSessionSummary,
+    'activeWorkState' | 'hasActivePrompt' | 'hasRunningBackgroundTasks'
+  >,
+): boolean {
+  return (
+    !session.hasActivePrompt &&
+    !session.hasRunningBackgroundTasks &&
+    (session.activeWorkState === undefined ||
+      session.activeWorkState === 'idle')
+  );
 }
 
 // Merge a fresh side-task listing into the cached catalog. The listing is
@@ -3325,6 +3385,7 @@ function readScopedModelSetting(
 }
 
 export function App({
+  onRefreshModels,
   askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
@@ -3396,6 +3457,7 @@ export function App({
   filterArtifact,
   shellRef,
   composerToolbarActions,
+  allowedApprovalModes: allowedApprovalModesProp,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3439,6 +3501,18 @@ export function App({
   const navigation = useWebShellNavigation();
   const navigationRef = useRef(navigation);
   navigationRef.current = navigation;
+  const [managedHome, setManagedHome] = useState(
+    () =>
+      managedAgentProvider !== undefined &&
+      managedSelectionFromUrl(
+        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      ).open,
+  );
+  const managedMode = managedAgentProvider !== undefined && managedHome;
+  const managedModeRef = useRef(managedMode);
+  managedModeRef.current = managedMode;
+  const [managedNavigationTarget, setManagedNavigationTarget] =
+    useState<HTMLDivElement | null>(null);
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -3475,6 +3549,11 @@ export function App({
   const contextUsageHeaderItemVisible =
     chatHeaderItems.includes('contextUsage');
   const rightPanelItems = rightPanel?.items ?? DEFAULT_RIGHT_PANEL_ITEMS;
+  // Workspace-scoped entries are the only ones usable before a session
+  // exists; the empty new-task page offers just those.
+  const emptyStateRightPanelItems = rightPanelItems.filter((item) =>
+    EMPTY_STATE_RIGHT_PANEL_ITEMS.includes(item),
+  );
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
   // The environment panel is only reachable through the chat header toggle,
@@ -3599,10 +3678,15 @@ export function App({
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      // [data-web-shell-dialog] joins this allowlist because DialogShell
+      // portals outside the drawer subtree but stacks above it — without the
+      // exemption, a dialog opened over the drawer loses all touch scrolling
+      // on a phone. The exemption covers DialogShell only, not other
+      // portaled overlays.
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
         )
       ) {
         return;
@@ -3669,8 +3753,11 @@ export function App({
     [],
   );
 
+  const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const customization = useMemo(
     () => ({
+      onRefreshModels,
+      allowedApprovalModes,
       artifact,
       filterArtifact,
       askUserFreeTextLabel,
@@ -3705,6 +3792,8 @@ export function App({
       fileDropAction,
     }),
     [
+      onRefreshModels,
+      allowedApprovalModes,
       artifact,
       filterArtifact,
       askUserFreeTextLabel,
@@ -3751,6 +3840,7 @@ export function App({
     structuralOnly: true,
   });
   const connection = useConnection();
+  const modelRefresh = useModelRefresh(onRefreshModels);
   const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
@@ -3800,6 +3890,59 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const [skillsSource, setSkillsSource] = useState<{
+    client: typeof workspace.client;
+    cwd: string;
+  }>();
+  const [pluginInitialTab, setPluginInitialTab] = useState<
+    'extensions' | 'skills'
+  >('extensions');
+  const skillsSourceCwd =
+    skillsSource?.client === workspace.client
+      ? skillsSource.cwd
+      : workspace.workspaceCwd;
+  const selectSkillsWorkspace = useCallback(
+    (cwd: string) => {
+      setSkillsSource((current) =>
+        current?.client === workspace.client && current.cwd === cwd
+          ? current
+          : { client: workspace.client, cwd },
+      );
+    },
+    [workspace.client],
+  );
+  const managedCreationSkills = useMemo(() => {
+    if (managedAgentProvider?.kind !== 'java' || !skillsSourceCwd)
+      return undefined;
+    const sourceCwd = skillsSourceCwd;
+    return {
+      workspaceCwd: sourceCwd,
+      async list(signal: AbortSignal) {
+        const status = await workspace.client
+          .workspaceByCwd(sourceCwd)
+          .workspaceConfigSkills();
+        signal.throwIfAborted();
+        if (status.workspaceCwd !== sourceCwd)
+          throw new Error('Skills source Workspace identity changed.');
+        if (!status.initialized || status.errors?.length)
+          throw new Error('Skills source Workspace is unavailable.');
+        return status.skills
+          .filter(
+            (skill) => skill.status === 'ok' && skill.userInvocable !== false,
+          )
+          .map(({ name, description }) => ({ name, description }));
+      },
+      async load(signal: AbortSignal) {
+        const snapshot = await workspace.client
+          .workspaceByCwd(sourceCwd)
+          .workspaceSkillsSnapshot(signal);
+        if (snapshot.workspaceCwd !== sourceCwd)
+          throw new Error('Skills source Workspace identity changed.');
+        return snapshot.skills;
+      },
+    };
+  }, [managedAgentProvider?.kind, skillsSourceCwd, workspace.client]);
+
   // Multi-daemon (#13727): saved hosts stay connected read-only alongside
   // the provider that owns this App subtree; the picker and sidebar consume
   // their live workspaces/sessions; embedded shells have no controller and
@@ -4447,6 +4590,17 @@ export function App({
   const headerWorkspaceName = activeWorkspaceCwd
     ? workspaceLabelForCwd(activeWorkspaceCwd, ordinaryWorkspaces)
     : undefined;
+  // The artifact panel keys its state per session; the empty new-task page
+  // gets a per-workspace draft key so its files/terminal/web-preview tabs
+  // persist and restore like a session's.
+  const panelWorkspaceCwd = connection.sessionId
+    ? connection.workspaceCwd
+    : activeWorkspaceCwd;
+  const panelStateKey =
+    logicalSessionKey ??
+    (workspaceContextActive && activeWorkspaceCwd
+      ? `${DRAFT_PANEL_KEY_PREFIX}${activeWorkspaceCwd}`
+      : undefined);
   const workspaceWorkflowsEnabled =
     workspaces.find(
       (entry) =>
@@ -4853,8 +5007,7 @@ export function App({
     initialArtifactPanelPersistedStates,
   );
   const initialArtifactPanelOpen = Boolean(
-    logicalSessionKey &&
-      initialArtifactPanelPersistedStates[logicalSessionKey]?.open,
+    panelStateKey && initialArtifactPanelPersistedStates[panelStateKey]?.open,
   );
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(
     initialArtifactPanelOpen,
@@ -5090,6 +5243,7 @@ export function App({
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
   const artifactPanelTriggerRef = useRef<HTMLElement | null>(null);
+  const focusComposerAfterArtifactPanelCloseRef = useRef(false);
   const rememberArtifactPanelTrigger = useCallback(() => {
     if (
       !artifactPanelOpenRef.current &&
@@ -5128,18 +5282,17 @@ export function App({
   }, [artifactPanelTabs, blocks, logicalSessionKey]);
   useLayoutEffect(() => {
     if (
-      !logicalSessionKey ||
-      artifactPanelRestoredSessionKeyRef.current !== logicalSessionKey
+      !panelStateKey ||
+      artifactPanelRestoredSessionKeyRef.current !== panelStateKey
     )
       return;
     const previousPersistedState =
-      artifactPanelPersistedStatesRef.current[logicalSessionKey];
-    delete artifactPanelPersistedStatesRef.current[logicalSessionKey];
+      artifactPanelPersistedStatesRef.current[panelStateKey];
+    delete artifactPanelPersistedStatesRef.current[panelStateKey];
     const serializedTabs = serializeArtifactPanelTabs(artifactPanelTabs);
     const deferredTabs =
-      artifactPanelDeferredPersistedTabsRef.current.get(logicalSessionKey) ??
-      [];
-    artifactPanelPersistedStatesRef.current[logicalSessionKey] = {
+      artifactPanelDeferredPersistedTabsRef.current.get(panelStateKey) ?? [];
+    artifactPanelPersistedStatesRef.current[panelStateKey] = {
       open: artifactPanelOpen,
       activeTabId:
         activeArtifactPanelTabId ??
@@ -5162,7 +5315,7 @@ export function App({
     activeArtifactPanelTabId,
     artifactPanelOpen,
     artifactPanelTabs,
-    logicalSessionKey,
+    panelStateKey,
   ]);
   const [reviewChanges, setReviewChanges] = useState<
     readonly TurnOutputFileChange[]
@@ -5174,6 +5327,10 @@ export function App({
     DEFAULT_REVIEW_PANEL_WIDTH,
   );
   const [artifactPanelFullscreen, setArtifactPanelFullscreen] = useState(false);
+  useEffect(() => {
+    if (managedMode && artifactPanelFullscreen)
+      setArtifactPanelFullscreen(false);
+  }, [managedMode, artifactPanelFullscreen]);
   const artifactPanelFullscreenRef = useRef(false);
   artifactPanelFullscreenRef.current = artifactPanelFullscreen;
   // Exiting fullscreen swaps the same DOM node back to .artifactPanelDock,
@@ -5209,7 +5366,14 @@ export function App({
   const artifactPanelStateBySessionRef = useRef(
     new Map<string, ArtifactPanelSessionState>(),
   );
-  const artifactPanelSessionIdRef = useRef(logicalSessionKey);
+  const artifactPanelSessionIdRef = useRef(panelStateKey);
+  // Set when a session materialized out of the empty new-task state and
+  // adopted the panel as-is; cleared on the next real session switch.
+  const artifactPanelAdoptedSessionRef = useRef<string | undefined>(undefined);
+  // Set when the lazy first-prompt creation allocates a session id: the panel
+  // effect then treats the draft→session transition as a migration (panel
+  // carries over, draft entry dropped) instead of a session switch.
+  const draftMaterializedSessionIdRef = useRef<string | undefined>(undefined);
   artifactPanelSessionStateRef.current = {
     open: artifactPanelOpen,
     tabs: artifactPanelTabs,
@@ -5224,14 +5388,18 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const sideTaskRestoreAvailable =
+    sideTasksAvailable &&
+    connection.capabilities?.features.includes('session_archive') === true;
+  const sideTaskArchiveAvailable =
+    sideTaskRestoreAvailable &&
+    connection.capabilities?.features.includes('session_archive_idle_guard') ===
+      true;
   const filesAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('files') &&
     Boolean(
-      resolveArtifactWorkspaceOwner(
-        workspace.capabilities,
-        connection.workspaceCwd,
-      ),
+      resolveArtifactWorkspaceOwner(workspace.capabilities, panelWorkspaceCwd),
     );
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
@@ -5266,18 +5434,41 @@ export function App({
     items: [],
     loaded: false,
   });
+  const [archivedSideTaskCatalog, setArchivedSideTaskCatalog] =
+    useState<SideTaskCatalogState>({
+      items: [],
+      loaded: false,
+    });
+  const [sideTaskCatalogRefreshNonce, setSideTaskCatalogRefreshNonce] =
+    useState(0);
+  const refreshSideTaskCatalog = useCallback(() => {
+    setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+  }, []);
+  const sideTaskCatalogRequestGenerationRef = useRef(0);
+  const removedSideTaskSessionIdsRef = useRef(new Set<string>());
   useLayoutEffect(() => {
+    sideTaskCatalogRequestGenerationRef.current += 1;
+    removedSideTaskSessionIdsRef.current.clear();
     setSideTaskCatalog({ items: [], loaded: false });
+    setArchivedSideTaskCatalog({ items: [], loaded: false });
   }, [logicalSessionKey]);
   const optimisticSideTaskIdsRef = useRef(new Set<string>());
   const visibleSideTasks =
     sideTaskCatalog.parentSessionId === connection.sessionId
       ? sideTaskCatalog.items
       : [];
+  const visibleArchivedSideTasks =
+    archivedSideTaskCatalog.parentSessionId === connection.sessionId
+      ? archivedSideTaskCatalog.items
+      : [];
   const sideTasksLoading =
     visibleSideTasks.length === 0 &&
+    visibleArchivedSideTasks.length === 0 &&
     (sideTaskCatalog.parentSessionId !== connection.sessionId ||
-      !sideTaskCatalog.loaded);
+      !sideTaskCatalog.loaded ||
+      (sideTaskRestoreAvailable &&
+        (archivedSideTaskCatalog.parentSessionId !== connection.sessionId ||
+          !archivedSideTaskCatalog.loaded)));
   const nextSideTaskTabIdRef = useRef(0);
   const createSideTask = useCallback(
     (initialPrompt?: string) => {
@@ -5348,13 +5539,13 @@ export function App({
       id,
       kind: 'terminal',
       title: count === 0 ? base : `${base} (${count + 1})`,
-      workspaceCwd: connection.workspaceCwd,
+      workspaceCwd: panelWorkspaceCwd,
       initialized: true,
     };
     setArtifactPanelTabs((tabs) => [...tabs, tab]);
     setActiveArtifactPanelTabId(tab.id);
     setArtifactPanelOpen(true);
-  }, [connection.workspaceCwd, t]);
+  }, [panelWorkspaceCwd, t]);
   const sideTaskCreationPromisesRef = useRef(
     new Map<string, Promise<{ sessionId: string; displayName?: string }>>(),
   );
@@ -5481,6 +5672,7 @@ export function App({
               title: sideTaskTab.title,
               workspaceCwd: sideTaskTab.workspaceCwd,
               updatedAt: new Date().toISOString(),
+              archivable: false,
             },
           ],
         };
@@ -5547,6 +5739,7 @@ export function App({
     (sideTask: SideTaskListItem) => {
       const parentSessionId = connection.sessionId;
       if (!parentSessionId) return;
+      removedSideTaskSessionIdsRef.current.delete(sideTask.sessionId);
       const tab: ArtifactPanelTab = {
         id: `side-task:${sideTask.sessionId}`,
         kind: 'side_task',
@@ -5577,38 +5770,60 @@ export function App({
     const workspaceCwd = connection.workspaceCwd;
     if (!sideTasksAvailable || !parentSessionId || !workspaceCwd) {
       setSideTaskCatalog({ items: [], loaded: false });
+      setArchivedSideTaskCatalog({ items: [], loaded: false });
       return;
     }
     if (!artifactPanelOpen) return;
+    const requestGeneration = ++sideTaskCatalogRequestGenerationRef.current;
     setSideTaskCatalog((catalog) =>
       catalog.parentSessionId === parentSessionId
         ? { ...catalog, loaded: false }
         : { parentSessionId, items: [], loaded: false },
     );
+    setArchivedSideTaskCatalog((catalog) =>
+      catalog.parentSessionId === parentSessionId
+        ? { ...catalog, loaded: !sideTaskRestoreAvailable }
+        : {
+            parentSessionId,
+            items: [],
+            loaded: !sideTaskRestoreAvailable,
+          },
+    );
     let cancelled = false;
-    void loadSessionCatalogOnce(
-      workspace.client,
-      {
-        routeKind: 'legacy',
-        workspaceCwd,
-        options: {
-          pageSize: SESSION_LIST_PAGE_SIZE,
-          archiveState: 'active',
-          sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
-          sourceId: parentSessionId,
+    const requestIsCurrent = () =>
+      !cancelled &&
+      sideTaskCatalogRequestGenerationRef.current === requestGeneration;
+    const toSideTaskListItem = (
+      session: DaemonSessionSummary,
+    ): SideTaskListItem => ({
+      sessionId: session.sessionId,
+      title:
+        session.displayName?.trim() ||
+        `${t('sideTask.title')} ${session.sessionId.slice(0, 8)}`,
+      workspaceCwd: session.workspaceCwd || workspaceCwd,
+      updatedAt: session.updatedAt || session.createdAt,
+    });
+    const loadSideTasks = (archiveState: 'active' | 'archived') =>
+      loadSessionCatalogOnce(
+        workspace.client,
+        {
+          routeKind: 'legacy',
+          workspaceCwd,
+          options: {
+            pageSize: SESSION_LIST_PAGE_SIZE,
+            archiveState,
+            sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
+            sourceId: parentSessionId,
+          },
         },
-      },
-      { fresh: true },
-    )
+        { fresh: true },
+      );
+    void loadSideTasks('active')
       .then((page) => {
-        if (cancelled) return;
+        if (!requestIsCurrent()) return;
         const listedItems = page.sessions.map((session) => ({
-          sessionId: session.sessionId,
-          title:
-            session.displayName?.trim() ||
-            `${t('sideTask.title')} ${session.sessionId.slice(0, 8)}`,
-          workspaceCwd: session.workspaceCwd || workspaceCwd,
-          updatedAt: session.updatedAt || session.createdAt,
+          ...toSideTaskListItem(session),
+          archivable: canArchiveSideTaskSummary(session),
         }));
         for (const item of listedItems) {
           optimisticSideTaskIdsRef.current.delete(item.sessionId);
@@ -5623,13 +5838,32 @@ export function App({
         );
       })
       .catch(() => {
-        if (cancelled) return;
+        if (!requestIsCurrent()) return;
         setSideTaskCatalog((catalog) =>
           catalog.parentSessionId === parentSessionId
             ? { ...catalog, loaded: true }
             : catalog,
         );
       });
+    if (sideTaskRestoreAvailable) {
+      void loadSideTasks('archived')
+        .then((page) => {
+          if (!requestIsCurrent()) return;
+          setArchivedSideTaskCatalog({
+            parentSessionId,
+            loaded: true,
+            items: page.sessions.map(toSideTaskListItem),
+          });
+        })
+        .catch(() => {
+          if (!requestIsCurrent()) return;
+          setArchivedSideTaskCatalog((catalog) =>
+            catalog.parentSessionId === parentSessionId
+              ? { ...catalog, loaded: true }
+              : catalog,
+          );
+        });
+    }
     return () => {
       cancelled = true;
     };
@@ -5637,6 +5871,8 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
     artifactPanelOpen,
+    sideTaskCatalogRefreshNonce,
+    sideTaskRestoreAvailable,
     sideTasksAvailable,
     t,
     workspace.client,
@@ -6295,6 +6531,11 @@ export function App({
               ...sessionActions,
               getTasks: () =>
                 workspace.client.sessionTasks(tab.sourceSessionId),
+              getTaskRuntime: (taskId) =>
+                workspace.client.sessionTaskRuntime(
+                  tab.sourceSessionId,
+                  taskId,
+                ),
               cancelTask: (taskId, kind) =>
                 workspace.client.sessionTaskCancel(
                   tab.sourceSessionId,
@@ -6315,7 +6556,7 @@ export function App({
                 : {
                     id: tab.id,
                     kind: 'shell',
-                    title: tab.title,
+                    title: shellTaskPanelTitle(task.command),
                     task,
                     sessionId: tab.sourceSessionId,
                     sessionActions: crossSessionActions,
@@ -6548,7 +6789,11 @@ export function App({
     true;
   useLayoutEffect(() => {
     const previousSessionId = artifactPanelSessionIdRef.current;
-    const nextSessionId = logicalSessionKey;
+    const nextSessionId = panelStateKey;
+    const materializedSessionId = draftMaterializedSessionIdRef.current;
+    if (previousSessionId !== nextSessionId) {
+      draftMaterializedSessionIdRef.current = undefined;
+    }
     setArtifactPanelRestoring(false);
     if (
       previousSessionId &&
@@ -6564,27 +6809,28 @@ export function App({
           pendingRestore:
             artifactPanelRestoredSessionKeyRef.current !== previousSessionId,
         });
-        if (
-          artifactPanelStateBySessionRef.current.size >
-          MAX_ARTIFACT_PANEL_SESSION_STATES
-        ) {
-          const oldestSessionId = Array.from(
-            artifactPanelStateBySessionRef.current.keys(),
-          ).find((sessionId) => sessionId !== nextSessionId);
-          if (oldestSessionId) {
-            const oldestState =
-              artifactPanelStateBySessionRef.current.get(oldestSessionId);
-            for (const tab of oldestState?.tabs ?? []) {
-              if (tab.kind === 'terminal') {
-                releaseDetachedWebTerminal(
-                  workspace.baseUrl,
-                  tab.id,
-                  tab.workspaceCwd,
-                );
-              }
+        const nextState = nextSessionId
+          ? artifactPanelStateBySessionRef.current.get(nextSessionId)
+          : undefined;
+        if (nextSessionId && nextState) {
+          artifactPanelStateBySessionRef.current.delete(nextSessionId);
+          artifactPanelStateBySessionRef.current.set(nextSessionId, nextState);
+        }
+        for (const evictedKey of getEvictedArtifactPanelStateKeys(
+          artifactPanelStateBySessionRef.current.keys(),
+        )) {
+          const evictedState =
+            artifactPanelStateBySessionRef.current.get(evictedKey);
+          for (const tab of evictedState?.tabs ?? []) {
+            if (tab.kind === 'terminal') {
+              releaseDetachedWebTerminal(
+                workspace.baseUrl,
+                tab.id,
+                tab.workspaceCwd,
+              );
             }
-            artifactPanelStateBySessionRef.current.delete(oldestSessionId);
           }
+          artifactPanelStateBySessionRef.current.delete(evictedKey);
         }
       }
     }
@@ -6601,15 +6847,74 @@ export function App({
         nextSavedState?.width ?? getDefaultReviewPanelWidth(),
       );
       setArtifactPanelFullscreen(false);
+      artifactPanelAdoptedSessionRef.current = undefined;
     }
 
     artifactPanelSessionIdRef.current = nextSessionId;
     if (!nextSessionId) {
       artifactPanelRestoredSessionKeyRef.current = undefined;
       setArtifactPanelRestoring(false);
-      setArtifactPanelOpen(false);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      // Steady no-key states keep an already-open panel usable; only a real
+      // key change (leaving a session, or a draft losing its workspace
+      // context) drops the live panel content — persisted entries survive.
+      if (previousSessionId !== nextSessionId) {
+        setArtifactPanelOpen(false);
+        setArtifactPanelTabs([]);
+        setActiveArtifactPanelTabId(null);
+      }
+      return;
+    }
+    if (
+      previousSessionId !== undefined &&
+      previousSessionId.startsWith(DRAFT_PANEL_KEY_PREFIX) &&
+      materializedSessionId !== undefined &&
+      materializedSessionId === connection.sessionId
+    ) {
+      // The first prompt consumed the draft: the panel carries into the new
+      // session, and the workspace's draft resets to empty for the next
+      // new-task visit.
+      artifactPanelStateBySessionRef.current.delete(previousSessionId);
+      const previousDraftPersisted =
+        artifactPanelPersistedStatesRef.current[previousSessionId];
+      delete artifactPanelPersistedStatesRef.current[previousSessionId];
+      // Deferred tabs belong to the draft too: move them under the session
+      // key so a capability flip can still restore them later.
+      const deferredDraftTabs =
+        artifactPanelDeferredPersistedTabsRef.current.get(previousSessionId) ??
+        [];
+      artifactPanelDeferredPersistedTabsRef.current.delete(previousSessionId);
+      if (deferredDraftTabs.length > 0) {
+        setBoundedMapEntry(
+          artifactPanelDeferredPersistedTabsRef.current,
+          nextSessionId,
+          deferredDraftTabs,
+          MAX_ARTIFACT_PANEL_SESSION_STATES * 2,
+        );
+      }
+      // Persist the carried-over state under the session key immediately: the
+      // persist writer already ran earlier in this commit (before this
+      // effect) and would otherwise leave the session unrecorded until the
+      // next panel change.
+      const carriedState = artifactPanelSessionStateRef.current;
+      if (carriedState) {
+        setArtifactPanelWidth(carriedState.width);
+        setArtifactPanelFullscreen(artifactPanelFullscreenRef.current);
+        artifactPanelPersistedStatesRef.current[nextSessionId] = {
+          open: carriedState.open,
+          activeTabId: carriedState.activeTabId,
+          tabs: mergePersistedArtifactPanelTabs(
+            serializeArtifactPanelTabs(carriedState.tabs),
+            deferredDraftTabs,
+            previousDraftPersisted?.tabs,
+          ),
+        };
+      }
+      writeStoredArtifactPanelStates(
+        RIGHT_PANEL_STATE_STORAGE_KEY,
+        artifactPanelPersistedStatesRef.current,
+      );
+      artifactPanelAdoptedSessionRef.current = nextSessionId;
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
       return;
     }
     const newlyAvailableDeferredTab = (
@@ -6628,6 +6933,14 @@ export function App({
       !connection.loadingTranscript &&
       !newlyAvailableDeferredTab
     ) {
+      return;
+    }
+    if (
+      artifactPanelAdoptedSessionRef.current === nextSessionId &&
+      !newlyAvailableDeferredTab
+    ) {
+      // An adopted new-task panel stays untouched through the session's
+      // first load (transcript/artifact flips included).
       return;
     }
     const saveCurrentState = () => {
@@ -6749,7 +7062,7 @@ export function App({
         artifactPanelDeferredPersistedTabsRef.current,
         nextSessionId,
         deferredPersistedTabs,
-        MAX_ARTIFACT_PANEL_SESSION_STATES,
+        MAX_ARTIFACT_PANEL_SESSION_STATES * 2,
       );
     } else {
       artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
@@ -6930,7 +7243,15 @@ export function App({
                   }
                   if (!task || task.kind !== tab.kind) return undefined;
                   const { taskId: _taskId, ...rest } = tab;
-                  return { ...rest, task, sessionActions } as ArtifactPanelTab;
+                  return {
+                    ...rest,
+                    title:
+                      task.kind === 'shell'
+                        ? shellTaskPanelTitle(task.command)
+                        : tab.title,
+                    task,
+                    sessionActions,
+                  } as ArtifactPanelTab;
                 }
                 case 'side_task':
                   return tab.sessionId ? tab : undefined;
@@ -7012,8 +7333,15 @@ export function App({
         ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
         ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
-      const mergedTabs = candidateTabs.filter(
-        (tab) =>
+      const mergedTabs = candidateTabs.filter((tab) => {
+        if (
+          tab.kind === 'side_task' &&
+          tab.sessionId &&
+          removedSideTaskSessionIdsRef.current.has(tab.sessionId)
+        ) {
+          return false;
+        }
+        return (
           // Once the split decision is final, drop stale pane-bound tabs before
           // they can be selected active and mount a foreign collection; while
           // the decision is pending, commit and let the settled sweep reclaim.
@@ -7024,8 +7352,9 @@ export function App({
             (mainViewRef.current !== 'split' ||
               tab.sessionId === undefined ||
               !splitSessionIdsRef.current.includes(tab.sessionId))
-          ),
-      );
+          )
+        );
+      });
       const reclaimEmptiedPanel =
         mergedTabs.length === 0 && candidateTabs.length > 0;
       const activeTabId = mergedTabs.some(
@@ -7085,7 +7414,7 @@ export function App({
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
-    logicalSessionKey,
+    panelStateKey,
     resetEmptyArtifactPanel,
     sessionAgentTraceSupported,
     sessionActions,
@@ -7107,7 +7436,7 @@ export function App({
           ? `shell:${sourceSessionId}:${task.id}`
           : `shell:${task.id}`,
         kind: 'shell',
-        title: task.command,
+        title: shellTaskPanelTitle(task.command),
         task,
         ...(sourceSessionId ? { sessionId: sourceSessionId } : {}),
         ...(sourceSessionActions
@@ -7121,7 +7450,7 @@ export function App({
               const mergedTask = mergeShellTaskSnapshot(item.task, task);
               return {
                 ...tab,
-                title: mergedTask.command,
+                title: shellTaskPanelTitle(mergedTask.command),
                 task: mergedTask,
               };
             })
@@ -7138,7 +7467,7 @@ export function App({
   const openFilesPanel = useCallback(() => {
     const owner = resolveArtifactWorkspaceOwner(
       workspace.capabilities,
-      connection.workspaceCwd,
+      panelWorkspaceCwd,
     );
     if (!filesAvailable || !owner) return;
     rememberArtifactPanelTrigger();
@@ -7158,7 +7487,7 @@ export function App({
     );
     setArtifactPanelOpen(true);
   }, [
-    connection.workspaceCwd,
+    panelWorkspaceCwd,
     filesAvailable,
     getMaxArtifactPanelWidth,
     rememberArtifactPanelTrigger,
@@ -7206,11 +7535,11 @@ export function App({
     [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
   );
   const openSubagentPanel = useCallback(
-    (tool: ACPToolCall) => {
-      if (!connection.sessionId) return;
+    (tool: ACPToolCall, parentSessionId = connection.sessionId) => {
+      if (!parentSessionId) return;
       openSubagentPanelForSession(
         tool,
-        connection.sessionId,
+        parentSessionId,
         connection.workspaceCwd,
       );
     },
@@ -7635,6 +7964,82 @@ export function App({
     (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
     [closeArtifactPanelTabs],
   );
+  const removeSideTaskTabs = useCallback(
+    (sessionIds: ReadonlySet<string>) => {
+      for (const sessionId of sessionIds) {
+        removedSideTaskSessionIdsRef.current.add(sessionId);
+      }
+      const matches = (tab: { kind: string; sessionId?: string }) =>
+        tab.kind === 'side_task' &&
+        tab.sessionId !== undefined &&
+        sessionIds.has(tab.sessionId);
+      closeArtifactPanelTabs(
+        new Set(
+          artifactPanelTabsRef.current.filter(matches).map((tab) => tab.id),
+        ),
+      );
+      for (const [
+        sessionKey,
+        state,
+      ] of artifactPanelStateBySessionRef.current) {
+        const removedIds = new Set(
+          state.tabs.filter(matches).map((tab) => tab.id),
+        );
+        if (removedIds.size === 0) continue;
+        const tabs = state.tabs.filter((tab) => !removedIds.has(tab.id));
+        artifactPanelStateBySessionRef.current.set(sessionKey, {
+          ...state,
+          open: tabs.length > 0 && state.open,
+          tabs,
+          activeTabId:
+            state.activeTabId && removedIds.has(state.activeTabId)
+              ? (tabs[0]?.id ?? null)
+              : state.activeTabId,
+        });
+      }
+      for (const [
+        sessionKey,
+        tabs,
+      ] of artifactPanelDeferredPersistedTabsRef.current) {
+        const retained = tabs.filter((tab) => !matches(tab));
+        if (retained.length === tabs.length) continue;
+        if (retained.length === 0) {
+          artifactPanelDeferredPersistedTabsRef.current.delete(sessionKey);
+        } else {
+          artifactPanelDeferredPersistedTabsRef.current.set(
+            sessionKey,
+            retained,
+          );
+        }
+      }
+      let persistedChanged = false;
+      for (const [sessionKey, state] of Object.entries(
+        artifactPanelPersistedStatesRef.current,
+      )) {
+        const removedIds = new Set(
+          state.tabs.filter(matches).map((tab) => tab.id),
+        );
+        if (removedIds.size === 0) continue;
+        const tabs = state.tabs.filter((tab) => !removedIds.has(tab.id));
+        artifactPanelPersistedStatesRef.current[sessionKey] = {
+          open: tabs.length > 0 && state.open,
+          tabs,
+          activeTabId:
+            state.activeTabId && removedIds.has(state.activeTabId)
+              ? (tabs[0]?.id ?? null)
+              : state.activeTabId,
+        };
+        persistedChanged = true;
+      }
+      if (persistedChanged) {
+        writeStoredArtifactPanelStates(
+          RIGHT_PANEL_STATE_STORAGE_KEY,
+          artifactPanelPersistedStatesRef.current,
+        );
+      }
+    },
+    [closeArtifactPanelTabs],
+  );
   const closeUsageTabs = useCallback(
     (sessionIds?: readonly string[], paneOnly = false) => {
       const sessions = sessionIds ? new Set(sessionIds) : undefined;
@@ -7740,11 +8145,14 @@ export function App({
   // the panel auto-close, the panel focus-restore guard, and the ChatEditor
   // dialogOpen prop.
   const approvalOverlayActive =
-    pendingToolApproval !== null || pendingAskUserApproval !== null;
+    !managedMode &&
+    (pendingToolApproval !== null || pendingAskUserApproval !== null);
   const approvalOverlayActiveRef = useRef(approvalOverlayActive);
   approvalOverlayActiveRef.current =
     approvalOverlayActive ||
-    (canActOnPendingApproval && extractPendingPermission(blocks) !== null);
+    (!managedMode &&
+      canActOnPendingApproval &&
+      extractPendingPermission(blocks) !== null);
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -8212,7 +8620,7 @@ export function App({
         changed = true;
         return {
           ...tab,
-          title: mergedTask.command,
+          title: shellTaskPanelTitle(mergedTask.command),
           task: mergedTask,
         };
       });
@@ -9105,6 +9513,9 @@ export function App({
   const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
+  useEffect(() => {
+    if (managedMode && showApprovalModeDialog) setShowApprovalModeDialog(false);
+  }, [managedMode, showApprovalModeDialog]);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
@@ -9496,24 +9907,39 @@ export function App({
     | 'agents'
     | 'channels'
     | 'live'
-    | 'managed'
     | 'workspaces'
     | null
-  >(() =>
-    initialConnectionsSettingsCategory
-      ? 'settings'
-      : managedAgentProvider && managedSelectionFromUrl().open
-        ? 'managed'
-        : null,
-  );
+  >(() => (initialConnectionsSettingsCategory ? 'settings' : null));
   const [managedSessionId, setManagedSessionId] = useState<string | undefined>(
     () => managedSelectionFromUrl().sessionId,
   );
+  const [managedHistoryRevision, setManagedHistoryRevision] = useState(
+    navigation?.historyRevision,
+  );
+  if (managedHistoryRevision !== navigation?.historyRevision) {
+    setManagedHistoryRevision(navigation?.historyRevision);
+    if (managedAgentProvider) {
+      const selection = managedSelectionFromUrl(
+        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      );
+      setManagedHome(selection.open);
+      setManagedSessionId(selection.sessionId);
+    }
+  }
   useEffect(() => {
-    saveManagedSelection(activePanel === 'managed', managedSessionId);
-  }, [activePanel, managedSessionId]);
+    if (managedAgentProvider)
+      saveManagedSelection(managedMode, managedSessionId);
+  }, [managedAgentProvider, managedMode, managedSessionId]);
   const chatActive =
-    !activePanel && mainView === 'chat' && !artifactPanelFullscreen;
+    !managedMode &&
+    !activePanel &&
+    mainView === 'chat' &&
+    !artifactPanelFullscreen;
+  const managedChatVisible =
+    managedMode &&
+    !activePanel &&
+    mainView === 'chat' &&
+    !artifactPanelFullscreen;
   const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
 
   const activePanelRef = useRef(activePanel);
@@ -9537,6 +9963,7 @@ export function App({
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
     }
+    if (activePanel !== 'plugins') setPluginInitialTab('extensions');
   }, [activePanel]);
   const closePanel = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
@@ -9553,8 +9980,7 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
-      !(activePanel === 'settings' && initialConnectionsSettingsCategory) &&
-      !(activePanel === 'managed' && externalManagedAgentAvailable)
+      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
     ) {
       setActivePanel(null);
     }
@@ -9621,7 +10047,6 @@ export function App({
         | 'agents'
         | 'channels'
         | 'live'
-        | 'managed'
         | 'workspaces',
     ) => {
       splitClassificationGenerationRef.current += 1;
@@ -10446,6 +10871,7 @@ export function App({
   // ToolApproval/AskUserQuestion (their keyboard handling is focus-scoped), so
   // the app no longer focuses the wrapper element directly.
   const toolApprovalOverlayVisible =
+    !managedMode &&
     pendingToolApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
@@ -10453,6 +10879,7 @@ export function App({
     mainView === 'chat' &&
     !artifactPanelFullscreen;
   const askUserOverlayVisible =
+    !managedMode &&
     pendingAskUserApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
@@ -10512,6 +10939,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
+            promptId: `local-command:${crypto.randomUUID()}`,
             text: change.version
               ? t('extensions.install.installedWithVersion', {
                   name,
@@ -10529,6 +10957,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
+            promptId: `local-command:${crypto.randomUUID()}`,
             text: t(key, { name, version: change.version ?? '' }),
           },
         ]);
@@ -11010,6 +11439,7 @@ export function App({
               await onSessionCreatedRef.current?.(sessionId);
             },
             onSessionAllocated: (sessionId) => {
+              draftMaterializedSessionIdRef.current = sessionId;
               notify?.(sessionId);
               preparingSessionIdRef.current = sessionId;
               allocatedSessionId = sessionId;
@@ -11128,6 +11558,169 @@ export function App({
       pushToast('error', message);
     },
     [pushToast, t],
+  );
+  const archiveSideTasks = useCallback(
+    async (sideTasks: readonly SideTaskListItem[]) => {
+      if (!sideTaskArchiveAvailable) return;
+      const eligibleTasks = sideTasks.filter(
+        (sideTask) => sideTask.archivable === true,
+      );
+      if (eligibleTasks.length === 0) return;
+      // Archive through each task's owning workspace runtime: the unscoped
+      // route resolves ids against the legacy-primary catalog, where a
+      // secondary-Workspace task answers notFound without migrating.
+      const idsByWorkspace = new Map<string | undefined, string[]>();
+      for (const sideTask of eligibleTasks) {
+        const key = sideTask.workspaceCwd?.trim()
+          ? sideTask.workspaceCwd
+          : undefined;
+        const ids = idsByWorkspace.get(key);
+        if (ids === undefined) idsByWorkspace.set(key, [sideTask.sessionId]);
+        else ids.push(sideTask.sessionId);
+      }
+      try {
+        const batches = [...idsByWorkspace.entries()].flatMap(([cwd, ids]) =>
+          Array.from(
+            { length: Math.ceil(ids.length / SESSION_ARCHIVE_BATCH_SIZE) },
+            (_, index) => ({
+              cwd,
+              ids: ids.slice(
+                index * SESSION_ARCHIVE_BATCH_SIZE,
+                (index + 1) * SESSION_ARCHIVE_BATCH_SIZE,
+              ),
+            }),
+          ),
+        );
+        const settledResults = await Promise.allSettled(
+          batches.map((batch) =>
+            batch.cwd === undefined
+              ? workspace.client.archiveSessionsData(batch.ids, {
+                  requireIdle: true,
+                })
+              : workspace.client
+                  .workspaceByCwd(batch.cwd)
+                  .archiveSessionsData(batch.ids, { requireIdle: true }),
+          ),
+        );
+        const results = settledResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [result.value] : [],
+        );
+        const archived = new Set([
+          ...results.flatMap((result) => result.archived),
+          ...results.flatMap((result) => result.alreadyArchived),
+        ]);
+        if (archived.size > 0) {
+          sideTaskCatalogRequestGenerationRef.current += 1;
+          for (const sessionId of archived) {
+            optimisticSideTaskIdsRef.current.delete(sessionId);
+          }
+          setSideTaskCatalog((catalog) => ({
+            ...catalog,
+            items: catalog.items.filter(
+              (sideTask) => !archived.has(sideTask.sessionId),
+            ),
+          }));
+          removeSideTaskTabs(archived);
+          setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+        }
+        const errorMessages = [
+          ...results.flatMap((result) =>
+            result.notFound.map(
+              (sessionId) => `${sessionId}: not found in its workspace catalog`,
+            ),
+          ),
+          ...results.flatMap((result) =>
+            result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
+          ),
+          ...settledResults.flatMap((result, index) =>
+            result.status === 'rejected'
+              ? batches[index]!.ids.map(
+                  (sessionId) =>
+                    `${sessionId}: ${formatError(result.reason, t('sidebar.archiveFailed'))}`,
+                )
+              : [],
+          ),
+        ];
+        if (errorMessages.length > 0) {
+          throw new Error(errorMessages.join('; '));
+        }
+      } catch (error) {
+        reportError(error, t('sidebar.archiveFailed'));
+      }
+    },
+    [
+      reportError,
+      removeSideTaskTabs,
+      sideTaskArchiveAvailable,
+      t,
+      workspace.client,
+    ],
+  );
+  const unarchiveSideTasks = useCallback(
+    async (sideTasks: readonly SideTaskListItem[]) => {
+      if (!sideTaskRestoreAvailable) return;
+      if (sideTasks.length === 0) return;
+      const idsByWorkspace = new Map<string | undefined, string[]>();
+      for (const sideTask of sideTasks) {
+        const key = sideTask.workspaceCwd?.trim()
+          ? sideTask.workspaceCwd
+          : undefined;
+        const ids = idsByWorkspace.get(key);
+        if (ids === undefined) idsByWorkspace.set(key, [sideTask.sessionId]);
+        else ids.push(sideTask.sessionId);
+      }
+      try {
+        const groups = [...idsByWorkspace.entries()];
+        const settledResults = await Promise.allSettled(
+          groups.map(([cwd, ids]) =>
+            cwd === undefined
+              ? workspace.client.unarchiveSessionsData(ids)
+              : workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+          ),
+        );
+        const results = settledResults.flatMap((result) =>
+          result.status === 'fulfilled' ? [result.value] : [],
+        );
+        const restored = new Set([
+          ...results.flatMap((result) => result.unarchived),
+          ...results.flatMap((result) => result.alreadyActive),
+        ]);
+        if (restored.size > 0) {
+          sideTaskCatalogRequestGenerationRef.current += 1;
+          setArchivedSideTaskCatalog((catalog) => ({
+            ...catalog,
+            items: catalog.items.filter(
+              (sideTask) => !restored.has(sideTask.sessionId),
+            ),
+          }));
+          setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
+        }
+        const errorMessages = [
+          ...results.flatMap((result) =>
+            result.notFound.map(
+              (sessionId) => `${sessionId}: not found in its workspace catalog`,
+            ),
+          ),
+          ...results.flatMap((result) =>
+            result.errors.map((entry) => `${entry.sessionId}: ${entry.error}`),
+          ),
+          ...settledResults.flatMap((result, index) =>
+            result.status === 'rejected'
+              ? groups[index]![1].map(
+                  (sessionId) =>
+                    `${sessionId}: ${formatError(result.reason, t('sidebar.unarchiveFailed'))}`,
+                )
+              : [],
+          ),
+        ];
+        if (errorMessages.length > 0) {
+          throw new Error(errorMessages.join('; '));
+        }
+      } catch (error) {
+        reportError(error, t('sidebar.unarchiveFailed'));
+      }
+    },
+    [reportError, sideTaskRestoreAvailable, t, workspace.client],
   );
   const refuseModelSetup = useCallback(
     (text: string) => {
@@ -11774,9 +12367,10 @@ export function App({
   // Tasks page) or the fullscreen artifact panel — so keystrokes/Escape can't
   // reach the hidden composer underneath. The fullscreen gate also keeps the
   // btw capture-phase Escape handler from dismissing hidden content and
-  // swallowing the Escape that shrinks the panel.
+  // swallowing the Escape that shrinks the panel. Managed home also hides
+  // this daemon composer; its shortcuts must not reach the Local session.
   const interactionBlocked =
-    dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
+    managedMode || dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
   const mainVoiceTarget = useMemo(
     () =>
       workspaceContextActive
@@ -12555,14 +13149,26 @@ export function App({
   // read-only display commands wrap this in echoLocalCommandIfIdle and
   // intentionally ignore the suppression signal — their status-block output
   // does not split the active turn.
+  useEffect(() => {
+    clearPendingLocalCommands(store);
+  }, [connection.sessionId, store]);
   const echoOrDeferLocalCommand = useCallback(
-    (text: string, images?: PromptImage[]): boolean =>
+    (
+      text: string,
+      images?: PromptImage[],
+      localCommandId = `local-command:echo:${crypto.randomUUID()}`,
+    ): boolean =>
       appendOrDeferLocalUserMessage(
         streamingStateRef.current !== 'idle',
         text,
         images,
         {
-          append: (value: string) => store.appendLocalUserMessage(value),
+          append: (value: string) => {
+            store.appendLocalUserMessage(value, undefined, {
+              source: 'local_command',
+              localCommandId,
+            });
+          },
         },
       ),
     [store],
@@ -12573,10 +13179,18 @@ export function App({
   // block, which does not split the active turn, so they run immediately
   // mid-turn with only the echo skipped.
   const echoLocalCommandIfIdle = useCallback(
-    (text: string): void => {
-      void echoOrDeferLocalCommand(text);
+    (text: string): string => {
+      const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+      beginLocalCommand(store, localCommandId);
+      if (streamingStateRef.current === 'idle') {
+        store.appendLocalUserMessage(text, undefined, {
+          source: 'local_command',
+          localCommandId,
+        });
+      }
+      return localCommandId;
     },
-    [echoOrDeferLocalCommand],
+    [store],
   );
 
   // Shared result dispatch for those read-only commands: `clearActiveText:
@@ -12584,10 +13198,12 @@ export function App({
   // block mid-stream, which would split the streaming answer and orphan its
   // usage frames.
   const dispatchReadOnlyStatus = useCallback(
-    (text: string, data?: unknown) => {
+    (text: string, data?: unknown, localCommandId?: string) => {
+      finishLocalCommand(store, localCommandId);
       store.dispatch([
         {
           type: 'status',
+          promptId: localCommandId ?? `local-command:${crypto.randomUUID()}`,
           text,
           ...(data !== undefined ? { data } : {}),
           clearActiveText: false,
@@ -12662,6 +13278,14 @@ export function App({
     () => (projectFeaturesAvailable ? loadedWorkspaceSettings : []),
     [loadedWorkspaceSettings, projectFeaturesAvailable],
   );
+  const availableApprovalModes = useApprovalModes(
+    activeWorkspaceCwd,
+    allowedApprovalModes,
+  );
+  const showResponseTokensPerSecond =
+    workspaceSettings.find(
+      (setting) => setting.key === 'ui.showResponseTokensPerSecond',
+    )?.values.effective === true;
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -13337,7 +13961,13 @@ export function App({
 
   const handleClearScreen = useCallback(() => {
     if (streamingStateRef.current !== 'idle') {
-      store.dispatch([{ type: 'status', text: t('clear.blocked') }]);
+      store.dispatch([
+        {
+          type: 'status',
+          promptId: `local-command:${crypto.randomUUID()}`,
+          text: t('clear.blocked'),
+        },
+      ]);
       return;
     }
     autoRecapVersionRef.current += 1;
@@ -13385,6 +14015,7 @@ export function App({
 
   const setComposerMode = useCallback(
     async (modeId: string, planMode: boolean): Promise<boolean> => {
+      if (managedModeRef.current) return false;
       if (modeTransitionRef.current?.owner.isCurrent()) return false;
       if (sessionWriteBlocked) return false;
       if (!isDaemonApprovalMode(modeId) || modeId === 'plan') {
@@ -13414,6 +14045,7 @@ export function App({
         setPlanExecutionMode(executionModeRef.current);
         const approval = pendingApprovalRef.current;
         if (
+          !managedModeRef.current &&
           !planMode &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
@@ -13427,6 +14059,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
+                promptId: `local-command:${crypto.randomUUID()}`,
                 text: t('mode.autoApproved', { tool: approval.title || '' }),
               },
             ]);
@@ -13458,9 +14091,20 @@ export function App({
   );
   const handleSetMode = useCallback(
     (modeId: string) => {
+      if (
+        isDaemonApprovalMode(modeId) &&
+        modeId !== 'plan' &&
+        !availableApprovalModes.some((mode) => mode === modeId)
+      ) {
+        reportError(
+          new Error(`Approval mode not offered here: ${modeId}`),
+          t('local.approvalMode'),
+        );
+        return;
+      }
       void setComposerMode(modeId, currentModeRef.current === 'plan');
     },
-    [setComposerMode],
+    [availableApprovalModes, setComposerMode, reportError, t],
   );
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(
@@ -14038,13 +14682,9 @@ export function App({
   ]);
 
   const handleCycleMode = useCallback(() => {
-    // findIndex, not indexOf: narrowing currentMode to the tuple member type
-    // silently degrades when the SDK's declaration bundle leaves its
-    // permission-mode import dangling, and the build must survive both states.
-    const idx = MODES_CYCLE.findIndex((mode) => mode === executionMode);
-    const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
-    handleSetMode(next);
-  }, [executionMode, handleSetMode]);
+    const next = nextApprovalMode(availableApprovalModes, executionMode);
+    if (next) handleSetMode(next);
+  }, [availableApprovalModes, executionMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context
   // indicator. Echoes the command when idle — that also makes the transcript
@@ -14058,7 +14698,7 @@ export function App({
       // so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
       const owner = sessionOwnerGuard.capture();
-      echoLocalCommandIfIdle(commandText);
+      const localCommandId = echoLocalCommandIfIdle(commandText);
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
@@ -14066,18 +14706,26 @@ export function App({
           dispatchReadOnlyStatus(
             t('contextUsage.title'),
             createContextUsageMessageData(result),
+            localCommandId,
           );
         })
         .catch((error: unknown) => {
           if (!owner.isCurrent()) return;
+          dispatchReadOnlyStatus(
+            t('messageDelete.commandFailed'),
+            undefined,
+            localCommandId,
+          );
           reportError(error, 'Failed to load context usage');
-        });
+        })
+        .finally(() => finishLocalCommand(store, localCommandId));
     },
     [
       echoLocalCommandIfIdle,
       dispatchReadOnlyStatus,
       requireActiveSessionForLocalCommand,
       sessionActions,
+      store,
       sessionOwnerGuard,
       reportError,
       t,
@@ -14135,6 +14783,7 @@ export function App({
           store.dispatch([
             {
               type: 'status',
+              promptId: `local-command:${crypto.randomUUID()}`,
               text: t('branch.success', {
                 name: result.displayName,
               }),
@@ -14334,6 +14983,7 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      setManagedHome(false);
       pendingManualTitleRef.current = opts?.carryManualTitle
         ? { displayName: opts.carryManualTitle }
         : undefined;
@@ -15378,6 +16028,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
+      setManagedHome(false);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
@@ -16707,7 +17358,9 @@ export function App({
           if (commitComposerAccepted) commitComposerAccepted();
           else editorRef.current?.clear();
         }
-        store.appendLocalUserMessage(text);
+        store.appendLocalUserMessage(text, undefined, {
+          localCommandId: `local-command:${crypto.randomUUID()}`,
+        });
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
         const objective =
           operation.kind === 'set' || operation.kind === 'edit'
@@ -17165,6 +17818,7 @@ export function App({
               store.dispatch([
                 {
                   type: 'status',
+                  promptId: `local-command:${crypto.randomUUID()}`,
                   text: [
                     t('language.current', {
                       language: languageLabel(selectedLanguage),
@@ -17183,6 +17837,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
+                    promptId: `local-command:${crypto.randomUUID()}`,
                     text: [
                       t('language.set'),
                       '',
@@ -17269,6 +17924,7 @@ export function App({
                 store.dispatch([
                   {
                     type: result.status === 'error' ? 'error' : 'status',
+                    promptId: `local-command:${crypto.randomUUID()}`,
                     text: translateCopyMessage(result.message, t),
                   },
                 ]);
@@ -17546,29 +18202,37 @@ export function App({
             if (toolsArg === 'desc' || toolsArg === 'descriptions') {
               setShowToolsDialog(true);
             } else {
-              if (echoOrDeferLocalCommand(text, images)) return true;
+              const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+              if (echoOrDeferLocalCommand(text, images, localCommandId))
+                return true;
+              const owner = sessionOwnerGuard.capture();
+              beginLocalCommand(store, localCommandId);
               workspaceActions
                 .loadToolsStatus()
                 .then((status) => {
+                  if (!owner.isCurrent()) return;
                   const tools = status?.tools ?? [];
-                  if (tools.length === 0) {
-                    store.dispatch([{ type: 'status', text: t('tools.none') }]);
-                  } else {
-                    const list = tools
-                      .map((tool) => `- ${tool.displayName || tool.name}`)
-                      .join('\n');
-                    store.dispatch([
-                      {
-                        type: 'status',
-                        text: `${t('tools.available')}\n\n${list}`,
-                      },
-                    ]);
-                  }
-                  resumeChatBottomFollow('smooth');
+                  const list = tools
+                    .map((tool) => `- ${tool.displayName || tool.name}`)
+                    .join('\n');
+                  dispatchReadOnlyStatus(
+                    tools.length
+                      ? `${t('tools.available')}\n\n${list}`
+                      : t('tools.none'),
+                    undefined,
+                    localCommandId,
+                  );
                 })
                 .catch((error: unknown) => {
+                  if (!owner.isCurrent()) return;
+                  dispatchReadOnlyStatus(
+                    t('messageDelete.commandFailed'),
+                    undefined,
+                    localCommandId,
+                  );
                   reportError(error, 'Failed to load tools');
-                });
+                })
+                .finally(() => finishLocalCommand(store, localCommandId));
             }
             return true;
           }
@@ -17684,16 +18348,24 @@ export function App({
                   break;
                 }
               }
+              const localCommandId = `local-command:${crypto.randomUUID()}`;
               if (parseError) {
-                store.appendLocalUserMessage(text);
-                store.dispatch([{ type: 'error', text: parseError }]);
+                store.appendLocalUserMessage(text, undefined, {
+                  localCommandId,
+                });
+                store.dispatch([
+                  { type: 'error', promptId: localCommandId, text: parseError },
+                ]);
                 return true;
               }
               if (!source) {
-                store.appendLocalUserMessage(text);
+                store.appendLocalUserMessage(text, undefined, {
+                  localCommandId,
+                });
                 store.dispatch([
                   {
                     type: 'error',
+                    promptId: localCommandId,
                     text: t('extensions.install.usage'),
                   },
                 ]);
@@ -17704,10 +18376,11 @@ export function App({
                 pushToast('warning', t('extensions.install.waitForSession'));
                 return true;
               }
-              store.appendLocalUserMessage(text);
+              store.appendLocalUserMessage(text, undefined, { localCommandId });
               store.dispatch([
                 {
                   type: 'status',
+                  promptId: localCommandId,
                   text: t('extensions.install.started', { source }),
                 },
               ]);
@@ -17731,10 +18404,13 @@ export function App({
                 });
               return true;
             }
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+            if (echoOrDeferLocalCommand(text, images, localCommandId))
+              return true;
             store.dispatch([
               {
                 type: 'error',
+                promptId: localCommandId,
                 text: t('extensions.install.usage'),
               },
             ]);
@@ -17808,6 +18484,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
+                    promptId: `local-command:${crypto.randomUUID()}`,
                     text: t('rename.success', { name: displayName }),
                   },
                 ]);
@@ -17879,7 +18556,7 @@ export function App({
             else if (statsArg === 'tools') statsView = 'tools';
             if (!requireActiveSessionForLocalCommand()) return false;
             const owner = sessionOwnerGuard.capture();
-            echoLocalCommandIfIdle(text);
+            const localCommandId = echoLocalCommandIfIdle(text);
             sessionActions
               .getStats()
               .then((result) => {
@@ -17887,16 +18564,24 @@ export function App({
                 dispatchReadOnlyStatus(
                   t('stats.title'),
                   createStatsMessageData(result, statsView),
+                  localCommandId,
                 );
               })
               .catch((error: unknown) => {
                 if (!owner.isCurrent()) return;
+                dispatchReadOnlyStatus(
+                  t('messageDelete.commandFailed'),
+                  undefined,
+                  localCommandId,
+                );
                 reportError(error, 'Failed to load stats');
-              });
+              })
+              .finally(() => finishLocalCommand(store, localCommandId));
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
-            echoLocalCommandIfIdle(text);
+            const owner = sessionOwnerGuard.capture();
+            const localCommandId = echoLocalCommandIfIdle(text);
             (workspaceContextActive
               ? Promise.all([
                   workspaceActions.loadPreflight().catch(() => null),
@@ -17906,6 +18591,7 @@ export function App({
               : Promise.resolve([null, null, null] as const)
             )
               .then(([preflight, providers, env]) => {
+                if (!owner.isCurrent()) return;
                 const sys = collectSystemInfo(preflight, env);
 
                 let authSource = sys.authSource;
@@ -17958,16 +18644,31 @@ export function App({
                   memoryUsage: sys.memoryUsage,
                 };
 
-                dispatchReadOnlyStatus(serializeStatusMessage(info));
+                dispatchReadOnlyStatus(
+                  serializeStatusMessage(info),
+                  undefined,
+                  localCommandId,
+                );
               })
               .catch((error: unknown) => {
+                if (owner.isCurrent())
+                  dispatchReadOnlyStatus(
+                    t('messageDelete.commandFailed'),
+                    undefined,
+                    localCommandId,
+                  );
                 reportError(error, 'Failed to load status info');
-              });
+              })
+              .finally(() => finishLocalCommand(store, localCommandId));
             return true;
           }
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            const localCommandId = `local-command:${crypto.randomUUID()}`;
+            if (echoOrDeferLocalCommand(text, images, localCommandId))
+              return true;
+            const owner = sessionOwnerGuard.capture();
+            beginLocalCommand(store, localCommandId);
             (workspaceContextActive
               ? Promise.all([
                   workspaceActions.loadPreflight().catch(() => null),
@@ -17992,9 +18693,12 @@ export function App({
                     title: bugTitle,
                     systemInfo: sysInfo,
                   });
-                  store.dispatch([
-                    { type: 'status', text: t('bug.submitted') },
-                  ]);
+                  if (owner.isCurrent())
+                    dispatchReadOnlyStatus(
+                      t('bug.submitted'),
+                      undefined,
+                      localCommandId,
+                    );
                 } else {
                   const fields = Object.entries(sysInfo)
                     .filter(([, v]) => v)
@@ -18007,17 +18711,34 @@ export function App({
                   const win = window.open(url, '_blank');
                   if (win) {
                     win.opener = null;
-                    store.dispatch([
-                      { type: 'status', text: t('bug.submitted') },
-                    ]);
+                    if (owner.isCurrent())
+                      dispatchReadOnlyStatus(
+                        t('bug.submitted'),
+                        undefined,
+                        localCommandId,
+                      );
                   } else {
-                    pushToast('error', t('bug.popupBlocked'));
+                    if (owner.isCurrent())
+                      dispatchReadOnlyStatus(
+                        t('bug.popupBlocked'),
+                        undefined,
+                        localCommandId,
+                      );
+                    if (owner.isCurrent())
+                      pushToast('error', t('bug.popupBlocked'));
                   }
                 }
               })
               .catch((error: unknown) => {
+                if (owner.isCurrent())
+                  dispatchReadOnlyStatus(
+                    t('messageDelete.commandFailed'),
+                    undefined,
+                    localCommandId,
+                  );
                 reportError(error, t('bug.failed'));
-              });
+              })
+              .finally(() => finishLocalCommand(store, localCommandId));
             return true;
           }
         }
@@ -18162,7 +18883,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      resumeChatBottomFollow,
       providedLanguage,
       selectedLanguage,
       setPendingModel,
@@ -18635,7 +19355,13 @@ export function App({
           );
         });
     } else {
-      store.dispatch([{ type: 'status', text: t('retry.none') }]);
+      store.dispatch([
+        {
+          type: 'status',
+          promptId: `local-command:${crypto.randomUUID()}`,
+          text: t('retry.none'),
+        },
+      ]);
     }
   }, [
     connected,
@@ -18723,7 +19449,7 @@ export function App({
     streamingState !== 'idle' || sessionHasActivePrompt;
   useEffect(() => {
     resetEscapeState();
-  }, [escStreamingBoundary, resetEscapeState]);
+  }, [escStreamingBoundary, managedMode, resetEscapeState]);
 
   useEffect(() => {
     // Arm a two-press action: the first Esc shows the affordance and starts a
@@ -19003,6 +19729,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
+                promptId: `local-command:${crypto.randomUUID()}`,
                 text: t('settings.models.runtimeSyncFailed'),
               },
             ]);
@@ -19011,7 +19738,11 @@ export function App({
           // settings panel does.
           if (owner.isCurrent() && result?.requiresRestart) {
             store.dispatch([
-              { type: 'status', text: t('settings.requiresRestart') },
+              {
+                type: 'status',
+                promptId: `local-command:${crypto.randomUUID()}`,
+                text: t('settings.requiresRestart'),
+              },
             ]);
           }
           // A transient reload failure shouldn't surface as "delete failed" —
@@ -19090,7 +19821,11 @@ export function App({
           // panel does for restart-required edits.
           if (result?.requiresRestart) {
             store.dispatch([
-              { type: 'status', text: t('settings.requiresRestart') },
+              {
+                type: 'status',
+                promptId: `local-command:${crypto.randomUUID()}`,
+                text: t('settings.requiresRestart'),
+              },
             ]);
           }
           // A reload failure shouldn't surface as "save failed" — the value
@@ -19266,7 +20001,11 @@ export function App({
       .then((result) => {
         if (owner.isCurrent() && result?.requiresRestart) {
           store.dispatch([
-            { type: 'status', text: t('settings.requiresRestart') },
+            {
+              type: 'status',
+              promptId: `local-command:${crypto.randomUUID()}`,
+              text: t('settings.requiresRestart'),
+            },
           ]);
         }
       })
@@ -19532,11 +20271,24 @@ export function App({
     [renderWelcomeFooter, welcomeHeaderProps],
   );
   const isChatEmptyState =
+    !managedMode &&
     !connection.sessionId &&
     displayMessages.length === 0 &&
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  // Custom header renderers require a session. The built-in empty-state
+  // header exposes only configured workspace actions with a resolved owner.
+  const emptyStateChatHeader =
+    isChatEmptyState &&
+    Boolean(header) &&
+    !renderChatHeader &&
+    workspaceContextActive &&
+    Boolean(activeWorkspaceCwd) &&
+    mainView === 'chat' &&
+    ((rightPanelHeaderItemVisible && emptyStateRightPanelItems.length > 0) ||
+      showMobileAccess ||
+      workspaceHostsEnabled);
   const handleAgentCollaborationError = useCallback(
     (message: string) => pushToast('error', message),
     [pushToast],
@@ -19735,6 +20487,14 @@ export function App({
     effectiveSessionContext?.kind,
     isChatEmptyState,
   ]);
+  const composerNamesWorkspace =
+    composerWorkspaceSelectEnabled &&
+    visibleComposerToolbarActions.includes('workspace') &&
+    composerWorkspaces !== undefined &&
+    (composerWorkspaces.length > 1 ||
+      scratchWorkspaceRegistrationSupported ||
+      dynamicWorkspaceRegistrationSupported ||
+      (standaloneSessionsSupported && !lockedWorkspaceCwd));
   const useMobileWelcomeMiddleLayout =
     isChatEmptyState && mobileWelcomeFooterMiddle;
   const showMobileWelcomeFooterMiddle =
@@ -19775,11 +20535,13 @@ export function App({
   const environmentPanelFits =
     chatWidthMode !== 'wide' && environmentPanelCanDock;
   const environmentPanelVisible =
+    !managedMode &&
     environmentPanelOpen &&
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
   const workspaceGitStatusEnabled =
+    !managedMode &&
     !activePanel &&
     !artifactPanelFullscreen &&
     !showMissingSessionState &&
@@ -20264,7 +21026,7 @@ export function App({
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
     selectedReviewPath,
-    workspaceCwd: connection.workspaceCwd || '',
+    workspaceCwd: panelWorkspaceCwd || '',
     loading: artifactsLoading,
     restoring: artifactPanelRestoring,
     error: artifactsError,
@@ -20288,6 +21050,7 @@ export function App({
             );
             if (!tag) return;
             if (useFloatingArtifactPanel) {
+              focusComposerAfterArtifactPanelCloseRef.current = true;
               closeArtifactPanel();
             } else {
               setArtifactPanelFullscreen(false);
@@ -20309,12 +21072,18 @@ export function App({
     trajectoryTabId: connection.sessionId
       ? trajectoryTabId(connection.sessionId)
       : undefined,
-    items: rightPanelItems,
+    items: isChatEmptyState ? emptyStateRightPanelItems : rightPanelItems,
     sideTaskAvailable: sideTasksAvailable,
     sideTasks: visibleSideTasks,
+    archivedSideTasks: visibleArchivedSideTasks,
     sideTasksLoading,
     onCreateSideTask: createEmptySideTask,
     onOpenSideTask: openSideTask,
+    onArchiveSideTasks: sideTaskArchiveAvailable ? archiveSideTasks : undefined,
+    onUnarchiveSideTasks: sideTaskRestoreAvailable
+      ? unarchiveSideTasks
+      : undefined,
+    onSideTaskMenuOpen: refreshSideTaskCatalog,
     onCreateSideTaskSession: createSideTaskSession,
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,
@@ -20457,6 +21226,9 @@ export function App({
             >
               <ModelDialog
                 mode={modelDialogMode}
+                modelRefresh={
+                  modelDialogMode === 'main' ? modelRefresh : undefined
+                }
                 models={modelDialogModels[modelDialogMode]}
                 loading={
                   (modelDialogMode === 'advisor' && providersState.loading) ||
@@ -20483,7 +21255,7 @@ export function App({
               />
             </DialogShell>
           )}
-          {showApprovalModeDialog && (
+          {!managedMode && showApprovalModeDialog && (
             <DialogShell
               title={t('mode.select')}
               size="sm"
@@ -20491,6 +21263,7 @@ export function App({
             >
               <ApprovalModeDialog
                 currentMode={executionMode}
+                availableModes={availableApprovalModes}
                 sessionWorkflowEnabled={sessionWorkflowEnabled}
                 onSelect={(modeId) => {
                   handleSetMode(modeId);
@@ -20569,9 +21342,9 @@ export function App({
                 agentTools={
                   sessionWorkflowEnabled ? tasksDialogAgentTools : []
                 }
-                onOpenSubagent={(tool) => {
+                onOpenSubagent={(tool, parentSessionId) => {
                   setTasksDialogMessage(null);
-                  openSubagentPanel(tool);
+                  openSubagentPanel(tool, parentSessionId);
                 }}
                 onOpenMonitor={handleOpenMonitorDetails}
               />
@@ -20640,7 +21413,7 @@ export function App({
                   store.dispatch([
                     type === 'error'
                       ? { type: 'error', text }
-                      : { type: 'status', text },
+                      : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
                   ]);
                 }}
                 onClose={handleCloseAuthDialog}
@@ -20695,6 +21468,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
+                      promptId: `local-command:${crypto.randomUUID()}`,
                       text:
                         sessionIds.length === 1
                           ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
@@ -20726,6 +21500,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
+                      promptId: `local-command:${crypto.randomUUID()}`,
                       text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
                     },
                   ]);
@@ -20950,6 +21725,7 @@ export function App({
                       : undefined
                   }
                   onOpenPlugins={() => {
+                    setPluginInitialTab('extensions');
                     closeMobileDrawer();
                     openPanel('plugins');
                   }}
@@ -20969,7 +21745,8 @@ export function App({
                     managedAgentProvider
                       ? () => {
                           closeMobileDrawer();
-                          openPanel('managed');
+                          setManagedHome(true);
+                          returnToChat();
                         }
                       : undefined
                   }
@@ -21016,13 +21793,45 @@ export function App({
                   // in the composer's workspace picker instead. From a Live
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
-                  onNewSession={(workspaceCwd) =>
-                    createNewSession(
+                  onNewSession={(workspaceCwd) => {
+                    if (managedMode) {
+                      setManagedSessionId(undefined);
+                      closeMobileDrawer();
+                      returnToChat();
+                      return true;
+                    }
+                    return createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
                         : { kind: 'inherit', leaveLive: true },
-                    )
+                    );
+                  }}
+                  sessionContent={
+                    managedMode ? (
+                      <div ref={setManagedNavigationTarget} />
+                    ) : undefined
                   }
+                  sessionHeader={managedAgentProvider ? (
+                    <Tabs
+                      className="px-2 pb-2"
+                      value={managedMode ? 'managed' : 'local'}
+                      onValueChange={(value) =>
+                        setManagedHome(value === 'managed')
+                      }
+                    >
+                      <TabsList
+                        aria-label={t('managed.executionMode')}
+                        className="w-full"
+                      >
+                        <TabsTrigger value="local" className="flex-1">
+                          {t('managed.localMode')}
+                        </TabsTrigger>
+                        <TabsTrigger value="managed" className="flex-1">
+                          {t('managed.managedMode')}
+                        </TabsTrigger>
+                      </TabsList>
+                    </Tabs>
+                  ) : undefined}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
@@ -21170,8 +21979,38 @@ export function App({
                 .join(' ')}
               aria-hidden={artifactPanelFullscreen || undefined}
             >
+              {managedMode &&
+                !activePanel &&
+                mainView === 'chat' &&
+                sidebarOptions.enabled &&
+                sidebarOptions.showCompactToggle && (
+                    <button
+                      type="button"
+                      className={styles.hamburgerButton}
+                      style={{ margin: '8px 20px' }}
+                      aria-label={t('sidebar.toggleMenu')}
+                      aria-expanded={mobileDrawerOpen}
+                      onClick={() => {
+                        setForceMobileDrawer(false);
+                        setMobileDrawerOpen((open) => !open);
+                      }}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 6h18M3 12h18M3 18h18" />
+                      </svg>
+                    </button>
+              )}
               {chatHeaderEnabled &&
-                !isChatEmptyState &&
+                !managedMode &&
+                (!isChatEmptyState || emptyStateChatHeader) &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
@@ -21245,28 +22084,39 @@ export function App({
                       location={
                         workspaceHostsEnabled && mainView === 'chat' ? (
                           <WorkspaceLocation
-                            cwd={connection.workspaceCwd}
+                            cwd={panelWorkspaceCwd}
                             hostOrigin={focusedHostOrigin}
                           />
                         ) : undefined
                       }
                       content={
-                        titleHeaderItemVisible
+                        titleHeaderItemVisible && !isChatEmptyState
                           ? (sessionDisplayName ?? t('session.new'))
                           : null
                       }
                       workspaceName={headerWorkspaceName}
                       workspacePath={activeWorkspaceCwd}
+                      hideWorkspaceIcon={isChatEmptyState && composerNamesWorkspace}
                       environmentOpen={environmentPanelVisible}
                       environmentAvailable={
-                        mainView === 'chat' && environmentHeaderItemVisible
+                        !isChatEmptyState &&
+                        mainView === 'chat' &&
+                        environmentHeaderItemVisible
                       }
                       environmentRunning={environmentRunning}
                       rightPanelOpen={artifactPanelOpen}
                       rightPanelAvailable={
                         mainView === 'chat' &&
                         rightPanelHeaderItemVisible &&
-                        !artifactPanelOpen
+                        !artifactPanelOpen &&
+                        (!isChatEmptyState ||
+                          (Boolean(activeWorkspaceCwd) &&
+                            emptyStateRightPanelItems.length > 0))
+                      }
+                      onOpenFiles={
+                        mainView === 'chat' && filesAvailable
+                          ? openFilesPanel
+                          : undefined
                       }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
@@ -21343,20 +22193,15 @@ export function App({
                 .join(' ')}
             >
               {sidebarOptions.enabled &&
+                !managedMode &&
                 sidebarOptions.showCompactToggle &&
-                (!chatHeaderEnabled || isChatEmptyState) &&
+                (!chatHeaderEnabled ||
+                  (isChatEmptyState && !emptyStateChatHeader)) &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
                     type="button"
-                    className={[
-                      styles.hamburgerButton,
-                      !chatHeaderEnabled || isChatEmptyState
-                        ? styles.hamburgerButtonFloating
-                        : undefined,
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
+                    className={`${styles.hamburgerButton} ${styles.hamburgerButtonFloating}`}
                     onClick={() => {
                       setForceMobileDrawer(false);
                       setMobileDrawerOpen((open) => !open);
@@ -21380,10 +22225,7 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable ||
-                  activePanel === 'status' ||
-                  (activePanel === 'managed' &&
-                    externalManagedAgentAvailable)) && (
+                (projectFeaturesAvailable || activePanel === 'status') && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -21407,8 +22249,6 @@ export function App({
                               ? t('sidebar.channelSettings')
                             : activePanel === 'live'
                               ? t('sidebar.liveSettings')
-                            : activePanel === 'managed'
-                              ? t('managed.title')
                               : activePanel === 'workspaces'
                                 ? t('workspacesOverview.title')
                               : t('sessionsOverview.title')
@@ -21498,13 +22338,11 @@ export function App({
                         ? t('settings.title')
                         : activePanel === 'status'
                           ? t('daemon.title')
-                          : activePanel === 'managed'
-                            ? t('managed.title')
                             : t('sessionsOverview.title')}
                     </div>
                     </div>
                   )}
-                  <div className={`${styles.panelBody} ${activePanel === 'managed' ? styles.managedPanelBody : ''}`} key={activePanel}>
+                  <div className={styles.panelBody} key={activePanel}>
                     <ShadowDomBoundary
                       enabled={
                         shadowDomOptions.plugins &&
@@ -21626,16 +22464,6 @@ export function App({
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
                       />
-                    ) : activePanel === 'managed' ? (
-                      <ManagedSessionsPage
-                        key={
-                          managedAgentProvider?.storageKey ?? workspace.baseUrl
-                        }
-                        sessionId={managedSessionId}
-                        onSelectSession={setManagedSessionId}
-                        workspaceCwd={lockedWorkspaceCwd}
-                        managedAgentProvider={managedAgentProvider}
-                      />
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
                         key={agentsNav.request}
@@ -21662,6 +22490,10 @@ export function App({
                         onClose={returnToChat}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
+                        initialTab={pluginInitialTab}
+                        skillsWorkspaceCwd={skillsSourceCwd}
+                        onSkillsWorkspaceChange={selectSkillsWorkspace}
+                        managedSkills={managedAgentProvider?.kind === 'java'}
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
@@ -21877,6 +22709,7 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <WorkflowRunsPage
+                      onOpenSubagent={openSubagentPanel}
                       onWorkflowRunStarted={() =>
                         setBackgroundTasksRefreshTrigger((value) => value + 1)
                       }
@@ -22065,6 +22898,7 @@ export function App({
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
                       <SplitView
+                        showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
@@ -22111,6 +22945,41 @@ export function App({
                   </WebShellCustomizationProvider>
                 </div>
               )}
+              {managedAgentProvider && (
+                <div
+                  className={`${styles.managedHome} ${managedChatVisible ? '' : styles.chatViewHidden}`}
+                  aria-hidden={!managedChatVisible || undefined}
+                  data-testid="managed-home"
+                >
+                  <WebShellCustomizationProvider value={customization}>
+                    <ManagedSessionsPage
+                      key={managedAgentProvider.storageKey}
+                      sessionId={managedSessionId}
+                      onSelectSession={(id) => {
+                        setManagedSessionId(id);
+                        if (managedModeRef.current) {
+                          closeMobileDrawer();
+                          returnToChat();
+                        }
+                      }}
+                      workspaceCwd={lockedWorkspaceCwd}
+                      managedAgentProvider={managedAgentProvider}
+                      creationSkills={managedCreationSkills}
+                      onManageSkills={() => {
+                        setPluginInitialTab('skills');
+                        closeMobileDrawer();
+                        openPanel('plugins');
+                      }}
+                      interactive={managedChatVisible}
+                      navigationTarget={
+                        sidebarOptions.enabled
+                          ? managedNavigationTarget
+                          : undefined
+                      }
+                    />
+                  </WebShellCustomizationProvider>
+                </div>
+              )}
               <div
                 className={[
                   styles.chatViewWrap,
@@ -22124,7 +22993,7 @@ export function App({
                   // App.module.css that keeps this wrap relative so the
                   // absolutely-positioned bottom panels keep their anchor.
                   CustomFooter ? styles.chatViewWithCustomFooter : undefined,
-                  activePanel ||
+                  managedMode || activePanel ||
                   mainView !== 'chat' ||
                   artifactPanelFullscreen
                     ? styles.chatViewHidden
@@ -22139,7 +23008,7 @@ export function App({
                 // reach the outer composer/toolbar behind the covering surface.
                 // State is preserved (the node stays mounted).
                 aria-hidden={
-                  activePanel ||
+                  managedMode || activePanel ||
                   mainView !== 'chat' ||
                   artifactPanelFullscreen
                     ? true
@@ -22676,6 +23545,7 @@ export function App({
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
+                              showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
                               startedAt={
                                 failedPromptRetry?.startedAt ??
                                 activeTurnStartedAt
@@ -22929,6 +23799,7 @@ export function App({
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={executionMode}
+                          availableModes={availableApprovalModes}
                           modeControlsDisabled={modeControlsBusy}
                           planMode={currentMode === 'plan'}
                           onTogglePlan={handleTogglePlan}
@@ -23002,6 +23873,7 @@ export function App({
                           onOpenContextUsage={
                             contextUsageAvailable ? openCurrentContextUsagePanel : undefined
                           }
+                          modelRefresh={modelRefresh}
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
@@ -23136,7 +24008,7 @@ export function App({
                               goalSnapshot={goalSnapshot}
                               activeGoal={activeGoal}
                               tasks={footerTasks}
-                              availableModes={MODES_CYCLE}
+                              availableModes={availableApprovalModes}
                               availableModels={(connection.models ?? [])
                                 .filter(isVisibleComposerModel)
                                 .map((m) => ({
@@ -23164,7 +24036,7 @@ export function App({
                             goalSnapshot={goalSnapshot}
                             activeGoal={activeGoal}
                             tasks={footerTasks}
-                            availableModes={MODES_CYCLE}
+                            availableModes={availableApprovalModes}
                             availableModels={(connection.models ?? [])
                               .filter(isVisibleComposerModel)
                               .map((m) => ({
@@ -23336,7 +24208,7 @@ export function App({
                 onDismiss={dismissEnvironmentPanel}
               />
             )}
-            {artifactPanelOpen && useFloatingArtifactPanel && (
+            {!managedMode && artifactPanelOpen && useFloatingArtifactPanel && (
               <Drawer
                 open
                 autoFocus={floatingArtifactDrawerAutoFocus}
@@ -23372,6 +24244,12 @@ export function App({
                   onCloseAutoFocus={(event) => {
                     const trigger = artifactPanelTriggerRef.current;
                     artifactPanelTriggerRef.current = null;
+                    if (focusComposerAfterArtifactPanelCloseRef.current) {
+                      focusComposerAfterArtifactPanelCloseRef.current = false;
+                      event.preventDefault();
+                      editorRef.current?.focus();
+                      return;
+                    }
                     if (!trigger?.isConnected) return;
                     event.preventDefault();
                     trigger.focus();
@@ -23437,7 +24315,7 @@ export function App({
                 panel stays mounted across the mode change. While fullscreen
                 it is the modal surface: dialog role/name plus Tab containment
                 (what the floating variant gets from vaul's Radix dialog). */}
-            {artifactPanelOpen &&
+            {!managedMode && artifactPanelOpen &&
               !useFloatingArtifactPanel &&
               artifactPanelSlotEl &&
               createPortal(

@@ -14,7 +14,16 @@ import {
   hostedApprovalAsks,
   hostedApprovalDefinition,
   parseHostedApprovalSettings,
+  readHostedApprovalDefinition,
 } from './hosted-tool-approval.js';
+import {
+  HOSTED_WORKSPACE_READ_PROFILE,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceReadProfile,
+  isHostedWorkspaceSearchProfile,
+  isHostedWorkspaceGlobProfile,
+  isHostedWorkspaceShellProfile,
+} from './hosted-workspace-profiles.js';
 
 describe('Hosted tool approval settings', () => {
   it('defaults to yolo and accepts only the modes a tool turn can ask in', () => {
@@ -73,6 +82,29 @@ describe('Hosted tool approval settings', () => {
     ).toBe(false);
   });
 
+  // #13753 I3: the read profile is a saved Workspace profile with glob and
+  // no Shell, so a snapshot child is never asked about either read tool.
+  it('pre-approves both read tools on the read profile', () => {
+    const profile = HOSTED_WORKSPACE_READ_PROFILE;
+    expect(profile).toBe('hosted-workspace-read/1');
+    expect(isHostedWorkspaceProfile(profile)).toBe(true);
+    expect(isHostedWorkspaceReadProfile(profile)).toBe(true);
+    expect(isHostedWorkspaceShellProfile(profile)).toBe(false);
+    expect(isHostedWorkspaceReadProfile('hosted-workspace-files/2')).toBe(
+      false,
+    );
+    for (const mode of ['default', 'auto-edit'] as const)
+      for (const tool of ['read_file', 'glob'])
+        expect(
+          hostedApprovalAsks(
+            { mode, timeoutMs: 1_000 },
+            tool,
+            isHostedWorkspaceGlobProfile(profile),
+          ),
+        ).toBe(false);
+    expect(isHostedWorkspaceSearchProfile(profile)).toBe(false);
+  });
+
   it('asks before every team write and never before reading the board', () => {
     for (const mode of ['default', 'auto-edit'] as const) {
       expect(
@@ -105,6 +137,14 @@ describe('Hosted tool approval settings', () => {
     expect(
       hostedApprovalDefinition({ mode: 'auto-edit', timeoutMs: 5_000 }),
     ).toEqual({ approvalMode: 'auto-edit', approvalTimeoutMs: 5_000 });
+  });
+
+  it('retains a selectable Full Access timeout through a cold definition read', () => {
+    const settings = parseHostedApprovalSettings('yolo', 5_000)!;
+    expect(settings.timeoutMs).toBe(5_000);
+    expect(
+      readHostedApprovalDefinition(hostedApprovalDefinition(settings, true)),
+    ).toEqual({ mode: 'yolo', timeoutMs: 5_000 });
   });
 });
 
@@ -212,6 +252,30 @@ describe('Hosted approval waiters', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(settled).toBe(true);
     await waiting;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not overlap asynchronous policy polls and propagates a failed read', async () => {
+    vi.useFakeTimers();
+    let fail!: (error: Error) => void;
+    const onPoll = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    const waiting = new HostedApprovalWaiters().wait(
+      'policy',
+      Date.now() + 60_000,
+      new AbortController().signal,
+      () => false,
+      onPoll,
+    );
+    const failure = waiting.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onPoll).toHaveBeenCalledOnce();
+    fail(new Error('writer fenced'));
+    await expect(failure).resolves.toMatchObject({ message: 'writer fenced' });
     expect(vi.getTimerCount()).toBe(0);
   });
 

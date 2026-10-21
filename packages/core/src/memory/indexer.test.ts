@@ -25,6 +25,7 @@ import {
 } from './indexer.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import * as trustedMemoryFilesystem from './trusted-memory-filesystem.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 vi.mock('./trusted-memory-filesystem.js', { spy: true });
 
@@ -127,40 +128,45 @@ describe('managed auto-memory indexer', () => {
     await expect(fs.readFile(index, 'utf-8')).resolves.toBe('GOOD INDEX\n');
   });
 
-  it('refuses to persist a partial index when a subdirectory cannot be read', async () => {
-    // chmod 000 blocks neither root nor Windows, where a directory chmod only
-    // toggles FILE_ATTRIBUTE_READONLY and so cannot make a directory
-    // unreadable — the rebuild would resolve and the rejects assertion red.
-    if (process.platform === 'win32' || process.getuid?.() === 0) {
-      return;
-    }
-    // A partially walked root must fail the rebuild loudly: the index is the
-    // persisted, authoritative artifact, so committing it from a scan that
-    // silently skipped a directory would drop those entries with no warning.
-    const memoryRoot = getAutoMemoryRoot(projectRoot);
-    const indexPath = getAutoMemoryIndexPath(projectRoot);
-    const doc = (name: string) =>
-      `---\ntype: project\nname: ${name}\ndescription: ${name}\n---\nbody`;
-    const visible = path.join(memoryRoot, 'project', 'visible.md');
-    const locked = path.join(memoryRoot, 'reference');
-    await fs.mkdir(path.dirname(visible), { recursive: true });
-    await fs.writeFile(visible, doc('Visible'), 'utf-8');
-    await fs.mkdir(locked, { recursive: true });
-    await fs.writeFile(path.join(locked, 'hidden.md'), doc('Hidden'), 'utf-8');
-
-    const complete = await rebuildManagedAutoMemoryIndex(projectRoot);
-    expect(complete).toContain('reference/hidden.md');
-
-    await fs.chmod(locked, 0o000);
-    try {
-      await expect(rebuildManagedAutoMemoryIndex(projectRoot)).rejects.toThrow(
-        'memory scan',
+  // chmod 000 blocks neither root with its DAC capabilities nor Windows,
+  // where a directory chmod only toggles FILE_ATTRIBUTE_READONLY and so
+  // cannot make a directory unreadable — the rebuild would resolve and the
+  // rejects assertion red.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'refuses to persist a partial index when a subdirectory cannot be read',
+    async () => {
+      // A partially walked root must fail the rebuild loudly: the index is the
+      // persisted, authoritative artifact, so committing it from a scan that
+      // silently skipped a directory would drop those entries with no warning.
+      const memoryRoot = getAutoMemoryRoot(projectRoot);
+      const indexPath = getAutoMemoryIndexPath(projectRoot);
+      const doc = (name: string) =>
+        `---\ntype: project\nname: ${name}\ndescription: ${name}\n---\nbody`;
+      const visible = path.join(memoryRoot, 'project', 'visible.md');
+      const locked = path.join(memoryRoot, 'reference');
+      await fs.mkdir(path.dirname(visible), { recursive: true });
+      await fs.writeFile(visible, doc('Visible'), 'utf-8');
+      await fs.mkdir(locked, { recursive: true });
+      await fs.writeFile(
+        path.join(locked, 'hidden.md'),
+        doc('Hidden'),
+        'utf-8',
       );
-      await expect(fs.readFile(indexPath, 'utf-8')).resolves.toBe(complete);
-    } finally {
-      await fs.chmod(locked, 0o700);
-    }
-  });
+
+      const complete = await rebuildManagedAutoMemoryIndex(projectRoot);
+      expect(complete).toContain('reference/hidden.md');
+
+      await fs.chmod(locked, 0o000);
+      try {
+        await expect(
+          rebuildManagedAutoMemoryIndex(projectRoot),
+        ).rejects.toThrow('memory scan');
+        await expect(fs.readFile(indexPath, 'utf-8')).resolves.toBe(complete);
+      } finally {
+        await fs.chmod(locked, 0o700);
+      }
+    },
+  );
 
   it('does not create a missing user root while rebuilding', async () => {
     const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];

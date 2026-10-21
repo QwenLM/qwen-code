@@ -433,7 +433,7 @@ describe('child Workspace receipt (#13753 I2)', () => {
   });
 
   it("carries a worktree child's outcome into its wake notification", async () => {
-    for (const workspaceMode of ['worktree', 'shared'] as const) {
+    for (const workspaceMode of ['worktree', 'shared', 'snapshot'] as const) {
       const harness = await createHarness();
       await withAuthority(harness, async (authority) => {
         const children = new HostedChildAgentSession(
@@ -469,7 +469,8 @@ describe('child Workspace receipt (#13753 I2)', () => {
           (await harness.store.read(contentRef)).toString('utf8'),
         ).text as string;
         // Only the record's own mode decides: a shared child's receipt
-        // never speaks for a Workspace it did not have.
+        // never speaks for a Workspace it did not have, and a snapshot's
+        // copy is always discarded (#13753 I3).
         if (workspaceMode === 'worktree') {
           expect(text).toContain(
             '<workspace>merged into this Workspace as uncommitted changes.</workspace>',
@@ -910,6 +911,90 @@ describe('hosted child agent session (H4b)', () => {
         children.launchedChildRunsOf('scope-main').map((run) => run.childRunId),
       ).toEqual(['run-1']);
       expect(children.activeChildRunsOf('scope-main')).toHaveLength(1);
+    });
+  });
+
+  // #14387: a recovery-blocked run is parked — evidence of an unwitnessed
+  // execution, never live work — so it holds no launch-admission slot:
+  // a full scope of blocked children must not refuse the next launch.
+  it('does not count a recovery-blocked run against the scope concurrency cap', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      // Four children each dispatch, then block on a lost generation.
+      for (let i = 1; i <= MANAGED_CHILD_LIMITS.maxActivePerScope; i++) {
+        await children.admit(
+          launchParams({
+            childRunId: `run-${i}`,
+            executionCallId: `call-${i}`,
+          }),
+        );
+        await children.dispatchStarted(`run-${i}`, {
+          dispatchId: `dispatch-${i}`,
+          runtime: BINDING,
+        });
+        await children.settleRecoveryBlocked(`run-${i}`, {
+          reason: 'runtime_lost',
+        });
+      }
+      // The parked runs are evidence, not live work — the scope's slots
+      // are all free.
+      expect(children.activeChildRunsOf('scope-main')).toHaveLength(0);
+      // ...so the next launch is admitted, past the count the blocked
+      // runs would have held without the exclusion.
+      await children.admit(
+        launchParams({
+          childRunId: 'run-next',
+          executionCallId: 'call-next',
+        }),
+      );
+      expect(
+        children.activeChildRunsOf('scope-main').map((run) => run.childRunId),
+      ).toEqual(['run-next']);
+    });
+  });
+
+  // #14165 FG10d: a background child's blocked line rides the blocked
+  // commit and must describe that revision — never the running one it
+  // replaces ("run running (unknown)" under `<status>blocked</status>`).
+  it("tells a background child's parent the run is blocked, not running", async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admit(launchParams());
+      await children.dispatchStarted('run-1', {
+        dispatchId: 'dispatch-1',
+        runtime: BINDING,
+      });
+      await children.attach('run-1', 'session-child');
+      await children.settleRecoveryBlocked('run-1', {
+        reason: 'runtime_lost',
+      });
+      const input = authority
+        .readEvents({ afterSequence: 0, limit: 64 })
+        .findLast((event) => event.kind === 'input.accepted');
+      expect(input?.payload['turnId']).toBe('run-1:blocked:notify');
+      const text = JSON.parse(
+        (
+          await harness.store.read(
+            input!.payload['contentRef'] as unknown as Parameters<
+              typeof harness.store.read
+            >[0],
+          )
+        ).toString('utf8'),
+      ).text as string;
+      expect(text).toContain('<status>blocked</status>');
+      expect(text).toContain(
+        `<result>\n${childRunEndedText(children.record('run-1')!)}\n</result>`,
+      );
+      expect(text).toContain('recovery blocked (outcome unknown).');
+      expect(text).not.toContain('running');
     });
   });
 

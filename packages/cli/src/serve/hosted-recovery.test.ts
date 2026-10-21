@@ -18,6 +18,7 @@ import {
   hostedRuntimeSessionId,
   HostedWorkspaceBroker,
 } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import { HostedApprovalWaiters } from './hosted-tool-approval.js';
 import {
@@ -32,7 +33,10 @@ import {
   publishHostedModelRequest,
 } from './hosted-model-recovery.js';
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
-import { HOSTED_WORKSPACE_FILE_PROFILE } from './hosted-workspace-profiles.js';
+import {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_READ_PROFILE,
+} from './hosted-workspace-profiles.js';
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -447,12 +451,25 @@ it.each([
   'retired-read-only',
   'retired-write-history-missing',
   'retired-multi-batch',
+  // #13753 I3: a snapshot child's read profile resumes the same way.
+  'retired-read-profile',
+  'retired-read-profile-new-call',
 ])(
   'retains original cleanup through committed-result recovery (%s)',
   async (mode) => {
     const f = await fixture();
+    const readProfile = mode.startsWith('retired-read-profile');
+    const profile = readProfile
+      ? HOSTED_WORKSPACE_READ_PROFILE
+      : HOSTED_WORKSPACE_FILE_PROFILE;
+    const readOnly = mode === 'retired-read-only' || readProfile;
     try {
       let runtime = f.broker.runtime;
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = runtime;
@@ -543,15 +560,14 @@ it.each([
           settings: { mode: 'yolo', timeoutMs: 15 },
           waiters: new HostedApprovalWaiters(),
         },
-        { profile: HOSTED_WORKSPACE_FILE_PROFILE },
+        { profile },
       );
       const call = {
-        name: mode === 'retired-read-only' ? 'read_file' : 'write_file',
+        name: readOnly ? 'read_file' : 'write_file',
         callId: 'original-call',
-        args:
-          mode === 'retired-read-only'
-            ? { file_path: 'original.txt' }
-            : { file_path: 'original.txt', content: 'written once' },
+        args: readOnly
+          ? { file_path: 'original.txt' }
+          : { file_path: 'original.txt', content: 'written once' },
         isClientInitiated: false,
         prompt_id: f.promptId,
       };
@@ -598,7 +614,7 @@ it.each([
       expect(authorization.status).toBe('runnable');
       if (authorization.status !== 'runnable') throw new Error('Not runnable');
       expect(authorization.checkpoint.continuation.phase).toBe('results_ready');
-      if (mode === 'retired-read-only')
+      if (readOnly)
         expect(
           f.session.authority.domainRecord('file_history'),
         ).toBeUndefined();
@@ -640,7 +656,7 @@ it.each([
         undefined,
         undefined,
         undefined,
-        { profile: HOSTED_WORKSPACE_FILE_PROFILE },
+        { profile },
       );
       if (
         mode === 'retired-release-lost' ||
@@ -664,7 +680,10 @@ it.each([
       }
       await replacement.resumeCommittedResults(new AbortController().signal);
       await replacement.consumeResults();
-      if (mode === 'retired-new-call') {
+      if (
+        mode === 'retired-new-call' ||
+        mode === 'retired-read-profile-new-call'
+      ) {
         const next = { ...call, callId: 'new-call' };
         await expect(
           replacement.execute(
@@ -720,16 +739,58 @@ const prepared: LlmPreparedRequest = {
   promptTokensForClamp: 12,
 };
 
+it('restores a screenshot-sized model request from a cold session owner', async () => {
+  const f = await fixture();
+  const data = Buffer.alloc(5 * 1024 * 1024, 0x61).toString('base64');
+  const content = {
+    role: 'user',
+    parts: [{ inlineData: { mimeType: 'image/png', data } }],
+  };
+  const request = createHostedModelRequest(
+    f.session,
+    f.promptId,
+    {
+      ...prepared,
+      history: [content],
+      request: { ...prepared.request, contents: [content] },
+    },
+    0,
+    false,
+    undefined,
+    { bootId: 'source-boot', eventEpoch: 'source-epoch' },
+  );
+  await new ManagedHookActivationController(f.session).runTurn(
+    f.promptId,
+    async (scope) => {
+      const ref = await publishHostedModelRequest(f.session, request);
+      expect(ref?.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+      await scope.beginMainAttempt('fixture', ref);
+    },
+  );
+  await f.session.close();
+  const replacement = await f.reopen();
+  try {
+    expect(await findHostedModelRequest(replacement, f.promptId)).toEqual(
+      request,
+    );
+  } finally {
+    await replacement.close();
+  }
+});
+
 it.each(
   [false, true].flatMap((finished) =>
-    [undefined, false, true].map((allowPersistentRetry) => ({
-      finished,
-      allowPersistentRetry,
-    })),
+    [0, 16].flatMap((round) =>
+      [undefined, false, true].map((allowPersistentRetry) => ({
+        finished,
+        allowPersistentRetry,
+        round,
+      })),
+    ),
   ),
 )(
   'restores an unfinished request even when stream Finished was recorded (%s)',
-  async ({ finished, allowPersistentRetry }) => {
+  async ({ finished, allowPersistentRetry, round }) => {
     const f = await fixture();
     const request = createHostedModelRequest(
       f.session,
@@ -737,8 +798,16 @@ it.each(
       {
         ...prepared,
         ...(allowPersistentRetry === undefined ? {} : { allowPersistentRetry }),
+        ...(allowPersistentRetry === undefined
+          ? {}
+          : {
+              contextPrefixLength: allowPersistentRetry ? 5 : 0,
+              history: allowPersistentRetry
+                ? Array.from({ length: 5 }, () => prepared.history[0]!)
+                : prepared.history,
+            }),
       },
-      0,
+      round,
       false,
       undefined,
       { bootId: 'source-boot', eventEpoch: 'source-epoch' },
@@ -772,6 +841,38 @@ it.each(
   },
 );
 
+it.each([-1, 6, 0.5])(
+  'rejects an invalid saved context prefix %s',
+  async (contextPrefixLength) => {
+    const f = await fixture();
+    try {
+      const request = createHostedModelRequest(
+        f.session,
+        f.promptId,
+        { ...prepared, contextPrefixLength },
+        0,
+        false,
+        undefined,
+        { bootId: 'source-boot', eventEpoch: 'source-epoch' },
+      );
+      await new ManagedHookActivationController(f.session).runTurn(
+        f.promptId,
+        async (scope) => {
+          await scope.beginMainAttempt(
+            'fixture',
+            await publishHostedModelRequest(f.session, request),
+          );
+        },
+      );
+      await expect(
+        findHostedModelRequest(f.session, f.promptId),
+      ).rejects.toThrow('Invalid saved model request');
+    } finally {
+      await f.session.close();
+    }
+  },
+);
+
 it('does not reuse an older snapshot after a newer unsupported attempt', async () => {
   const f = await fixture();
   try {
@@ -798,7 +899,7 @@ it('does not reuse an older snapshot after a newer unsupported attempt', async (
     expect(
       await publishHostedModelRequest(f.session, {
         ...request,
-        workspaceContext: 'x'.repeat(64 * 1024),
+        workspaceContext: 'x'.repeat(32 * 1024 * 1024),
       }),
     ).toBeUndefined();
   } finally {

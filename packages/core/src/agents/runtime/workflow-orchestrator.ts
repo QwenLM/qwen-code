@@ -61,6 +61,10 @@ import type { ContextState } from './agent-headless.js';
 import {
   attachJsonlTranscriptWriter,
   buildAgentTranscriptAttach,
+  getAgentMetaPath,
+  readAgentMeta,
+  writeAgentMeta,
+  type AgentMeta,
 } from '../agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
@@ -87,7 +91,7 @@ import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { resolveExternalWorktreeDir } from '../worktree-pin.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
-import { runWithAgentContext } from './agent-context.js';
+import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import {
   canonicalAgentToolName,
@@ -627,48 +631,59 @@ export function createProductionDispatch(
       );
     }
     let attempt = 0;
-    return runStallResilient(
-      async (attemptSignal, emitter) => {
-        attempt += 1;
-        const cleanupApprovalBridge = bridgeApprovalEvents?.(
-          emitter,
-          dispatchId,
-        );
-        const cleanupTranscript = attachDispatchTranscript(
-          config,
-          workflowAgentId,
-          prompt,
-          agentIdentity.name,
-          emitter,
-          attempt,
-        );
-        try {
-          return await runSingleDispatch(
-            config,
-            prompt,
-            opts,
-            attemptSignal,
+    let finishTranscript: (status: AgentMeta['status']) => void = () => {};
+    let status: AgentMeta['status'] = 'failed';
+    try {
+      const result = await runStallResilient(
+        async (attemptSignal, emitter) => {
+          attempt += 1;
+          const cleanupApprovalBridge = bridgeApprovalEvents?.(
             emitter,
-            workflowAgentId,
-            agentIdentity,
-            onTokens,
-            subagentBounds,
-            refuseSubagentTools,
+            dispatchId,
           );
-        } finally {
-          cleanupTranscript();
-          cleanupApprovalBridge?.();
-        }
-      },
-      {
-        stallMs,
-        signal,
-        // The name can carry a model-authored agentType spelling — keep
-        // the stall log / abandoned error single-line the same way the
-        // "not found" throw site sanitizes it.
-        label: sanitizeForErrorMessage(agentIdentity.name),
-      },
-    );
+          const cleanupTranscript = attachDispatchTranscript(
+            config,
+            workflowAgentId,
+            prompt,
+            agentIdentity.name,
+            emitter,
+            attempt,
+          );
+          finishTranscript = cleanupTranscript;
+          try {
+            return await runSingleDispatch(
+              config,
+              prompt,
+              opts,
+              attemptSignal,
+              emitter,
+              workflowAgentId,
+              agentIdentity,
+              onTokens,
+              subagentBounds,
+              refuseSubagentTools,
+            );
+          } finally {
+            cleanupTranscript('running');
+            cleanupApprovalBridge?.();
+          }
+        },
+        {
+          stallMs,
+          signal,
+          // The name can carry a model-authored agentType spelling — keep
+          // the stall log / abandoned error single-line the same way the
+          // "not found" throw site sanitizes it.
+          label: sanitizeForErrorMessage(agentIdentity.name),
+        },
+      );
+      status = 'completed';
+      return result;
+    } finally {
+      finishTranscript(
+        status === 'failed' && signal?.aborted ? 'cancelled' : status,
+      );
+    }
   };
 }
 
@@ -748,7 +763,7 @@ function attachDispatchTranscript(
   emitter: AgentEventEmitter,
   /** 1-based attempt; retries append to the transcript attempt 1 opened. */
   attempt: number,
-): () => void {
+): (status: AgentMeta['status']) => void {
   const append = attempt > 1;
   try {
     const { jsonlPath, options } = buildAgentTranscriptAttach(config, agentId, {
@@ -762,7 +777,36 @@ function attachDispatchTranscript(
       appendToExisting: append,
       retryAttempt: append ? attempt : undefined,
     });
-    return attachJsonlTranscriptWriter(emitter, jsonlPath, options).cleanup;
+    const writer = attachJsonlTranscriptWriter(emitter, jsonlPath, options);
+    const metaPath = getAgentMetaPath(
+      config.storage.getProjectDir(),
+      options.sessionId,
+      agentId,
+    );
+    const now = new Date().toISOString();
+    const meta: AgentMeta = {
+      agentId,
+      agentType:
+        stripAnsiAndControl(agentName).slice(0, 200) || 'workflow-agent',
+      description: stripAnsiAndControl(prompt).slice(0, 4_096),
+      parentSessionId: options.sessionId,
+      parentAgentId: getCurrentAgentId() ?? null,
+      createdAt:
+        (append ? readAgentMeta(metaPath)?.createdAt : undefined) ?? now,
+      lastUpdatedAt: now,
+      status: 'running',
+      isBackgrounded: false,
+      workflowOwner: { pid: process.pid, hostname: os.hostname() },
+    };
+    writeAgentMeta(metaPath, meta);
+    return (status) => {
+      writer.cleanup();
+      writeAgentMeta(metaPath, {
+        ...meta,
+        status,
+        lastUpdatedAt: new Date().toISOString(),
+      });
+    };
   } catch (error) {
     debugLogger.warn(
       `[Workflow] failed to attach transcript for ${agentId}: ${error}`,

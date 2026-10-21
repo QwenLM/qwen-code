@@ -946,6 +946,21 @@ const SETTINGS_SCHEMA = {
     description: 'User interface settings.',
     showInDialog: false,
     properties: {
+      allowedApprovalModes: {
+        type: 'array',
+        label: 'Web Shell Approval Modes',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        mergeStrategy: MergeStrategy.REPLACE,
+        description:
+          'Execution approval modes offered by Web Shell. Omit to show default, auto-edit, auto and yolo; an empty list offers none. Host allowedApprovalModes overrides this setting. Presentation only: does not change the current mode or enforce backend permissions. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored with a warning. Edit settings.json directly.',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          enum: ['default', 'auto-edit', 'auto', 'yolo'],
+        },
+      },
       theme: {
         type: 'string',
         label: 'Theme',
@@ -1058,7 +1073,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.',
+          'When true, human submissions containing `workflow` or `ultracode` no longer softly steer the current turn toward the Workflow tool. Applies across terminal, IDE, Web and explicitly human-origin SDK messages when workflows are enabled. Plain headless prompts and automated messages do not trigger this reminder.',
         showInDialog: true,
       },
       showStatusInTitle: {
@@ -4291,15 +4306,25 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
-      mods: {
+      generatedUi: {
         type: 'boolean',
-        label: 'Claude-compatible Mod commands',
+        label: 'Generated UI',
         category: 'Experimental',
         requiresRestart: true,
         default: false,
         description:
-          'Run the experimental JavaScript and TypeScript Mod command subset from enabled extensions in trusted headless sessions.',
-        showInDialog: false,
+          'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+        showInDialog: true,
+      },
+      mods: {
+        type: 'boolean',
+        label: 'Mods (Experimental)',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+        showInDialog: true,
       },
       liveVoice: {
         type: 'object',

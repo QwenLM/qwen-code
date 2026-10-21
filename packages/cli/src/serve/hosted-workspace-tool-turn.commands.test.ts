@@ -19,8 +19,15 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
-import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  HostedToolRecoveryRequiredError,
+  HostedWorkspaceToolTurn,
+} from './hosted-workspace-tool-turn.js';
+import {
+  answerResumedTurnCalls,
+  settleCancelledCommandWaitRuns,
+} from './hosted-runtime-recovery.js';
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -100,6 +107,10 @@ let rootDir: string;
 let session: ManagedSession;
 let children: HostedChildAgentSession;
 let commands: HostedSessionCommandSession;
+const executions: Array<{
+  controller: AbortController;
+  result: Promise<Part[]>;
+}> = [];
 let sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
 const lineage: HostedSessionLineage = {
   parentSessionId: PARENT,
@@ -180,18 +191,23 @@ function createTurn(
   );
 }
 
-async function execute(
+function execute(
   turn: HostedWorkspaceToolTurn,
   batch: ToolCallRequestInfo[],
 ): Promise<Part[]> {
-  return turn.execute(
+  const controller = new AbortController();
+  const result = turn.execute(
     batch,
     batch.map((entry) => ({
       functionCall: { id: entry.callId, name: entry.name, args: entry.args },
     })),
     'model',
-    new AbortController().signal,
+    controller.signal,
   );
+  executions.push({ controller, result });
+  // Observe failures even when an earlier assertion prevents the await.
+  void result.catch(() => undefined);
+  return result;
 }
 
 function commandIdOf(callId: string, promptName = 'prompt'): string {
@@ -296,6 +312,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const { controller } of executions) controller.abort();
+  await Promise.allSettled(executions.map(({ result }) => result));
+  executions.length = 0;
   vi.useRealTimers();
   await session?.close();
   await rm(rootDir, { recursive: true, force: true });
@@ -342,6 +361,79 @@ async function journaledResults(): Promise<string> {
       .flatMap((entry) => entry.message?.parts ?? []),
   );
 }
+
+// #14063: every wait settlement preserves the member-message guidance.
+it.each([
+  ['live', 'accepting'],
+  ['live', 'unknown'],
+  ['resumed', 'accepting'],
+  ['resumed', 'unknown'],
+  ['interrupted', 'accepting'],
+  ['interrupted', 'unknown'],
+] as const)(
+  'does not suggest resending a member message in the %s %s path',
+  async (route, state) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }),
+    );
+    const callId = 'call-message-timeout';
+    const commandId = commandIdOf(callId);
+    let live: Promise<Part[]> | undefined;
+    let runs: HarnessCommandWaitRun[] = [];
+    if (route === 'live') {
+      live = execute(createTurn(), [
+        call({ to: 'bob', message: 'sync at noon' }, callId, 'send_message'),
+      ]);
+      await vi.waitFor(
+        () => expect(commands.command(commandId)).toBeDefined(),
+        { timeout: 10_000 },
+      );
+    } else {
+      runs = await parkCalls([{ callId, toolName: 'send_message' }]);
+      await commands.runCommand({
+        commandId,
+        kind: 'member_message',
+        args: { to: 'bob', message: 'sync at noon' },
+        executionCallId: callId,
+        closing: false,
+      });
+    }
+    await commands.handover(commandId, PARENT);
+    if (state === 'unknown') await commands.settle(commandId, 'unknown');
+
+    if (route === 'live') {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 121_000);
+      await live;
+      vi.useRealTimers();
+    } else if (route === 'resumed') {
+      await createManagedHarnessHandle(session).markCommandWaitTimeout();
+      await createTurn().resumeCommandWaitRuns(
+        runs,
+        false,
+        'model',
+        new AbortController().signal,
+      );
+    } else {
+      await settleCancelledCommandWaitRuns({
+        managed: session,
+        sessionId: sessionKey.sessionId,
+        promptId: 'prompt',
+        cwd: rootDir,
+        runs,
+        commands,
+      });
+    }
+
+    const answered = await journaledResults();
+    expect(answered).toContain(
+      sessionCommandEvidenceText(state, 'member_message'),
+    );
+    expect(answered).not.toMatch(/read the board/i);
+    expect(answered).toContain('Do not send it again');
+    expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
+  },
+);
 
 async function runnableCheckpoint() {
   const authorization = await session.authority.harnessRunAuthorization();
@@ -562,6 +654,42 @@ it('parks on the command checkpoint, answers from the reply, and marks it consum
   expect(settled.checkpoint.commandWait?.runs.every((run) => run.folded)).toBe(
     true,
   );
+});
+
+it('propagates an unsettled command append instead of answering the tool call', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const turn = createTurn();
+  const unsettled = new ManagedSessionAppendUnsettledError(
+    new Error('ack lost'),
+  );
+  const realRun = commands.runCommand.bind(commands);
+  const run = vi
+    .spyOn(commands, 'runCommand')
+    .mockImplementationOnce(async (params) => {
+      await realRun(params);
+      throw unsettled;
+    });
+  try {
+    const running = execute(turn, [
+      call({ subject: 'x', description: 'y' }, 'call-unsettled', 'task_create'),
+    ]);
+    const failure = await running.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect((failure as Error).cause).toBe(unsettled);
+    // The outbound landed; the failure is the store's, not the call's
+    // answer, so the parked wait stays for recovery.
+    expect(commands.command(commandIdOf('call-unsettled'))).toBeDefined();
+    const checkpoint = await runnableCheckpoint();
+    expect(checkpoint.continuation.phase).toBe('await_command');
+  } finally {
+    run.mockRestore();
+  }
 });
 
 it('answers a never-handed command as not sent when the wait bound ends', async () => {

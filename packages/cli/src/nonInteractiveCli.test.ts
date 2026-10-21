@@ -34,6 +34,7 @@ import {
   ApprovalMode,
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
+  LoopReason,
   LoopType,
   getToolCallFingerprint,
   CronScheduler,
@@ -68,11 +69,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
-import { ModSession } from './nonInteractive/mod-session.js';
+import { ModSession } from './services/mod-session.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
-import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import {
+  CommandKind,
+  type ExecutionMode,
+  type SlashCommand,
+} from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
+import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
+import { BundledSkillLoader } from './services/BundledSkillLoader.js';
+import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { McpPromptLoader } from './services/McpPromptLoader.js';
+import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
+import { SkillCommandLoader } from './services/SkillCommandLoader.js';
+import type { ICommandLoader } from './services/types.js';
 import {
   _resetCleanupFunctionsForTest,
   runExitCleanup,
@@ -266,6 +278,7 @@ describe('runNonInteractive', () => {
   let processStderrSpy: MockInstance;
   let mockLlmClient: {
     sendMessageStream: Mock;
+    admitUserPrompt: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
@@ -337,6 +350,7 @@ describe('runNonInteractive', () => {
 
     mockLlmClient = {
       sendMessageStream: vi.fn(),
+      admitUserPrompt: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
@@ -3475,6 +3489,77 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('names the cause when the stop carries its loop reason', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Partial work' },
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Long turn',
+      'prompt-id-turn-cap-reason',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+      ),
+    );
+    // The reason replaces the hedged hint that lists every cause.
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('A per-turn tool-call cap was reached'),
+    );
+  });
+
+  it('offers the skipLoopDetection escape for the heuristic global duplicate', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.REPEATED_CALL,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Repeat',
+      'prompt-id-global-dup-reason',
+    );
+
+    // The heuristic detector runs only with skipLoopDetection: false, so the
+    // always-on hint the provider-id breaker gets would be wrong here.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Set the `model.skipLoopDetection` setting to true',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('always-on guard'),
+    );
+  });
+
   it('marks JSON output as an error when loop detection halts the run', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
     setupMetricsMock();
@@ -3667,6 +3752,7 @@ describe('runNonInteractive', () => {
       mockSettings,
       'Use a tool',
       'prompt-id-2',
+      { humanInput: { text: 'ultracode use a tool' } },
     );
 
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
@@ -3688,6 +3774,7 @@ describe('runNonInteractive', () => {
         type: SendMessageType.UserQuery,
         modelOverride: undefined,
         submittedPrompt: 'Use a tool',
+        humanInput: { text: 'ultracode use a tool' },
       },
     );
     // Verify second call (after tool execution) has type: ToolResult
@@ -5058,6 +5145,11 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(LoopType.GLOBAL_TOOL_CALL_DUPLICATE),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the provider replayed a tool call id that had already run',
+      ),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -6500,6 +6592,7 @@ describe('runNonInteractive', () => {
         error: {
           message: '402 Model gpt-oss-120b is not available for billing.',
           status: 402,
+          requestId: 'a30a1854-1925-4da8-8803-73fee2865116',
         },
       },
     };
@@ -6544,6 +6637,14 @@ describe('runNonInteractive', () => {
         expect(line.match(/\[API Error: /g)?.length ?? 0).toBe(1);
       }
     }
+
+    // End-to-end pin for issue #14115: the StructuredError's requestId must
+    // survive the whole forwarding chain onto the user-facing stderr line
+    // (inside the closing bracket, so the idempotency guard above still
+    // recognizes the line as formatted).
+    expect(stderrOutput).toContain(
+      '(request_id: a30a1854-1925-4da8-8803-73fee2865116)',
+    );
   });
 
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
@@ -6630,6 +6731,211 @@ describe('runNonInteractive', () => {
     );
 
     expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
+  });
+
+  describe('UserPromptSubmit admission before a command expands', () => {
+    const spies: Array<{ mockRestore: () => void }> = [];
+    const admission = Object.freeze({ blocked: false });
+    let deploy: SlashCommand & { action: Mock };
+    const finishedStream = () =>
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'done' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]);
+
+    beforeEach(() => {
+      setupMetricsMock();
+      deploy = {
+        name: 'deploy',
+        description: 'deploy',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'deploy expanded' }],
+        }),
+      };
+      for (const Loader of [
+        McpPromptLoader,
+        BuiltinCommandLoader,
+        BundledSkillLoader,
+        SkillCommandLoader,
+        SavedWorkflowLoader,
+      ]) {
+        spies.push(
+          vi
+            .spyOn(Loader.prototype as ICommandLoader, 'loadCommands')
+            .mockResolvedValue([]),
+        );
+      }
+      spies.push(
+        vi
+          .spyOn(FileCommandLoader.prototype as ICommandLoader, 'loadCommands')
+          .mockImplementation(async () => [deploy]),
+      );
+      mockCommandServiceCreate.mockImplementation(
+        async (loaders: ICommandLoader[], signal: AbortSignal) => {
+          const commands = (
+            await Promise.all(
+              loaders.map((loader) => loader.loadCommands(signal)),
+            )
+          )
+            .flat()
+            .map((command) => ({ ...command }));
+          return {
+            getCommands: () => commands,
+            getCommandsForMode: (mode: ExecutionMode) =>
+              filterCommandsForMode(commands, mode),
+          };
+        },
+      );
+      mockLlmClient.admitUserPrompt.mockResolvedValue(admission);
+      mockLlmClient.sendMessageStream.mockImplementation(finishedStream);
+    });
+
+    afterEach(() => {
+      for (const spy of spies.splice(0)) spy.mockRestore();
+    });
+
+    it('admits a custom command before it expands and passes the admission to the first send', async () => {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-admit',
+      );
+
+      expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledExactlyOnceWith(
+        '/deploy prod',
+        'prompt-id-admit',
+      );
+      expect(
+        mockLlmClient.admitUserPrompt.mock.invocationCallOrder[0],
+      ).toBeLessThan(deploy.action.mock.invocationCallOrder[0]!);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+        [{ text: 'deploy expanded' }],
+        expect.any(AbortSignal),
+        'prompt-id-admit',
+        {
+          type: SendMessageType.UserQuery,
+          modelOverride: undefined,
+          submittedPrompt: '/deploy prod',
+          promptAdmission: admission,
+        },
+      );
+    });
+
+    it('sends a refused command unexpanded, with the admission that blocks it', async () => {
+      const refused = Object.freeze({ blocked: true });
+      mockLlmClient.admitUserPrompt.mockResolvedValue(refused);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-refused',
+      );
+
+      expect(deploy.action).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+        [{ text: '/deploy prod' }],
+        expect.any(AbortSignal),
+        'prompt-id-refused',
+        expect.objectContaining({
+          type: SendMessageType.UserQuery,
+          promptAdmission: refused,
+        }),
+      );
+    });
+
+    it('passes the admission to the first send only', async () => {
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'Tool response' }],
+        executionStatus: 'success',
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-1',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-id-tool',
+              },
+            },
+          ]),
+        )
+        .mockImplementationOnce(finishedStream);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-tool',
+      );
+
+      const sendOptions = mockLlmClient.sendMessageStream.mock.calls.map(
+        (call) => call[3],
+      );
+      expect(sendOptions).toEqual([
+        expect.objectContaining({ promptAdmission: admission }),
+        expect.not.objectContaining({ promptAdmission: expect.anything() }),
+      ]);
+      expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledOnce();
+    });
+
+    it('does not admit a notification batch', async () => {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-notification',
+        { sendMessageType: SendMessageType.Notification },
+      );
+
+      expect(mockLlmClient.admitUserPrompt).not.toHaveBeenCalled();
+      expect(deploy.action).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ['before admission', true],
+      ['while admission runs', false],
+    ])(
+      'runs no command when the turn is cancelled %s',
+      async (_, abortFirst) => {
+        const turnAbortController = new AbortController();
+        const cancel = () =>
+          turnAbortController.abort(new TurnInterruptedError());
+        if (abortFirst) cancel();
+        mockLlmClient.admitUserPrompt.mockImplementation(async () => {
+          cancel();
+          return admission;
+        });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          '/deploy prod',
+          'prompt-id-cancelled',
+          {
+            abortController: turnAbortController,
+            recoverableCancellation: true,
+          },
+        );
+
+        expect(exitCode).toBe(130);
+        expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledTimes(
+          abortFirst ? 0 : 1,
+        );
+        expect(deploy.action).not.toHaveBeenCalled();
+        expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('should handle command that requires confirmation by returning early', async () => {

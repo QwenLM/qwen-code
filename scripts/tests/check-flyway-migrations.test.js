@@ -412,9 +412,9 @@ describe('check-flyway-migrations', () => {
   });
 
   it('passes a module that owns no migrations', () => {
-    // runtime-broker shares the classpath namespace but carries no migration
+    // A dependency can share the classpath namespace without a migration
     // sequence; requiring its SQL location would fail the whole invocation.
-    const dir = module('broker');
+    const dir = module('dependency');
     mkdirSync(join(dir, 'src/main/java/com/example'), { recursive: true });
     const result = check(dir);
     expect(result.output).toContain('no migration directories');

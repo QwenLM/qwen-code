@@ -33,6 +33,7 @@ import {
   MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
   type SendMessageOptions,
   type SteerInput,
+  type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
@@ -76,7 +77,7 @@ import {
   Turn,
   type ServerLlmStreamEvent,
 } from './turn.js';
-import { LoopType } from '../telemetry/types.js';
+import { LoopReason, LoopType } from '../telemetry/types.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
 import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
 import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
@@ -120,6 +121,7 @@ import {
   buildChangedSkillsReminder,
   buildMcpServerInstructionsReminderFromEntries,
   getInitialChatHistory,
+  wrapSystemReminder,
 } from './environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
@@ -403,6 +405,7 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: mockUiTelemetryService,
 }));
 vi.mock('../telemetry/loggers.js', () => ({
+  logWorkflowKeyword: vi.fn(),
   logHookCall: vi.fn(),
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
@@ -1367,6 +1370,132 @@ describe('Gemini Client (client.ts)', () => {
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(2);
       expectSessionStart(hookSystem, SessionStartSource.Startup, { nth: 1 });
       expectSessionStart(hookSystem, SessionStartSource.Resume, { nth: 2 });
+    });
+  });
+
+  describe('DW03: human workflow intent', () => {
+    beforeEach(() => {
+      Object.assign(mockConfig, {
+        isWorkflowsEnabled: () => true,
+        getWorkflowKeywordTriggerEnabled: () => true,
+        isWorkflowNameOnly: () => false,
+      });
+      registryMock().getAllToolNames.mockReturnValue(['workflow']);
+      registryMock().getTool.mockReturnValue({ authoringSurface: 'withheld' });
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    const notices = () =>
+      getLastTurnRequestText().match(/The user's message includes the/g) ?? [];
+
+    it('injects an independent Part once and leaves the caller options intact', async () => {
+      const applied = vi.fn();
+      const options = Object.freeze({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'original input',
+        humanInput: Object.freeze({ text: 'ultracode: inspect' }),
+        onWorkflowIntentApplied: applied,
+      });
+      await run([{ text: 'expanded request' }], 'dw03-human', options);
+      expect(notices()).toHaveLength(1);
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts).toContain('expanded request');
+      expect(
+        parts.some(
+          (part) =>
+            typeof part !== 'string' &&
+            part.text?.includes('"ultracode" keyword'),
+        ),
+      ).toBe(true);
+      expect(applied).toHaveBeenCalledExactlyOnceWith('ultracode');
+      expect(options.humanInput.text).toBe('ultracode: inspect');
+      await run([{ text: 'ultracode unknown next turn' }], 'dw03-unknown', {
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'ultracode unknown next turn',
+      });
+      expect(notices()).toHaveLength(0);
+      expect(applied).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      SendMessageType.ToolResult,
+      SendMessageType.Steer,
+      SendMessageType.Retry,
+      SendMessageType.Hook,
+      SendMessageType.Cron,
+      SendMessageType.Notification,
+      SendMessageType.Teammate,
+    ])(
+      'does not activate for an internal %s even with a descriptor',
+      async (type) => {
+        await run([{ text: 'workflow ultracode' }], `dw03-${type}`, {
+          type,
+          humanInput: { text: 'ultracode' },
+        });
+        expect(notices()).toHaveLength(0);
+      },
+    );
+
+    it('does not upgrade an expanded attachment or hook body to human input', async () => {
+      await run(
+        [{ text: 'attachment body: workflow ultracode' }],
+        'dw03-attachment',
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'inspect @context.txt' },
+        },
+      );
+      expect(notices()).toHaveLength(0);
+    });
+
+    it('does not let a descriptor bypass automatic Goal admission', async () => {
+      const onWorkflowIntentApplied = vi.fn();
+      await expect(
+        run([{ text: 'ultracode' }], 'dw03-goal', {
+          type: SendMessageType.Goal,
+          humanInput: { text: 'ultracode' },
+          onWorkflowIntentApplied,
+        }),
+      ).rejects.toThrow('An automatic Goal turn requires an exact permit');
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(onWorkflowIntentApplied).not.toHaveBeenCalled();
+    });
+
+    it('excludes concurrent side queries', async () => {
+      await run([{ text: 'ultracode' }], 'dw03-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+        humanInput: { text: 'ultracode' },
+      });
+      expect(notices()).toHaveLength(0);
+    });
+
+    it('does not inject or notify when the raw admission blocks', async () => {
+      const applied = vi.fn();
+      const bus = installMessageBus(
+        vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by fixture' },
+        }),
+        'UserPromptSubmit',
+      );
+      const admission = await client.admitUserPrompt(
+        'ultracode raw',
+        'dw03-block',
+      );
+      const events = await run([{ text: 'expanded input' }], 'dw03-block', {
+        type: SendMessageType.UserQuery,
+        promptAdmission: admission,
+        humanInput: { text: 'ultracode raw' },
+        onWorkflowIntentApplied: applied,
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: LlmEventType.UserPromptSubmitBlocked,
+        }),
+      );
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(applied).not.toHaveBeenCalled();
+      expect(bus.request.mock.calls[0][0].input.prompt).toBe('ultracode raw');
     });
   });
 
@@ -3616,20 +3745,21 @@ describe('Gemini Client (client.ts)', () => {
       ).not.toContain('Host Git snapshot');
     });
 
-    it('records the gitStatus-free base as the static system prefix on Config', () => {
+    it('keeps git status out of the system instruction and its static prefix', () => {
       vi.mocked(getCoreSystemPrompt).mockReturnValueOnce('core base prompt');
       vi.mocked(getRecentGitStatus).mockReturnValueOnce('Git snapshot A');
 
       const instruction = client['getMainSessionSystemInstruction']();
 
-      // The recorded prefix must be exactly the instruction minus the
-      // volatile git tail: the Anthropic converter's startsWith split relies
-      // on that boundary for the early cache breakpoint.
+      // A repository change between sessions must not change the system
+      // prompt: providers that cache only at the end of the system message
+      // would otherwise lose it. The snapshot goes to the startup prelude.
       const recorded = vi
         .mocked(client['config'].setStaticSystemPrefix)
         .mock.calls.at(-1)?.[0];
       expect(recorded).toBeTruthy();
-      expect(instruction).toBe(`${recorded}\n\nGit snapshot A`);
+      expect(instruction).toBe(recorded);
+      expect(instruction).not.toContain('Git snapshot A');
     });
   });
 
@@ -3743,7 +3873,7 @@ describe('Gemini Client (client.ts)', () => {
       return hookSystem;
     };
 
-    it('refreshes the live system instruction after the working directory changes', async () => {
+    it('announces the new git status after the working directory changes', async () => {
       gitSnapshotsAB();
       mockMemoryManager.resetMemoryBodyStateForSession.mockClear();
       const cancelRecall = vi.spyOn(
@@ -3754,8 +3884,10 @@ describe('Gemini Client (client.ts)', () => {
       );
 
       await client.startChat();
-      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
-        'Git snapshot A',
+      expect(getInitialChatHistory).toHaveBeenLastCalledWith(
+        expect.anything(),
+        undefined,
+        { gitStatus: 'Git snapshot A' },
       );
 
       await client.addWorkingDirectoryChangedContext(
@@ -3766,7 +3898,18 @@ describe('Gemini Client (client.ts)', () => {
       const systemInstruction = client.getChat()['generationConfig']
         .systemInstruction as string;
       expect(systemInstruction).not.toContain('Git snapshot A');
-      expect(systemInstruction).toContain('Git snapshot B');
+      expect(systemInstruction).not.toContain('Git snapshot B');
+      const changeMessage = client
+        .getChat()
+        .getHistory()
+        .find((content) =>
+          content.parts?.some((part) =>
+            part.text?.includes('working directory has changed'),
+          ),
+        );
+      expect(changeMessage?.parts?.[1]?.text).toBe(
+        wrapSystemReminder('Git snapshot B'),
+      );
       expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
       expect(cancelRecall).toHaveBeenCalledWith('new_query');
       expect(
@@ -3777,20 +3920,18 @@ describe('Gemini Client (client.ts)', () => {
     it('clears cached git status so it can be recomputed for the next session', async () => {
       gitSnapshotsAB();
 
-      const instructionBeforeReset =
-        client['getMainSessionSystemInstruction']();
-      const instructionBeforeSecondCall =
-        client['getMainSessionSystemInstruction']();
-
-      expect(instructionBeforeReset).toContain('Git snapshot A');
-      expect(instructionBeforeSecondCall).toContain('Git snapshot A');
+      expect(client['getCachedGitStatus']()).toBe('Git snapshot A');
+      expect(client['getCachedGitStatus']()).toBe('Git snapshot A');
       expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
 
       await client.resetChat();
 
-      const instructionAfterReset = client['getMainSessionSystemInstruction']();
-
-      expect(instructionAfterReset).toContain('Git snapshot B');
+      expect(getInitialChatHistory).toHaveBeenLastCalledWith(
+        expect.anything(),
+        undefined,
+        { gitStatus: 'Git snapshot B' },
+      );
+      expect(client['getCachedGitStatus']()).toBe('Git snapshot B');
       expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
     });
 
@@ -8126,6 +8267,12 @@ Other open files:
     it('halts the interactive turn when paired ToolResults show a frozen stateful board (#9450)', async () => {
       const events = await runTaskListPollTurns(() => 'frozen board');
       expectLoopType(events, 'global_tool_call_duplicate');
+      expect(
+        events.find((e) => e.type === LlmEventType.LoopDetected)?.value,
+      ).toEqual({
+        loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+        loopReason: LoopReason.REPEATED_CALL,
+      });
     });
 
     it('keeps the interactive turn alive while paired ToolResults keep changing (#9450)', async () => {
@@ -8330,6 +8477,33 @@ Other open files:
         'loop_detected',
         LoopType.TURN_TOOL_CALL_CAP,
       );
+    });
+
+    it('bubbles the cap reason and numbers on the LoopDetected event', async () => {
+      // A real detector run (no getLastLoopType spy): an explicit cap of 2
+      // halts the third distinct call, and the event carries why.
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(true);
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          toolCallRequest('cap-1', 'read_file', { path: 'a' }),
+          toolCallRequest('cap-2', 'read_file', { path: 'b' }),
+          toolCallRequest('cap-3', 'read_file', { path: 'c' }),
+        ),
+      );
+      installChat();
+
+      const events = await run([{ text: 'read three files' }], 'prompt-cap');
+
+      expect(events.at(-1)).toEqual({
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 3,
+          toolCallLimit: 2,
+        },
+      });
     });
 
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
@@ -12025,6 +12199,238 @@ Other open files:
         });
       });
 
+      describe('admission before expansion', () => {
+        const submitCalls = (bus: { request: Mock }) =>
+          bus.request.mock.calls.filter(
+            ([request]) => request.eventName === 'UserPromptSubmit',
+          );
+        const admittedSend = (
+          admission: UserPromptAdmission,
+          promptId = 'prompt-admitted',
+          type = SendMessageType.UserQuery,
+        ) =>
+          run([{ text: 'expanded body' }], promptId, {
+            type,
+            submittedPrompt: '/deploy prod',
+            promptAdmission: admission,
+          });
+
+        it('runs UserPromptSubmit on the raw prompt and applies that verdict instead of a second run', async () => {
+          const bus = promptSubmitBus(extraHookContext());
+          const recordUserMessage = vi.fn();
+          vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+            recordUserMessage,
+            recordAttributionSnapshot: vi.fn(),
+          } as unknown as ReturnType<Config['getChatRecordingService']>);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-admitted',
+          );
+          await admittedSend(admission);
+
+          expect(admission.blocked).toBe(false);
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(submitCalls(bus)[0][0].input).toEqual({
+            prompt: '/deploy prod',
+            submitted_prompt: '/deploy prod',
+          });
+          const taggedContext =
+            '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+          expect(recordUserMessage).toHaveBeenCalledWith(
+            [{ text: 'expanded body' }, { text: taggedContext }],
+            undefined,
+            { displayText: '/deploy prod', hookContext: 'extra hook context' },
+            'prompt-admitted',
+          );
+          expect(getLastTurnRequestText().split(taggedContext)).toHaveLength(2);
+        });
+
+        it('blocks the send with the admission verdict before any model call', async () => {
+          const bus = promptSubmitBus({
+            output: { decision: 'block', reason: 'not this one' },
+          });
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-refused',
+          );
+          const events = await admittedSend(admission, 'prompt-refused');
+
+          expect(admission.blocked).toBe(true);
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(events).toContainEqual({
+            type: LlmEventType.UserPromptSubmitBlocked,
+            value: { reason: 'not this one', originalPrompt: '/deploy prod' },
+          });
+          expect(
+            mockInteractionTelemetry.endInteractionSpan,
+          ).toHaveBeenCalledWith('cancelled', { promptId: 'prompt-refused' });
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('keeps hooks registered after an admission without hooks off that prompt', async () => {
+          const bus = installMessageBus(
+            vi.fn().mockResolvedValue({ output: undefined }),
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const admission = await client.admitUserPrompt(
+            '/skill-with-hooks',
+            'prompt-no-hooks',
+          );
+          vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+          await admittedSend(admission, 'prompt-no-hooks');
+          await run([{ text: 'next prompt' }], 'prompt-next');
+
+          expect(
+            submitCalls(bus).map(([request]) => request.input.prompt),
+          ).toEqual(['next prompt']);
+        });
+
+        it("spends the admission on its UserQuery, not on that turn's continuations", async () => {
+          const bus = promptSubmitBus({ output: undefined });
+          vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(false);
+          vi.mocked(await importedNextSpeaker())
+            .mockResolvedValueOnce({
+              reasoning: 'more to do',
+              next_speaker: 'model',
+            })
+            .mockResolvedValue(null);
+          notDoneChat();
+          mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-continued',
+          );
+          await admittedSend(admission, 'prompt-continued');
+
+          // The continuation re-spreads the send options and keeps its
+          // existing UserPromptSubmit run.
+          expect(
+            submitCalls(bus).map(([request]) => request.input.prompt),
+          ).toEqual(['/deploy prod', 'Please continue.']);
+          expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        });
+
+        it.each([
+          [
+            'a forged object',
+            () => Object.freeze({ blocked: false }),
+            'prompt-a',
+          ],
+          ['another prompt id', undefined, 'prompt-b'],
+        ])('rejects an admission from %s', async (_, forge, promptId) => {
+          promptSubmitBus({ output: undefined });
+          const admission =
+            forge?.() ??
+            (await client.admitUserPrompt('/deploy prod', 'prompt-a'));
+
+          await expect(admittedSend(admission, promptId)).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission that was already spent', async () => {
+          promptSubmitBus({ output: undefined });
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-twice',
+          );
+          await admittedSend(admission, 'prompt-twice');
+
+          await expect(admittedSend(admission, 'prompt-twice')).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        });
+
+        it('rejects an admission on a send that is not a UserQuery', async () => {
+          promptSubmitBus({ output: undefined });
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-tool-result',
+          );
+
+          await expect(
+            admittedSend(
+              admission,
+              'prompt-tool-result',
+              SendMessageType.ToolResult,
+            ),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission issued by another client', async () => {
+          promptSubmitBus({ output: undefined });
+          const other = await initializedClient();
+          const admission = await other.admitUserPrompt(
+            '/deploy prod',
+            'prompt-other-client',
+          );
+
+          await expect(
+            admittedSend(admission, 'prompt-other-client'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission after the session changes', async () => {
+          promptSubmitBus({ output: undefined });
+          const admission = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-session',
+          );
+          vi.mocked(mockConfig.getSessionId).mockReturnValue('next-session');
+
+          await expect(
+            admittedSend(admission, 'prompt-session'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('binds the admission to the hook owner fields, not the owner object', async () => {
+          promptSubmitBus({ output: undefined });
+          vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+            runtimeId: 'runtime-1',
+          } as unknown as ReturnType<Config['getHookSystem']>);
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+          const sameOwner = await client.admitUserPrompt(
+            '/deploy prod',
+            'prompt-same-owner',
+          );
+          await admittedSend(sameOwner, 'prompt-same-owner');
+
+          const subagentOwner = await runWithHookExecutionOwner(
+            {
+              runtimeId: 'runtime-1',
+              sessionId: 'test-session-id',
+              agentId: 'agent-1',
+            },
+            () => client.admitUserPrompt('/deploy prod', 'prompt-other-owner'),
+          );
+          await expect(
+            admittedSend(subagentOwner, 'prompt-other-owner'),
+          ).rejects.toThrow(
+            'UserPromptSubmit admission does not match this prompt',
+          );
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        });
+      });
+
       it('wraps injected additionalContext in the reserved tag and records display provenance', async () => {
         promptSubmitBus(extraHookContext());
         const recordUserMessage = vi.fn();
@@ -13250,7 +13656,7 @@ Other open files:
       );
     });
 
-    it('caches git status across repeated system instruction generation', async () => {
+    it('keeps git status out of the inherited system instruction', async () => {
       vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot cached');
       vi.mocked(getRecentGitStatus).mockClear();
       vi.mocked(getCoreSystemPrompt).mockReturnValue('Core prompt');
@@ -13258,11 +13664,11 @@ Other open files:
       await generate();
       await generate();
 
-      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
+      expect(getRecentGitStatus).not.toHaveBeenCalled();
       for (const nth of [1, 2]) {
         expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
           nth,
-          ...withInstruction('Core prompt\n\nGit snapshot cached'),
+          ...withInstruction('Core prompt'),
         );
       }
     });

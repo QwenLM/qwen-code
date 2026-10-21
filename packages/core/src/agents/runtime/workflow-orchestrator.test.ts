@@ -3482,7 +3482,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         .trim()
         .split('\n')
         .map((line) => JSON.parse(line) as Record<string, unknown>);
-      return { calls, records };
+      const meta = JSON.parse(
+        fs.readFileSync(
+          path.join(sessionDir, names[0]!.replace(/\.jsonl$/, '.meta.json')),
+          'utf8',
+        ),
+      );
+      return { calls, records, meta };
     } finally {
       fs.rmSync(transcriptDir, { recursive: true, force: true });
     }
@@ -3542,12 +3548,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // records could not be correlated by agentName with AgentTool launches of
   // the same agentType.
   it('stamps the resolved agentType name in the transcript when a label is also set', async () => {
-    const { calls, records } = await transcriptOf(
+    const { calls, records, meta } = await transcriptOf(
       { lookup: codeReviewer, onCreate: ends('review-output') },
       'review chunk 1 of 3',
       { agentType: 'Code-Reviewer', label: 'chunk-1' },
     );
     expect(calls[0]!.config.name).toBe('code-reviewer');
+    expect(meta.agentType).toBe('code-reviewer');
     expect(records[0]!['agentName']).toBe(calls[0]!.config.name);
   });
 
@@ -5240,6 +5247,106 @@ describe('createProductionDispatch — subagent transcripts', () => {
     expect(names[0]).toBe(`agent-${recs[0]!['agentId'] as string}.jsonl`);
   });
 
+  it.each([
+    {
+      label: '\u001b[31mReviewer\u001b[0m\u0000\u0085',
+      prompt: '\u001b[32mInspect\u001b[0m\u0007\u007f',
+      expectedName: 'Reviewer',
+      expectedPrompt: 'Inspect',
+    },
+    {
+      label: 'a'.repeat(500),
+      prompt: 'p'.repeat(5000),
+      expectedName: 'a'.repeat(200),
+      expectedPrompt: 'p'.repeat(4096),
+    },
+    {
+      label: '\u001b[31m\u0000\u001b[0m',
+      prompt: '\u0000\u0007',
+      expectedName: 'workflow-agent',
+      expectedPrompt: '',
+    },
+  ])(
+    'bounds display metadata without changing the execution prompt: $expectedName',
+    async ({ label, prompt, expectedName, expectedPrompt }) => {
+      await createProductionDispatch(transcriptConfig())(prompt, { label });
+      const name = fs
+        .readdirSync(sessionDir())
+        .find((n) => n.endsWith('.meta.json'))!;
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(sessionDir(), name), 'utf8'),
+      );
+      expect(meta).toMatchObject({
+        agentType: expectedName,
+        description: expectedPrompt,
+      });
+      expect(partsOf(recordsIn(transcriptNames()[0]!)[0]!)).toEqual([
+        { text: prompt },
+      ]);
+      expect(created[0]!.name).toBe(label);
+      expect(created[0]!.prompt).toBe(prompt);
+    },
+  );
+
+  it('persists a resolvable foreground agent identity and lifecycle', async () => {
+    const readMeta = () => {
+      const name = fs
+        .readdirSync(sessionDir())
+        .find((n) => n.endsWith('.meta.json'))!;
+      return JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8'));
+    };
+    nextExecuteHook.value = async () => {
+      expect(readMeta()).toMatchObject({
+        parentSessionId: 'sess-1',
+        status: 'running',
+        isBackgrounded: false,
+        workflowOwner: { pid: process.pid, hostname: os.hostname() },
+        description: 'Inspect the workflow',
+      });
+    };
+    await createProductionDispatch(transcriptConfig())('Inspect the workflow', {
+      label: 'Inspector',
+    });
+    const meta = readMeta();
+    expect(meta).toMatchObject({ agentType: 'Inspector', status: 'completed' });
+    expect(meta.agentId).toBe(recordsIn(transcriptNames()[0]!)[0]!['agentId']);
+  });
+
+  it('persists cancellation without making the workflow child resumable', async () => {
+    const controller = new AbortController();
+    nextExecuteHook.value = async () => {
+      controller.abort();
+      nextTerminateMode.value = 'CANCELLED';
+    };
+    await expect(
+      createProductionDispatch(transcriptConfig(), controller.signal)(
+        'Inspect',
+        {},
+      ),
+    ).rejects.toThrow(/CANCELLED/);
+    const name = fs
+      .readdirSync(sessionDir())
+      .find((n) => n.endsWith('.meta.json'))!;
+    expect(
+      JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8')),
+    ).toMatchObject({ status: 'cancelled', isBackgrounded: false });
+  });
+
+  it('persists failed dispatch metadata when execution throws', async () => {
+    nextExecuteHook.value = async () => {
+      throw new Error('model unavailable');
+    };
+    await expect(
+      createProductionDispatch(transcriptConfig())('Inspect', {}),
+    ).rejects.toThrow('model unavailable');
+    const name = fs
+      .readdirSync(sessionDir())
+      .find((n) => n.endsWith('.meta.json'))!;
+    expect(
+      JSON.parse(fs.readFileSync(path.join(sessionDir(), name), 'utf8')).status,
+    ).toBe('failed');
+  });
+
   // An empty prompt seeds no user record, so it is refused before any
   // transcript starts.
   it('rejects an empty or non-string prompt before attaching a transcript', async () => {
@@ -5343,6 +5450,19 @@ describe('createProductionDispatch — subagent transcripts', () => {
       expect(records[i]!['parentUuid']).toBe(records[i - 1]!['uuid']);
       expect(records[i]!['agentId']).toBe(records[0]!['agentId']);
     }
+    const metaNames = fs
+      .readdirSync(sessionDir())
+      .filter((name) => name.endsWith('.meta.json'));
+    expect(metaNames).toHaveLength(1);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(sessionDir(), metaNames[0]!), 'utf8'),
+      ),
+    ).toMatchObject({
+      agentId: records[0]!['agentId'],
+      status: 'completed',
+      isBackgrounded: false,
+    });
     expect(created).toHaveLength(2);
     expect(created.map((call) => call.agentId)).toEqual([
       records[0]!['agentId'],

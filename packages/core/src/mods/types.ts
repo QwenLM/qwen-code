@@ -46,6 +46,11 @@ export interface ModCommand {
   argumentHint?: string;
 }
 
+export interface ModCommandPresentation {
+  isFullscreen: boolean;
+  columns: number;
+}
+
 export interface ModPlugin {
   id: string;
   name: string;
@@ -60,8 +65,18 @@ export interface ModLog {
 }
 
 export type ModRequest =
-  | { type: 'load'; plugins: ModPlugin[]; cwd: string }
-  | { type: 'command'; command: string; args: string }
+  | {
+      type: 'load';
+      plugins: ModPlugin[];
+      cwd: string;
+      surface: 'terminal' | null;
+    }
+  | {
+      type: 'command';
+      command: string;
+      args: string;
+      presentation?: ModCommandPresentation;
+    }
   | { type: 'tool'; input: ModToolCallInput; builtinTool?: string }
   | { type: 'host-result'; id: number; result?: ModToolResult; error?: string }
   | {
