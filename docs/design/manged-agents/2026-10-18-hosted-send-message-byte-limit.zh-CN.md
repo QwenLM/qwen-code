@@ -89,7 +89,13 @@ assistant record 在首次参数准备**之后**检查，并非每次编码之�
 使用 `validationError ??=` 保留既有收件人、原始大小、plan mode 等拒绝。新增消息编码超限的文案为：
 
 ```text
-Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message and retry.
+Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.
+```
+
+成员通道的文案写明该通道实际执行的上限。此类消息已通过 32768 字节的成员包装上限，因此编码超限来自转义膨胀，而不是原始消息体积：
+
+```text
+Hosted send_message to a member exceeds the 65536-byte inline Session Store limit once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.
 ```
 
 保留现有 `workflow` 文案。`byte_limit` 是函数错误文本中的 token，不是新增响应字段。通过 `convertToFunctionErrorResponse` 保留原函数名和 call ID。
@@ -173,8 +179,8 @@ npx vitest run src/serve/hosted-workspace-tool-turn.commands.test.ts src/serve/h
 工作区仅实施第 4 节的两个生产代码改动：成员→parent 的原始正文检查，以及窄范围的 `send_message` 编码超限拒绝。Store 上限、公共声明、schema、relay 行为不变。
 
 - 独立测试工程师在源码修改前复现五项基线失败，并先实际尝试全局 `qwen` 0.23.3。其普通 CLI 返回 `Tool "send_message" not found in registry`，未到达 Hosted 工具，不能算 Hosted 验收。
-- command、session-message、workflow 套件共 97 项通过，覆盖成员、广播、parent 通道、UTF-8 原始限制、65,536 与 65,537 字节精确编码边界、首次批次拒绝、收件人错误优先级、拒绝写入失败，以及普通工具超限行为不变。宽松 transcript 判据下的直接调用测试仍仅作为 guard/encoder 的隔离证据。
-- 完整 Harness 套件共 566 项通过，其中五项新增回归使用实际模型循环、本地 OpenAI-compatible 脚本端点、生产 ChatRecord 大小判定及 HTTP resource-store inline 检查。成员与普通子 agent 的高转义消息可在同一 prompt 内拒绝后缩短重试；真实 `HostedHookSession` 先处理、持久化脚本化 worker 结果，再让改写消息获得拒绝并缩短。两项 65,400 字节 ASCII 场景仍在 assistant record 处失败，不产生消息记录。
+- command、session-message、workflow 套件共 102 项通过，覆盖成员、广播、parent 通道、UTF-8 原始限制、65,536 与 65,537 字节精确编码边界、首次批次拒绝、收件人错误优先级、拒绝写入失败，以及普通工具超限行为不变。成员通道被告知的是自身的 32768 字节包装上限，而非 Store 上限。宽松 transcript 判据下的直接调用测试仍仅作为 guard/encoder 的隔离证据。
+- 完整 Harness 套件共 611 项通过，其中七项新增回归使用实际模型循环、本地 OpenAI-compatible 脚本端点、生产 ChatRecord 大小判定及 HTTP resource-store inline 检查。原有五项覆盖成员与普通子 agent 发往 `parent`、两项 assistant record 场景，以及真实 Hook 改写；新增两项覆盖成员→`bob` 与成员→`*`（广播）的命令通道恢复。成员、命令通道与普通子 agent 的高转义消息可在同一 prompt 内拒绝后缩短重试；真实 `HostedHookSession` 先处理、持久化脚本化 worker 结果，再让改写消息获得拒绝并缩短。两项 65,400 字节 ASCII 场景仍在 assistant record 处失败，不产生消息记录。
 - 上述 Harness 测试使用本地 journal/resources，并 mock Broker/worker 访问。一条本地排队的 `session_message` 不代表远端收件人已收到。真实 managed-agent-server/MySQL/Broker/Harness/worker 验收尚未执行：Docker 已安装，但 daemon 不可用。
 - `npm run build`、`npm run bundle`、完整 workspace/integration `npm run typecheck`、针对性 ESLint、Prettier 及引用检查均通过。两项源码变异均被直接识别，固定源码按字节恢复。独立修复后验证通过原始五项复现及 24 项选定验收/正常路径用例。独立代码审查的两项建议已纳入，无未处理发现。本地报告及 E2E 计划位于 `.qwen/issues/issue-14062.md` 与 `.qwen/e2e-tests/issue-14062/`；代码审查记录位于 `.qwen/pr-reviews/issue-14062-implementation-review.md`。
 

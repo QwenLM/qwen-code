@@ -89,7 +89,13 @@ In the existing `HostedToolInputInlineLimitError` catch, permit conversion when 
 Use `validationError ??=` so an existing recipient, raw-size, plan-mode or other refusal is preserved. For a new message overflow use:
 
 ```text
-Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message and retry.
+Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.
+```
+
+A member-lane send names the bound that lane actually enforces. It has already fit the 32768-byte member wrapper, so an encoder overflow there comes from escape inflation rather than from the raw message size:
+
+```text
+Hosted send_message to a member exceeds the 65536-byte inline Session Store limit once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.
 ```
 
 Keep the existing `workflow` text. `byte_limit` remains a token in the function error text, not a newly introduced response field. Keep the original function name and call ID through `convertToFunctionErrorResponse`.
@@ -173,8 +179,8 @@ The audit report is retained locally at `.qwen/pr-reviews/issue-14062-design-aud
 The working tree implements only the two production changes in section 4: member→parent raw-content parity and a narrow `send_message` encoding-overflow refusal. Store limits, public declarations, schemas, and relay behavior remain unchanged.
 
 - The independent test engineer reproduced five baseline failures before the source edit, after an actual global `qwen` 0.23.3 attempt could not reach Hosted tools. Its ordinary CLI returned `Tool "send_message" not found in registry`; that attempt is not Hosted acceptance.
-- The command, session-message and workflow suites pass 97 tests. They cover member/broadcast/parent lanes, UTF-8 raw limits, exact encoder boundaries at 65,536 and 65,537 bytes, initial batch refusal, recipient-error precedence, refusal-write failure, and unchanged ordinary-tool overflow. Direct-call tests with a permissive transcript predicate remain isolated guard/encoder evidence.
-- The complete Harness suite passes 566 tests, including five new regressions that use the actual model loop with a local OpenAI-compatible scripted endpoint, production ChatRecord sizing, and the HTTP resource-store inline check. Member and ordinary-child escape-dense messages recover and retry within the same prompt; a real `HostedHookSession` processes/persists the scripted worker result before the rewritten message is refused and shortened. The two 65,400-byte ASCII cases still fail the assistant record with no message record.
+- The command, session-message and workflow suites pass 102 tests. They cover member/broadcast/parent lanes, UTF-8 raw limits, exact encoder boundaries at 65,536 and 65,537 bytes, initial batch refusal, recipient-error precedence, refusal-write failure, and unchanged ordinary-tool overflow. The member lane is told its 32768-byte wrapper bound instead of the store bound. Direct-call tests with a permissive transcript predicate remain isolated guard/encoder evidence.
+- The complete Harness suite passes 611 tests, including seven new regressions that use the actual model loop with a local OpenAI-compatible scripted endpoint, production ChatRecord sizing, and the HTTP resource-store inline check. The original five cover member and ordinary-child sends to `parent`, the two assistant-record cases and the real Hook rewrite; the two added modes cover command-lane recovery for member→`bob` and member→`*` (broadcast). Member, command-lane and ordinary-child escape-dense messages recover and retry within the same prompt; a real `HostedHookSession` processes/persists the scripted worker result before the rewritten message is refused and shortened. The two 65,400-byte ASCII cases still fail the assistant record with no message record.
 - These Harness tests use local journal/resources and mocked Broker/worker access. One locally queued `session_message` is not proof of a remote recipient receiving it. Real managed-agent-server/MySQL/Broker/Harness/worker acceptance is unperformed: Docker was installed but its daemon was unavailable.
 - `npm run build`, `npm run bundle`, full workspace/integration `npm run typecheck`, targeted ESLint, Prettier and reference checks pass. The two source mutations are detected directly, and fixed source is restored byte-for-byte. Independent post-fix verification passes the original five reproduction cases and 24 selected acceptance/happy-path cases. Independent code review has no unaddressed findings after two suggestions were incorporated. Local reports and the E2E plan are under `.qwen/issues/issue-14062.md` and `.qwen/e2e-tests/issue-14062/`; code review is recorded at `.qwen/pr-reviews/issue-14062-implementation-review.md`.
 
