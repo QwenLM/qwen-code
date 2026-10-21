@@ -2199,9 +2199,47 @@ describe('extension tests', () => {
       fs.rmSync(destination, { recursive: true, force: true });
       await manager.refreshCache();
 
-      const snapshot = await manager.uninstallExtension(identity.name, false);
+      // The loader re-keys the policy under the id it derives from the manifest,
+      // so read the key that actually survived instead of assuming the seeded
+      // one: asserting on the seeded id passes whether or not the entry is
+      // cleared.
+      const before = await extensionStore.readSnapshot();
+      const survivor = Object.entries(before.extensions).find(
+        ([, policy]) => policy.name === identity.name,
+      );
+      expect(survivor?.[0]).toBeDefined();
 
-      expect(snapshot.extensions[identity.id]).toBeUndefined();
+      // Mixed case, because the install-side conflict check that creates the
+      // dead end folds case too.
+      const snapshot = await manager.uninstallExtension(
+        'Ghost-Extension',
+        false,
+      );
+
+      expect(snapshot.extensions[survivor![0]]).toBeUndefined();
+      expect(
+        Object.values(snapshot.extensions).some(
+          (policy) => policy.name === identity.name,
+        ),
+      ).toBe(false);
+      expect(snapshot.generation).toBeGreaterThan(before.generation);
+    });
+
+    it('refuses by name when the surviving entry is a declaration', async () => {
+      // `declarationOnly` also covers an installed policy whose artifact went
+      // missing (`mutateMany` flips it), so the fallback must not read the flag
+      // as "nothing left to do": reporting success while clearing nothing is
+      // the worst outcome for the command, and the store already has the honest
+      // answer.
+      const identity = { id: 'ae'.repeat(32), name: 'declared-ghost' };
+      const extensionStore = storeAt(userExtensionsDir);
+      await extensionStore.setDefaultActivations([identity], 'disabled');
+      const manager = createExtensionManager({ extensionStore });
+      await manager.refreshCache();
+
+      await expect(
+        manager.uninstallExtension('declared-ghost', false),
+      ).rejects.toThrow('is not installed.');
     });
 
     it('still reports "Extension not found." for a name with no store entry', async () => {
