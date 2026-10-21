@@ -55,31 +55,31 @@ describe('resolveUnattendedAcpChildApprovalModeForWorkspace', () => {
   });
 
   it('elevates a keyless workspace to auto so unattended children do not park', () => {
-    expect(
-      resolveUnattendedAcpChildApprovalModeForWorkspace(workspace),
-    ).toBe(ApprovalMode.AUTO);
+    expect(resolveUnattendedAcpChildApprovalModeForWorkspace(workspace)).toBe(
+      ApprovalMode.AUTO,
+    );
   });
 
   it('honors a workspace plan pin', async () => {
     await writeWorkspaceApprovalMode('plan');
-    expect(
-      resolveUnattendedAcpChildApprovalModeForWorkspace(workspace),
-    ).toBe(ApprovalMode.PLAN);
+    expect(resolveUnattendedAcpChildApprovalModeForWorkspace(workspace)).toBe(
+      ApprovalMode.PLAN,
+    );
   });
 
   it('honors a workspace default pin without escalating to auto', async () => {
     await writeWorkspaceApprovalMode('default');
-    expect(
-      resolveUnattendedAcpChildApprovalModeForWorkspace(workspace),
-    ).toBe(ApprovalMode.DEFAULT);
+    expect(resolveUnattendedAcpChildApprovalModeForWorkspace(workspace)).toBe(
+      ApprovalMode.DEFAULT,
+    );
   });
 
   it('keeps safe-mode workspaces on default even when a pin is present', async () => {
     process.env['QWEN_CODE_SAFE_MODE'] = '1';
     await writeWorkspaceApprovalMode('auto');
-    expect(
-      resolveUnattendedAcpChildApprovalModeForWorkspace(workspace),
-    ).toBe(ApprovalMode.DEFAULT);
+    expect(resolveUnattendedAcpChildApprovalModeForWorkspace(workspace)).toBe(
+      ApprovalMode.DEFAULT,
+    );
   });
 
   async function writeWorkspaceApprovalMode(mode: string): Promise<void> {

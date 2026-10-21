@@ -586,8 +586,9 @@ async function dispatchTaskToFreshSession(
       parentSessionId: task.sessionId,
       sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
       sourceId: scheduledTaskRunSourceId(task.id),
-      approvalMode:
-        resolveUnattendedAcpChildApprovalModeForWorkspace(target.workspaceCwd),
+      approvalMode: resolveUnattendedAcpChildApprovalModeForWorkspace(
+        target.workspaceCwd,
+      ),
     }),
   );
   try {
