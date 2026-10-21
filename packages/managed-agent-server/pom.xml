@@ -564,8 +564,11 @@
                                  regression add 60 s: healthy 9578 s, fork
                                  10178 s, Verify 180 minutes. The FG13e Hook
                                  stream-gap cell adds 150 s: healthy 9728 s,
-                                 fork 10328 s, Verify 183 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10328</forkedProcessTimeoutInSeconds>
+                                 fork 10328 s, Verify 183 minutes. The FG11d
+                                 close-queued cell adds 134 s (2x its measured
+                                 67.2 s): healthy 9862 s, fork 10462 s, Verify
+                                 185 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10462</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
