@@ -28,24 +28,20 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-} from 'node:fs';
+import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Vendored binaries the CLI spawns directly, one expected entry per platform
-// directory that actually ships the binary. `rg.exe` is a 0644 Windows
-// binary by design, so `-win32` platforms are excluded; `landlock-run/src`
-// is a source directory, not a platform, and falls out through the
-// leaf-existence check. Any future vendored binary spawned the same way
-// belongs here — its runtime heal shares the ripgrep heal's limit of being
-// unable to chmod a root-owned or read-only install (#12668).
+// directory. Platform membership comes from the directory name alone: a
+// platform directory whose binary is missing is itself a broken package and
+// must fail the gate, never shrink the expected set. `rg.exe` is a 0644
+// Windows binary by design, so `-win32` platforms are excluded;
+// `landlock-run/src` is a source directory, not a platform, and is excluded
+// by name. Any future vendored binary spawned the same way belongs here —
+// its runtime heal shares the ripgrep heal's limit of being unable to chmod
+// a root-owned or read-only install (#12668).
 const SPAWNED_VENDORED_BINARIES = [
   {
     root: ['vendor', 'ripgrep'],
@@ -55,7 +51,7 @@ const SPAWNED_VENDORED_BINARIES = [
   {
     root: ['vendor', 'landlock-run'],
     leaf: 'qwen-landlock-run',
-    skip: () => false,
+    skip: (platform) => platform === 'src',
   },
 ];
 
@@ -107,8 +103,9 @@ function listTarEntryModes(tarball) {
 }
 
 /**
- * Packs `packageDir` the way the release publishes it and asserts every unix
- * vendored ripgrep entry keeps 0111. Throws with a per-entry report otherwise.
+ * Packs `packageDir` the way the release publishes it and asserts every
+ * spawned vendored binary entry keeps 0111. Throws with a per-entry report
+ * otherwise.
  */
 export function checkReleaseTarballExecBits(packageDir = 'dist') {
   if (process.platform === 'win32') {
@@ -161,7 +158,6 @@ function expectedSpawnedEntries(packageDir) {
     }
     for (const platform of platforms) {
       if (!platform.isDirectory() || spec.skip(platform.name)) continue;
-      if (!existsSync(join(root, platform.name, spec.leaf))) continue;
       expected.push(
         `package/${spec.root.join('/')}/${platform.name}/${spec.leaf}`,
       );
