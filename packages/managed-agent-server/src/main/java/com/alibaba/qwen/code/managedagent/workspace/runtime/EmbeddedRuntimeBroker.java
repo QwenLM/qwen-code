@@ -605,6 +605,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 + " and QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false";
     }
 
+    /** The workspace ID this Broker resolves, which the Session Store shares. */
+    public static String workspaceId(ManagedAgentProperties.RuntimeBroker broker) {
+        return resolveWorkspaceId(broker, resolveWorkspaceCwd(broker));
+    }
+
     private static String resolveWorkspaceCwd(
             ManagedAgentProperties.RuntimeBroker broker) {
         if ("kubernetes".equals(broker.getProvisioner()) || "kubernetes-workspace".equals(broker.getProvisioner())) {
