@@ -140,9 +140,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(lockedSteps).toHaveLength(2);
     for (const s of lockedSteps) {
       // A child that keeps fd 9 after the step shell dies holds the host lock
-      // until the child exits (#15110), so every external command in the
-      // locked section closes it. Pipeline stages are judged separately: a
-      // leak through either tar keeps the whole lock.
+      // until the child exits, so every external command in the locked section
+      // closes it. Pipeline stages are judged separately: a leak through
+      // either tar keeps the whole lock.
       const commands = s.run
         .replace(/\\\n/g, ' ')
         .split('\n')
@@ -187,18 +187,24 @@ describe('SDK Java self-hosted workflow guards', () => {
         ).toBe(true);
       }
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-'));
-      try {
-        for (const command of locked) {
-          const result = spawnSync(
-            'bash',
-            [
-              '-e',
-              '-c',
-              `
-              pids_file="$LOCK_FILE.pids"
+      // Each run ends with one of these explicit exits, so a workflow line that
+      // leaks the lock is distinguishable from a bash failure in the witness.
+      const verdicts = new Map([
+        [91, 'released the lock while the command was still running'],
+        [92, 'the witness could not take its own lock'],
+        [93, 'still held the lock after fd 9 was closed'],
+        [94, 'the child spawned by the command did not outlive the step shell'],
+      ]);
+      const witness = (command) =>
+        spawnSync(
+          'bash',
+          [
+            '-c',
+            `
+              pids_file="$LOCK_FILE.pids.$$"
               trap 'while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$pids_file"' EXIT
-              exec 9>"$LOCK_FILE"
-              flock --nonblock 9
+              exec 9>"$LOCK_FILE" || exit 92
+              flock --nonblock 9 || exit 92
               survive() {
                 sleep 30 </dev/null >/dev/null 2>&1 &
                 echo $! >> "$pids_file"
@@ -210,18 +216,34 @@ describe('SDK Java self-hosted workflow guards', () => {
               ${command}
               if flock --nonblock "$LOCK_FILE" true; then exit 91; fi
               exec 9>&-
-              flock --nonblock "$LOCK_FILE" true
-              kill -0 "$(tail -n 1 "$pids_file")"
+              # A transient flock failure that acquires on retry is not a leak.
+              released=
+              for _ in 1 2 3; do
+                if flock --nonblock "$LOCK_FILE" true; then released=1; break; fi
+                sleep 0.05
+              done
+              [ -n "$released" ] || exit 93
+              kill -0 "$(tail -n 1 "$pids_file")" || exit 94
             `,
-            ],
-            {
-              encoding: 'utf8',
-              timeout: 5000,
-              env: { ...process.env, LOCK_FILE: join(dir, 'tests.lock') },
-            },
-          );
-          expect(result.error, command).toBeUndefined();
-          expect(result.status, command + result.stderr).toBe(0);
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: { ...process.env, LOCK_FILE: join(dir, 'tests.lock') },
+          },
+        );
+      try {
+        for (const command of locked) {
+          let result = witness(command);
+          // Anything outside the witness's own verdicts is a load-sensitive
+          // bash failure, not a leak: retry once.
+          if (result.status !== 0 && !verdicts.has(result.status)) {
+            result = witness(command);
+          }
+          const detail = `${command}\nexit ${result.status}\n${result.stderr}`;
+          expect(result.error, detail).toBeUndefined();
+          expect(verdicts.get(result.status), detail).toBeUndefined();
+          expect(result.status, `witness error\n${detail}`).toBe(0);
         }
       } finally {
         rmSync(dir, { recursive: true, force: true });
