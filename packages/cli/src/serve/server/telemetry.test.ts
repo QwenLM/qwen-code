@@ -432,6 +432,24 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     });
   });
 
+  it.each([
+    [
+      'GET',
+      '/workspaces/ws/session/session%2F1/artifact-library',
+      'GET /workspaces/:workspace/session/:id/artifact-library',
+    ],
+    [
+      'DELETE',
+      '/workspaces/ws/session/session%2F1/artifact-library/artifact-1',
+      'DELETE /workspaces/:workspace/session/:id/artifact-library/:artifactId',
+    ],
+  ])('attributes %s artifact library requests', (method, path, route) => {
+    expect(resolveDaemonTelemetryRoute(mockReq(method, path))).toEqual({
+      route,
+      sessionId: 'session/1',
+    });
+  });
+
   it('attributes workspace transcript reads to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);
