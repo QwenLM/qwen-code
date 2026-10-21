@@ -569,8 +569,11 @@
                                  67.2 s): healthy 9862 s, fork 10462 s, Verify
                                  185 minutes. The FG11d close-in-flight refusal
                                  cell adds 9 s (2x its measured 4.5 s): healthy
-                                 9871 s, fork 10471 s, Verify 185 minutes. -->
-                            <forkedProcessTimeoutInSeconds>10471</forkedProcessTimeoutInSeconds>
+                                 9871 s, fork 10471 s, Verify 185 minutes. The
+                                 FG11d retry-reuse cell adds 11 s (2x its
+                                 measured 5.3 s): healthy 9882 s, fork 10482 s,
+                                 Verify 185 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10482</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
