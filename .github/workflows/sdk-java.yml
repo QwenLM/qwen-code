@@ -774,12 +774,13 @@ jobs:
     # fork to 10471 s; the FG13f MessageDisplay reload cell adds 150 s, moving
     # the fork to 10621 s and Verify to 188 minutes; the FG12d
     # cancel-before-dispatch cell adds 18 s, moving the fork to 10639 s; the
-    # FG11d retry-reuse cell adds 11 s, moving the fork to 10650 s; the FG11d
-    # settled-outcome cell adds 9 s, moving the fork to 10659 s; the FG11d
-    # cancel-retry cell adds 12 s, moving the fork to 10671 s; the FG11d
-    # second-fire refusal cell adds 25 s, moving the fork to 10696 s; the FG11d
-    # cancel-isolation cell adds 11 s, moving the fork to 10707 s, wrapping
-    # fork + 600 s plus margin (11307 s of fork plus wrap);
+    # FG11d retry-reuse cell adds 11 s, moving the fork to 10650 s; the FG12d
+    # Spring-restart owner-release cell adds 24 s, moving the fork to 10674 s;
+    # the FG11d settled-outcome cell adds 9 s, moving the fork to 10683 s; the
+    # FG11d cancel-retry cell adds 12 s, moving the fork to 10695 s; the FG11d
+    # second-fire refusal cell adds 25 s, moving the fork to 10720 s; the FG11d
+    # cancel-isolation cell adds 11 s, moving the fork to 10731 s, wrapping
+    # fork + 600 s plus margin (11331 s of fork plus wrap);
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
@@ -884,7 +885,10 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 10696 s, so the step wraps to fork + 600 s plus margin (189 min).
+        # 10683 s, so the step wraps to fork + 600 s plus margin (189 min).
+        # This diff is the cell that spends the last of the old margin: 11283 s
+        # of fork plus wrap no longer fit 188 minutes, so the step and the job
+        # ceiling move with it.
         timeout-minutes: 189
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
