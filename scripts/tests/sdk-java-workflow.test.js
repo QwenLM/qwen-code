@@ -40,6 +40,107 @@ const step = (block, name) => {
   return block.slice(start, next < 0 ? undefined : start + 1 + next);
 };
 
+const shellWords = new Set([
+  'if',
+  'then',
+  'else',
+  'elif',
+  'fi',
+  'for',
+  'in',
+  'do',
+  'done',
+  'while',
+  'until',
+  'case',
+  'esac',
+  'function',
+  'time',
+  '{',
+  '}',
+  '!',
+  'cd',
+  'echo',
+  'exec',
+  'exit',
+  'export',
+  'printf',
+  'read',
+  'return',
+  'set',
+  'shift',
+  'source',
+  '.',
+  'test',
+  '[',
+  '[[',
+  ']]',
+  'true',
+  'false',
+  'unset',
+  'local',
+  'trap',
+  'wait',
+]);
+
+const splitShellLine = (line) => {
+  const parts = [];
+  let quote = null;
+  let current = '';
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (quote) {
+      current += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === '|' || char === ';') {
+      parts.push(current);
+      current = '';
+      if (char === '|' && line[i + 1] === '|') i += 1;
+      continue;
+    }
+    if (char === '&' && line[i + 1] === '&') {
+      parts.push(current);
+      current = '';
+      i += 1;
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+  return parts;
+};
+
+// Everything after the acquire block runs with fd 9 open. A command whose
+// first word is not a shell builtin can leave a child holding that fd, so it
+// must close it; an unrecognised name is a failure to inspect, not a skip.
+const lockedCommands = (run) => {
+  const acquire = run.indexOf('sdk_java_lock_acquire 5400');
+  if (acquire < 0) throw new Error('missing sdk_java_lock_acquire');
+  // The acquire block's closing `fi` is the first column-0 `fi` after the
+  // acquire line; everything below it runs with fd 9 open.
+  const boundary = run.indexOf('\nfi\n', acquire);
+  if (boundary < 0) throw new Error('missing lock acquisition boundary');
+  return run
+    .slice(boundary + '\nfi\n'.length)
+    .replace(/\\\n/g, ' ')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .flatMap(splitShellLine)
+    .map((command) => command.trim())
+    .filter((command) => command && !shellWords.has(command.split(/\s+/)[0]));
+};
+
+const unclosedCommands = (run) =>
+  lockedCommands(run).filter((command) => !/9>&-$/.test(command));
+
 describe('SDK Java self-hosted workflow guards', () => {
   it('builds native producer prerequisites before either Server test lane', () => {
     const jobs = parse(workflow).jobs;
@@ -140,25 +241,57 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(lockedSteps).toHaveLength(2);
     for (const s of lockedSteps) {
       // A child that keeps fd 9 after the step shell dies holds the host lock
-      // until the child exits (#15114), so every external command in the
-      // locked section closes it. Pipeline stages are judged separately: a
-      // leak through either tar keeps the whole lock.
-      const commands = s.run
-        .replace(/\\\n/g, ' ')
-        .split('\n')
-        .flatMap((line) => line.split('|'))
-        .map((command) => command.trim())
-        .filter((command) => /^(?:mvn|cp|mkdir|tar)\b/.test(command));
-      expect(commands.length, s.name).toBeGreaterThan(0);
-      for (const command of commands) {
-        // The bare-lock fallback creates its lock directory before the lock
-        // exists; no fd 9 is open there to inherit.
-        if (command.includes('mkdir -p "${HOME}/.cache/qwen-code-ci"')) {
-          continue;
-        }
-        expect(command, s.name).toContain('9>&-');
-      }
+      // until the child exits, so every external command in the locked
+      // section closes it. Pipeline stages are judged separately: a leak
+      // through either tar keeps the whole lock.
+      expect(lockedCommands(s.run).length, s.name).toBeGreaterThan(0);
+      expect(unclosedCommands(s.run), s.name).toEqual([]);
     }
+  });
+
+  it('fails closed on an unlisted external command in the locked section', () => {
+    const run = [
+      'if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then',
+      '  sdk_java_lock_acquire 5400',
+      'else',
+      '  echo fallback',
+      'fi',
+      'node scripts/x.mjs',
+      'docker run -d --name x busybox sleep 60',
+      'mvn --batch-mode test 9>&-',
+    ].join('\n');
+    expect(unclosedCommands(run)).toEqual([
+      'node scripts/x.mjs',
+      'docker run -d --name x busybox sleep 60',
+    ]);
+  });
+
+  it('judges every command position in a compound line', () => {
+    const head =
+      'if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then\n' +
+      '  sdk_java_lock_acquire 5400\n' +
+      'fi\n';
+    expect(
+      unclosedCommands(`${head}mvn install 9>&- && mvn clean verify`),
+    ).toEqual(['mvn clean verify']);
+    expect(
+      unclosedCommands(`${head}mvn install 9>&-; mvn clean verify`),
+    ).toEqual(['mvn clean verify']);
+    expect(unclosedCommands(`${head}mkdir -p x # 9>&- not needed`)).toEqual([
+      'mkdir -p x # 9>&- not needed',
+    ]);
+  });
+
+  it('ignores commands before the lock is acquired', () => {
+    const run = [
+      'mkdir -p "${HOME}/.cache/qwen-code-ci"',
+      'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
+      'if [ -f helper ]; then',
+      '  sdk_java_lock_acquire 5400',
+      'fi',
+      'mvn --batch-mode test 9>&-',
+    ].join('\n');
+    expect(unclosedCommands(run)).toEqual([]);
   });
 
   it.skipIf(process.platform !== 'linux')(
@@ -166,29 +299,23 @@ describe('SDK Java self-hosted workflow guards', () => {
     () => {
       const jobs = parse(workflow).jobs;
       const commands = ['test', 'mysql-integration'].flatMap((name) =>
-        jobs[name].steps.flatMap((s) =>
-          s.run?.includes('sdk-java-tests.lock')
-            ? (s.run
-                .replace(/\\\n/g, ' ')
-                .match(/^\s*(?:mvn|cp|mkdir|tar)\b.+$/gm) ?? [])
-            : [],
-        ),
+        jobs[name].steps
+          .filter((s) => s.run?.includes('sdk-java-tests.lock'))
+          .flatMap((s) => lockedCommands(s.run)),
       );
-      // The bare-lock fallback creates its lock directory before the lock
-      // exists; it has no fd 9 to leak.
-      const locked = commands.filter(
-        (command) =>
-          !command.includes('mkdir -p "${HOME}/.cache/qwen-code-ci"'),
-      );
-      for (const name of ['mvn', 'cp', 'mkdir', 'tar']) {
-        expect(
-          locked.some((command) => command.trim().startsWith(name)),
-          name,
-        ).toBe(true);
+      expect(commands.length).toBeGreaterThan(0);
+      const names = [
+        ...new Set(commands.map((command) => command.split(/\s+/)[0])),
+      ];
+      for (const name of names) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          throw new Error(`cannot stub ${name} in the survivor harness`);
+        }
       }
+      const stubs = names.map((name) => `${name}() { survive; }`).join('\n');
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-'));
       try {
-        for (const command of locked) {
+        for (const command of commands) {
           const result = spawnSync(
             'bash',
             [
@@ -203,10 +330,7 @@ describe('SDK Java self-hosted workflow guards', () => {
                 sleep 30 </dev/null >/dev/null 2>&1 &
                 echo $! >> "$pids_file"
               }
-              mvn() { survive; }
-              cp() { survive; }
-              mkdir() { survive; }
-              tar() { survive; }
+              ${stubs}
               ${command}
               if flock --nonblock "$LOCK_FILE" true; then exit 91; fi
               exec 9>&-

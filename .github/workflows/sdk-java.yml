@@ -705,8 +705,9 @@ jobs:
           # Seed from the host-shared repo (cache-restored on hosted runners)
           # so it and the egress proxy keep paying off for the job-local copy.
           cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null 9>&- || true
-          # The shell owns the lock; no child inherits fd 9, or a cancelled
-          # job's survivor would hold the host lock until it exits (#15114).
+          # The shell owns the lock; keep fd 9 out of every child as
+          # hardening so an orphan cannot hold the host lock after a
+          # cancelled step.
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 9>&-
           cd packages/managed-agent-server
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
