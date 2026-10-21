@@ -5631,8 +5631,13 @@ export class LlmChat {
         if (successfulRecoveries > 0) {
           self.coalesceRecoveryPairs(successfulRecoveries);
         }
-        if (previousGenerationConfig)
+        if (previousGenerationConfig) {
+          // Restoring the live config swaps the fixed input the anchor above
+          // was measured against.
+          self.toolBudgetUsageAnchor = undefined;
+          self.toolBudgetFixedInputVersion++;
           self.generationConfig = previousGenerationConfig;
+        }
         sleepInhibitorHandle.release();
         streamDoneResolver!();
         // Flush any deferred partial-tool_use record. Covers both the
