@@ -191,6 +191,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       live.waiters.shift()!();
     });
     expect(settled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'cancelled',
       queued: expect.objectContaining({
         text: 'read @delayed.txt\n\nqueued before cancel\n\nqueued after cancel',
         imagePaths: [path],
@@ -225,15 +226,61 @@ describe('useOpenTuiLiveTurn submit paths', () => {
         if (kind === 'reset') result.current.resetTranscript([]);
       });
       await act(async () => live.waiters.shift()!());
-      if (kind === 'reset') expect(settled).not.toHaveBeenCalled();
-      else
-        expect(settled).toHaveBeenCalledExactlyOnceWith({
-          queued: null,
-          prompt: null,
-        });
+      expect(settled).toHaveBeenCalledExactlyOnceWith(
+        kind === 'reset'
+          ? { kind: 'reset' }
+          : { kind: 'cancelled', queued: null, prompt: null },
+      );
       expect(live.turns).toHaveLength(1);
     },
   );
+
+  it('discards cancellation once on reset without letting a late turn consume successor input', async () => {
+    const path = join(dir, 'reset.png');
+    writeFileSync(path, png);
+    live.holds.add(2);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('original', [path]));
+    const oldOptions = live.turns[0].options as LivePromptOptions;
+    let held: OpenTuiSteeringSubmission[] = [];
+    const settled = vi.fn();
+    act(() => {
+      result.current.submit('old queued', [path]);
+      held = oldOptions.drainSteering!();
+      result.current.interrupt(settled);
+      result.current.resetTranscript([]);
+      result.current.resetTranscript([]);
+    });
+    expect(settled).toHaveBeenCalledExactlyOnceWith({ kind: 'reset' });
+    expect(result.current.messageQueue).toEqual([]);
+    act(() => {
+      result.current.submit('successor');
+      result.current.submit('successor queued', [path]);
+    });
+    await act(async () => {
+      oldOptions.restoreSteering!(held);
+      live.waiters.shift()!();
+    });
+    expect(settled).toHaveBeenCalledExactlyOnceWith({ kind: 'reset' });
+    expect(live.turns).toHaveLength(2);
+    expect(live.signals[1].aborted).toBe(false);
+    expect(result.current.streaming).toBe(true);
+    expect(result.current.messageQueue).toEqual(['successor queued']);
+    const successorSettled = vi.fn();
+    act(() => result.current.interrupt(successorSettled));
+    await act(async () => live.waiters.shift()!());
+    expect(successorSettled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'cancelled',
+      queued: expect.objectContaining({
+        text: 'successor queued',
+        imagePaths: [path],
+      }),
+      prompt: expect.objectContaining({ text: 'successor' }),
+    });
+    expect(live.turns).toHaveLength(2);
+  });
 
   it('does not restart late restored steering after a bare exit interrupt', async () => {
     const { result } = renderHook(() =>

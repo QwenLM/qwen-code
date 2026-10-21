@@ -377,6 +377,7 @@ export function useOpenTuiLiveTurn(
           if (activeTurnRef.current === active) activeTurnRef.current = null;
           if (abort.signal.aborted) {
             active.onCancelSettled?.({
+              kind: 'cancelled',
               queued: popQueue(),
               prompt: active.toolStarted ? null : (active.prompt ?? null),
             });
@@ -498,12 +499,13 @@ export function useOpenTuiLiveTurn(
       active.onCancelSettled ??= onSettled;
       abortRef.current?.abort();
     } else {
-      onSettled?.({ queued: null, prompt: null });
+      onSettled?.({ kind: 'cancelled', queued: null, prompt: null });
     }
   }, []);
 
   const resetTranscript = useCallback(
     (events: readonly OpenTuiStreamEvent[]) => {
+      const onReset = activeTurnRef.current?.onCancelSettled;
       // Invalidate the in-flight generation first: its late events and
       // settles are dead on arrival (P2-2).
       turnSeqRef.current += 1;
@@ -528,6 +530,7 @@ export function useOpenTuiLiveTurn(
       // not land in the dying one's queue.
       setBusy(false);
       setItems(foldBatch(events));
+      onReset?.({ kind: 'reset' });
     },
     [setBusy, syncQueue],
   );

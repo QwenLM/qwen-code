@@ -711,6 +711,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
     await typeText('successor');
     await act(async () =>
       settle({
+        kind: 'cancelled',
         queued: { text: 'queued earlier', imagePaths: ['/tmp/earlier.png'] },
         prompt: { text: 'old prompt', imagePaths: ['/tmp/old.png'] },
       }),
@@ -722,6 +723,51 @@ describe('OpenTuiInputPrompt submit guard', () => {
     expect(submit).toHaveBeenCalledExactlyOnceWith(
       'queued earlier\n\nqueued later\nsuccessor',
       ['/tmp/earlier.png', '/tmp/later.png'],
+      expect.any(Object),
+    );
+  });
+
+  it('releases a reset cancellation without popping queues or changing successor attachments', async () => {
+    const settlements: OpenTuiCancelSettled[] = [];
+    const onInterrupt = vi.fn((settle?: OpenTuiCancelSettled) => {
+      settlements.push(settle!);
+    });
+    const onPopQueue = vi.fn(() => ({
+      text: 'successor queued',
+      imagePaths: ['/tmp/queued.png'],
+    }));
+    const onSubmit = vi.fn(() => false);
+    renderPrompt({
+      streaming: true,
+      onInterrupt,
+      onPopQueue,
+      onSubmit,
+    });
+    await pressKey('escape');
+    await pressKey('escape');
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+    await typeText('successor');
+    await pressKey('v', true);
+    await act(async () => settlements[0]({ kind: 'reset' }));
+    expect(onPopQueue).not.toHaveBeenCalled();
+    expect(currentEditor().plainText).toBe('successor');
+    await pressKey('return');
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      'successor',
+      ['/tmp/clipboard-test.png'],
+      expect.any(Object),
+    );
+    await pressKey('escape');
+    expect(onInterrupt).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      settlements[1]({ kind: 'cancelled', queued: null, prompt: null }),
+    );
+    expect(onPopQueue).toHaveBeenCalledOnce();
+    expect(currentEditor().plainText).toBe('successor queued\nsuccessor');
+    await pressKey('return');
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      'successor queued\nsuccessor',
+      ['/tmp/queued.png', '/tmp/clipboard-test.png'],
       expect.any(Object),
     );
   });
@@ -742,6 +788,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
       if (successor) await typeText('successor');
       await act(async () =>
         settle({
+          kind: 'cancelled',
           queued: null,
           prompt: {
             text: 'expanded original',
@@ -807,6 +854,7 @@ describe('OpenTuiInputPrompt submit guard', () => {
       } else view.unmount();
       await act(async () =>
         settle({
+          kind: 'cancelled',
           queued: null,
           prompt: { text: 'old prompt', imagePaths: ['/tmp/old.png'] },
         }),

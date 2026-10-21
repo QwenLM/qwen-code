@@ -11,10 +11,15 @@ export interface OpenTuiInputSubmission {
   deferUntilIdle?: boolean;
 }
 
-export type OpenTuiCancelSettled = (input: {
-  queued: OpenTuiInputSubmission | null;
-  prompt: OpenTuiInputSubmission | null;
-}) => void;
+export type OpenTuiCancelSettled = (
+  input:
+    | {
+        kind: 'cancelled';
+        queued: OpenTuiInputSubmission | null;
+        prompt: OpenTuiInputSubmission | null;
+      }
+    | { kind: 'reset' },
+) => void;
 
 export interface OpenTuiComposerHandle {
   getText(): string;

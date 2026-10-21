@@ -664,9 +664,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       !claimedDraftRef.current;
     const session = sessionRef.current;
     cancelPendingRef.current = true;
-    onInterrupt(({ queued, prompt }) => {
+    onInterrupt((settlement) => {
       if (session !== sessionRef.current || !draftRef.current.valid) return;
       cancelPendingRef.current = false;
+      if (settlement.kind === 'reset') return;
+      const { queued, prompt } = settlement;
       const popped = onPopQueue?.();
       const pending = [queued, popped].filter((entry) => entry != null);
       if (pending.length) {
