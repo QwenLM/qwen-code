@@ -106,7 +106,10 @@ export function createJavaManagedAgentProvider(
       workspaceId: string;
       cwdRelative: string;
       text?: string;
+      input?: import('./managed-agent-provider').ManagedInputBlock[];
       approvalMode?: ManagedApprovalMode;
+      planMode?: boolean;
+      skills?: import('./managed-agent-provider').ManagedSessionSkill[];
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -115,13 +118,23 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.skills?.length ? { skills: request.skills } : {}),
+        // Without a title the Session list and header fall back to a UUID
+        // prefix, unlike the standard shell's prompt-derived title.
+        ...(request.text === undefined
+          ? {}
+          : { title: titleFor(request.text) }),
         ...(request.approvalMode === undefined
           ? {}
           : { approvalMode: request.approvalMode }),
+        ...(request.planMode === undefined
+          ? {}
+          : { planMode: request.planMode }),
         input:
-          request.text === undefined
+          request.input ??
+          (request.text === undefined
             ? []
-            : [{ type: 'input_text', text: request.text }],
+            : [{ type: 'input_text', text: request.text }]),
         metadata: { clientId: command.clientId },
         workspace: {
           workspaceId: request.workspaceId,
@@ -139,8 +152,40 @@ export function createJavaManagedAgentProvider(
   return {
     kind: 'java',
     storageKey: storageKey(options),
+    workspaceFiles: {
+      query: (request, command) =>
+        client.queryWorkspaceFiles(request, command.signal),
+      read: (request, command) =>
+        client.readWorkspaceFile(request, command.signal),
+    },
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    async renameSession(sessionId, displayName, command) {
+      const result = await client.renameSession(
+        {
+          sessionId,
+          title: displayName,
+          idempotencyKey: command.idempotencyKey,
+        },
+        command.signal,
+      );
+      if (
+        result.sessionId !== sessionId ||
+        typeof result.title !== 'string' ||
+        !result.title.trim()
+      ) {
+        throw new Error('Managed Agent rename response is invalid');
+      }
+      return { displayName: result.title };
+    },
+    skills: {
+      list: (sessionId, request) =>
+        client.getSessionSkills(sessionId, request.signal),
+    },
+    mcp: {
+      list: (sessionId, request) =>
+        client.getSessionMcp(sessionId, request.signal),
+    },
     tasks: {
       list: (sessionId, request) =>
         client.listTasks(
@@ -219,6 +264,15 @@ export function createJavaManagedAgentProvider(
                 approvalRevision: result.approvalRevision,
                 availableApprovalModes: result.availableApprovalModes,
                 supported: result.supported,
+                ...(result.liveSupported === true
+                  ? { liveSupported: true }
+                  : {}),
+                ...(typeof result.planMode === 'boolean'
+                  ? { planMode: result.planMode }
+                  : {}),
+                ...(typeof result.planModeSupported === 'boolean'
+                  ? { planModeSupported: result.planModeSupported }
+                  : {}),
               };
             },
             async submit(sessionId, request, command) {
@@ -244,6 +298,9 @@ export function createJavaManagedAgentProvider(
                 approvalMode: result.approvalMode,
                 approvalRevision: result.approvalRevision,
                 replayed: result.replayed,
+                ...(typeof result.planMode === 'boolean'
+                  ? { planMode: result.planMode }
+                  : {}),
               };
             },
           },
@@ -383,6 +440,10 @@ export function createJavaManagedAgentProvider(
         }
       },
     },
+    toolDetails: {
+      get: (sessionId, itemId, request) =>
+        client.getToolDetails(sessionId, itemId, request.signal),
+    },
     toolResults: {
       canDownload: saveArtifact !== undefined,
       getResult: (sessionId, itemId, request) =>
@@ -465,6 +526,8 @@ export function createJavaManagedAgentProvider(
                   page.capabilities?.workspaceCreation === true,
                 canSelectDirectory:
                   page.capabilities?.workspaceDirectorySelection === true,
+                canImportLocalDirectory:
+                  page.capabilities?.localDirectoryImport === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
               };
@@ -482,11 +545,25 @@ export function createJavaManagedAgentProvider(
             getSessionOptions: (agentId, request) =>
               client.getSessionOptions(agentId, request.signal),
             createEmpty: (
-              { agentId, workspaceId, cwdRelative, approvalMode },
+              {
+                agentId,
+                workspaceId,
+                cwdRelative,
+                approvalMode,
+                planMode,
+                skills,
+              },
               command,
             ) =>
               createWorkspaceSession(
-                { agentId, workspaceId, cwdRelative, approvalMode },
+                {
+                  agentId,
+                  workspaceId,
+                  cwdRelative,
+                  approvalMode,
+                  planMode,
+                  skills,
+                },
                 command,
               ),
             createSession: createWorkspaceSession,
@@ -539,7 +616,7 @@ export function createJavaManagedAgentProvider(
           // environmentId scopes the storageKey only: the standalone Java
           // server 400s any non-blank value with unsupported_feature.
           title: titleFor(request.text),
-          input: [{ type: 'input_text', text: request.text }],
+          input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
         command.signal,
@@ -555,7 +632,7 @@ export function createJavaManagedAgentProvider(
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           sessionId,
-          input: [{ type: 'input_text', text: request.text }],
+          input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
         command.signal,
@@ -625,6 +702,12 @@ function toSessionSummary(
   return {
     sessionId: session.sessionId,
     agentId: session.agentId,
+    ...(typeof session.planMode === 'boolean'
+      ? { planMode: session.planMode }
+      : {}),
+    ...(typeof session.planModeSupported === 'boolean'
+      ? { planModeSupported: session.planModeSupported }
+      : {}),
     ...(isManagedApprovalMode(session.approvalMode)
       ? { approvalMode: session.approvalMode }
       : {}),
@@ -649,6 +732,7 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
@@ -669,6 +753,9 @@ function toSessionSummary(
         ? { approvalModeChange: true }
         : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
+      ...(session.capabilities?.inputAttachments === true
+        ? { inputAttachments: true }
+        : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
   };
@@ -804,7 +891,10 @@ function titleFor(text: string): string {
     .replace(/[\x00-\x1f\x7f]/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
-  return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
+  // Slice by code point: a code-unit cut can leave a lone high surrogate, which
+  // no store column keeps, so the server would persist it as '?'.
+  const units = Array.from(title);
+  return units.length <= 80 ? title : `${units.slice(0, 77).join('')}...`;
 }
 
 function requireTaskCancelOperation(

@@ -10,6 +10,7 @@ export const PTY_INPUT_QUEUE_FIELDS = [
   '_writeStream._writeQueue',
   '_agent.inSocket.writableLength',
   '_socket.writableLength',
+  'stats.writeQueuedBytes',
 ] as const;
 
 export const MAX_PTY_INPUT_QUEUE_TASKS = 1024;
@@ -17,6 +18,7 @@ export const MAX_PTY_INPUT_QUEUE_TASKS = 1024;
 export type PtyInputQueueBytes = number | 'saturated' | undefined;
 
 export interface PtyInputQueueInternals {
+  stats?: { writeQueuedBytes?: number };
   _socket?: { writableLength?: number };
   _agent?: WindowsPtyAgentInternals;
   _writeStream?: {
@@ -29,6 +31,7 @@ export interface PtyInputQueueInternals {
  * POSIX write tasks, Windows input socket, and the legacy POSIX socket.
  * Recheck these shapes and deferred Windows startup writes on upgrades;
  * node-pty's public write() provides no drain signal.
+ * Bun exposes retained queued/in-flight bytes through its public stats.
  * A POSIX queue at the task limit is saturated without inspecting its entries.
  * Below that limit every task is validated, bounding work per admission even
  * when a stalled child retains many one-byte writes. Drain restores capacity.
@@ -58,8 +61,12 @@ export function getPtyInputQueueBytes(
     return bytes;
   }
   // A Windows PTY's _socket is its output socket, never an input fallback.
-  const bytes = (pty._agent !== undefined ? pty._agent?.inSocket : pty._socket)
-    ?.writableLength;
+  const stats = pty.stats;
+  const bytes =
+    stats !== undefined
+      ? stats?.writeQueuedBytes
+      : (pty._agent !== undefined ? pty._agent?.inSocket : pty._socket)
+          ?.writableLength;
   return typeof bytes === 'number' && Number.isSafeInteger(bytes) && bytes >= 0
     ? bytes
     : undefined;

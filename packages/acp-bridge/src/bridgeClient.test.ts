@@ -2647,6 +2647,67 @@ describe('BridgeClient — artifact ingress', () => {
     ).toEqual({ toolName: 'record_artifact' });
   });
 
+  it('forwards the update-only flag of file-write tool artifacts', async () => {
+    const sessionId = 'sess:update-only-artifacts';
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-edit',
+        status: 'completed',
+        content: [],
+        _meta: {
+          toolName: 'edit',
+          artifacts: [
+            {
+              title: 'index.ts',
+              storage: 'workspace',
+              workspacePath: 'src/index.ts',
+              updateOnly: true,
+            },
+          ],
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(upsertMany).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          workspacePath: 'src/index.ts',
+          toolCallId: 'call-edit',
+          toolName: 'edit',
+          updateOnly: true,
+        }),
+      ],
+      { trustedPublisher: false },
+    );
+  });
+
   it('does not store artifact metadata from non-tool session updates', async () => {
     const sessionId = 'sess:non-tool-artifacts';
     const publish = vi.fn().mockReturnValue(true);
@@ -5526,5 +5587,43 @@ describe('background execution ownership', () => {
       outcome: { outcome: 'cancelled' },
     });
     expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+});
+
+describe('MCP reload capability invalidation', () => {
+  it('publishes only a current owning-session invalidation', async () => {
+    const publish = vi.fn();
+    const entry = { events: { publish } };
+    const client = makeClient(undefined, {
+      resolveEntry: () => entry,
+      ownsSession: (id) => id === 'owner',
+      handler: vi.fn(),
+    });
+    const method = 'qwen/notify/session/mcp-changed';
+    for (const params of [{}, { sessionId: 42 }, { sessionId: 'foreign' }]) {
+      await client.extNotification(method, params);
+    }
+    expect(publish).not.toHaveBeenCalled();
+    await client.extNotification(method, {
+      sessionId: 'owner',
+      generatedUi: { version: 1, enabled: true },
+    });
+    expect(publish).toHaveBeenCalledExactlyOnceWith({
+      type: 'settings_changed',
+      data: { key: 'mcp' },
+    });
+    const retired = makeClient(undefined, {
+      resolveEntry: () => entry,
+      ownsSession: () => false,
+      handler: vi.fn(),
+    });
+    await retired.extNotification(method, { sessionId: 'owner' });
+    const missing = makeClient(undefined, {
+      resolveEntry: () => undefined,
+      ownsSession: () => true,
+      handler: vi.fn(),
+    });
+    await missing.extNotification(method, { sessionId: 'owner' });
+    expect(publish).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
-import { act, type ReactNode } from 'react';
+import { act, useContext, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isShellResultDisplay } from '@qwen-code/sdk/daemon';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { getManagedClientId } from './managed-session-storage';
+import * as pendingStorage from './managed-pending-storage';
 import { I18nProvider } from '../../i18n';
 import type {
   ManagedAgentProvider,
@@ -15,12 +17,19 @@ import type {
 } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
+import { getSlashCommandCompletionResult } from '../../completions/slashCompletion';
 import type { ComponentProps } from 'react';
+import {
+  ToolDetailsContext,
+  type ToolDetailsLoader,
+} from '../messages/tools/ToolDetailsContext';
 
 const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
   commitAccepted: vi.fn(),
+  loadToolDetails: undefined as ToolDetailsLoader | undefined,
+  clearEditor: vi.fn(),
   editorProps: undefined as
     | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     | undefined,
@@ -55,23 +64,28 @@ vi.mock('../MessageList', () => ({
     onToolResultOpen?: (itemId: string) => void;
     pendingApproval?: unknown;
     welcomeHeader?: ReactNode;
-  }) => (
-    <>
-      {welcomeHeader}
-      <button onClick={() => onToolResultOpen?.('item-1')}>
-        Open tool output
-      </button>
-      <pre data-testid="messages">{JSON.stringify(messages)}</pre>
-      {/* The real MessageList keys its folding off this prop, so the mock has
+  }) => {
+    mocks.loadToolDetails = useContext(ToolDetailsContext);
+    return (
+      <>
+        {welcomeHeader}
+        <button onClick={() => onToolResultOpen?.('item-1')}>
+          Open tool output
+        </button>
+        <pre data-testid="messages">{JSON.stringify(messages)}</pre>
+        {/* The real MessageList keys its folding off this prop, so the mock has
           to expose it for the join between the two to be observed. */}
-      <pre data-testid="message-list-pending-approval">
-        {JSON.stringify(pendingApproval ?? null)}
-      </pre>
-      {hasOlderHistory && (
-        <button onClick={() => void onLoadOlderHistory()}>Older history</button>
-      )}
-    </>
-  ),
+        <pre data-testid="message-list-pending-approval">
+          {JSON.stringify(pendingApproval ?? null)}
+        </pre>
+        {hasOlderHistory && (
+          <button onClick={() => void onLoadOlderHistory()}>
+            Older history
+          </button>
+        )}
+      </>
+    );
+  },
 }));
 
 vi.mock('../ChatEditor', async () => {
@@ -98,6 +112,10 @@ vi.mock('../ChatEditor', async () => {
           ({
             setText: update,
             clearText: () => update(''),
+            clear: () => {
+              mocks.clearEditor();
+              update('');
+            },
             getText: () => input.current?.value ?? '',
             focus: () => input.current?.focus(),
           }) as EditorHandle,
@@ -285,6 +303,285 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
+    let resolve!: (value: { displayName: string }) => void;
+    const renameSession = vi.fn().mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    provider = { ...provider, renameSession };
+    const canRename = (title: string) =>
+      summary('s1', {
+        title,
+        capabilities: { canSend: true, canCancel: false, canRename: true },
+      });
+    mocks.client.getSession.mockResolvedValue(canRename('Original'));
+    let oldList!: (value: { sessions: ManagedAgentSessionSummary[] }) => void;
+    mocks.client.listSessions
+      .mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            oldList = done;
+          }),
+      )
+      .mockResolvedValue({ sessions: [canRename('Stored name')] });
+    await render('s1');
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Rename')!
+        .click();
+    });
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename"]',
+    )!;
+    expect(input.value).toBe('Original');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '  Requested name  ');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await flush();
+    });
+    expect(renameSession).toHaveBeenCalledWith(
+      's1',
+      'Requested name',
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(container.textContent).toContain('Original');
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    mocks.client.getSession.mockResolvedValue(canRename('Stored name'));
+    await act(async () => {
+      resolve({ displayName: 'Stored name' });
+      await flush();
+    });
+    await act(async () => {
+      oldList({ sessions: [canRename('Original')] });
+      await flush();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('nav')?.textContent).toContain(
+      'Stored name',
+    );
+    expect(container.textContent).not.toContain('Original');
+    expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not expose rename when permission or interactivity is missing', async () => {
+    provider = { ...provider, renameSession: vi.fn() };
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Rename',
+      ),
+    ).toBe(false);
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, canRename: true },
+      }),
+    );
+    await render('s1', 'en', provider, null, false);
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Rename',
+      ),
+    ).toBe(false);
+  });
+
+  it('binds tool detail reads to the selected Session and distinguishes recorded empty output from missing output', async () => {
+    const get = vi.fn().mockResolvedValue({
+      input: { command: 'true' },
+      output: '',
+      truncated: false,
+    });
+    provider = { ...provider, toolDetails: { get } };
+    await render('s1');
+    expect(get).not.toHaveBeenCalled();
+    const first = mocks.loadToolDetails;
+    expect(first).toBeDefined();
+    const abort = new AbortController();
+    expect(await first!('p1:item-1', abort.signal)).toEqual({
+      args: { command: 'true' },
+      rawOutput: '',
+    });
+    expect(get).toHaveBeenLastCalledWith('s1', 'item-1', {
+      clientId: getManagedClientId(provider.storageKey),
+      signal: abort.signal,
+    });
+    get.mockResolvedValue({ input: null, output: null, truncated: false });
+    await render('s2');
+    const second = mocks.loadToolDetails;
+    expect(second).not.toBe(first);
+    expect(await second!('p2:item-2', abort.signal)).toEqual({
+      args: undefined,
+      rawOutput: undefined,
+    });
+    expect(get).toHaveBeenLastCalledWith('s2', 'item-2', {
+      clientId: getManagedClientId(provider.storageKey),
+      signal: abort.signal,
+    });
+  });
+
+  it('passes saved structured Shell results to the shared daemon renderer', async () => {
+    const shellResult = {
+      type: 'shell_result',
+      version: 1,
+      text: 'saved display text',
+      output: 'saved stdout',
+      directory: '/workspace/project',
+      exitCode: 7,
+      signal: null,
+      pid: 123,
+      error: 'saved failure',
+      outcome: 'failed',
+      notices: ['saved notice'],
+      truncated: true,
+      outputFiles: ['/tmp/saved.log'],
+    };
+    const get = vi.fn().mockResolvedValue({
+      input: { command: 'exit 7' },
+      output: 'legacy text',
+      truncated: true,
+      shellResult,
+    });
+    provider = { ...provider, toolDetails: { get } };
+    await render('s1');
+    expect(get).not.toHaveBeenCalled();
+    const detail = await mocks.loadToolDetails!(
+      'p1:item-1',
+      new AbortController().signal,
+    );
+    expect(detail.args).toEqual({ command: 'exit 7' });
+    expect(detail.rawOutput).toBe(shellResult);
+    expect(isShellResultDisplay(detail.rawOutput)).toBe(true);
+  });
+
+  it('connects the Session Skill catalog to the composer without enabling other Workspace features', async () => {
+    const skills = [{ name: 'review', description: 'Pinned review.' }];
+    const list = vi.fn().mockResolvedValue({ skills });
+    provider = { ...provider, skills: { list } };
+    await render('s1');
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    await act(async () => mocks.editorProps?.onSkillsOpenChange?.(true));
+    expect(list).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+    expect(mocks.editorProps?.skills).toEqual(skills);
+    expect(mocks.editorProps?.skillsLoaded).toBe(true);
+    const completion = getSlashCommandCompletionResult(
+      '/rev',
+      4,
+      mocks.editorProps?.commands ?? [],
+    );
+    expect(completion?.items).toMatchObject([
+      { label: '/review', apply: '/review ' },
+    ]);
+    expect(completion?.items[0]?.autoSubmit).not.toBe(true);
+  });
+
+  it('connects MCP independently of file attachments without enabling daemon features', async () => {
+    const list = vi.fn().mockResolvedValue({
+      object: 'agent.mcp_catalog',
+      session_id: 's1',
+      servers: [],
+    });
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    await expect(
+      mocks.editorProps!.fileReferenceActions!.loadMcpStatus!(),
+    ).resolves.toEqual({ servers: [] });
+    expect(list).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+  });
+
+  it('invalidates the composer MCP cache scope when the selected Session changes without file actions', async () => {
+    const list = vi.fn(async (sessionId: string) => ({
+      object: 'agent.mcp_catalog' as const,
+      session_id: sessionId,
+      servers: [],
+    }));
+    provider = { ...provider, mcp: { list } };
+    await render('s1');
+    const first = mocks.editorProps!.fileReferenceActions!;
+    expect(first.scopeKey).toBeTruthy();
+    await first.loadMcpStatus!();
+
+    await render('s1');
+    expect(mocks.editorProps!.fileReferenceActions!.scopeKey).toBe(
+      first.scopeKey,
+    );
+
+    await render('s2');
+    const second = mocks.editorProps!.fileReferenceActions!;
+    expect(second.scopeKey).not.toBe(first.scopeKey);
+    await second.loadMcpStatus!();
+    expect(list.mock.calls.map(([sessionId]) => sessionId)).toEqual([
+      's1',
+      's2',
+    ]);
+  });
+
+  it('keeps Workspace file references available alongside MCP and the pinned Skill catalog', async () => {
+    const skills = [{ name: 'review', description: 'Pinned review.' }];
+    const list = vi.fn().mockResolvedValue({ skills });
+    const query = vi.fn().mockResolvedValue({
+      scopeRevision: 'registered',
+      directory: '.',
+      entries: [],
+      truncated: false,
+    });
+    provider = {
+      ...provider,
+      skills: { list },
+      mcp: {
+        list: vi.fn().mockResolvedValue({ session_id: 's1', servers: [] }),
+      },
+      workspaceFiles: { query, read: vi.fn() },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+        workspace: { workspaceId: 'ws', cwdRelative: '.' },
+      }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(
+      mocks.editorProps?.fileReferenceActions?.loadMcpStatus,
+    ).toBeDefined();
+    expect(mocks.editorProps?.persistFileReferences).toBe(true);
+    expect(mocks.editorProps?.workspaceFeaturesEnabled).toBe(false);
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    await act(async () => mocks.editorProps?.onSkillsOpenChange?.(true));
+    expect(mocks.editorProps?.skills).toEqual(skills);
+    expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
+    expect(query).toHaveBeenCalledWith(
+      { workspaceId: 'ws', cwdRelative: '.', directory: '.', query: '' },
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+  });
+
   it.each(['default', 'auto-edit', 'yolo'] as const)(
     'shows persisted policy as fixed even on an unbound Session (%s)',
     async (approvalMode) => {
@@ -301,7 +598,7 @@ describe('ManagedSessionsPage', () => {
         'contextUsage',
       ]);
       expect(container.textContent).toContain(
-        'Approval mode is fixed for this task',
+        'This session does not support changing its approval policy',
       );
       await render('s1', 'en', provider, undefined, false);
       expect(mocks.editorProps?.visibleToolbarActions).toEqual([]);
@@ -314,7 +611,7 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.availableModes).toEqual([]);
     expect(mocks.editorProps?.visibleToolbarActions).toEqual(['contextUsage']);
     expect(container.textContent).not.toContain(
-      'Approval mode is fixed for this task',
+      'This session does not support changing its approval policy',
     );
   });
 
@@ -406,77 +703,137 @@ describe('ManagedSessionsPage', () => {
     mocks.client.getSession.mockImplementation(async () => current());
   }
 
-  it('switches approval after readback while preserving the draft and excluding same-frame send and model changes', async () => {
+  it.each(['qwen-code', `agent_${'a'.repeat(32)}`])(
+    'switches approval for %s after readback while preserving the draft and excluding same-frame send and model changes',
+    async (agentId) => {
+      let session = switchableSession({
+        agentId,
+        approvalMode: 'default',
+        initialApprovalMode: 'default',
+        approvalRevision: 0,
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          workspaceTurns: true,
+          modelChange: true,
+          approvalModeChange: true,
+        },
+      });
+      modelApi(() => session);
+      let acknowledge!: (value: {
+        sessionId: string;
+        approvalMode: 'yolo';
+        approvalRevision: number;
+        replayed: boolean;
+      }) => void;
+      provider.approvalChange = {
+        queryOptions: vi.fn(async () => ({
+          supported: true,
+          approvalMode: session.approvalMode!,
+          approvalRevision: session.approvalRevision!,
+          availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        })),
+        submit: vi.fn(
+          () =>
+            new Promise((resolve) => {
+              acknowledge = resolve;
+            }),
+        ),
+      };
+      await render('s1');
+      await input('Keep the approval draft');
+      expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
+      expect(mocks.editorProps?.availableModes).toEqual([
+        'default',
+        'auto-edit',
+        'yolo',
+      ]);
+      const send = mocks.editorProps!.onSubmit;
+      const model = mocks.editorProps!.onSelectModel!;
+      await act(async () => {
+        mocks.editorProps!.onSelectMode!('yolo');
+        send('Keep the approval draft', undefined, undefined, vi.fn());
+        model('B');
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+      expect(mocks.editorProps?.currentMode).toBe('default');
+      expect(mocks.editorProps?.modeControlsDisabled).toBe(true);
+      expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+      session = { ...session, approvalMode: 'yolo', approvalRevision: 1 };
+      await act(async () => {
+        acknowledge({
+          sessionId: 's1',
+          approvalMode: 'yolo',
+          approvalRevision: 1,
+          replayed: false,
+        });
+        await flush();
+      });
+      expect(mocks.editorProps?.currentMode).toBe('yolo');
+      expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
+      expect(container.querySelector('textarea')?.value).toBe(
+        'Keep the approval draft',
+      );
+      expect(mocks.commitAccepted).not.toHaveBeenCalled();
+    },
+  );
+
+  it('changes approval during a live Turn without enabling Plan or changing the draft', async () => {
     let session = switchableSession({
       approvalMode: 'default',
-      initialApprovalMode: 'default',
       approvalRevision: 0,
+      phase: 'agent_running',
+      planModeSupported: true,
       capabilities: {
         canSend: true,
-        canCancel: false,
+        canCancel: true,
         workspaceTurns: true,
-        modelChange: true,
         approvalModeChange: true,
       },
     });
-    modelApi(() => session);
-    let acknowledge!: (value: {
-      sessionId: string;
-      approvalMode: 'yolo';
-      approvalRevision: number;
-      replayed: boolean;
-    }) => void;
+    mocks.client.getSession.mockImplementation(async () => session);
     provider.approvalChange = {
       queryOptions: vi.fn(async () => ({
         supported: true,
+        liveSupported: true,
         approvalMode: session.approvalMode!,
         approvalRevision: session.approvalRevision!,
         availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        planModeSupported: true,
       })),
-      submit: vi.fn(
-        () =>
-          new Promise((resolve) => {
-            acknowledge = resolve;
-          }),
-      ),
+      submit: vi.fn(async () => {
+        session = { ...session, approvalMode: 'yolo', approvalRevision: 1 };
+        return {
+          sessionId: 's1',
+          approvalMode: 'yolo',
+          approvalRevision: 1,
+          replayed: false,
+        };
+      }),
     };
     await render('s1');
-    await input('Keep the approval draft');
+    await input('Keep my next message');
     expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
-    expect(mocks.editorProps?.availableModes).toEqual([
-      'default',
-      'auto-edit',
-      'yolo',
-    ]);
-    const send = mocks.editorProps!.onSubmit;
-    const model = mocks.editorProps!.onSelectModel!;
+    expect(mocks.editorProps?.planControlsDisabled).toBe(true);
+    await act(async () => {
+      mocks.editorProps!.onTogglePlan!();
+    });
+    expect(provider.approvalChange.submit).not.toHaveBeenCalled();
     await act(async () => {
       mocks.editorProps!.onSelectMode!('yolo');
-      send('Keep the approval draft', undefined, undefined, vi.fn());
-      model('B');
       await flush();
     });
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
-    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
-    expect(mocks.editorProps?.currentMode).toBe('default');
-    expect(mocks.editorProps?.modeControlsDisabled).toBe(true);
-    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
-    session = { ...session, approvalMode: 'yolo', approvalRevision: 1 };
-    await act(async () => {
-      acknowledge({
-        sessionId: 's1',
-        approvalMode: 'yolo',
-        approvalRevision: 1,
-        replayed: false,
-      });
-      await flush();
-    });
+    expect(provider.approvalChange.submit).toHaveBeenCalledOnce();
     expect(mocks.editorProps?.currentMode).toBe('yolo');
-    expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
     expect(container.querySelector('textarea')?.value).toBe(
-      'Keep the approval draft',
+      'Keep my next message',
     );
-    expect(mocks.commitAccepted).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      'subsequent tool calls in this turn',
+    );
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
   });
 
   it.each(['agent_running', 'cancelling'] as const)(
@@ -511,6 +868,102 @@ describe('ManagedSessionsPage', () => {
       expect(provider.approvalChange.submit).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
+    '{',
+  ])(
+    'requires explicit discard before sending after a pending record cannot be restored (%s)',
+    async (stored) => {
+      const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+      sessionStorage.setItem(key, stored);
+      await render('s1');
+      expect(container.textContent).toContain(
+        'may already have been submitted',
+      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      vi.spyOn(pendingStorage, 'saveManagedPending').mockResolvedValueOnce(
+        false,
+      );
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(container.textContent).toContain(
+        'Could not discard this request.',
+      );
+      expect(sessionStorage.getItem(key)).toBe(stored);
+      await act(async () => {
+        mocks.editorProps!.onSubmit(
+          'blocked request',
+          undefined,
+          undefined,
+          vi.fn(),
+        );
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(sessionStorage.getItem(key)).toBeNull();
+      expect(container.textContent).not.toContain(
+        'Could not discard this request.',
+      );
+      expect(container.textContent).not.toContain(
+        'may already have been submitted',
+      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        mocks.editorProps!.onSubmit(
+          'new explicit request',
+          undefined,
+          undefined,
+          vi.fn(),
+        );
+        await flush();
+      });
+      expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps submissions serialized while the frozen request is being persisted', async () => {
+    await render('s1');
+    let acknowledge!: (saved: boolean) => void;
+    const save = vi
+      .spyOn(pendingStorage, 'saveManagedPending')
+      .mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            acknowledge = resolve;
+          }),
+      );
+    const send = mocks.editorProps!.onSubmit;
+    await act(async () => {
+      send('first draft', undefined, undefined, vi.fn());
+      await flush();
+      send('second draft', undefined, undefined, vi.fn());
+      await flush();
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      acknowledge(true);
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt.mock.calls[0]?.[1]).toMatchObject({
+      text: 'first draft',
+    });
+    save.mockRestore();
+  });
 
   it('switches only after admission and readback, preserves the draft and blocks a same-frame send', async () => {
     let session = switchableSession();
@@ -1821,6 +2274,50 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).not.toContain('Preparing environment');
   });
 
+  it('compacts the bound Workspace row into one line in the home layout', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      }),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      await render('bound', 'en', provider, target);
+      const binding = container.querySelector(
+        '[data-managed-workspace-binding]',
+      );
+      expect(binding?.querySelector('summary')?.getAttribute('title')).toBe(
+        'ws-a',
+      );
+      expect(binding?.textContent).toContain('ws-a');
+      expect(binding?.textContent).toContain('services/api');
+      // The compact row repeats neither label: a regression that restores the
+      // standalone lines inside the details row is what this pins.
+      expect(binding?.textContent).not.toContain('Bound Workspace');
+      expect(binding?.textContent).not.toContain('Relative directory');
+    } finally {
+      target.remove();
+    }
+  });
+
+  it('keeps the labeled Workspace lines in the standalone layout', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      }),
+    );
+    await render('bound');
+    const binding = container.querySelector('[data-managed-workspace-binding]');
+    expect(binding?.textContent).toContain('Bound Workspace');
+    expect(binding?.textContent).toContain('Relative directory');
+    expect(binding?.textContent).toContain('ws-a');
+    expect(binding?.textContent).toContain('services/api');
+    // The compact summary belongs to the home layout only: rendering it here
+    // would repeat the row above the two labeled lines, inside a plain div.
+    expect(binding?.querySelector('summary')).toBeNull();
+  });
+
   it('lets the creator send a later Turn to a bound Session', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('bound', {
@@ -2180,6 +2677,7 @@ describe('ManagedSessionsPage', () => {
       )?.disabled,
     ).toBe(true);
     expect(onSelect).toHaveBeenLastCalledWith('s1');
+    expect(mocks.clearEditor).toHaveBeenCalledOnce();
   });
 
   it('preserves the visible foreign draft when retrying a live retained commit', async () => {

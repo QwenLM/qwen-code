@@ -10,10 +10,12 @@ import type {
 } from './hosted-tool-approval.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type { ManagedSessionApprovalSelection } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 export interface HostedApprovalSelection {
   mode: HostedApprovalMode;
   revision: number;
+  planMode?: true;
 }
 
 export function parseHostedApprovalSelection(
@@ -24,18 +26,21 @@ export function parseHostedApprovalSelection(
     throw new Error('Invalid Hosted approval selection.');
   const selection = value as Record<string, unknown>;
   if (
-    Object.keys(selection).length !== 2 ||
+    Object.keys(selection).length !==
+      (selection['planMode'] === true ? 3 : 2) ||
+    (Object.hasOwn(selection, 'planMode') && selection['planMode'] !== true) ||
     (selection['mode'] !== 'default' &&
       selection['mode'] !== 'auto-edit' &&
       selection['mode'] !== 'yolo') ||
     typeof selection['revision'] !== 'number' ||
     !Number.isSafeInteger(selection['revision']) ||
-    selection['revision'] < 0
+    selection['revision'] < (selection['planMode'] === true ? 1 : 0)
   )
     throw new Error('Invalid Hosted approval selection.');
   return {
     mode: selection['mode'] as HostedApprovalMode,
     revision: selection['revision'],
+    ...(selection['planMode'] === true ? { planMode: true as const } : {}),
   };
 }
 
@@ -87,4 +92,37 @@ export async function hostedTurnApproval(
       'Hosted approval selection conflicts with the Session definition.',
     );
   return { ...initial, mode: selection.mode };
+}
+
+export function createHostedLiveApprovalReader(
+  initial: HostedApprovalSettings,
+  admission: HostedApprovalSelection | undefined,
+  query: () => Promise<ManagedSessionApprovalSelection | undefined>,
+): () => Promise<HostedApprovalSettings> {
+  let previous: ManagedSessionApprovalSelection = admission ?? {
+    mode: initial.mode,
+    revision: 0,
+  };
+  let tail = Promise.resolve();
+  return () => {
+    const work = tail.then(async () => {
+      const selection = parseHostedApprovalSelection(await query());
+      if (
+        !selection ||
+        selection.revision < previous.revision ||
+        (selection.revision === previous.revision &&
+          selection.mode !== previous.mode)
+      )
+        throw new Error(
+          'Hosted live approval selection is missing or regressed.',
+        );
+      previous = selection;
+      return { ...initial, mode: selection.mode };
+    });
+    tail = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    return work;
+  };
 }

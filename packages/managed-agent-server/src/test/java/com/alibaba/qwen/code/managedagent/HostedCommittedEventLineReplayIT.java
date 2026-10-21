@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -41,7 +42,10 @@ class HostedCommittedEventLineReplayIT {
             process.exit(failed === 0 ? 0 : 1);
             """;
 
+    // The Hosted*IT classes share one fork, budgeted by each case's
+    // ceiling; the reader replay below waits at most 120 s.
     @Test
+    @Timeout(180)
     void readerAcceptsTheCommittedEventShapes() throws Exception {
         ObjectNode sessionKey = JSON.createObjectNode()
                 .put("tenantId", "tenant-1").put("workspaceId", "workspace-1")

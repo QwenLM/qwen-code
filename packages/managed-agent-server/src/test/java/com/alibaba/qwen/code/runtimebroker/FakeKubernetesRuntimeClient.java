@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesRuntimeClient;
+
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -8,14 +10,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
 
-final class FakeKubernetesRuntimeClient implements KubernetesRuntimeClient {
-    final Map<String, Map<String, Object>> objects = new LinkedHashMap<>();
-    int reads;
-    int creates;
-    String loseCreateReply;
-    String podIp = "10.42.0.8";
-    RuntimeBrokerException readFailure;
-    Consumer<Map<String, Object>> podCreated = ignored -> { };
+public final class FakeKubernetesRuntimeClient implements KubernetesRuntimeClient {
+    public final Map<String, Map<String, Object>> objects = new LinkedHashMap<>();
+    public int reads;
+    public int creates;
+    public String loseCreateReply;
+    public String podIp = "10.42.0.8";
+    public RuntimeBrokerException readFailure;
+    public Consumer<Map<String, Object>> podCreated = ignored -> { };
 
     @Override
     public synchronized CompletionStage<Map<String, Object>> get(String resource, String namespace, String name) {
@@ -57,12 +59,12 @@ final class FakeKubernetesRuntimeClient implements KubernetesRuntimeClient {
         return CompletableFuture.completedFuture(object);
     }
 
-    Map<String, Object> object(String resource) {
+    public Map<String, Object> object(String resource) {
         return objects.entrySet().stream().filter(entry -> entry.getKey().startsWith(resource + "/"))
                 .map(Map.Entry::getValue).findFirst().orElseThrow();
     }
 
-    void remove(String resource) {
+    public void remove(String resource) {
         objects.keySet().removeIf(key -> key.startsWith(resource + "/"));
     }
 
@@ -75,7 +77,7 @@ final class FakeKubernetesRuntimeClient implements KubernetesRuntimeClient {
     }
 
     @SuppressWarnings("unchecked")
-    static Map<String, Object> map(Object value) {
+    public static Map<String, Object> map(Object value) {
         return (Map<String, Object>) value;
     }
 }

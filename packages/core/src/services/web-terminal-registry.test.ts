@@ -13,9 +13,9 @@ import {
   MAX_PTY_INPUT_QUEUE_TASKS,
   PTY_INPUT_QUEUE_FIELDS,
 } from './pty-input-queue.js';
+import * as conptyHost from './conpty-host.js';
 
 const { Terminal } = pkg;
-
 const {
   spawn,
   loadPty,
@@ -53,6 +53,7 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...patched, default: patched };
 });
 
+import { DEFAULT_WRITE_QUEUE_BYTES } from '../utils/bun-pty.js';
 import {
   MAX_CONCURRENT_WEB_TERMINALS,
   resolveWebTerminalShell,
@@ -197,6 +198,9 @@ describe('WebTerminalRegistry', () => {
     write = vi.fn((data: string | Buffer) => {
       inputSocket.writableLength += Buffer.byteLength(data);
     });
+    // Every test is isolated from host PIDs, including release fixtures that
+    // deliberately model a live POSIX process/group with pid 42.
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
     resize = vi.fn();
     kill = vi.fn();
     nativeKill = vi.fn();
@@ -506,6 +510,36 @@ describe('WebTerminalRegistry', () => {
     );
   });
 
+  it.each(['linux', 'win32'])(
+    'reports capacity refusal without retry and frees the id on %s',
+    async (platform) => {
+      osPlatform.mockReturnValue(platform);
+      const registry = new WebTerminalRegistry();
+      const dispose = vi.spyOn(Terminal.prototype, 'dispose');
+      spawn.mockImplementationOnce(() => {
+        throw Object.assign(new Error('capacity'), {
+          code: 'QWEN_PTY_ACTIVE_LIMIT',
+          limitKind: 'active-pty-count',
+          limit: 64,
+        });
+      });
+      const result = await create(registry, 'terminal:capacity');
+      const message =
+        'PTY capacity limit reached (QWEN_PTY_ACTIVE_LIMIT, active-pty-count, limit 64): capacity';
+      expect(result).toEqual({ error: message });
+      expect(warn).toHaveBeenCalledExactlyOnceWith(message);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(dispose).toHaveBeenCalledTimes(platform === 'win32' ? 1 : 0);
+      expect(kill).not.toHaveBeenCalled();
+      expect(process.kill).not.toHaveBeenCalled();
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(registry.readSnapshot('terminal:capacity')).toBeUndefined();
+      await expect(create(registry, 'terminal:capacity')).resolves.toEqual({
+        terminalId: 'terminal:capacity',
+      });
+    },
+  );
+
   it('reports a spawn failure and frees the id when both backends fail', async () => {
     osPlatform.mockReturnValue('win32');
     const responder = new Terminal();
@@ -534,6 +568,397 @@ describe('WebTerminalRegistry', () => {
     await expect(
       create(registry, 'terminal:bundled-double-fail'),
     ).resolves.toEqual({ terminalId: 'terminal:bundled-double-fail' });
+  });
+
+  it('marks the session failed and frees the pty when the backend reports a resource limit', async () => {
+    const code = 'QWEN_PTY_WRITE_LIMIT';
+    const errorListeners: Array<(err: Error) => void> = [];
+    const disposeError = vi.fn();
+    const releaseHost = vi.spyOn(conptyHost, 'releaseConPtyHost');
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: disposeError };
+      }),
+    });
+    const registry = await start('terminal:limit');
+    const failures: string[] = [];
+    const throwingClient = vi.fn(() => {
+      throw new Error('injected disconnected client');
+    });
+    registry.addFailureListener('terminal:limit', throwingClient);
+    registry.addFailureListener('terminal:limit', (message) => {
+      failures.push(message);
+    });
+    expect(registry.readSnapshot('terminal:limit')?.failed).toBeUndefined();
+
+    expect(() =>
+      errorListeners[0]!(
+        Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+          code,
+        }),
+      ),
+    ).not.toThrow();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(throwingClient).toHaveBeenCalledTimes(1);
+    expect(failures).toHaveLength(1);
+    for (const dispose of [
+      disposeData,
+      disposeExit,
+      disposeError,
+      releaseHost,
+    ]) {
+      expect(dispose).toHaveBeenCalledTimes(1);
+    }
+    const snapshot = registry.readSnapshot('terminal:limit');
+    expect(snapshot?.failed).toBe(true);
+    expect(snapshot?.failureMessage).toContain('resource limit');
+    // Logical failure rejects new I/O; release must not signal a pid that
+    // may already have exited. Deferred disposal happened BEFORE release.
+    registry.write('terminal:limit', 'nope');
+    registry.resize('terminal:limit', 100, 40);
+    expect(write).not.toHaveBeenCalled();
+    expect(resize).not.toHaveBeenCalled();
+    registry.release('terminal:limit');
+    registry.release('terminal:limit');
+    for (const dispose of [
+      disposeData,
+      disposeExit,
+      disposeError,
+      releaseHost,
+    ]) {
+      expect(dispose).toHaveBeenCalledTimes(1);
+    }
+    expect(kill).not.toHaveBeenCalled();
+    expect(process.kill).not.toHaveBeenCalled();
+  });
+
+  it.each(['failure-first', 'exit-first'])(
+    'keeps failure and exit mutually exclusive (%s)',
+    async (order) => {
+      const errorListeners: Array<(err: Error) => void> = [];
+      spawn.mockReturnValueOnce({
+        pid: 42,
+        write,
+        resize,
+        kill,
+        onData: vi.fn((listener: (data: string) => void) => {
+          onData = listener;
+          return { dispose: disposeData };
+        }),
+        onExit: vi.fn(
+          (listener: (e: { exitCode: number; signal?: number }) => void) => {
+            onExit = listener;
+            return { dispose: disposeExit };
+          },
+        ),
+        on: vi.fn((event: string, listener: (err: Error) => void) => {
+          if (event === 'error') errorListeners.push(listener);
+          return { dispose: vi.fn() };
+        }),
+      });
+      const registry = await start('terminal:failed-exit-race');
+      const exitEvents: Array<{ exitCode: number; signal?: number }> = [];
+      registry.addExitListener('terminal:failed-exit-race', (e) =>
+        exitEvents.push(e),
+      );
+
+      if (order === 'exit-first') onExit({ exitCode: 3 });
+      errorListeners[0]!(
+        Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+          code: 'QWEN_PTY_WRITE_LIMIT',
+        }),
+      );
+      if (order === 'failure-first') onExit({ exitCode: 3 });
+
+      const snapshot = registry.readSnapshot('terminal:failed-exit-race');
+      expect(snapshot?.failed).toBe(true);
+      expect(snapshot?.exited).toBe(false);
+      expect(snapshot?.exitCode).toBeUndefined();
+      expect(exitEvents).toHaveLength(order === 'failure-first' ? 0 : 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      registry.release('terminal:failed-exit-race');
+      expect(kill).not.toHaveBeenCalled();
+      expect(process.kill).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not re-throw unexpected backend errors from the error event', async () => {
+    // A throw here leaves the backend's fs callback as an uncaught exception
+    // and kills the whole serve daemon. Non-limit errors go to the
+    // diagnostic sink instead — the same fallback the backend itself uses
+    // when nobody listens.
+    const errorListeners: Array<(err: Error) => void> = [];
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    });
+    const registry = await start('terminal:unexpected');
+
+    expect(() =>
+      errorListeners[0]!(Object.assign(new Error('boom'), { code: 'EPIPE' })),
+    ).not.toThrow();
+    expect(warn).toHaveBeenCalledWith('web terminal pty error: boom');
+    // The session is not failed by a non-limit error: the exit path owns
+    // teardown, and the limit path converges on handleFailure.
+    expect(
+      registry.readSnapshot('terminal:unexpected')?.failed,
+    ).toBeUndefined();
+  });
+
+  it('swallows the expected EIO/EAGAIN teardown races on an EventEmitter-shaped backend', async () => {
+    // The Bun backend is an EventEmitter (`on` returns the emitter, detach
+    // goes through `off`); the shape must not change the outcome. EIO/EAGAIN
+    // are the races node-pty deliberately swallows on a dead child — and a
+    // non-limit error must not escape the emit either.
+    const errorListeners: Array<(err: Error) => void> = [];
+    const emitter = {
+      on: vi.fn(function (
+        this: unknown,
+        event: string,
+        listener: (err: Error) => void,
+      ) {
+        if (event === 'error') errorListeners.push(listener);
+        return this;
+      }),
+      off: vi.fn(() => undefined),
+    };
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      stats: { writeQueuedBytes: 0 },
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      ...emitter,
+    });
+    const registry = await start('terminal:emitter-race');
+
+    expect(() =>
+      errorListeners[0]!(Object.assign(new Error('read EIO'), { code: 'EIO' })),
+    ).not.toThrow();
+    expect(() =>
+      errorListeners[0]!(
+        Object.assign(new Error('read EAGAIN'), { code: 'EAGAIN' }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      errorListeners[0]!(Object.assign(new Error('boom'), { code: 'EPIPE' })),
+    ).not.toThrow();
+    // The session stays live and readable through all three.
+    expect(
+      registry.readSnapshot('terminal:emitter-race')?.failed,
+    ).toBeUndefined();
+    expect(registry.write('terminal:emitter-race', 'x')).toBe('written');
+  });
+
+  it('does not count failed sessions against the admission cap', async () => {
+    // A limit-failed session's pty is already dead and released, so it must
+    // not keep one of the admission slots until the idle reclaim — otherwise
+    // eight failures inside the window lock out every new terminal.
+    const errorListeners: Array<(err: Error) => void> = [];
+    spawn.mockImplementation(() => ({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    }));
+    const registry = new WebTerminalRegistry();
+    for (let i = 0; i < MAX_CONCURRENT_WEB_TERMINALS; i += 1) {
+      await expect(create(registry, `terminal:fail-${i}`)).resolves.toEqual({
+        terminalId: `terminal:fail-${i}`,
+      });
+    }
+    for (const listener of errorListeners) {
+      listener(
+        Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+          code: 'QWEN_PTY_WRITE_LIMIT',
+        }),
+      );
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let i = 0; i < MAX_CONCURRENT_WEB_TERMINALS; i += 1) {
+      expect(registry.readSnapshot(`terminal:fail-${i}`)?.failed).toBe(true);
+    }
+
+    await expect(create(registry, 'terminal:after-limit')).resolves.toEqual({
+      terminalId: 'terminal:after-limit',
+    });
+  });
+
+  it('does not fabricate an exit frame when releasing a failed session', async () => {
+    // The failure frame was the session's terminal event; release() must not
+    // synthesize an exit code on top of it — the kill guard right below
+    // already treats failure and exit as distinct states.
+    const errorListeners: Array<(err: Error) => void> = [];
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    });
+    const registry = await start('terminal:failed-release');
+    errorListeners[0]!(
+      Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+        code: 'QWEN_PTY_WRITE_LIMIT',
+      }),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(registry.readSnapshot('terminal:failed-release')?.failed).toBe(true);
+
+    const exitEvents: Array<{ exitCode: number; signal?: number }> = [];
+    registry.addExitListener('terminal:failed-release', (e) => {
+      exitEvents.push(e);
+    });
+    expect(registry.release('terminal:failed-release')).toBe(true);
+    expect(exitEvents).toHaveLength(0);
+  });
+
+  it('survives an EventEmitter-shaped error subscription on release', async () => {
+    // The real Bun backend is an EventEmitter: `on('error')` returns the
+    // emitter itself, not a Disposable. Storing it made release() call
+    // `.dispose()` on the emitter and crash the host (real `qwen serve` under
+    // Bun exited 1 with the WS closing 1006). Detach must go through `off`.
+    const registered: Array<(err: Error) => void> = [];
+    const emitter = {
+      on: vi.fn(function (
+        this: unknown,
+        event: string,
+        listener: (err: Error) => void,
+      ) {
+        if (event === 'error') registered.push(listener);
+        return this;
+      }),
+      off: vi.fn(() => undefined),
+    };
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      ...emitter,
+    });
+    const registry = await start('terminal:emitter-release');
+
+    expect(vi.isMockFunction(process.kill)).toBe(true);
+    expect(() => registry.release('terminal:emitter-release')).not.toThrow();
+    expect(emitter.on).toHaveBeenCalledWith('error', expect.any(Function));
+    expect(emitter.off).toHaveBeenCalledWith('error', registered[0]);
+  });
+
+  it('detaches the error subscription through removeListener on release', async () => {
+    // node-pty's Terminal: `on('error')` proxies to the master socket and
+    // returns undefined, and only `removeListener` detaches.
+    const registered: Array<(err: Error) => void> = [];
+    const removed: Array<[string, (err: Error) => void]> = [];
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') registered.push(listener);
+        return undefined;
+      }),
+      removeListener: vi.fn((event: string, listener: (err: Error) => void) => {
+        removed.push([event, listener]);
+      }),
+    });
+    const registry = await start('terminal:remove-listener-release');
+
+    expect(vi.isMockFunction(process.kill)).toBe(true);
+    expect(() =>
+      registry.release('terminal:remove-listener-release'),
+    ).not.toThrow();
+    expect(removed).toEqual([['error', registered[0]]]);
   });
 
   it('frees a bundled-shape session once across kill and exit-time release', async () => {
@@ -834,6 +1259,107 @@ describe('WebTerminalRegistry', () => {
     expect(registry.write('terminal:paste', paste)).toBe('backpressure');
     expect(write).toHaveBeenCalledOnce();
     registry.dispose();
+  });
+
+  it('admits Bun input from public stats across output, drain and reconnect', async () => {
+    let pending = 0;
+    write.mockImplementation((data: string | Buffer) => {
+      pending += Buffer.byteLength(data);
+    });
+    spawn.mockImplementationOnce(() => ({
+      ...createSpawnedPty(),
+      _socket: undefined,
+      _agent: undefined,
+      get stats() {
+        return { writeQueuedBytes: pending };
+      },
+    }));
+    loadPty.mockResolvedValueOnce({
+      impl: { module: { spawn }, name: 'qwen-bun-pty' },
+      loadError: null,
+    });
+    const registry = await start('terminal:bun');
+    const detach = registry.addOutputListener('terminal:bun', vi.fn());
+    expect(registry.write('terminal:bun', 'é'.repeat(128 * 1024))).toBe(
+      'written',
+    );
+    expect(pending).toBe(256 * 1024);
+    expect(registry.write('terminal:bun', 'x')).toBe('backpressure');
+    onData('output does not drain input');
+    detach?.();
+    registry.addOutputListener('terminal:bun', vi.fn());
+    expect(registry.write('terminal:bun', 'x')).toBe('backpressure');
+    expect(registry.write('terminal:bun', '\x03')).toBe('written');
+    pending = 0;
+    expect(registry.write('terminal:bun', 'next command\r')).toBe('written');
+    expect(warn).not.toHaveBeenCalled();
+    registry.dispose();
+  });
+
+  it('preserves the Bun hard write budget for oversized frames and recovery controls', async () => {
+    loadPty.mockResolvedValueOnce({
+      impl: { module: { spawn }, name: 'qwen-bun-pty' },
+      loadError: null,
+    });
+    let pending = 0;
+    const errorListeners: Array<(err: Error) => void> = [];
+    const acceptedBytes = vi.fn((data: string | Buffer) => {
+      pending += Buffer.byteLength(data);
+      if (pending <= DEFAULT_WRITE_QUEUE_BYTES) return;
+      for (const listener of errorListeners) {
+        listener(
+          Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+            code: 'QWEN_PTY_WRITE_LIMIT',
+          }),
+        );
+      }
+    });
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write: acceptedBytes,
+      get stats() {
+        return { writeQueuedBytes: pending };
+      },
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    });
+    const registry = await start('terminal:oversized-frame');
+
+    expect(
+      registry.write(
+        'terminal:oversized-frame',
+        'x'.repeat(DEFAULT_WRITE_QUEUE_BYTES + 1),
+      ),
+    ).toBe('backpressure');
+    expect(acceptedBytes).not.toHaveBeenCalled();
+    expect(
+      registry.write(
+        'terminal:oversized-frame',
+        'é'.repeat(DEFAULT_WRITE_QUEUE_BYTES / 2),
+      ),
+    ).toBe('written');
+    expect(acceptedBytes).toHaveBeenCalledOnce();
+    expect(registry.write('terminal:oversized-frame', '\x03')).toBe(
+      'backpressure',
+    );
+    expect(acceptedBytes).toHaveBeenCalledOnce();
+    expect(
+      registry.readSnapshot('terminal:oversized-frame')?.failed,
+    ).toBeUndefined();
   });
 
   it('accepts more input after a silent socket drain, including after reconnect', async () => {
@@ -1201,10 +1727,10 @@ describe('WebTerminalRegistry', () => {
               '-A',
               '-o',
               process.platform === 'linux'
-                ? 'pid=,ppid=,sid='
+                ? 'pid=,ppid=,sid=,lstart='
                 : process.platform === 'darwin'
-                  ? 'pid=,ppid=,tdev='
-                  : 'pid=,ppid=',
+                  ? 'pid=,ppid=,tdev=,lstart='
+                  : 'pid=,ppid=,lstart=',
             ],
             expect.objectContaining({
               encoding: 'utf8',

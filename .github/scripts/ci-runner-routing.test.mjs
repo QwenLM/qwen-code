@@ -730,6 +730,31 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       ['push', 'merge_group'],
     ],
     [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    // Both gate lanes also run in the gate's approval-triggered full tier.
+    [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
       'assign-pr-owner.yml',
       'assign',
       'pull_request_target',

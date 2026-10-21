@@ -12,6 +12,27 @@ import {
 } from './pty-input-queue.js';
 
 describe('getPtyInputQueueBytes', () => {
+  it('reads the Bun public queued/in-flight byte counter as it drains', () => {
+    let pending = 300 * 1024;
+    const pty = {
+      get stats() {
+        return { writeQueuedBytes: pending };
+      },
+    };
+    expect(getPtyInputQueueBytes(pty)).toBe(pending);
+    pending = 0;
+    expect(getPtyInputQueueBytes(pty)).toBe(0);
+  });
+
+  it.each([undefined, -1, NaN, Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid Bun queued-byte count %s',
+    (writeQueuedBytes) => {
+      expect(
+        getPtyInputQueueBytes({ stats: { writeQueuedBytes } }),
+      ).toBeUndefined();
+    },
+  );
+
   it.each([MAX_PTY_INPUT_QUEUE_TASKS, MAX_PTY_INPUT_QUEUE_TASKS * 4])(
     'treats %s queued tasks as saturated without inspecting entries',
     (length) => {

@@ -13,9 +13,11 @@
  * image reaching the model goes through the prompt-side vision bridge.
  */
 
+import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   ApprovalMode,
+  MockTool,
   getUnsupportedImageFormatWarning,
   SendMessageType,
 } from '@qwen-code/qwen-code-core';
@@ -46,6 +48,9 @@ const visionMocks = vi.hoisted(() => ({
 }));
 
 const modMocks = vi.hoisted(() => ({ get: vi.fn() }));
+const schedulerControl = vi.hoisted(() => ({
+  finish: null as (() => Promise<void>) | null,
+}));
 vi.mock('../../services/interactive-mod-session.js', () => ({
   getInteractiveModSession: modMocks.get,
 }));
@@ -74,6 +79,24 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       async schedule(
         calls: Array<{ callId: string; name?: string; args?: unknown }>,
       ): Promise<void> {
+        const failure = calls.find(
+          (c) => (c.args as { __scheduleFailure?: string })?.__scheduleFailure,
+        )?.args as { __scheduleFailure: string } | undefined;
+        if (failure) {
+          this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'scheduled', request })),
+          );
+          if (failure.__scheduleFailure === 'cancelled')
+            throw new DOMException('Mod generation revoked', 'AbortError');
+          throw new Error('Scheduler failed');
+        }
+        if (
+          calls.some((c) => (c.args as { __deferred?: boolean })?.__deferred)
+        ) {
+          schedulerControl.finish = () =>
+            this.schedule(calls.map((c) => ({ ...c, args: {} })));
+          return;
+        }
         const bounce = calls.some(
           (c) =>
             (c.args as { __bounceApproval?: boolean } | undefined)
@@ -211,8 +234,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             const a = (c.args ?? {}) as {
               __cancelled?: boolean;
               __cancelApproval?: boolean;
+              __modOutput?: string;
             };
             return {
+              nativeAttemptsObserved: a.__modOutput !== undefined,
               request: {
                 callId: c.callId,
                 name: c.name ?? 'test_tool',
@@ -230,11 +255,18 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                     functionResponse: {
                       name: c.name ?? 'test_tool',
                       id: c.callId,
-                      response: { ok: true },
+                      response:
+                        a.__modOutput !== undefined
+                          ? { output: a.__modOutput }
+                          : { ok: true },
                     },
                   },
                 ],
                 resultDisplay: 'done',
+                persistedOutputFiles:
+                  a.__modOutput !== undefined ? [] : undefined,
+                executionStatus:
+                  a.__modOutput !== undefined ? 'not_started' : undefined,
               },
             };
           }),
@@ -267,6 +299,11 @@ const atMocks = vi.hoisted(() => ({
    */
   abortAfter: null as (() => void) | null,
 }));
+
+vi.mock('../../services/interactive-mod-tool-scheduler.js', async () => {
+  const core = await import('@qwen-code/qwen-code-core');
+  return { InteractiveModToolScheduler: core.CoreToolScheduler };
+});
 
 vi.mock('../hooks/atCommandProcessor.js', () => ({
   handleAtCommand: async ({ query }: { query: string }) => {
@@ -330,7 +367,7 @@ function oneToolBatchStream(request: {
   args?: unknown;
 }) {
   let calls = 0;
-  return vi.fn(function* (): Generator<{
+  return vi.fn(function* (..._args: unknown[]): Generator<{
     type: string;
     value?: unknown;
   }> {
@@ -376,6 +413,7 @@ describe('livePromptEvents', () => {
     atMocks.abortAfter = null;
     visionMocks.run.mockReset();
     modMocks.get.mockReset();
+    schedulerControl.finish = null;
   });
 
   it('seeds prompt ids past claims in the resumed transcript', () => {
@@ -391,6 +429,70 @@ describe('livePromptEvents', () => {
     } as unknown as Config;
 
     expect(nextLivePromptId(config)).toBe('session-1########3');
+  });
+
+  it('records and restores only the finalized synthetic read response under a small batch budget', async () => {
+    const output = 'RAW-MOD-RESULT:'.repeat(2000);
+    const request = {
+      callId: 'synthetic-read',
+      name: 'read_file',
+      args: { __modOutput: output },
+    };
+    const stream = oneToolBatchStream(request);
+    const recordToolResult = vi.fn();
+    const config = createFakeConfig(stream, undefined, () => true, {
+      recordMidTurnUserMessage: vi.fn(),
+      recordToolResult,
+    } as Parameters<typeof createFakeConfig>[3]);
+    Object.assign(config, { getToolOutputBatchBudget: () => 1000 });
+    await drain(livePromptEvents(config, 'read', new AbortController().signal));
+    expect(recordToolResult).toHaveBeenCalledOnce();
+    const [parts, metadata] = recordToolResult.mock.calls[0];
+    expect(metadata.responseParts).toBeUndefined();
+    expect(metadata.executionStatus).toBe('not_started');
+    expect(JSON.stringify(parts)).not.toContain(output);
+    expect(JSON.stringify(parts).length).toBeLessThan(1500);
+    expect(stream.mock.calls[1][0]).toEqual(parts);
+    const restored = buildResumedHistoryItems(
+      {
+        conversation: {
+          messages: [
+            {
+              type: 'assistant',
+              timestamp: new Date().toISOString(),
+              message: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: request.callId,
+                      name: request.name,
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              type: 'tool_result',
+              toolCallResult: metadata,
+              message: { parts },
+            },
+          ],
+        },
+      } as unknown as import('@qwen-code/qwen-code-core').ResumedSessionData,
+      {
+        getToolRegistry: () => ({
+          getTool: () =>
+            new MockTool({ name: 'read_file', displayName: 'Read File' }),
+        }),
+      } as unknown as Config,
+    );
+    const group = restored.find((item) => item.type === 'tool_group');
+    expect(group?.type).toBe('tool_group');
+    if (group?.type !== 'tool_group') throw new Error('missing restored read');
+    expect(group.tools[0].detailedDisplay).toBeDefined();
+    expect(group.tools[0].detailedDisplay?.length).toBeLessThan(1500);
+    expect(group.tools[0].detailedDisplay).not.toContain(output);
   });
 
   it('forwards string prompts as an explicit UserQuery send', async () => {
@@ -905,6 +1007,29 @@ describe('livePromptEvents', () => {
       submittedPrompt: '@file.txt raw composer text',
     });
     expect(secondOptions).toEqual({ type: SendMessageType.ToolResult });
+  });
+
+  it('forwards a human declaration only on the initial send, independently from submittedPrompt', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'intent-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const humanInput = { text: 'ultracode inspect @notes' };
+    await drain(
+      livePromptEvents(config, 'expanded payload', undefined, { humanInput }),
+    );
+    expect((sendMessageStream.mock.calls[0] as unknown[])[3]).toMatchObject({
+      type: SendMessageType.UserQuery,
+      humanInput,
+    });
+    expect(
+      (sendMessageStream.mock.calls[0] as unknown[])[3],
+    ).not.toHaveProperty('submittedPrompt');
+    expect(
+      (sendMessageStream.mock.calls[1] as unknown[])[3],
+    ).not.toHaveProperty('humanInput');
   });
 
   it('expands an @-mention where the prompt enters the stream', async () => {
@@ -2171,6 +2296,76 @@ describe('livePromptEvents', () => {
     )) as OpenTuiStreamEvent[];
 
     expect(events.some((e) => e.type === 'tool-description')).toBe(false);
+  });
+
+  it.each(['cancelled', 'error'])(
+    'rejects a %s batch after draining UI-only terminal states without committing results',
+    async (summary) => {
+      const send = oneToolBatchStream({
+        callId: 'revoked',
+        name: 'test_tool',
+        args: { __scheduleFailure: summary },
+      });
+      const recordToolResult = vi.fn();
+      const config = {
+        ...createFakeConfig(send),
+        getChatRecordingService: () => ({ recordToolResult }),
+      } as unknown as Config;
+      const events: OpenTuiStreamEvent[] = [];
+      const run = (async () => {
+        for await (const event of livePromptEvents(config, 'run'))
+          events.push(event);
+      })();
+      await expect(run).rejects.toThrow(
+        summary === 'cancelled' ? 'Mod generation revoked' : 'Scheduler failed',
+      );
+      expect(events).toContainEqual({
+        type: 'tool-end',
+        id: 'revoked',
+        success: false,
+        summary,
+      });
+      expect(events).toContainEqual({
+        type: 'tool-queued',
+        id: 'revoked',
+        queued: false,
+      });
+      expect(events).toContainEqual({
+        type: 'confirm-resolved',
+        id: 'revoked',
+        outcome: 'rejected',
+      });
+      expect(events.some((event) => event.type === 'error')).toBe(false);
+      expect(send).toHaveBeenCalledOnce();
+      expect(config.getGeminiClient().addHistory).not.toHaveBeenCalled();
+      expect(recordToolResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the native queue open when schedule resolves before completion', async () => {
+    const send = oneToolBatchStream({
+      callId: 'deferred',
+      name: 'test_tool',
+      args: { __deferred: true },
+    });
+    let settled = false;
+    const run = drain(livePromptEvents(createFakeConfig(send), 'run')).then(
+      (events) => {
+        settled = true;
+        return events;
+      },
+    );
+    await vi.waitFor(() => expect(schedulerControl.finish).not.toBeNull());
+    expect(settled).toBe(false);
+    expect(send).toHaveBeenCalledOnce();
+    await schedulerControl.finish!();
+    expect(await run).toContainEqual({
+      type: 'tool-end',
+      id: 'deferred',
+      success: true,
+      summary: 'ok',
+    });
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it('ends the turn without a follow-up request when the whole batch was cancelled', async () => {
