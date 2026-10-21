@@ -81,6 +81,7 @@ fn def() -> &'static ToolDef {
                 "app_context": { "type": "boolean", "description": "Capture the app interaction context with native compact AX projection." },
                 "query": { "type": "string", "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_accessibility": {"type":"boolean","default":true,"description":"Set false for a screenshot without an accessibility walk."},
                 "include_screenshot": {
                     "type": "boolean",
                     "description": "Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return the tree only (the cheap path when you're just re-indexing before an element ax action; saves the image tokens + screen-grab latency). screenshot_out_file still forces a capture to disk."
@@ -120,6 +121,17 @@ fn def() -> &'static ToolDef {
         idempotent: false,
         open_world: false,
     })
+}
+
+fn off_space_staleness_note(
+    on_current_space: Option<bool>,
+    chromium: bool,
+) -> Option<&'static str> {
+    (on_current_space == Some(false) && chromium).then_some(
+        "This browser window is on another Space. Chromium may pause painting and \
+         accessibility updates while hidden, so this screenshot and tree can show \
+         an older state. Do not use this read alone to confirm an action's effect.",
+    )
 }
 
 fn chromium_browser_window(pid: i32) -> bool {
@@ -274,10 +286,16 @@ impl Tool for GetWindowStateTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        // Always walk the AX tree (perception returns both tree + screenshot).
-        let tree_result = {
+        let (tree_result, pending_snapshot) = if args["include_accessibility"] == false {
+            (None, None)
+        } else {
             let q = query.clone();
             let state = Arc::clone(&self.state);
+            let readiness_deadline = Some(
+                cua_driver_core::tool::current_ax_readiness_deadline().unwrap_or_else(|| {
+                    std::time::Instant::now() + cua_driver_core::tool::AX_READINESS_BUDGET
+                }),
+            );
             // Keep the product deadline below the public client's 25-second
             // deadline so callers receive a structured driver error. The AX
             // walker also applies a native per-element messaging timeout because
@@ -296,16 +314,19 @@ impl Tool for GetWindowStateTool {
                         max_elements,
                         max_depth,
                         app_context,
+                        readiness_deadline,
                     )
                 };
-                if app_context {
-                    crate::apps::with_app_observation(pid, walk)
+                let tree = if app_context {
+                    crate::apps::with_app_observation(pid, readiness_deadline, walk)
                 } else {
                     walk()
-                }
+                };
+                let snapshot = crate::ax::cache::ElementCache::prepare(&tree.nodes);
+                (tree, snapshot)
             });
             match tokio::time::timeout(std::time::Duration::from_secs(20), walk_future).await {
-                Ok(Ok(r)) => Some(r),
+                Ok(Ok((tree, snapshot))) => (Some(tree), Some(snapshot)),
                 Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
                 Err(_elapsed) => {
                     return ToolResult::error(format!(
@@ -332,21 +353,8 @@ impl Tool for GetWindowStateTool {
         // `window_scope` is None only when no window_id was requested, which
         // this tool never does — so treat that as resolved.
         let scope_matched = window_scope.as_ref().is_none_or(|s| s.is_matched());
-
-        // Update element cache — ONLY for a resolved window scope. Caching an
-        // unresolved scope's nodes under (pid, window_id) is what turned a
-        // wrong-surface snapshot into a wrong-surface *action*: a follow-up
-        // click(element_index=N) picked whatever the walk happened to return.
-        // For an unresolved scope, replace any prior entry with an empty
-        // snapshot so a stale index map cannot be clicked through either.
-        if !observation_only {
-            if let Some(ref r) = tree_result {
-                if scope_matched {
-                    self.state.element_cache.update(pid, window_id, &r.nodes);
-                } else {
-                    self.state.element_cache.update(pid, window_id, &[]);
-                }
-            }
+        if !observation_only && tree_result.is_some() && !scope_matched {
+            self.state.element_cache.clear_target(pid, window_id);
         }
 
         let observation_revision =
@@ -583,16 +591,15 @@ impl Tool for GetWindowStateTool {
         // Skipped entirely for an unresolved window scope: an element_token is
         // a promise that index N addresses a row of THIS window, and there is
         // no such row to promise (issue #2237).
-        let elem_count_for_snapshot = tree_result
-            .as_ref()
-            .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
-            .unwrap_or(0);
         let snapshot_id = if scope_matched && !observation_only {
-            Some(cua_driver_core::element_token::global().register_snapshot(
-                pid,
-                window_id,
-                elem_count_for_snapshot,
-            ))
+            pending_snapshot.map(|snapshot| {
+                self.state.element_cache.publish_for_session(
+                    pid,
+                    window_id,
+                    snapshot,
+                    args.get("_session_id").and_then(Value::as_str),
+                )
+            })
         } else {
             None
         };
@@ -822,6 +829,16 @@ impl Tool for GetWindowStateTool {
         }
         if let Some(ref fp) = screenshot_file_path {
             structured["screenshot_file_path"] = serde_json::json!(fp);
+        }
+        let on_current_space = crate::windows::window_on_current_space_by_id(window_id);
+        if on_current_space == Some(false) {
+            structured["on_current_space"] = serde_json::json!(false);
+            if let Some(note) =
+                off_space_staleness_note(on_current_space, chromium_browser_window(pid))
+            {
+                structured["off_space_staleness"] = serde_json::json!(note);
+                content.push(Content::text(note));
+            }
         }
         cua_driver_core::window_inspection::mark_browser_chrome_capture_coverage(
             &mut structured,

@@ -552,20 +552,42 @@
                                  measured 7.4 s), so the fork moves to 10080 s
                                  and the Verify step to 179 minutes: 10680 s of
                                  fork plus wrap is exactly 178, so 179 is what
-                                 keeps the margin. The FG12f delivery entry moves from 30 s to
-                                 50 s at 2x (four cases, 24.16 s measured): the
-                                 healthy sum becomes 9500 s, so the fork moves
-                                 to 10100 s and the 179-minute step still wraps
-                                 (10700 s of fork plus wrap). The FG11d
-                                 retire-at-intent cell adds 18 s (2x its measured
-                                 8.6 s): the healthy sum becomes 9518 s, so the
-                                 fork moves to 10118 s and the 179-minute step
-                                 still wraps (10718 s of fork plus wrap). Class-boundary
-                                 cleanup and its regression add 60 s:
-                                 healthy 9578 s, fork 10178 s, Verify 180
-                                 minutes with margin above the 10778-second
-                                 fork-plus-wrap sum. -->
-                            <forkedProcessTimeoutInSeconds>10178</forkedProcessTimeoutInSeconds>
+                                 keeps the margin. The FG12f delivery entry
+                                 moves from 30 s to 50 s at 2x (four cases,
+                                 24.16 s measured): the healthy sum becomes
+                                 9500 s, so the fork moves to 10100 s and the
+                                 179-minute step still wraps (10700 s of fork
+                                 plus wrap). The FG11d retire-at-intent cell
+                                 adds 18 s (2x its measured 8.6 s): the
+                                 healthy sum becomes 9518 s, so the fork moves
+                                 to 10118 s. Class-boundary cleanup and its
+                                 regression add 60 s: healthy 9578 s, fork
+                                 10178 s, Verify 180 minutes. The FG13e Hook
+                                 stream-gap cell adds 150 s: healthy 9728 s,
+                                 fork 10328 s, Verify 183 minutes. The FG11d
+                                 close-queued cell adds 134 s (2x its measured
+                                 67.2 s): healthy 9862 s, fork 10462 s, Verify
+                                 185 minutes. The FG11d close-in-flight refusal
+                                 cell adds 9 s (2x its measured 4.5 s): healthy
+                                 9871 s, fork 10471 s, Verify 185 minutes. The
+                                 FG13f MessageDisplay reload cell adds 150 s:
+                                 healthy 10021 s, fork 10621 s, Verify 188
+                                 minutes. The FG12d cancel-before-dispatch cell
+                                 adds 18 s (2x its measured 9.1 s): healthy
+                                 10039 s, fork 10639 s, Verify 188 minutes. The
+                                 FG11d retry-reuse cell adds 11 s (2x its
+                                 measured 5.3 s): healthy 10050 s, fork 10650 s,
+                                 Verify 188 minutes. The FG12d Spring-restart
+                                 owner-release cell adds 24 s (2x its measured
+                                 11.9 s): healthy 10074 s, fork 10674 s. The
+                                 FG11d settled-outcome cell adds 9 s (2x its
+                                 measured 4.5 s): healthy 10083 s, fork 10683 s,
+                                 Verify 189 minutes. The FG13a result store
+                                 ack-loss cell adds 150 s: healthy 10233 s, fork
+                                 10833 s, Verify 191 minutes. The FG13a dispatch
+                                 ack-loss cell adds 150 s: healthy 10383 s, fork
+                                 10983 s, Verify 194 minutes. -->
+                            <forkedProcessTimeoutInSeconds>10983</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

@@ -676,6 +676,7 @@ describe('package asset scripts', () => {
     expect(distPackageJson.files).toContain('export-transcript-document.css');
     expect(distPackageJson.files).toContain('execution-worker.js');
     expect(distPackageJson.files).toContain('mem0');
+    expect(distPackageJson.files).toContain('generated-ui');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -718,6 +719,10 @@ describe('package asset scripts', () => {
     'execution-worker.js',
     'mem0/main.js',
     'mem0/write-confirmation.js',
+    'generated-ui/main.js',
+    'generated-ui/app.html',
+    'generated-ui/skills/generated-ui/SKILL.md',
+    'generated-ui/THIRD_PARTY_NOTICES.txt',
     'sandboxBwrapRelay.js',
     'sandboxLandlockRelay.js',
     'sandboxFileWorker.js',
@@ -792,7 +797,7 @@ describe('package asset scripts', () => {
     },
   );
 
-  it('copies Computer Use platform references to both CLI and core distributions', () => {
+  it('copies bundled skill references to both CLI and core distributions', () => {
     const rootDir = createFixtureRoot();
     const coreDir = path.join(rootDir, 'packages', 'core');
     const resources = [
@@ -803,7 +808,7 @@ describe('package asset scripts', () => {
     for (const resource of resources) {
       writeFile(
         rootDir,
-        `packages/core/src/skills/bundled/computer-use/${resource}`,
+        `packages/core/src/skills/bundled/fixture-skill/${resource}`,
         resource,
       );
     }
@@ -813,13 +818,13 @@ describe('package asset scripts', () => {
     for (const resource of resources) {
       expect(
         readFileSync(
-          path.join(rootDir, 'dist/bundled/computer-use', resource),
+          path.join(rootDir, 'dist/bundled/fixture-skill', resource),
           'utf8',
         ),
       ).toBe(resource);
       expect(
         readFileSync(
-          path.join(coreDir, 'dist/src/skills/bundled/computer-use', resource),
+          path.join(coreDir, 'dist/src/skills/bundled/fixture-skill', resource),
           'utf8',
         ),
       ).toBe(resource);
@@ -1588,6 +1593,14 @@ describe('package asset scripts', () => {
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/mem0/main.js', '');
     writeFile(rootDir, 'dist/mem0/write-confirmation.js', '');
+    for (const file of [
+      'main.js',
+      'app.html',
+      'skills/generated-ui/SKILL.md',
+      'THIRD_PARTY_NOTICES.txt',
+    ]) {
+      writeFile(rootDir, `dist/generated-ui/${file}`, 'generated-ui asset\n');
+    }
     writeFile(rootDir, 'dist/cli.js', '');
     writeFile(rootDir, 'dist/execution-worker.js', '');
     writeFile(rootDir, 'dist/sandboxBwrapRelay.js', '');

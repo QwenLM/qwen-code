@@ -17,6 +17,7 @@ import type {
 } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
+import { getSlashCommandCompletionResult } from '../../completions/slashCompletion';
 import type { ComponentProps } from 'react';
 import {
   ToolDetailsContext,
@@ -302,6 +303,99 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('uses the shared rename dialog and synchronizes the confirmed title without submitting the composer', async () => {
+    let resolve!: (value: { displayName: string }) => void;
+    const renameSession = vi.fn().mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    provider = { ...provider, renameSession };
+    const canRename = (title: string) =>
+      summary('s1', {
+        title,
+        capabilities: { canSend: true, canCancel: false, canRename: true },
+      });
+    mocks.client.getSession.mockResolvedValue(canRename('Original'));
+    let oldList!: (value: { sessions: ManagedAgentSessionSummary[] }) => void;
+    mocks.client.listSessions
+      .mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            oldList = done;
+          }),
+      )
+      .mockResolvedValue({ sessions: [canRename('Stored name')] });
+    await render('s1');
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Rename')!
+        .click();
+    });
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename"]',
+    )!;
+    expect(input.value).toBe('Original');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '  Requested name  ');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await flush();
+    });
+    expect(renameSession).toHaveBeenCalledWith(
+      's1',
+      'Requested name',
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(container.textContent).toContain('Original');
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    mocks.client.getSession.mockResolvedValue(canRename('Stored name'));
+    await act(async () => {
+      resolve({ displayName: 'Stored name' });
+      await flush();
+    });
+    await act(async () => {
+      oldList({ sessions: [canRename('Original')] });
+      await flush();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('nav')?.textContent).toContain(
+      'Stored name',
+    );
+    expect(container.textContent).not.toContain('Original');
+    expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not expose rename when permission or interactivity is missing', async () => {
+    provider = { ...provider, renameSession: vi.fn() };
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Rename',
+      ),
+    ).toBe(false);
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, canRename: true },
+      }),
+    );
+    await render('s1', 'en', provider, null, false);
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Rename',
+      ),
+    ).toBe(false);
+  });
+
   it('binds tool detail reads to the selected Session and distinguishes recorded empty output from missing output', async () => {
     const get = vi.fn().mockResolvedValue({
       input: { command: 'true' },
@@ -385,6 +479,15 @@ describe('ManagedSessionsPage', () => {
     );
     expect(mocks.editorProps?.skills).toEqual(skills);
     expect(mocks.editorProps?.skillsLoaded).toBe(true);
+    const completion = getSlashCommandCompletionResult(
+      '/rev',
+      4,
+      mocks.editorProps?.commands ?? [],
+    );
+    expect(completion?.items).toMatchObject([
+      { label: '/review', apply: '/review ' },
+    ]);
+    expect(completion?.items[0]?.autoSubmit).not.toBe(true);
   });
 
   it('connects MCP independently of file attachments without enabling daemon features', async () => {
@@ -2169,6 +2272,50 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('[data-managed-progress]')).toBeNull();
     expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain('Preparing environment');
+  });
+
+  it('compacts the bound Workspace row into one line in the home layout', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      }),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      await render('bound', 'en', provider, target);
+      const binding = container.querySelector(
+        '[data-managed-workspace-binding]',
+      );
+      expect(binding?.querySelector('summary')?.getAttribute('title')).toBe(
+        'ws-a',
+      );
+      expect(binding?.textContent).toContain('ws-a');
+      expect(binding?.textContent).toContain('services/api');
+      // The compact row repeats neither label: a regression that restores the
+      // standalone lines inside the details row is what this pins.
+      expect(binding?.textContent).not.toContain('Bound Workspace');
+      expect(binding?.textContent).not.toContain('Relative directory');
+    } finally {
+      target.remove();
+    }
+  });
+
+  it('keeps the labeled Workspace lines in the standalone layout', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+      }),
+    );
+    await render('bound');
+    const binding = container.querySelector('[data-managed-workspace-binding]');
+    expect(binding?.textContent).toContain('Bound Workspace');
+    expect(binding?.textContent).toContain('Relative directory');
+    expect(binding?.textContent).toContain('ws-a');
+    expect(binding?.textContent).toContain('services/api');
+    // The compact summary belongs to the home layout only: rendering it here
+    // would repeat the row above the two labeled lines, inside a plain div.
+    expect(binding?.querySelector('summary')).toBeNull();
   });
 
   it('lets the creator send a later Turn to a bound Session', async () => {

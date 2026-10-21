@@ -995,6 +995,39 @@ describe('Query', () => {
   });
 
   describe('Multi-Turn Conversation', () => {
+    it('serializes human origin only on the explicitly declared message', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+      await respondToInitialize(transport, query);
+      const human = createUserMessage('ultracode declared');
+      human.origin = { kind: 'human' };
+
+      async function* messages() {
+        yield createUserMessage('ultracode unknown before');
+        yield human;
+        yield createUserMessage('ultracode unknown after');
+      }
+
+      const stream = query.streamInput(messages());
+      transport.simulateMessage(createResultMessage(true));
+      await stream;
+
+      const userMessages = transport
+        .getAllWrittenMessages()
+        .filter(
+          (message): message is SDKUserMessage =>
+            typeof message === 'object' &&
+            message !== null &&
+            'type' in message &&
+            message.type === 'user',
+        );
+      expect(userMessages.map((message) => message.origin)).toEqual([
+        undefined,
+        { kind: 'human' },
+        undefined,
+      ]);
+      await query.close();
+    });
+
     it('should support streamInput() for follow-up messages', async () => {
       const query = new Query(transport, { cwd: '/test' });
 
