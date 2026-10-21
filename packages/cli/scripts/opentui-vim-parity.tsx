@@ -505,7 +505,7 @@ try {
 
   for (const [suffix, expected, cursor] of [
     ['Z', '甲🙂e\u0301Z', 5],
-    ['\x1bx', '甲🙂e', 2],
+    ['\x1bx', '甲🙂e', 3],
     ['\x1baZ', '甲🙂e\u0301Z', 5],
   ] as const) {
     await change(() => getComposerHandle()!.setText(''));
