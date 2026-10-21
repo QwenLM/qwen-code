@@ -90,6 +90,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_artifact_library: { since: 'v1' },
   session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
@@ -245,6 +246,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_settings_toggle: { since: 'v1' },
   workspace_skill_settings_batch_toggle: { since: 'v1' },
+  workspace_session_refresh: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
   // Extension activation commits do not refresh active sessions. Clients that
   // need immediate runtime application must submit the independent refresh
@@ -427,6 +429,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // settings, so daemons without settings persistence omit the tag and
   // return 404.
   user_language_sync: { since: 'v1' },
+  session_message_deletion: { since: 'v1' },
   session_rewind: { since: 'v1' },
   workspace_hooks: { since: 'v1' },
   session_hooks: { since: 'v1' },
@@ -435,6 +438,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  workspace_model_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and
   // direct workspace notifications. Presence describes the route/event
   // contract; current worker availability is reported per delivery.
@@ -716,6 +720,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ServeFeature,
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
+  ['session_message_deletion', (toggles) => toggles.hostedHarness !== true],
   ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
   [
     'managed_session_journal_delta_v1',
@@ -763,6 +768,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,
+  ],
+  [
+    'session_artifact_library',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
     'session_artifacts_persistence',

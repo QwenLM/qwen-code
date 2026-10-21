@@ -983,8 +983,28 @@ describe('verifyRecoverySession', () => {
     ],
     ['missing bytes', Buffer.from('[]'), null, 'missing_resource'],
     [
+      'catalog above the previous 48 KiB limit',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'review',
+            description: 'Review',
+            body: 'x'.repeat(48 * 1024),
+          },
+        ]),
+      ),
+      undefined,
+      undefined,
+    ],
+    [
+      'catalog at the 2 MiB resource limit',
+      Buffer.from('[]'.padEnd(2 * 1024 * 1024)),
+      undefined,
+      undefined,
+    ],
+    [
       'oversized catalog',
-      Buffer.alloc(48 * 1024 + 1, 0x20),
+      Buffer.from('[]'.padEnd(2 * 1024 * 1024 + 1)),
       undefined,
       'Invalid agent skills reference',
     ],

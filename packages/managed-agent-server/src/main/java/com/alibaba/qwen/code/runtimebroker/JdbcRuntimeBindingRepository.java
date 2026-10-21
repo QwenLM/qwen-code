@@ -1,6 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
+import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
+
+import javax.sql.DataSource;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -19,8 +24,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
-
-import javax.sql.DataSource;
 
 /** JDBC Runtime binding repository coordinated through a shared database. */
 public final class JdbcRuntimeBindingRepository
@@ -697,11 +700,17 @@ public final class JdbcRuntimeBindingRepository
     }
 
     Map<String, Object> readCsiBatch(
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeBindingRecord hint, String promptId, String batchId) {
+        return readCsiBatch(sessions, executions, hint, promptId, batchId, null);
+    }
+
+    Map<String, Object> readCsiBatch(
             RuntimeSessionRepository sessions,
             ToolExecutionRepository executions,
             RuntimeBindingRecord hint,
             String promptId,
-            String batchId) {
+            String batchId, Map<String, Object> recoveryOwner) {
         requireCsiRepositories(sessions, executions);
         return JdbcRepositorySupport.transaction(
                 dataSource,
@@ -728,6 +737,10 @@ public final class JdbcRuntimeBindingRepository
                                 "Original CSI Runtime Session is not ready",
                                 false);
                     }
+                    if (recoveryOwner != null) {
+                        admission.head().requireRecoveryOwner(recoveryOwner);
+                        JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head());
+                    }
                     var result =
                             CsiNativeToolReservation.read(
                                     connection,
@@ -735,7 +748,7 @@ public final class JdbcRuntimeBindingRepository
                                     admission.prefix(),
                                     resources,
                                     promptId,
-                                    batchId);
+                                    batchId, recoveryOwner != null);
                     admission.head().requireCurrentTime(connection);
                     return result;
                 });
@@ -1525,6 +1538,27 @@ public final class JdbcRuntimeBindingRepository
                 });
     }
 
+    private static void requireResidentWorkspaceAdmission(Connection connection,
+            RuntimeProvisionRequest request) throws SQLException {
+        if (!ResidentWorkspaceProfile.selects(request)) {
+            return;
+        }
+        var scope = request.getScope();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT workspace_generation, storage_id, state FROM ma_workspace"
+                        + " WHERE tenant_id = ? AND workspace_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, scope.getWorkspaceId());
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next() || !"ACTIVE".equals(row.getString("state"))
+                        || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
+                        || !request.getStorageId().equals(row.getString("storage_id"))) {
+                    throw admissionClosed();
+                }
+            }
+        }
+    }
+
     @Override
     public RuntimeBindingRecord findOrCreate(
             RuntimeProvisionRequest request) {
@@ -1533,6 +1567,7 @@ public final class JdbcRuntimeBindingRepository
                 dataSource,
                 connection -> {
                     lockPlacementDomain(connection, request.getScope().getTenantId());
+                    requireResidentWorkspaceAdmission(connection, request);
                     boolean csiFiles =
                             JdbcCsiFilesRetirementGuard.requireProvisionPin(connection, request);
                     requireHarnessAdmission(connection, request);
@@ -1550,6 +1585,11 @@ public final class JdbcRuntimeBindingRepository
                         }
                         if (csiFiles) {
                             JdbcCsiFilesRetirementGuard.lockBinding(connection, active);
+                        }
+                        if (ResidentWorkspaceProfile.selects(request)
+                                && (active.getState() == RuntimeBindingRecord.State.DRAINING
+                                        || active.isDrainRequested())) {
+                            throw admissionClosed();
                         }
                         return active;
                     }
@@ -1813,14 +1853,21 @@ public final class JdbcRuntimeBindingRepository
         String ownerId = BrokerValues.requireId(owner, "owner");
         Duration duration = JdbcRepositorySupport.requireDuration(
                 leaseDuration);
+        RuntimeBindingRecord hint = findById(id);
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
+                    if (hint != null && ResidentWorkspaceProfile.selects(hint.getRequest())) {
+                        lockPlacementDomain(connection, hint.getRequest().getScope().getTenantId());
+                    }
                     BindingControl control = lockBindingControl(connection, id);
                     RuntimeBindingRecord current = selectById(connection, id, true);
                     requireControlBinding(control, current);
                     Instant now = controlTime(connection, control);
-                    if (current == null || !current.isActive()) {
+                    if (current == null || !current.isActive()
+                            || ResidentWorkspaceProfile.selects(current.getRequest())
+                                    && (current.getState() == RuntimeBindingRecord.State.DRAINING
+                                            || current.isDrainRequested())) {
                         return null;
                     }
                     if (ownerId.equals(current.getOperationOwner())
@@ -1935,7 +1982,7 @@ public final class JdbcRuntimeBindingRepository
             return new BindingControl(connection, original, null);
         }
         return new BindingControl(
-                connection, original, JdbcCsiReadyAdmission.lock(connection, original));
+                connection, original, JdbcCsiApplicationProgress.lock(connection, original));
     }
 
     private static void requireControlBinding(
@@ -2007,7 +2054,7 @@ public final class JdbcRuntimeBindingRepository
     private record BindingControl(
             Connection connection,
             JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiReadyAdmission.Admission progress) {}
+            JdbcCsiApplicationProgress.Continuation progress) {}
 
     private static void ensureSlot(Connection connection, String requestKey,
             RuntimeProvisionRequest request) throws SQLException {

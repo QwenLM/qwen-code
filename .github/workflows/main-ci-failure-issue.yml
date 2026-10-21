@@ -24,11 +24,7 @@ on:
       - 'Qwen Code CI'
       - 'Desktop Checks'
     types: ['completed']
-    # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
-    # completes on every pull request, and without this each of those would
-    # raise a workflow_run event here just to skip. The job filter still
-    # enforces main — this only keeps the event log honest.
-    branches: ['main']
+    # PR approval runs can finish after merge and still need a failure report.
 
 defaults:
   run:
@@ -45,10 +41,13 @@ jobs:
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
       github.event.workflow_run.conclusion == 'failure' &&
-      github.event.workflow_run.head_branch == 'main' &&
+      ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks"]'), github.event.workflow.name))) }}
+      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks"]'), github.event.workflow.name)))) ||
+      (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
+      (github.event.workflow.name == 'Managed Agent gate' &&
+      contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     permissions:
@@ -60,34 +59,121 @@ jobs:
       contents: 'read'
       # Find an issue that already tracks this failure.
       issues: 'read'
+      pull-requests: 'read'
     outputs:
       issue_number: '${{ steps.plan.outputs.issue_number }}'
       title: '${{ steps.plan.outputs.title }}'
       body: '${{ steps.plan.outputs.body }}'
       infra_only: '${{ steps.infra.outputs.infra_only }}'
+      pr_number: '${{ steps.destination.outputs.pr_number }}'
+      file_issue: '${{ steps.destination.outputs.file_issue }}'
+      comment_body: '${{ steps.summary.outputs.body }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false
 
+      # A workflow_run event is delivered once, but this job can sit in the
+      # queue long enough for the same run to be re-run. Attempt 1 of run
+      # 39237270547 waited hours here; by the time it ran, attempt 2 was green,
+      # so the failed-jobs list read from the latest attempt was empty and a
+      # per-commit issue was filed for an already-green head (#14768). A later
+      # attempt owns the run: its own completion event reports the result.
+      - name: 'Skip a superseded attempt'
+        id: 'live'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          REPO: '${{ github.repository }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+        run: |-
+          set -euo pipefail
+          superseded=false
+          if live_attempt="$(
+            gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
+              --jq '.run_attempt'
+          )"; then
+            # A missing run_attempt must fail open, not read as attempt 0.
+            if [[ -n "${RUN_ATTEMPT}" && "${live_attempt}" -gt "${RUN_ATTEMPT}" ]]; then
+              superseded=true
+              echo "::warning::Run ${WORKFLOW_RUN_ID} is on attempt ${live_attempt}; this attempt-${RUN_ATTEMPT} event is stale and its own completion event reports the result."
+            fi
+          else
+            echo "::warning::Could not read run ${WORKFLOW_RUN_ID}; assuming this attempt-${RUN_ATTEMPT} event is current and reporting."
+          fi
+          echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Select the failure destination'
+        id: 'destination'
+        if: "${{ steps.live.outputs.superseded != 'true' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          REPO: '${{ github.repository }}'
+          EVENT_NAME: '${{ github.event.workflow_run.event }}'
+          HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+        run: |-
+          set -euo pipefail
+          pr_number=''
+          file_issue=false
+          # An allow-list, not "main and not a PR event": an event admitted
+          # to the job later defaults to the PR lookup, never to filing a
+          # main-regression issue for an unmerged head.
+          if [[ "${HEAD_BRANCH}" == 'main' && ( "${EVENT_NAME}" == 'push' || "${EVENT_NAME}" == 'schedule' || "${EVENT_NAME}" == 'workflow_dispatch' ) ]]; then
+            file_issue=true
+          else
+            # workflow_run.pull_requests can be empty, including on approval
+            # runs, and an approval run records the BASE repository as its
+            # head_repository even when the PR head lives in a fork, so an
+            # owner:branch head= filter derived from it can never find a
+            # fork's PR. The exact head SHA qualifies instead: a same-named
+            # branch on an unrelated fork carries a different one.
+            if ! pr="$(
+              gh api --method GET "repos/${REPO}/pulls" \
+                -f state=all -f per_page=100 --paginate \
+                | jq -sc --arg sha "${HEAD_SHA}" --arg repo "${REPO}" \
+                  'add // [] | map(select(.head.sha == $sha and .base.repo.full_name == $repo and .base.ref == "main" and (.state != "closed" or .merged_at != null))) | .[0] // {}'
+            )"; then
+              # Fail soft like the neighbouring reads: a transient listing
+              # error must cost this report, not the whole analyze job.
+              pr='{}'
+            fi
+            pr_number="$(jq -r '.number // empty' <<< "${pr}")"
+            file_issue="$(jq -r '.merged_at != null' <<< "${pr}")"
+          fi
+          if [[ -z "${pr_number}" && "${file_issue}" != 'true' ]]; then
+            echo "::warning::The admitted ${EVENT_NAME} run on ${HEAD_BRANCH} resolved to no PR and no issue; nothing will be reported."
+          fi
+          echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
+          echo "file_issue=${file_issue}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Download failed job logs'
+        if: "${{ steps.live.outputs.superseded != 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
         run: |-
           log_dir="${RUNNER_TEMP}/failed-logs"
           mkdir -p "${log_dir}"
 
-          # One fetch feeds both projections below. `gh api` writes a non-2xx
-          # body to stdout before exiting non-zero, so an errored call parks its
-          # error JSON here instead of in a projection: both jq passes reject a
-          # body with no `.jobs` and emit nothing, which is the degradation the
+          # The endpoint names the event's attempt, not the run: the
+          # supersession check above can pass and the run still move on while
+          # this paginates, and the run-level endpoint resolves to the latest
+          # attempt.
+          # One fetch feeds both projections below. `--paginate` prints one
+          # JSON document per page, and the comment helper reads this file
+          # with a single JSON.parse, so the pages merge into one document
+          # here — a run wider than 100 jobs would otherwise render a comment
+          # naming no job. `gh api` writes a non-2xx body to stdout before
+          # exiting non-zero, and that body carries no `.jobs`, so a parked
+          # error normalizes to an empty list: the same degradation the
           # per-commit body already handles.
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
-          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
-            --paginate > "${jobs_json}"; then
+          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+            --paginate | jq -s '{jobs: [ .[].jobs[]? ]}' > "${jobs_json}"; then
             echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}"
           fi
 
@@ -124,6 +210,7 @@ jobs:
 
       - name: 'Detect infrastructure-only failures'
         id: 'infra'
+        if: "${{ steps.live.outputs.superseded != 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
@@ -180,8 +267,37 @@ jobs:
           echo "infra_only=${infra_only}"
           echo "infra_only=${infra_only}" >> "${GITHUB_OUTPUT}"
 
+      - name: 'Build the PR failure summary'
+        id: 'summary'
+        if: "${{ steps.destination.outputs.pr_number != '' || steps.destination.outputs.file_issue == 'true' }}"
+        env:
+          WORKFLOW_NAME: '${{ github.event.workflow.name }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          INFRA_ONLY: '${{ steps.infra.outputs.infra_only }}'
+        run: |-
+          helper='.github/scripts/ci/main-failure-signature.mjs'
+          shopt -s nullglob
+          logs=("${RUNNER_TEMP}/failed-logs/"*.log)
+          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" \
+            --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" > "${RUNNER_TEMP}/analysis.json"
+          node "${helper}" comment --analysis "${RUNNER_TEMP}/analysis.json" \
+            --jobs-json "${RUNNER_TEMP}/run-jobs.json" --sha "${HEAD_SHA}" \
+            --run-id "${WORKFLOW_RUN_ID}" --run-url "${WORKFLOW_RUN_URL}" > "${RUNNER_TEMP}/pr-comment.md"
+          delim="QWEN_CI_COMMENT_$(openssl rand -hex 16)"
+          {
+            echo "body<<${delim}"
+            cat "${RUNNER_TEMP}/pr-comment.md"
+            if [[ "${INFRA_ONLY}" == 'true' ]]; then
+              echo 'GitHub runner infrastructure failed; this result does not identify a Java test regression.'
+            fi
+            echo "${delim}"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: 'Plan the issue'
         id: 'plan'
+        if: "${{ steps.destination.outputs.file_issue == 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
@@ -193,14 +309,8 @@ jobs:
           WORKFLOW_RUN_AT: '${{ github.event.workflow_run.updated_at }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
         run: |-
-          shopt -s nullglob
-          logs=("${RUNNER_TEMP}/failed-logs/"*.log)
-
           helper='.github/scripts/ci/main-failure-signature.mjs'
           analysis="${RUNNER_TEMP}/analysis.json"
-          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" \
-            --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" \
-            > "${analysis}"
           echo "Failing tests identified: $(jq '.tests | length' "${analysis}")"
           jq -r '.tests[].id' "${analysis}"
 
@@ -261,10 +371,15 @@ jobs:
   # its failed jobs once (analyze gates this to attempt 1) and file nothing;
   # if the break is real or the pool stays sick, the rerun's own completion
   # re-enters this workflow at attempt 2 and the issue is filed then.
+  # The rerun holds actions: write while infra_only is classified from
+  # check-run annotation text — text a fork's own steps print — so it runs
+  # only for destinations that file (main runs and merged PRs). An open PR's
+  # infra death is reported on the PR without dispatching a rerun, and the
+  # classifier never grants an untrusted run actions: write.
   rerun_infra:
     name: 'Rerun infrastructure-only failures'
     needs: 'analyze'
-    if: "${{ needs.analyze.outputs.infra_only == 'true' }}"
+    if: "${{ needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -290,7 +405,7 @@ jobs:
     # skipped need is not a success: file when the run is not
     # infrastructure-only, and file when the rerun itself could not be
     # dispatched — the issue is then the only record of a red main.
-    if: "${{ always() && needs.analyze.result == 'success' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
+    if: "${{ always() && needs.analyze.result == 'success' && needs.analyze.outputs.file_issue == 'true' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
     # and the pool being the REASON CI broke would queue the report behind
     # the very failure it documents.
@@ -298,8 +413,11 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: 'write'
+    outputs:
+      issue_url: '${{ steps.issue.outputs.issue_url }}'
     steps:
       - name: 'File or update the autofix issue'
+        id: 'issue'
         env:
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           REPO: '${{ github.repository }}'
@@ -321,11 +439,15 @@ jobs:
           body_file="${RUNNER_TEMP}/issue-body.md"
           printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
 
+          # issue_url is written before the route edit on both paths: under
+          # bash -e a failed label or assignee edit aborts the step, and the
+          # PR comment must still find the tracking-issue link.
           if [[ -n "${EXISTING_ISSUE}" ]]; then
             gh issue edit "${EXISTING_ISSUE}" \
               --repo "${REPO}" \
               --body-file "${body_file}"
             echo "Recorded this run on issue #${EXISTING_ISSUE}."
+            echo "issue_url=https://github.com/${REPO}/issues/${EXISTING_ISSUE}" >> "${GITHUB_OUTPUT}"
             apply_autofix_route "${EXISTING_ISSUE}"
             exit 0
           fi
@@ -336,4 +458,54 @@ jobs:
               --title "${ISSUE_TITLE}" \
               --body-file "${body_file}"
           )"
+          echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT}"
           apply_autofix_route "${issue_url}"
+
+  report_pr:
+    name: 'Report Java CI failure on the PR'
+    needs: ['analyze', 'file_issue', 'rerun_infra']
+    # A prepared summary survives issue planning errors. Only a successfully
+    # dispatched infrastructure rerun suppresses the comment.
+    if: "${{ always() && needs.analyze.outputs.comment_body != '' && needs.analyze.outputs.pr_number != '' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      issues: 'write'
+      pull-requests: 'write'
+    steps:
+      - name: 'Post or update the failure summary'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          REPO: '${{ github.repository }}'
+          PR_NUMBER: '${{ needs.analyze.outputs.pr_number }}'
+          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          COMMENT_BODY: '${{ needs.analyze.outputs.comment_body }}'
+          ISSUE_URL: '${{ needs.file_issue.outputs.issue_url }}'
+        run: |-
+          set -euo pipefail
+          body_file="${RUNNER_TEMP}/pr-comment.md"
+          printf '%s\n' "${COMMENT_BODY}" > "${body_file}"
+          if [[ -n "${ISSUE_URL}" ]]; then
+            printf '\n[Tracking issue](%s)\n' "${ISSUE_URL}" >> "${body_file}"
+          fi
+          marker="<!-- qwen-managed-agent-ci-failure:${WORKFLOW_RUN_ID} -->"
+          # Keep the lookup/publish retry contract of upsert-bot-comment.sh
+          # without checking out repository code in this write-only job.
+          for attempt in 1 2 3; do
+            if comment_id="$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+              | jq -sr --arg marker "${marker}" 'add | map(select(.user.login == "github-actions[bot]" and ((.body // "") | contains($marker)))) | last | .id // empty')"; then
+              if [[ -n "${comment_id}" ]]; then
+                endpoint="repos/${REPO}/issues/comments/${comment_id}"
+                method=PATCH
+              else
+                endpoint="repos/${REPO}/issues/${PR_NUMBER}/comments"
+                method=POST
+              fi
+              if gh api --method "${method}" "${endpoint}" -F "body=@${body_file}"; then
+                exit 0
+              fi
+            fi
+            sleep "${attempt}"
+          done
+          echo '::error::Could not publish the CI failure summary after three attempts.'
+          exit 1

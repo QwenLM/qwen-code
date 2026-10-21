@@ -24,10 +24,12 @@ import {
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { readManagedSessionTitleInfoSync } from '../utils/sessionStorageUtils.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { ManagedSessionAppendUnsettledError } from './managed-session-records.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
-import type {
-  ManagedSessionJournalStore,
-  ManagedSessionResourceStore,
+import {
+  ManagedSessionCommitRejectedError,
+  type ManagedSessionJournalStore,
+  type ManagedSessionResourceStore,
 } from './managed-session-storage.js';
 
 const DIGEST = '9'.repeat(64);
@@ -361,6 +363,166 @@ describe('managed session assembly', () => {
       });
     } finally {
       finishRenewal();
+    }
+  });
+
+  it('stops renewal after three consecutive failures', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValue(new Error('append failed'));
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(renew).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(3);
+    } finally {
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
+  it('keeps renewing through unsettled appends until the store recovers', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const unsettled = new ManagedSessionAppendUnsettledError(
+      new Error('store unavailable'),
+    );
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValueOnce(unsettled)
+      .mockRejectedValueOnce(unsettled)
+      .mockRejectedValueOnce(unsettled)
+      .mockResolvedValue(undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(4);
+    } finally {
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
+  it('keeps renewing through rollbackable commit rejections', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const rejected = new ManagedSessionCommitRejectedError(
+      new Error('workspace_unavailable'),
+    );
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValueOnce(rejected)
+      .mockRejectedValueOnce(rejected)
+      .mockRejectedValueOnce(rejected)
+      .mockResolvedValue(undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(4);
+    } finally {
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
+  it('does not carry counted failures across deferred appends', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const unsettled = new ManagedSessionAppendUnsettledError(
+      new Error('store unavailable'),
+    );
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValueOnce(new Error('append failed'))
+      .mockRejectedValueOnce(unsettled)
+      .mockRejectedValueOnce(new Error('append failed'))
+      .mockRejectedValueOnce(unsettled)
+      .mockRejectedValueOnce(new Error('append failed'))
+      .mockResolvedValue(undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(renew).toHaveBeenCalledTimes(6);
+    } finally {
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
+  it('counts only consecutive failures against the cap', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValueOnce(new Error('append failed'))
+      .mockRejectedValueOnce(new Error('append failed'))
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('append failed'))
+      .mockRejectedValueOnce(new Error('append failed'))
+      .mockResolvedValue(undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(renew).toHaveBeenCalledTimes(5);
+    } finally {
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
+  it('stops renewal as soon as the writer stops accepting appends', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockRejectedValue(new Error('append failed'));
+    const stopped = vi
+      .spyOn(session.authority, 'writesStopped', 'get')
+      .mockReturnValue(true);
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+    } finally {
+      stopped.mockRestore();
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
+  it('does not stack activation renewals behind one in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    let finishRenewal!: () => void;
+    const pendingRenewal = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockImplementation(async () => {
+        await pendingRenewal;
+        return undefined;
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+    } finally {
+      finishRenewal();
+      await session.close().catch(() => undefined);
     }
   });
 
