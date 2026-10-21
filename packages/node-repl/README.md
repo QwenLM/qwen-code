@@ -58,23 +58,131 @@ Call `cua.rewriteDocumentation()` after context compaction. `cua.desktop` provid
 
 ## Usage
 
-Once published, the packaged `bin` is the simplest entry point:
+### Requirements and installation
+
+Install Node.js **22 or later**, including npm, and the MCP client you want to
+use. Run the server on the computer whose desktop you want to control.
+The commands below target **0.26.0** and require that version's npm packages
+and native GitHub Release (`cua-driver-rs-v0.26.0`) to be published.
+
+`npx` downloads the server on first launch. It automatically installs
+`@qwen-code/cua-sdk@0.26.0` and `@qwen-code/browser-use@0.26.0`; the SDK's
+installation downloads the matching native payload and verifies its SHA-256
+checksum. Allow npm installation scripts and network access to npm and GitHub
+Releases. No separate SDK install, manual SDK import, skill installation,
+or standalone `qwen-cua-driver` CLI installation is needed.
+
+Claude Code and Codex do not require Qwen Code to use this server. These
+component versions do not require a Qwen Code CLI or Web Shell release with
+the same version. For direct native MCP tools instead of JavaScript, see the
+[CUA Driver README](../cua-driver/README.md#agent-integration).
+
+### Qwen Code
+
+On macOS/Linux:
+
+```bash
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.26.0
+```
+
+This writes the server entry to `~/.qwen/settings.json`. Use `--scope project`
+for the current project's `.qwen/settings.json` instead. The equivalent
+settings entry is:
 
 ```jsonc
-// qwen-code settings.json (or any MCP client)
 {
   "mcpServers": {
     "node-repl": {
       "command": "npx",
-      "args": ["-y", "@qwen-code/node-repl-mcp"],
-      "cwd": "/your/workspace",
-      "env": { "QWEN_NODE_REPL_ROOTS": "/extra/node_modules/parent" },
+      "args": ["-y", "@qwen-code/node-repl-mcp@0.26.0"],
     },
   },
 }
 ```
 
-For local development against a build in this repo, point at `dist/index.js`:
+### Claude Code
+
+On macOS/Linux:
+
+```bash
+claude mcp add --scope user --transport stdio node-repl -- npx -y @qwen-code/node-repl-mcp@0.26.0
+```
+
+User scope is stored in `~/.claude.json`. Use `--scope project` to write the
+current project's `.mcp.json` instead; its `mcpServers` entry can use the same
+JSON shape as above. See the
+[Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+### Codex
+
+On macOS/Linux:
+
+```bash
+codex mcp add node-repl -- npx -y @qwen-code/node-repl-mcp@0.26.0
+```
+
+Alternatively, add the following to `~/.codex/config.toml`. The longer startup
+timeout allows time for the first npm/native payload download; add it to the
+existing table if you registered the server with the CLI.
+
+```toml
+[mcp_servers.node-repl]
+command = "npx"
+args = ["-y", "@qwen-code/node-repl-mcp@0.26.0"]
+startup_timeout_sec = 120
+```
+
+Use an absolute `npx` executable path if the client's `PATH` does not include
+your Node.js installation. See the
+[official OpenAI MCP documentation](https://learn.chatgpt.com/docs/extend/mcp).
+
+### Windows client commands
+
+In PowerShell, use `cmd.exe` to launch npm's `npx` command. Run the command for
+your chosen client:
+
+```powershell
+# Qwen Code
+qwen mcp add --scope user node-repl cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.26.0
+
+# Claude Code
+claude mcp add --scope user --transport stdio node-repl -- cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.26.0
+
+# Codex
+codex mcp add node-repl -- cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.26.0
+```
+
+For manual JSON/TOML configuration on Windows, set `command` to `"cmd.exe"`
+and `args` to `["/d", "/c", "npx", "-y", "@qwen-code/node-repl-mcp@0.26.0"]`.
+
+### Permissions and connection check
+
+Restart the client, then check `qwen mcp list`, `claude mcp list`, or
+`codex mcp list`. Inside the session, use `/mcp` to check that `node-repl`
+is connected and exposes `js` and `js_reset`. Ask the agent to execute this
+first `js` call:
+
+```js
+await cua.getState();
+```
+
+It displays the current platform's instructions and application inventory.
+Continue with `var app = await cua.getApp('Application name')` using an
+application from that observation. The global `cua` is already loaded.
+
+On macOS, grant Accessibility and Screen Recording to the responsible host
+shown by macOS (the client, terminal, or Node process, depending on how you
+launched it). Automation may also be requested for document/Finder actions.
+These SDK grants follow the host's OS responsibility chain; the standalone
+`QwenCuaDriver.app` grant does not replace them. On Linux, pass the desktop
+environment as described below. Browser automation uses Chrome 125 or later on
+macOS/Linux and requires the
+[Qwen Code browser extension](https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph)
+installed in the Chrome profile you want to control.
+
+### Local development and environment
+
+For a build in this repo, point at `dist/index.js`:
 
 ```jsonc
 {
@@ -105,9 +213,10 @@ variables removed by the MCP client cannot be recovered by the SDK. For Codex,
 add the following allowlist to the existing server entry in `config.toml`:
 
 ```toml
-[mcp_servers.node_repl]
+[mcp_servers.node-repl]
 command = "npx"
-args = ["-y", "@qwen-code/node-repl-mcp"]
+args = ["-y", "@qwen-code/node-repl-mcp@0.26.0"]
+startup_timeout_sec = 120
 env_vars = ["DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "GTK_MODULES", "QT_ACCESSIBILITY", "QT_LINUX_ACCESSIBILITY_ALWAYS_ON"]
 ```
 
@@ -116,6 +225,9 @@ explicit `env` map, populate it from that same desktop session; display numbers,
 authentication paths, and bus addresses vary by machine and user. Restart the
 MCP server after changing its environment. An X11 connection failure is reported
 as `desktop_unavailable` by CUA discovery, rather than as an empty desktop.
+Linux supports X11 applications, including XWayland; native Wayland
+applications are unsupported. Add `env_vars` to the existing table rather
+than creating a second table for the same server.
 
 Uncaught errors preserve a string `code` and bounded `details` text in MCP output,
 including action and verification diagnostics. External side effects may already
