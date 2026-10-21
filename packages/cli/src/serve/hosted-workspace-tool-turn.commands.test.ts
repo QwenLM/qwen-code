@@ -1710,9 +1710,22 @@ it('bounds a member message with the member-message wrapper budget (b3c)', async
   expect(commands.command(commandIdOf('call-big'))).toBeUndefined();
 });
 
-it.each(['bob', '*', 'parent'])(
+it.each([
+  [
+    'bob',
+    'Hosted send_message to a member exceeds the 65536-byte inline Session Store limit once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.',
+  ],
+  [
+    '*',
+    'Hosted send_message to a member exceeds the 65536-byte inline Session Store limit once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.',
+  ],
+  [
+    'parent',
+    'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.',
+  ],
+])(
   'refuses an encoded message overflow to %s without opening a delivery (#14062)',
-  async (to) => {
+  async (to, expectedError) => {
     await seedFirstInput(
       teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
     );
@@ -1726,8 +1739,7 @@ it.each(['bob', '*', 'parent'])(
           id: 'call-dense',
           name: 'send_message',
           response: expect.objectContaining({
-            error:
-              'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.',
+            error: expectedError,
           }),
         }),
       }),

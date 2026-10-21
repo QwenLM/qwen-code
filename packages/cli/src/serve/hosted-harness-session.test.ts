@@ -16260,7 +16260,9 @@ describe('Hosted Harness no-tool session', () => {
                 expect.objectContaining({
                   type: 'text',
                   text: expect.stringContaining(
-                    'once encoded (byte_limit); shorten the message or other arguments and retry.',
+                    commandLane
+                      ? 'once encoded (byte_limit) although it fits the 32768-byte member wrapper; shorten escape-dense content and retry.'
+                      : 'once encoded (byte_limit); shorten the message or other arguments and retry.',
                   ),
                 }),
               ]),
