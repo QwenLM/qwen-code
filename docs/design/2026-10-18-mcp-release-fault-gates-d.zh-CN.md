@@ -54,3 +54,30 @@ JDK 21 实测（加入应答 hold 之后）：六格整类在 MySQL 8.0.46 上 3
 ## 待决问题
 
 - 在 release 派发到达 Runtime **之前**杀进程，会走“同 operation id 重派发、查询未命中”的分支。本门禁故意让原派发落地以钉住查询路径；pre-dispatch 变体是后续候选。
+
+## 后续格：派发前取消
+
+#14880 第 2 项要求一个派发前取消：取消到达时 `mcp_operation` 处于 `run.execution = intent`，结算为 `not_started_proven` 且零副作用。该项记录说，由于公开路由会直接开始派发，没有种行 helper 就到不了这个窗口。实际上通过受支持的路由就能到达：`invoke()` 先提交 `intent`，再 acquire owner（`POST …/tool-sessions:acquire`），之后才提交 `dispatch_started`。cancel 路由不受在飞 invoke（`mcpBusy`）阻挡，派发前取消分支也从不联系 Broker。
+
+| Case                     | 注入                                                                                                                          | 期望                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cancel-before-dispatch` | 目标 `mcp_operation` 在库中仍为 `intent` 时，代理扣住到达的第一个 owner acquire；测试经 `…/mcp/operations/{id}/cancel` 取消它 | invoke 仍被扣住时，cancel 已回答 `settled` + `managed_mcp_cancelled`；记录为 `cancelled`/`not_started_proven`、`cancelRequested: true`、无 `resultRef`。放开 acquire 后，原 invoke 回答同一视图，同 id 重试与 status 读取亦然。被扣的 acquire 之后没有任何 MCP 控制请求（`mcp-invoke`、`mcp-cancel`、`mcp-status`）到达 Broker，fixture 不记录副作用，也没有第二个 server 启动。 |
+
+决策：
+
+1. **扣 acquire，不种行。** 种一条 `intent` 行会绕过记录写入方与 authority 的 revision 链，而它们正是被测代码。扣 acquire 让每次写入都由 Harness 完成；代理只读取库中记录来决定扣哪一次 acquire。intent 提交之前 `refresh()` 发出的 acquire 会放行；hold 只生效一次，所以（若派发前分支被删）cancel 需要的 acquire 会被转发。
+2. **断言被扣 acquire 之后的线上序列。** 即使续跑的 invoke 忽略本地证明、转而询问 Runtime，它仍会回答 `managed_mcp_cancelled`，因为 `accept()` 会先重读记录。只有"被扣 acquire 之后没有 `mcp-status`"能抓住这一点，所以门禁断言其后完全没有 MCP 控制请求。
+
+变异见证，每个都重建进该格实际运行的 bundle（`hosted-mcp-session.ts`）：
+
+| 变异 | 改动                                       | 结果                                                                                                                       |
+| ---- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| M1   | `cancel()` 跳过其 `intent` 分支            | 红：cancel 去 acquire，发出 Runtime 从未登记过的原生 `mcp-cancel`，回答 `outcome_unknown` 而不是 `managed_mcp_cancelled`。 |
+| M2   | `invoke()` 在 owner acquire 之后不重读记录 | 红：在已取消记录上提交过期的 `dispatch_started` 被拒，续跑的 invoke 回答 503。                                             |
+| M3   | `invoke()` 重读记录但忽略本地证明          | 只在线上序列变红：续跑的 invoke 仍回答 `managed_mcp_cancelled`，但被扣 acquire 之后出现了 `mcp-status`。                   |
+
+每个变异都重建进 `dist/cli.js` 并只跑该格；之后重建的未变异对照为绿。
+
+预算：该格在八格整类运行（94.5 s，JDK 21、MySQL 8.4.6、Linux aarch64）中实测 9.1 s，按 2× 计入共享 healthy 18 s（9871 → 9889 s），因此 `hosted-harness-mysql` fork 移到 10489 s，185 分钟的 Verify step 仍能包住（fork 加包裹共 11089 s）；job 上限保持 288。`hosted-mcp-gates` 的 1200 s profile 与 artifact 根 `target/fg12-cases/fg12d/` 不变。
+
+未覆盖：configuration 的派发前取消（configuration 只在关闭期间由 `reconcileEffects()` 取消）与 MCP 工具调用（工具调用走普通工具生命周期，不经 `mcp_operation`）。
