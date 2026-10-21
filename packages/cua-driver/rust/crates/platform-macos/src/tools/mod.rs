@@ -17,7 +17,7 @@ mod pasteboard;
 mod press_key;
 mod right_click;
 mod scroll;
-mod select_text;
+pub(crate) mod select_text;
 mod set_value;
 mod set_window_frame;
 mod type_text;
@@ -216,6 +216,58 @@ pub(crate) fn background_refusal_result(
     .with_structured(structured)
 }
 
+pub(super) fn ax_action_unconfirmed(
+    action: &str,
+    index: Option<usize>,
+    status: crate::ax::bindings::AXError,
+) -> cua_driver_core::protocol::ToolResult {
+    let warning = format!(
+        "{action} returned {status}; delivery is uncertain. Observe before another action; this request was not replayed."
+    );
+    let target = index.map_or_else(
+        || "the hit-tested element".to_owned(),
+        |i| format!("element [{i}]"),
+    );
+    cua_driver_core::protocol::ToolResult::text(format!("Sent {action} to {target}. {warning}"))
+        .with_structured(serde_json::json!({
+            "path": "ax", "delivery_mode": "background", "sent": true, "verified": false,
+            "effect": "unverifiable", "ax_status": status, "warning": warning
+        }))
+}
+
+#[cfg(test)]
+mod ax_dispatch_tests {
+    #[test]
+    fn ax_errors_remain_unconfirmed_through_the_public_action_projection() {
+        use cua_driver_core::action_record::{ActionEffect, ActionExecutionRecord};
+
+        for (tool, action) in [
+            ("click", "AXPress"),
+            ("double_click", "AXOpen"),
+            ("right_click", "AXShowMenu"),
+        ] {
+            let result = super::ax_action_unconfirmed(action, None, -25202);
+            assert_ne!(result.is_error, Some(true));
+            let structured = result.structured_content.unwrap();
+            assert_eq!(structured["sent"], true);
+            assert!(structured["warning"].as_str().unwrap().contains("Observe"));
+            let record = ActionExecutionRecord::from_legacy(
+                tool,
+                &serde_json::json!({"pid": 101, "window_id": 501, "delivery_mode": "foreground"}),
+                &structured,
+            )
+            .unwrap();
+            assert_eq!(record.effect, ActionEffect::Unverifiable);
+            assert!(record.evidence.is_empty());
+            let public = record.public_result().unwrap();
+            public.validate_invariants().unwrap();
+            let public = serde_json::to_value(public).unwrap();
+            assert_eq!(public["effect"], "unverifiable");
+            assert_eq!(public["delivery"]["mode"], "background");
+        }
+    }
+}
+
 /// Exclusive per-process ownership of one background mutation. Callers must
 /// keep this value alive through actuator dispatch, focus restoration, and
 /// target-bound verification.
@@ -288,10 +340,7 @@ pub(crate) async fn acquire_background_mutation(pid: i32) -> BackgroundMutationL
     }
 }
 
-/// Finish the post-action observation window. Embedded interactive clients
-/// that already observe the target continuously may opt out through the
-/// private registry argument to avoid adding a one-second acknowledgement
-/// delay to every input event. Regular MCP callers retain the full observer.
+/// Collect immediately available window changes. Bounded settling belongs to observations.
 pub(crate) async fn finish_window_observation(
     snapshot: crate::window_change_detector::Snapshot,
     args: &serde_json::Value,
@@ -615,6 +664,9 @@ pub fn load_driver_config() -> DriverConfig {
 /// used by CoreGraphics input APIs. Retina scaled modes cannot rely on the
 /// nominal backing factor alone, so derive the ratio from the actual PNG.
 pub async fn desktop_screenshot_point(x: f64, y: f64) -> (f64, f64) {
+    if cua_driver_core::tool::computer_use_native_dispatch() {
+        return (x, y);
+    }
     let ratio = tokio::task::spawn_blocking(|| {
         let logical_w = get_screen_size::main_screen_size().map(|(w, _, _)| w as f64);
         let shot_w = crate::capture::screenshot_display_bytes()
@@ -962,10 +1014,6 @@ pub fn register_all(
             cua_driver_core::observation_revision::revision_tokens().clear_runtime(&runtime_scope);
         });
     }
-    // Share the element cache with the recording-hook layer so it can
-    // resolve element_index → window-local screenshot coords for click.png.
-    crate::recording_hooks::set_element_cache(state.element_cache.clone());
-
     // Drop a disconnecting session's config overrides + owned cursor on
     // `session_end`. The daemon fans the session id out to this hook;
     // recording ownership is handled separately on the core RecordingSession.
@@ -995,6 +1043,10 @@ pub fn register_all(
         registry.retain_session_revive_hook(revive_registration);
     }
 
+    cua_driver_core::desktop_keyboard::register(
+        registry,
+        Arc::new(crate::input::keyboard::DesktopKeyboard),
+    );
     registry.register(Box::new(list_apps::ListAppsTool));
     registry.register(Box::new(list_windows::ListWindowsTool));
     registry.register(Box::new(get_window_state::GetWindowStateTool::new(
@@ -1369,3 +1421,5 @@ mod recording_start_guard_tests {
         let _ = rec.stop_owner(None);
     }
 }
+
+mod menu_equivalent;
